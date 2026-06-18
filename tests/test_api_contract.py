@@ -1333,9 +1333,21 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
         "return_period_status",
         "return_period_reasons",
     ]
+    return_period_description = schemas["QhhLatestAvailability"]["properties"]["return_period_status"]["description"]
+    assert "product_quality.flood_return_period.quality_state" in return_period_description
+    assert "legacy row-count signal" in return_period_description
     assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
         "#/components/schemas/QhhLatestStationVariableCoverage"
     )
+    assert schemas["QhhLatestQuality"]["properties"]["product_quality"] == {
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
+        "nullable": True,
+        "description": (
+            "Supplemental per-product quality details. `flood_return_period` carries explicit flood run quality "
+            "when available and never blocks q_down display readiness."
+        ),
+    }
     assert schemas["QhhLatestQuality"]["required"] == [
         "station_sample_count",
         "river_sample_count",
@@ -1368,6 +1380,8 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert "context_limit: number;" in generated_types
     assert "display_end_station_count: number;" not in generated_types
     assert "QhhLatestUnavailableReason:" in generated_types
+    assert "QhhLatestProductQuality:" in generated_types
+    assert "FloodReturnPeriodProductQuality:" in generated_types
 
 
 def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
@@ -1397,14 +1411,65 @@ def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None
     run_parameters = spec["paths"]["/api/v1/runs"]["get"]["parameters"]
     ready_filter = next(parameter for parameter in run_parameters if parameter.get("name") == "flood_product_ready")
     assert ready_filter["schema"]["type"] == "boolean"
+    schemas = spec["components"]["schemas"]
+    assert schemas["FloodReturnPeriodProductQuality"]["required"] == [
+        "quality_state",
+        "quality_source",
+        "max_over_window",
+        "result_rows",
+        "return_period_rows",
+        "warning_rows",
+        "expected_result_rows",
+        "expected_max_result_rows",
+        "expected_timestep_result_rows",
+        "meaningful_result_rows",
+        "meaningful_max_result_rows",
+        "meaningful_timestep_result_rows",
+        "no_frequency_curve_rows",
+        "no_usable_frequency_curve_rows",
+        "warning_threshold_unavailable_rows",
+        "unavailable_products",
+        "residual_blockers",
+    ]
+    assert schemas["FloodReturnPeriodProductQuality"]["properties"]["quality_state"] == {
+        "$ref": "#/components/schemas/FloodReturnPeriodQualityState"
+    }
+    assert schemas["FloodReturnPeriodProductQuality"]["properties"]["quality_source"]["enum"] == [
+        "explicit",
+        "historical_backfill",
+        "legacy_row_count",
+    ]
+    for field in (
+        "result_rows",
+        "return_period_rows",
+        "warning_rows",
+        "expected_result_rows",
+        "meaningful_result_rows",
+        "no_frequency_curve_rows",
+        "no_usable_frequency_curve_rows",
+    ):
+        assert schemas["FloodReturnPeriodProductQuality"]["properties"][field] == {
+            "type": "integer",
+            "minimum": 0,
+        }
+    assert schemas["QhhLatestProductQuality"] == {
+        "type": "object",
+        "required": ["flood_return_period"],
+        "properties": {
+            "flood_return_period": {"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}
+        },
+        "additionalProperties": True,
+    }
     assert spec["components"]["schemas"]["HydroRun"]["properties"]["product_quality"] == {
         "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
         "additionalProperties": True,
         "nullable": True,
         "description": "Product readiness evidence keyed by product family, including flood_return_period readiness.",
     }
     assert spec["components"]["schemas"]["FloodReturnPeriodFeatureCollection"]["properties"]["product_quality"] == {
         "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}],
         "additionalProperties": True,
         "nullable": True,
         "description": "Flood return-period readiness evidence for the selected run.",
@@ -1418,10 +1483,26 @@ def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None
     assert "flood_product_ready?: boolean;" in generated_types[runs_start:get_run_start]
     hydro_run_start = generated_types.index("HydroRun:")
     hydro_page_start = generated_types.index("HydroRunPage:")
-    assert "product_quality?: {" in generated_types[hydro_run_start:hydro_page_start]
+    assert 'product_quality?: ({' in generated_types[hydro_run_start:hydro_page_start]
+    assert '& components["schemas"]["QhhLatestProductQuality"]) | null;' in generated_types[
+        hydro_run_start:hydro_page_start
+    ]
     collection_start = generated_types.index("FloodReturnPeriodFeatureCollection:")
     feature_start = generated_types.index("FloodReturnPeriodFeature:")
-    assert "product_quality?: {" in generated_types[collection_start:feature_start]
+    assert 'product_quality?: ({' in generated_types[collection_start:feature_start]
+    assert '& components["schemas"]["FloodReturnPeriodProductQuality"]) | null;' in generated_types[
+        collection_start:feature_start
+    ]
+    quality_start = generated_types.index("FloodReturnPeriodProductQuality:")
+    qhh_quality_start = generated_types.index("QhhLatestProductQuality:")
+    quality_types = generated_types[quality_start:qhh_quality_start]
+    assert 'quality_state: components["schemas"]["FloodReturnPeriodQualityState"];' in quality_types
+    assert 'quality_source: "explicit" | "historical_backfill" | "legacy_row_count";' in quality_types
+    assert "expected_result_rows: number;" in quality_types
+    assert "meaningful_result_rows: number;" in quality_types
+    assert "no_frequency_curve_rows: number;" in quality_types
+    assert "no_usable_frequency_curve_rows: number;" in quality_types
+    assert "flood_return_period: components[\"schemas\"][\"FloodReturnPeriodProductQuality\"];" in generated_types
 
 
 def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_types() -> None:

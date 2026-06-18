@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
@@ -19,6 +19,24 @@ QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("parsed", "frequency_done", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
+FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
+    {
+        "quality_state",
+        "quality_source",
+        "unavailable_products",
+        "residual_blockers",
+        "expected_result_rows",
+        "expected_max_result_rows",
+        "expected_timestep_result_rows",
+        "meaningful_result_rows",
+        "meaningful_max_result_rows",
+        "meaningful_timestep_result_rows",
+        "no_frequency_curve_rows",
+        "no_usable_frequency_curve_rows",
+        "warning_threshold_unavailable_rows",
+    }
+)
+FloodProductQualityMode = Literal["explicit", "legacy_table", "missing_table"]
 
 
 class ForecastStoreError(RuntimeError):
@@ -99,6 +117,23 @@ class PsycopgForecastStore:
         质量改走 return_period_result 存在性判定（#5：取消 node-27 计算频率、有产物就显示）。"""
         cursor.execute("SELECT to_regclass('flood.run_product_quality') AS reg", ())
         return cursor.fetchone()["reg"] is not None
+
+    @staticmethod
+    def _run_product_quality_mode(cursor: Any) -> FloodProductQualityMode:
+        if not PsycopgForecastStore._run_product_quality_available(cursor):
+            return "missing_table"
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'flood'
+              AND table_name = 'run_product_quality'
+              AND column_name = ANY(%s)
+            """,
+            (list(FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS),),
+        )
+        columns = {str(row["column_name"]) for row in cursor.fetchall()}
+        return "explicit" if FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS <= columns else "legacy_table"
 
     def forecast_series(
         self,
@@ -657,7 +692,7 @@ class PsycopgForecastStore:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
-            available = self._run_product_quality_available(cursor)
+            quality_mode = self._run_product_quality_mode(cursor)
             row = self._fetch_optional(
                 cursor,
                 f"""
@@ -666,12 +701,12 @@ class PsycopgForecastStore:
                     mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source,
-                    {_flood_product_quality_select("fpq", available)}
+                    {_flood_product_quality_select("fpq", quality_mode)}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq", available)}
+                {_flood_product_quality_join("fpq", quality_mode)}
                 WHERE h.run_id = %s
                 """,
                 (run_id,),
@@ -697,7 +732,7 @@ class PsycopgForecastStore:
         offset: int,
     ) -> dict[str, Any]:
         with self._transaction() as cursor:
-            available = self._run_product_quality_available(cursor)
+            quality_mode = self._run_product_quality_mode(cursor)
             clauses: list[str] = []
             params: list[Any] = []
             if basin_id is not None:
@@ -715,9 +750,9 @@ class PsycopgForecastStore:
             if flood_product_ready is True:
                 # 物化表在 → 维持「frequency_done/published 且质量完整」严格门；缺失（只读副本）→
                 # 仅存在性门（有 return_period_result 行 或 published），不再要求 frequency 完成（#5）。
-                if available:
+                if quality_mode != "missing_table":
                     clauses.append("h.status IN ('frequency_done', 'published')")
-                clauses.append(_flood_product_ready_sql("fpq", available))
+                clauses.append(_flood_product_ready_sql("fpq", quality_mode))
 
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             cursor.execute(
@@ -726,7 +761,7 @@ class PsycopgForecastStore:
                 FROM hydro.hydro_run h
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq", available)}
+                {_flood_product_quality_join("fpq", quality_mode)}
                 {where}
                 """,
                 tuple(params),
@@ -740,12 +775,12 @@ class PsycopgForecastStore:
                     mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source,
-                    {_flood_product_quality_select("fpq", available)}
+                    {_flood_product_quality_select("fpq", quality_mode)}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq", available)}
+                {_flood_product_quality_join("fpq", quality_mode)}
                 {where}
                 ORDER BY h.cycle_time DESC NULLS LAST, h.created_at DESC, h.run_id
                 LIMIT %s OFFSET %s
@@ -1240,7 +1275,7 @@ class PsycopgForecastStore:
     ) -> list[dict[str, Any]]:
         identity_sql, identity_params = _qhh_latest_strict_identity_sql(identity)
         candidate_limit = 1 if identity is not None else QHH_LATEST_SEARCH_LIMIT
-        available = self._run_product_quality_available(cursor)
+        quality_mode = self._run_product_quality_mode(cursor)
         # Fast path: when the per-run coverage materialization exists, serve the
         # station/river coverage from a cheap run_id JOIN instead of recomputing
         # the deep coverage CTEs on every request. The materialized values are
@@ -1261,7 +1296,7 @@ class PsycopgForecastStore:
                 identity_sql=identity_sql,
                 identity_params=identity_params,
                 candidate_limit=candidate_limit,
-                available=available,
+                quality_mode=quality_mode,
             )
             # Strip the cache-hit marker off every row, then serve the fast path
             # only if EVERY candidate hit. A missing marker defaults to a miss
@@ -1320,7 +1355,7 @@ class PsycopgForecastStore:
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
                     ) AS display_end_time,
-                    {_flood_product_quality_select("fpq", available)}
+                    {_flood_product_quality_select("fpq", quality_mode)}
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1330,7 +1365,7 @@ class PsycopgForecastStore:
                   ON rnv.river_network_version_id = mi.river_network_version_id
                 LEFT JOIN met.forcing_version fv
                   ON fv.forcing_version_id = h.forcing_version_id
-                {_flood_product_quality_join("fpq", available)}
+                {_flood_product_quality_join("fpq", quality_mode)}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
                   AND h.status IN ('parsed', 'frequency_done', 'published')
@@ -1797,7 +1832,7 @@ class PsycopgForecastStore:
         identity_sql: str,
         identity_params: Sequence[Any],
         candidate_limit: int,
-        available: bool,
+        quality_mode: FloodProductQualityMode,
     ) -> list[dict[str, Any]]:
         """Cheap latest-product candidates via the run_display_coverage JOIN.
 
@@ -1861,7 +1896,7 @@ class PsycopgForecastStore:
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
                     ) AS display_end_time,
-                    {_flood_product_quality_select("fpq", available)}
+                    {_flood_product_quality_select("fpq", quality_mode)}
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1871,7 +1906,7 @@ class PsycopgForecastStore:
                   ON rnv.river_network_version_id = mi.river_network_version_id
                 LEFT JOIN met.forcing_version fv
                   ON fv.forcing_version_id = h.forcing_version_id
-                {_flood_product_quality_join("fpq", available)}
+                {_flood_product_quality_join("fpq", quality_mode)}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
                   AND h.status IN ('parsed', 'frequency_done', 'published')
@@ -1925,7 +1960,7 @@ class PsycopgForecastStore:
     ) -> list[dict[str, Any]]:
         identity_sql, identity_params = _qhh_latest_strict_identity_sql(identity)
         context_limit = 1 if identity is not None else QHH_LATEST_CONTEXT_LIMIT
-        available = self._run_product_quality_available(cursor)
+        quality_mode = self._run_product_quality_mode(cursor)
         return self._fetch_all(
             cursor,
             f"""
@@ -1991,7 +2026,7 @@ class PsycopgForecastStore:
                 NULL AS river_valid_time_end,
                 NULL AS min_lead_time_hours,
                 NULL AS max_lead_time_hours,
-                {_flood_product_quality_select("fpq", available)}
+                {_flood_product_quality_select("fpq", quality_mode)}
             FROM hydro.hydro_run h
             JOIN core.basin_version bv
               ON bv.basin_version_id = h.basin_version_id
@@ -2001,7 +2036,7 @@ class PsycopgForecastStore:
               ON rnv.river_network_version_id = mi.river_network_version_id
             LEFT JOIN met.forcing_version fv
               ON fv.forcing_version_id = h.forcing_version_id
-            {_flood_product_quality_join("fpq", available)}
+            {_flood_product_quality_join("fpq", quality_mode)}
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
               AND h.status NOT IN ('parsed', 'frequency_done', 'published')
@@ -2771,23 +2806,33 @@ def _qhh_latest_no_candidates_reason(
 def _qhh_latest_return_period_status(row: Mapping[str, Any]) -> dict[str, Any]:
     """Supplemental return-period availability.
 
-    Uses the same non-null peak-row caliber as best-available / ``/runs``
-    (``flood_return_period_rows > 0``). This MUST stay out of the blocking
+    Uses the same flood product quality contract as best-available / ``/runs``.
+    This MUST stay out of the blocking
     ``unavailable_reasons`` set and MUST NOT affect the product ``ready``
     decision: a run with q_down output but no flood baseline still returns.
     """
-    return_period_rows = int(row.get("flood_return_period_rows") or 0)
-    if return_period_rows > 0:
+    quality = _flood_product_quality_from_row(row)
+    if quality["quality_state"] == "ready":
         return {"return_period_status": "ready", "return_period_reasons": []}
-    return {
-        "return_period_status": "unavailable",
-        "return_period_reasons": [
+    reasons = []
+    for blocker in quality["residual_blockers"]:
+        if not isinstance(blocker, Mapping):
+            continue
+        reason = dict(blocker)
+        reason.setdefault("message", reason.get("residual_risk") or "Flood return-period product is unavailable.")
+        reason.setdefault("run_id", str(row.get("run_id") or "") or None)
+        reasons.append(reason)
+    if not reasons:
+        reasons.append(
             {
                 "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
-                "message": "No non-null peak return-period rows are available for this run.",
+                "message": "Flood return-period product is unavailable or degraded for this run.",
                 "run_id": str(row.get("run_id") or "") or None,
             }
-        ],
+        )
+    return {
+        "return_period_status": "unavailable",
+        "return_period_reasons": reasons,
     }
 
 
@@ -2858,6 +2903,7 @@ def _qhh_identity_product(
 
 def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QHH_BASIN_ID) -> dict[str, Any]:
     reasons = _qhh_latest_unavailable_reasons(row)
+    flood_product_quality = _flood_product_quality_from_row(row)
     source_id = _display_source_id(str(row.get("source_id") or ""))
     cycle_time = _datetime_value(row.get("cycle_time"))
     available_start_time, available_end_time = _qhh_latest_available_window(row)
@@ -2918,6 +2964,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
         "quality": {
             "station_sample_count": _non_negative_int(row.get("station_sample_count")),
             "river_sample_count": _non_negative_int(row.get("river_sample_count")),
+            "product_quality": {"flood_return_period": flood_product_quality},
             "required_station_variables": list(MVP_STATION_VARIABLES),
             "station_variable_coverage": _qhh_station_variable_coverage(row.get("station_variable_coverage")),
             "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
@@ -3672,6 +3719,20 @@ def _hydro_run_response(row: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     product_quality = _flood_product_quality_from_row(payload)
     for key in (
+        "flood_quality_row_present",
+        "flood_quality_state",
+        "flood_quality_source",
+        "flood_unavailable_products",
+        "flood_residual_blockers",
+        "flood_expected_result_rows",
+        "flood_expected_max_result_rows",
+        "flood_expected_timestep_result_rows",
+        "flood_meaningful_result_rows",
+        "flood_meaningful_max_result_rows",
+        "flood_meaningful_timestep_result_rows",
+        "flood_no_frequency_curve_rows",
+        "flood_no_usable_frequency_curve_rows",
+        "flood_warning_threshold_unavailable_rows",
         "flood_result_rows",
         "flood_return_period_rows",
         "flood_warning_rows",
@@ -3686,9 +3747,99 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     result_rows = int(row.get("flood_result_rows") or 0)
     return_period_rows = int(row.get("flood_return_period_rows") or 0)
     warning_rows = int(row.get("flood_warning_rows") or 0)
+    run_id = str(row.get("run_id") or "")
+
+    if "flood_quality_state" in row:
+        if not row.get("flood_quality_row_present"):
+            return _missing_explicit_flood_quality(run_id)
+        quality_state = str(row.get("flood_quality_state") or "unavailable")
+        if quality_state not in {"ready", "degraded", "unavailable"}:
+            quality_state = "unavailable"
+        unavailable_products = _json_list(row.get("flood_unavailable_products"), strings=True)
+        residual_blockers = _json_list(row.get("flood_residual_blockers"), mappings=True)
+        if quality_state != "ready" and not unavailable_products:
+            unavailable_products = ["return_period_result"]
+        if quality_state != "ready" and not residual_blockers:
+            residual_blockers = [
+                {
+                    "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                    "state": quality_state,
+                    "quality_flag": "explicit_flood_product_unavailable",
+                    "run_id": run_id,
+                    "residual_risk": "Explicit run-level flood product quality is not ready.",
+                }
+            ]
+        return {
+            "quality_state": quality_state,
+            "quality_source": str(row.get("flood_quality_source") or "explicit"),
+            "max_over_window": bool(row.get("flood_quality_max_over_window")) if result_rows > 0 else None,
+            "result_rows": result_rows,
+            "return_period_rows": return_period_rows,
+            "warning_rows": warning_rows,
+            "expected_result_rows": _non_negative_int(row.get("flood_expected_result_rows")),
+            "expected_max_result_rows": _non_negative_int(row.get("flood_expected_max_result_rows")),
+            "expected_timestep_result_rows": _non_negative_int(row.get("flood_expected_timestep_result_rows")),
+            "meaningful_result_rows": _non_negative_int(row.get("flood_meaningful_result_rows")),
+            "meaningful_max_result_rows": _non_negative_int(row.get("flood_meaningful_max_result_rows")),
+            "meaningful_timestep_result_rows": _non_negative_int(row.get("flood_meaningful_timestep_result_rows")),
+            "no_frequency_curve_rows": _non_negative_int(row.get("flood_no_frequency_curve_rows")),
+            "no_usable_frequency_curve_rows": _non_negative_int(row.get("flood_no_usable_frequency_curve_rows")),
+            "warning_threshold_unavailable_rows": _non_negative_int(
+                row.get("flood_warning_threshold_unavailable_rows")
+            ),
+            "unavailable_products": unavailable_products,
+            "residual_blockers": residual_blockers,
+        }
+
+    return _legacy_flood_product_quality_from_counts(
+        run_id=run_id,
+        result_rows=result_rows,
+        return_period_rows=return_period_rows,
+        warning_rows=warning_rows,
+        max_over_window=bool(row.get("flood_quality_max_over_window")) if result_rows > 0 else None,
+    )
+
+
+def _missing_explicit_flood_quality(run_id: str) -> dict[str, Any]:
+    return {
+        "quality_state": "unavailable",
+        "quality_source": "explicit",
+        "max_over_window": None,
+        "result_rows": 0,
+        "return_period_rows": 0,
+        "warning_rows": 0,
+        "expected_result_rows": 0,
+        "expected_max_result_rows": 0,
+        "expected_timestep_result_rows": 0,
+        "meaningful_result_rows": 0,
+        "meaningful_max_result_rows": 0,
+        "meaningful_timestep_result_rows": 0,
+        "no_frequency_curve_rows": 0,
+        "no_usable_frequency_curve_rows": 0,
+        "warning_threshold_unavailable_rows": 0,
+        "unavailable_products": ["return_period_result"],
+        "residual_blockers": [
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": "missing_run_product_quality",
+                "run_id": run_id,
+                "residual_risk": "No run-level flood product quality row exists for this run.",
+            }
+        ],
+    }
+
+
+def _legacy_flood_product_quality_from_counts(
+    *,
+    run_id: str,
+    result_rows: int,
+    return_period_rows: int,
+    warning_rows: int,
+    max_over_window: bool | None,
+) -> dict[str, Any]:
     unavailable_products: list[str] = []
     residual_blockers: list[dict[str, Any]] = []
-    run_id = str(row.get("run_id") or "")
 
     if return_period_rows <= 0:
         unavailable_products.append("return_period_result")
@@ -3729,13 +3880,38 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "quality_state": quality_state,
-        "max_over_window": bool(row.get("flood_quality_max_over_window")) if result_rows > 0 else None,
+        "quality_source": "legacy_row_count",
+        "max_over_window": max_over_window,
         "result_rows": result_rows,
         "return_period_rows": return_period_rows,
         "warning_rows": warning_rows,
+        "expected_result_rows": result_rows,
+        "expected_max_result_rows": result_rows if max_over_window else 0,
+        "expected_timestep_result_rows": result_rows if max_over_window is False else 0,
+        "meaningful_result_rows": return_period_rows,
+        "meaningful_max_result_rows": return_period_rows if max_over_window else 0,
+        "meaningful_timestep_result_rows": return_period_rows if max_over_window is False else 0,
+        "no_frequency_curve_rows": max(result_rows - return_period_rows, 0),
+        "no_usable_frequency_curve_rows": 0,
+        "warning_threshold_unavailable_rows": max(return_period_rows - warning_rows, 0),
         "unavailable_products": unavailable_products,
         "residual_blockers": residual_blockers,
     }
+
+
+def _json_list(value: Any, *, strings: bool = False, mappings: bool = False) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list | tuple):
+        return []
+    if strings:
+        return [str(item) for item in value if str(item or "").strip()]
+    if mappings:
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    return list(value)
 
 
 def _run_display_coverage_available(cursor: Any) -> bool:
@@ -3746,8 +3922,18 @@ def _run_display_coverage_available(cursor: Any) -> bool:
     return cursor.fetchone()["reg"] is not None
 
 
-def _flood_product_quality_join(alias: str, available: bool = True) -> str:
-    if available:
+def _flood_quality_mode(available: FloodProductQualityMode | bool = "explicit") -> FloodProductQualityMode:
+    if isinstance(available, bool):
+        return "explicit" if available else "missing_table"
+    return available
+
+
+def _flood_product_quality_join(
+    alias: str,
+    available: FloodProductQualityMode | bool = "explicit",
+) -> str:
+    mode = _flood_quality_mode(available)
+    if mode != "missing_table":
         return f"""
                 LEFT JOIN flood.run_product_quality {alias}
                   ON {alias}.run_id = h.run_id
@@ -3759,19 +3945,23 @@ def _flood_product_quality_join(alias: str, available: bool = True) -> str:
                 LEFT JOIN LATERAL (
                     SELECT
                         EXISTS (
-                            SELECT 1 FROM flood.return_period_result r
-                            WHERE r.run_id = h.run_id
-                        ) AS has_product,
-                        EXISTS (
-                            SELECT 1 FROM flood.return_period_result r
-                            WHERE r.run_id = h.run_id AND r.max_over_window
-                        ) AS has_peak
+                    SELECT 1 FROM flood.return_period_result r
+                    WHERE r.run_id = h.run_id
+                ) AS has_product,
+                EXISTS (
+                    SELECT 1 FROM flood.return_period_result r
+                    WHERE r.run_id = h.run_id AND r.max_over_window
+                ) AS has_peak
                 ) {alias} ON TRUE
     """
 
 
-def _flood_product_quality_select(alias: str, available: bool = True) -> str:
-    if not available:
+def _flood_product_quality_select(
+    alias: str,
+    available: FloodProductQualityMode | bool = "explicit",
+) -> str:
+    mode = _flood_quality_mode(available)
+    if mode == "missing_table":
         # 存在性映射为 0/1 行计数：_flood_product_quality_from_row 据此判 ready（有产物）/unavailable（无）。
         return f"""
                     {alias}.has_peak AS flood_quality_max_over_window,
@@ -3779,7 +3969,29 @@ def _flood_product_quality_select(alias: str, available: bool = True) -> str:
                     (CASE WHEN {alias}.has_product THEN 1 ELSE 0 END) AS flood_return_period_rows,
                     (CASE WHEN {alias}.has_product THEN 1 ELSE 0 END) AS flood_warning_rows
     """
+    explicit_columns = (
+        f"""
+                    {alias}.quality_state AS flood_quality_state,
+                    {alias}.quality_source AS flood_quality_source,
+                    {alias}.unavailable_products AS flood_unavailable_products,
+                    {alias}.residual_blockers AS flood_residual_blockers,
+                    COALESCE({alias}.expected_result_rows, 0) AS flood_expected_result_rows,
+                    COALESCE({alias}.expected_max_result_rows, 0) AS flood_expected_max_result_rows,
+                    COALESCE({alias}.expected_timestep_result_rows, 0) AS flood_expected_timestep_result_rows,
+                    COALESCE({alias}.meaningful_result_rows, 0) AS flood_meaningful_result_rows,
+                    COALESCE({alias}.meaningful_max_result_rows, 0) AS flood_meaningful_max_result_rows,
+                    COALESCE({alias}.meaningful_timestep_result_rows, 0) AS flood_meaningful_timestep_result_rows,
+                    COALESCE({alias}.no_frequency_curve_rows, 0) AS flood_no_frequency_curve_rows,
+                    COALESCE({alias}.no_usable_frequency_curve_rows, 0) AS flood_no_usable_frequency_curve_rows,
+                    COALESCE({alias}.warning_threshold_unavailable_rows, 0)
+                        AS flood_warning_threshold_unavailable_rows,
+        """
+        if mode == "explicit"
+        else ""
+    )
     return f"""
+                    ({alias}.run_id IS NOT NULL) AS flood_quality_row_present,
+                    {explicit_columns}
                     CASE
                         WHEN {alias}.run_id IS NULL THEN NULL
                         WHEN {alias}.max_result_rows > 0 THEN true
@@ -3804,10 +4016,16 @@ def _flood_product_quality_select(alias: str, available: bool = True) -> str:
     """
 
 
-def _flood_product_ready_sql(alias: str, available: bool = True) -> str:
-    if not available:
+def _flood_product_ready_sql(
+    alias: str,
+    available: FloodProductQualityMode | bool = "explicit",
+) -> str:
+    mode = _flood_quality_mode(available)
+    if mode == "missing_table":
         # 有产物即就绪：DB 有 return_period_result 行 或 run 已发布（published 目录有产物）。
         return f"({alias}.has_product OR h.status = 'published')"
+    if mode == "explicit":
+        return f"{alias}.quality_state = 'ready'"
     return f"""
             COALESCE(
                 CASE

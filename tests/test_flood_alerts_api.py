@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -195,7 +196,7 @@ def test_warning_thresholds_unavailable_is_not_api_ready() -> None:
         (
             PARTIAL_ROUTE_WARNING_RUN_ID,
             "warning_thresholds",
-            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 1},
+            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 2},
         ),
     ],
 )
@@ -234,7 +235,7 @@ def test_flood_route_partial_product_rows_fail_before_geojson_serialization(
         (
             PARTIAL_ROUTE_WARNING_RUN_ID,
             "warning_thresholds",
-            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 1},
+            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 2},
         ),
     ],
 )
@@ -302,16 +303,12 @@ def test_flood_mvt_global_product_gate_fails_before_cache_lookup_or_live_sql(
         )
         flood_alert_routes.build_raw_tile_response(session, seed_tile, b"stale-global-cache")
 
-        def fail_route_gate(*_args: Any, **_kwargs: Any) -> None:
-            raise AssertionError("route gate should not run after the global flood product gate fails")
-
         def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
             raise AssertionError("flood MVT cache lookup should not run when global product gate fails")
 
         def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
             raise AssertionError("flood MVT live SQL should not run when global product gate fails")
 
-        monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", fail_route_gate)
         monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
         monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_tile_bytes", fail_live_fetch)
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
@@ -327,6 +324,125 @@ def test_flood_mvt_global_product_gate_fails_before_cache_lookup_or_live_sql(
     body = response.json()
     assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
     assert body["error"]["details"]["unavailable_products"] == ["return_period_result"]
+
+
+def test_explicit_all_no_curve_quality_keeps_catalog_discharge_and_blocks_flood_route() -> None:
+    run_id = "zz_explicit_no_curve"
+    with _store() as session:
+        _insert_hydro_run(session, run_id=run_id, cycle_time=datetime(2026, 5, 6, tzinfo=UTC))
+        _insert_timeseries_result(session, "seg_001", run_id, VALID_TIME_1, 101.0)
+        _write_explicit_flood_quality(
+            session,
+            run_id=run_id,
+            quality_state="unavailable",
+            unavailable_products=["frequency_curves", "return_period_result"],
+            residual_blockers=[
+                {
+                    "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                    "state": "unavailable",
+                    "quality_flag": "no_frequency_curve",
+                    "run_id": run_id,
+                    "residual_risk": "No usable frequency curves are available for this run.",
+                    "count": 2,
+                }
+            ],
+            expected_result_rows=2,
+            meaningful_result_rows=0,
+            no_frequency_curve_rows=2,
+            no_usable_frequency_curve_rows=0,
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                layers = client.get(f"/api/v1/layers?run_id={run_id}")
+                valid_times = client.get(f"/api/v1/layers/flood-return-period/valid-times?run_id={run_id}")
+                route = client.get(
+                    f"/api/v1/tiles/flood-return-period?run_id={run_id}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert layers.status_code == 200
+    by_id = {layer["layer_id"]: layer for layer in layers.json()["data"]}
+    assert by_id["discharge"]["metadata"]["valid_times"] == [VALID_TIME_1_ISO]
+    flood_quality = by_id["flood-return-period"]["metadata"]["product_quality"]
+    assert flood_quality["quality_state"] == "unavailable"
+    assert flood_quality["unavailable_products"] == ["frequency_curves", "return_period_result"]
+    assert flood_quality["expected_result_rows"] == 2
+    assert flood_quality["meaningful_result_rows"] == 0
+    assert flood_quality["no_frequency_curve_rows"] == 2
+
+    assert valid_times.status_code == 200
+    assert valid_times.json()["data"]["valid_times"] == []
+
+    assert route.status_code == 409
+    details = route.json()["error"]["details"]
+    assert route.json()["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    assert details["quality_state"] == "unavailable"
+    assert details["unavailable_products"] == ["frequency_curves", "return_period_result"]
+    assert details["expected_result_rows"] == 2
+    assert details["meaningful_result_rows"] == 0
+    assert details["no_frequency_curve_rows"] == 2
+
+
+def test_explicit_partial_quality_preserves_four_two_two_zero_counters_and_blocks_flood_route() -> None:
+    run_id = "zz_explicit_partial_quality"
+    with _store() as session:
+        _insert_hydro_run(session, run_id=run_id, cycle_time=datetime(2026, 5, 6, tzinfo=UTC))
+        _insert_timeseries_result(session, "seg_001", run_id, VALID_TIME_1, 101.0)
+        _insert_timeseries_result(session, "seg_002", run_id, VALID_TIME_1, 202.0)
+        _write_explicit_flood_quality(
+            session,
+            run_id=run_id,
+            quality_state="degraded",
+            unavailable_products=["frequency_curves"],
+            residual_blockers=[
+                {
+                    "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                    "state": "degraded",
+                    "quality_flag": "no_frequency_curve",
+                    "run_id": run_id,
+                    "residual_risk": "Some result rows have no frequency curve.",
+                    "count": 2,
+                }
+            ],
+            expected_result_rows=4,
+            meaningful_result_rows=2,
+            no_frequency_curve_rows=2,
+            no_usable_frequency_curve_rows=0,
+            result_rows=4,
+            return_period_rows=2,
+            warning_rows=2,
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                layers = client.get(f"/api/v1/layers?run_id={run_id}")
+                route = client.get(
+                    f"/api/v1/tiles/flood-return-period?run_id={run_id}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert layers.status_code == 200
+    by_id = {layer["layer_id"]: layer for layer in layers.json()["data"]}
+    flood_quality = by_id["flood-return-period"]["metadata"]["product_quality"]
+    assert flood_quality["quality_state"] == "degraded"
+    assert flood_quality["quality_source"] == "explicit"
+    assert flood_quality["expected_result_rows"] == 4
+    assert flood_quality["meaningful_result_rows"] == 2
+    assert flood_quality["no_frequency_curve_rows"] == 2
+    assert flood_quality["no_usable_frequency_curve_rows"] == 0
+
+    assert route.status_code == 409
+    details = route.json()["error"]["details"]
+    assert route.json()["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    assert details["quality_state"] == "degraded"
+    assert details["frequency_curves"] == "unavailable"
+    assert details["expected_result_rows"] == 4
+    assert details["meaningful_result_rows"] == 2
+    assert details["no_frequency_curve_rows"] == 2
+    assert details["no_usable_frequency_curve_rows"] == 0
 
 
 def test_latest_ready_run_skips_degraded_frequency_products() -> None:
@@ -347,7 +463,7 @@ def test_latest_ready_run_skips_degraded_frequency_products() -> None:
     assert latest["run_id"] == RUN_ID
 
 
-def test_flood_product_quality_uses_all_row_fallback_when_no_peak_rows() -> None:
+def test_explicit_ready_quality_is_authoritative_for_no_peak_rows() -> None:
     run_id = "zz_no_peak_layer_quality"
     valid_time = datetime(2026, 5, 5, tzinfo=UTC)
     with _store() as session:
@@ -383,11 +499,25 @@ def test_flood_product_quality_uses_all_row_fallback_when_no_peak_rows() -> None
             False,
             run_id=run_id,
         )
+        _write_explicit_flood_quality(
+            session,
+            run_id=run_id,
+            quality_state="ready",
+            unavailable_products=[],
+            residual_blockers=[],
+            expected_result_rows=1,
+            meaningful_result_rows=1,
+            no_frequency_curve_rows=0,
+            no_usable_frequency_curve_rows=0,
+            result_rows=1,
+            return_period_rows=1,
+            warning_rows=1,
+        )
 
         quality = flood_alert_routes._flood_product_quality(session, run_id, status="frequency_done")
 
     assert quality["quality_state"] == "ready"
-    assert quality["max_over_window"] is None
+    assert quality["max_over_window"] is False
     assert quality["result_rows"] == 1
     assert quality["return_period_rows"] == 1
     assert quality["warning_rows"] == 1
@@ -409,13 +539,23 @@ def test_layer_quality_and_latest_ready_sql_use_materialized_quality_without_res
     valid_time_source = mvt_source[
         mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
     ]
+    explicit_quality_source = route_source[
+        route_source.index("def _explicit_flood_product_quality_row") : route_source.index(
+            "def _explicit_flood_quality_from_row"
+        )
+    ]
 
+    assert "FROM flood.run_product_quality" in explicit_quality_source
+    assert "flood.return_period_result" not in explicit_quality_source
+    assert "COUNT(*)" not in explicit_quality_source
+    assert "SUM(" not in explicit_quality_source
     assert "FROM flood.run_product_quality" in quality_source
-    assert "flood.return_period_result" not in quality_source
-    assert "COUNT(*)" not in quality_source
-    assert "SUM(" not in quality_source
+    assert "flood.return_period_result" in quality_source
+    assert "EXISTS (" in quality_source
     assert "JOIN flood.run_product_quality" in latest_source
-    assert "FROM flood.return_period_result" not in latest_source
+    assert "product_quality.quality_state = 'ready'" in latest_source
+    assert "FROM flood.return_period_result" in latest_source
+    assert "EXISTS (" in latest_source
     assert "GROUP BY run_id" not in latest_source
     assert "COUNT(*)" not in latest_source
     assert "SUM(" not in latest_source
@@ -424,7 +564,7 @@ def test_layer_quality_and_latest_ready_sql_use_materialized_quality_without_res
     assert "GROUP BY" not in valid_time_source
 
 
-def test_latest_ready_run_uses_materialized_quality_and_no_peak_fallback() -> None:
+def test_latest_ready_run_uses_explicit_ready_quality() -> None:
     run_id = "zz_no_peak_latest_ready"
     valid_time = datetime(2026, 5, 5, tzinfo=UTC)
     with _store() as session:
@@ -461,12 +601,85 @@ def test_latest_ready_run_uses_materialized_quality_and_no_peak_fallback() -> No
             False,
             run_id=run_id,
         )
+        _write_explicit_flood_quality(
+            session,
+            run_id=run_id,
+            quality_state="ready",
+            unavailable_products=[],
+            residual_blockers=[],
+            expected_result_rows=1,
+            meaningful_result_rows=1,
+            no_frequency_curve_rows=0,
+            no_usable_frequency_curve_rows=0,
+            result_rows=1,
+            return_period_rows=1,
+            warning_rows=1,
+        )
         session.commit()
 
         latest = flood_alert_routes.latest_ready_run(session)
 
     assert latest is not None
     assert latest["run_id"] == run_id
+
+
+def test_full_ready_explicit_quality_preserves_three_three_zero_zero_counters_through_ready_paths() -> None:
+    run_id = "zz_explicit_full_ready_quality"
+    valid_time = datetime(2026, 5, 6, tzinfo=UTC)
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        _insert_hydro_run(session, run_id=run_id, cycle_time=valid_time)
+        for index, segment_id in enumerate(("seg_001", "seg_002", "seg_003"), start=1):
+            _insert_result(
+                session,
+                segment_id,
+                "basin_v1",
+                "rnv_v1",
+                valid_time,
+                100.0 + index,
+                float(index),
+                "normal",
+                False,
+                run_id=run_id,
+            )
+        _write_explicit_flood_quality(
+            session,
+            run_id=run_id,
+            quality_state="ready",
+            unavailable_products=[],
+            residual_blockers=[],
+            expected_result_rows=3,
+            meaningful_result_rows=3,
+            no_frequency_curve_rows=0,
+            no_usable_frequency_curve_rows=0,
+            result_rows=3,
+            return_period_rows=3,
+            warning_rows=3,
+        )
+        session.commit()
+
+        latest = flood_alert_routes.latest_ready_run(session)
+        quality = flood_alert_routes._flood_product_quality(session, run_id, status="frequency_done")
+        route_quality = flood_alert_routes._require_flood_route_product_ready(
+            session,
+            run_id=run_id,
+            duration="1h",
+            valid_time=valid_time,
+            max_over_window=False,
+            status="frequency_done",
+        )
+
+    assert latest is not None
+    assert latest["run_id"] == run_id
+    for returned_quality in (quality, route_quality):
+        assert returned_quality["quality_state"] == "ready"
+        assert returned_quality["quality_source"] == "explicit"
+        assert returned_quality["expected_result_rows"] == 3
+        assert returned_quality["meaningful_result_rows"] == 3
+        assert returned_quality["no_frequency_curve_rows"] == 0
+        assert returned_quality["no_usable_frequency_curve_rows"] == 0
+        assert returned_quality["unavailable_products"] == []
+        assert returned_quality["residual_blockers"] == []
 
 
 def test_missing_run_quality_row_fails_closed_for_flood_product_gate() -> None:
@@ -5922,6 +6135,19 @@ def _create_tables(connection: Any) -> None:
                 warning_rows INTEGER NOT NULL DEFAULT 0,
                 max_return_period_rows INTEGER NOT NULL DEFAULT 0,
                 max_warning_rows INTEGER NOT NULL DEFAULT 0,
+                quality_state TEXT NOT NULL DEFAULT 'ready',
+                quality_source TEXT NOT NULL DEFAULT 'historical_backfill',
+                unavailable_products TEXT NOT NULL DEFAULT '[]',
+                residual_blockers TEXT NOT NULL DEFAULT '[]',
+                expected_result_rows INTEGER NOT NULL DEFAULT 0,
+                expected_max_result_rows INTEGER NOT NULL DEFAULT 0,
+                expected_timestep_result_rows INTEGER NOT NULL DEFAULT 0,
+                meaningful_result_rows INTEGER NOT NULL DEFAULT 0,
+                meaningful_max_result_rows INTEGER NOT NULL DEFAULT 0,
+                meaningful_timestep_result_rows INTEGER NOT NULL DEFAULT 0,
+                no_frequency_curve_rows INTEGER NOT NULL DEFAULT 0,
+                no_usable_frequency_curve_rows INTEGER NOT NULL DEFAULT 0,
+                warning_threshold_unavailable_rows INTEGER NOT NULL DEFAULT 0,
                 refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -6647,6 +6873,129 @@ def _insert_result(
     _refresh_run_quality(connection, run_id)
 
 
+def _insert_hydro_run(
+    connection: Any,
+    *,
+    run_id: str,
+    cycle_time: datetime,
+    status: str = "frequency_done",
+    model_id: str = "model_1",
+    basin_version_id: str = "basin_v1",
+) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO hydro.hydro_run (
+                run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                start_time, end_time, status, run_manifest_uri, updated_at
+            )
+            VALUES (
+                :run_id, 'forecast', 'forecast_gfs_deterministic', :model_id, :basin_version_id,
+                'GFS', :cycle_time, :cycle_time, :end_time, :status, 'object://manifest', :updated_at
+            )
+            """
+        ),
+        {
+            "run_id": run_id,
+            "model_id": model_id,
+            "basin_version_id": basin_version_id,
+            "cycle_time": cycle_time,
+            "end_time": cycle_time + timedelta(days=7),
+            "status": status,
+            "updated_at": cycle_time + timedelta(hours=1),
+        },
+    )
+
+
+def _write_explicit_flood_quality(
+    connection: Any,
+    *,
+    run_id: str,
+    quality_state: str,
+    unavailable_products: list[str],
+    residual_blockers: list[dict[str, Any]],
+    expected_result_rows: int,
+    meaningful_result_rows: int,
+    no_frequency_curve_rows: int,
+    no_usable_frequency_curve_rows: int,
+    expected_max_result_rows: int = 0,
+    expected_timestep_result_rows: int = 0,
+    meaningful_max_result_rows: int = 0,
+    meaningful_timestep_result_rows: int = 0,
+    warning_threshold_unavailable_rows: int = 0,
+    result_rows: int = 0,
+    max_result_rows: int = 0,
+    return_period_rows: int = 0,
+    warning_rows: int = 0,
+    max_return_period_rows: int = 0,
+    max_warning_rows: int = 0,
+) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO flood.run_product_quality (
+                run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                max_return_period_rows, max_warning_rows, quality_state, quality_source,
+                unavailable_products, residual_blockers, expected_result_rows, expected_max_result_rows,
+                expected_timestep_result_rows, meaningful_result_rows, meaningful_max_result_rows,
+                meaningful_timestep_result_rows, no_frequency_curve_rows, no_usable_frequency_curve_rows,
+                warning_threshold_unavailable_rows, refreshed_at
+            )
+            VALUES (
+                :run_id, :result_rows, :max_result_rows, :return_period_rows, :warning_rows,
+                :max_return_period_rows, :max_warning_rows, :quality_state, 'explicit',
+                :unavailable_products, :residual_blockers, :expected_result_rows, :expected_max_result_rows,
+                :expected_timestep_result_rows, :meaningful_result_rows, :meaningful_max_result_rows,
+                :meaningful_timestep_result_rows, :no_frequency_curve_rows, :no_usable_frequency_curve_rows,
+                :warning_threshold_unavailable_rows, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (run_id) DO UPDATE SET
+                result_rows = excluded.result_rows,
+                max_result_rows = excluded.max_result_rows,
+                return_period_rows = excluded.return_period_rows,
+                warning_rows = excluded.warning_rows,
+                max_return_period_rows = excluded.max_return_period_rows,
+                max_warning_rows = excluded.max_warning_rows,
+                quality_state = excluded.quality_state,
+                quality_source = excluded.quality_source,
+                unavailable_products = excluded.unavailable_products,
+                residual_blockers = excluded.residual_blockers,
+                expected_result_rows = excluded.expected_result_rows,
+                expected_max_result_rows = excluded.expected_max_result_rows,
+                expected_timestep_result_rows = excluded.expected_timestep_result_rows,
+                meaningful_result_rows = excluded.meaningful_result_rows,
+                meaningful_max_result_rows = excluded.meaningful_max_result_rows,
+                meaningful_timestep_result_rows = excluded.meaningful_timestep_result_rows,
+                no_frequency_curve_rows = excluded.no_frequency_curve_rows,
+                no_usable_frequency_curve_rows = excluded.no_usable_frequency_curve_rows,
+                warning_threshold_unavailable_rows = excluded.warning_threshold_unavailable_rows,
+                refreshed_at = excluded.refreshed_at
+            """
+        ),
+        {
+            "run_id": run_id,
+            "result_rows": result_rows,
+            "max_result_rows": max_result_rows,
+            "return_period_rows": return_period_rows,
+            "warning_rows": warning_rows,
+            "max_return_period_rows": max_return_period_rows,
+            "max_warning_rows": max_warning_rows,
+            "quality_state": quality_state,
+            "unavailable_products": json.dumps(unavailable_products),
+            "residual_blockers": json.dumps(residual_blockers),
+            "expected_result_rows": expected_result_rows,
+            "expected_max_result_rows": expected_max_result_rows,
+            "expected_timestep_result_rows": expected_timestep_result_rows,
+            "meaningful_result_rows": meaningful_result_rows,
+            "meaningful_max_result_rows": meaningful_max_result_rows,
+            "meaningful_timestep_result_rows": meaningful_timestep_result_rows,
+            "no_frequency_curve_rows": no_frequency_curve_rows,
+            "no_usable_frequency_curve_rows": no_usable_frequency_curve_rows,
+            "warning_threshold_unavailable_rows": warning_threshold_unavailable_rows,
+        },
+    )
+
+
 def _refresh_run_quality(connection: Any, run_id: str) -> None:
     row = connection.execute(
         text(
@@ -6659,7 +7008,13 @@ def _refresh_run_quality(connection: Any, run_id: str) -> None:
                 SUM(CASE WHEN max_over_window = 1 AND return_period IS NOT NULL THEN 1 ELSE 0 END)
                     AS max_return_period_rows,
                 SUM(CASE WHEN max_over_window = 1 AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                    AS max_warning_rows
+                    AS max_warning_rows,
+                SUM(CASE WHEN quality_flag = 'no_frequency_curve' THEN 1 ELSE 0 END)
+                    AS no_frequency_curve_rows,
+                SUM(CASE WHEN quality_flag = 'no_usable_frequency_curve' THEN 1 ELSE 0 END)
+                    AS no_usable_frequency_curve_rows,
+                SUM(CASE WHEN quality_flag = 'warning_thresholds_unavailable' THEN 1 ELSE 0 END)
+                    AS warning_threshold_unavailable_rows
             FROM flood.return_period_result
             WHERE run_id = :run_id
             """
@@ -6672,16 +7027,66 @@ def _refresh_run_quality(connection: Any, run_id: str) -> None:
             {"run_id": run_id},
         )
         return
+    result_rows = int(row["result_rows"] or 0)
+    max_result_rows = int(row["max_result_rows"] or 0)
+    return_period_rows = int(row["return_period_rows"] or 0)
+    warning_rows = int(row["warning_rows"] or 0)
+    max_return_period_rows = int(row["max_return_period_rows"] or 0)
+    max_warning_rows = int(row["max_warning_rows"] or 0)
+    no_frequency_curve_rows = int(row["no_frequency_curve_rows"] or 0)
+    no_usable_frequency_curve_rows = int(row["no_usable_frequency_curve_rows"] or 0)
+    warning_threshold_unavailable_rows = int(row["warning_threshold_unavailable_rows"] or 0)
+    meaningful_result_rows = max(return_period_rows, warning_rows)
+    meaningful_max_result_rows = max(max_return_period_rows, max_warning_rows)
+    unavailable_products: list[str] = []
+    residual_blockers: list[dict[str, Any]] = []
+    if return_period_rows <= 0:
+        unavailable_products.append("return_period_result")
+        residual_blockers.append(
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": "missing_return_period_result",
+                "run_id": run_id,
+                "residual_risk": "No non-null return-period rows are available for this run.",
+                "count": result_rows,
+            }
+        )
+    if warning_threshold_unavailable_rows > 0:
+        unavailable_products.append("warning_thresholds")
+        residual_blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": "warning_thresholds_unavailable",
+                "run_id": run_id,
+                "residual_risk": "warning_level remains null for return-period rows.",
+                "count": warning_threshold_unavailable_rows,
+            }
+        )
+    unavailable_products = sorted(set(unavailable_products))
+    if return_period_rows <= 0 or warning_rows < return_period_rows:
+        quality_state = "unavailable"
+    else:
+        quality_state = "ready"
     connection.execute(
         text(
             """
             INSERT INTO flood.run_product_quality (
                 run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
-                max_return_period_rows, max_warning_rows, refreshed_at
+                max_return_period_rows, max_warning_rows, quality_state, quality_source,
+                unavailable_products, residual_blockers, expected_result_rows, expected_max_result_rows,
+                expected_timestep_result_rows, meaningful_result_rows, meaningful_max_result_rows,
+                meaningful_timestep_result_rows, no_frequency_curve_rows, no_usable_frequency_curve_rows,
+                warning_threshold_unavailable_rows, refreshed_at
             )
             VALUES (
                 :run_id, :result_rows, :max_result_rows, :return_period_rows, :warning_rows,
-                :max_return_period_rows, :max_warning_rows, CURRENT_TIMESTAMP
+                :max_return_period_rows, :max_warning_rows, :quality_state, 'historical_backfill',
+                :unavailable_products, :residual_blockers, :expected_result_rows, :expected_max_result_rows,
+                :expected_timestep_result_rows, :meaningful_result_rows, :meaningful_max_result_rows,
+                :meaningful_timestep_result_rows, :no_frequency_curve_rows, :no_usable_frequency_curve_rows,
+                :warning_threshold_unavailable_rows, CURRENT_TIMESTAMP
             )
             ON CONFLICT (run_id) DO UPDATE SET
                 result_rows = excluded.result_rows,
@@ -6690,17 +7095,42 @@ def _refresh_run_quality(connection: Any, run_id: str) -> None:
                 warning_rows = excluded.warning_rows,
                 max_return_period_rows = excluded.max_return_period_rows,
                 max_warning_rows = excluded.max_warning_rows,
+                quality_state = excluded.quality_state,
+                quality_source = excluded.quality_source,
+                unavailable_products = excluded.unavailable_products,
+                residual_blockers = excluded.residual_blockers,
+                expected_result_rows = excluded.expected_result_rows,
+                expected_max_result_rows = excluded.expected_max_result_rows,
+                expected_timestep_result_rows = excluded.expected_timestep_result_rows,
+                meaningful_result_rows = excluded.meaningful_result_rows,
+                meaningful_max_result_rows = excluded.meaningful_max_result_rows,
+                meaningful_timestep_result_rows = excluded.meaningful_timestep_result_rows,
+                no_frequency_curve_rows = excluded.no_frequency_curve_rows,
+                no_usable_frequency_curve_rows = excluded.no_usable_frequency_curve_rows,
+                warning_threshold_unavailable_rows = excluded.warning_threshold_unavailable_rows,
                 refreshed_at = excluded.refreshed_at
             """
         ),
         {
             "run_id": run_id,
-            "result_rows": int(row["result_rows"] or 0),
-            "max_result_rows": int(row["max_result_rows"] or 0),
-            "return_period_rows": int(row["return_period_rows"] or 0),
-            "warning_rows": int(row["warning_rows"] or 0),
-            "max_return_period_rows": int(row["max_return_period_rows"] or 0),
-            "max_warning_rows": int(row["max_warning_rows"] or 0),
+            "result_rows": result_rows,
+            "max_result_rows": max_result_rows,
+            "return_period_rows": return_period_rows,
+            "warning_rows": warning_rows,
+            "max_return_period_rows": max_return_period_rows,
+            "max_warning_rows": max_warning_rows,
+            "quality_state": quality_state,
+            "unavailable_products": json.dumps(unavailable_products),
+            "residual_blockers": json.dumps(residual_blockers),
+            "expected_result_rows": result_rows,
+            "expected_max_result_rows": max_result_rows,
+            "expected_timestep_result_rows": max(result_rows - max_result_rows, 0),
+            "meaningful_result_rows": meaningful_result_rows,
+            "meaningful_max_result_rows": meaningful_max_result_rows,
+            "meaningful_timestep_result_rows": max(meaningful_result_rows - meaningful_max_result_rows, 0),
+            "no_frequency_curve_rows": no_frequency_curve_rows,
+            "no_usable_frequency_curve_rows": no_usable_frequency_curve_rows,
+            "warning_threshold_unavailable_rows": warning_threshold_unavailable_rows,
         },
     )
 

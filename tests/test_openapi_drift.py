@@ -227,6 +227,9 @@ def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema
         "QhhLatestQualityNote",
         "QhhLatestStationVariableCoverage",
         "QhhLatestQueryIndex",
+        "FloodReturnPeriodQualityState",
+        "FloodReturnPeriodProductQuality",
+        "QhhLatestProductQuality",
         "QhhLatestAvailability",
         "QhhLatestQuality",
         "QhhLatestProduct",
@@ -411,13 +414,16 @@ def test_flood_return_period_collection_product_quality_matches_runtime_and_stat
 
     assert static_schema["properties"]["product_quality"] == {
         "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}],
         "additionalProperties": True,
         "nullable": True,
         "description": "Flood return-period readiness evidence for the selected run.",
     }
-    runtime_product_quality = runtime_schema["properties"]["product_quality"]
-    assert {"additionalProperties": True, "type": "object"} in runtime_product_quality["anyOf"]
-    assert {"type": "null"} in runtime_product_quality["anyOf"]
+    assert runtime_schema["properties"]["product_quality"] == static_schema["properties"]["product_quality"]
+    assert (
+        fastapi_spec["components"]["schemas"]["FloodReturnPeriodProductQuality"]
+        == static_spec["components"]["schemas"]["FloodReturnPeriodProductQuality"]
+    )
 
 
 def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:

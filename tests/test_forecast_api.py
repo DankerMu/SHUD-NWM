@@ -13,6 +13,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
+    FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS,
     QHH_LATEST_CONTEXT_LIMIT,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
@@ -557,6 +558,7 @@ class SqlCaptureCursor:
         self.rows_by_statement = rows_by_statement
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
         self._pending_regclass: dict[str, Any] | None = None
+        self._pending_columns: list[dict[str, Any]] | None = None
 
     def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
         probe = self._regclass_probe_result(statement)
@@ -564,7 +566,13 @@ class SqlCaptureCursor:
             # 探针不计入 executions：测试按下标/计数断言的是主查询序列。
             self._pending_regclass = probe
             return
+        if "information_schema.columns" in statement and "run_product_quality" in statement:
+            self._pending_columns = [
+                {"column_name": column} for column in sorted(FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS)
+            ]
+            return
         self._pending_regclass = None
+        self._pending_columns = None
         self.executions.append((statement, parameters))
 
     @classmethod
@@ -577,6 +585,9 @@ class SqlCaptureCursor:
         return {"reg": None}
 
     def fetchall(self) -> list[dict[str, Any]]:
+        if self._pending_columns is not None:
+            result, self._pending_columns = self._pending_columns, None
+            return result
         if not self.rows_by_statement:
             return []
         return self.rows_by_statement.pop(0)
@@ -1693,9 +1704,32 @@ def test_latest_qhh_return_period_ready_when_non_null_peak_rows_present() -> Non
 
 
 def test_latest_qhh_return_period_unavailable_does_not_block_ready_product() -> None:
-    # 关键回归：有 q_down 流量但 flood.return_period_result 无非空 peak 行 →
-    # 产品仍 ready 正常返回（不掉 ready、不 404），return_period_status=unavailable + reason。
-    store = SqlCaptureForecastStore([[_qhh_candidate_row(flood_return_period_rows=0)]])
+    # 关键回归：有 q_down 流量但显式 flood quality unavailable →
+    # 产品仍 ready 正常返回（不掉 ready、不 404），return_period_status=unavailable + reason/counters。
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    flood_return_period_rows=0,
+                    flood_result_rows=0,
+                    flood_warning_rows=0,
+                    flood_quality_state="unavailable",
+                    flood_unavailable_products=["frequency_curves", "return_period_result"],
+                    flood_residual_blockers=[
+                        {
+                            "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                            "state": "unavailable",
+                            "quality_flag": "no_frequency_curve",
+                            "residual_risk": "No usable frequency curves are available for this run.",
+                        }
+                    ],
+                    flood_expected_result_rows=2,
+                    flood_meaningful_result_rows=0,
+                    flood_no_frequency_curve_rows=2,
+                )
+            ]
+        ]
+    )
 
     response = store.latest_qhh_display_product("gfs")
 
@@ -1707,17 +1741,114 @@ def test_latest_qhh_return_period_unavailable_does_not_block_ready_product() -> 
     assert response["availability"]["return_period_status"] == "unavailable"
     reasons = response["availability"]["return_period_reasons"]
     assert [reason["code"] for reason in reasons] == ["RETURN_PERIOD_RESULT_UNAVAILABLE"]
+    flood_quality = response["quality"]["product_quality"]["flood_return_period"]
+    assert flood_quality["quality_state"] == "unavailable"
+    assert flood_quality["unavailable_products"] == ["frequency_curves", "return_period_result"]
+    assert flood_quality["expected_result_rows"] == 2
+    assert flood_quality["meaningful_result_rows"] == 0
+    assert flood_quality["no_frequency_curve_rows"] == 2
     # And it MUST NOT leak into the blocking unavailable_reasons set.
     blocking_codes = {reason["code"] for reason in response["availability"]["unavailable_reasons"]}
     assert "RETURN_PERIOD_RESULT_UNAVAILABLE" not in blocking_codes
     assert response["availability"]["unavailable_reasons"] == []
 
 
-def test_latest_qhh_return_period_unavailable_for_non_peak_only_rows() -> None:
-    # Scenario: 仅有非 peak/timestep 行（flood_return_period_rows == 0）→ unavailable（口径反例）。
-    # result_rows>0 (timestep rows exist) but no non-null peak return-period rows.
+def test_latest_qhh_explicit_partial_quality_preserves_four_two_two_zero_counters() -> None:
     store = SqlCaptureForecastStore(
-        [[_qhh_candidate_row(flood_return_period_rows=0, flood_result_rows=240)]]
+        [
+            [
+                _qhh_candidate_row(
+                    flood_return_period_rows=2,
+                    flood_result_rows=4,
+                    flood_warning_rows=2,
+                    flood_quality_state="degraded",
+                    flood_unavailable_products=["frequency_curves"],
+                    flood_residual_blockers=[
+                        {
+                            "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                            "state": "degraded",
+                            "quality_flag": "no_frequency_curve",
+                            "residual_risk": "Some result rows have no frequency curve.",
+                        }
+                    ],
+                    flood_expected_result_rows=4,
+                    flood_meaningful_result_rows=2,
+                    flood_no_frequency_curve_rows=2,
+                    flood_no_usable_frequency_curve_rows=0,
+                )
+            ]
+        ]
+    )
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert response["status"] == "ready"
+    assert response["availability"]["ready"] is True
+    assert response["availability"]["return_period_status"] == "unavailable"
+    flood_quality = response["quality"]["product_quality"]["flood_return_period"]
+    assert flood_quality["quality_state"] == "degraded"
+    assert flood_quality["quality_source"] == "explicit"
+    assert flood_quality["expected_result_rows"] == 4
+    assert flood_quality["meaningful_result_rows"] == 2
+    assert flood_quality["no_frequency_curve_rows"] == 2
+    assert flood_quality["no_usable_frequency_curve_rows"] == 0
+    assert flood_quality["unavailable_products"] == ["frequency_curves"]
+
+
+def test_latest_qhh_explicit_full_ready_quality_preserves_three_three_zero_zero_counters() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    flood_return_period_rows=3,
+                    flood_result_rows=3,
+                    flood_warning_rows=3,
+                    flood_quality_state="ready",
+                    flood_expected_result_rows=3,
+                    flood_meaningful_result_rows=3,
+                    flood_no_frequency_curve_rows=0,
+                    flood_no_usable_frequency_curve_rows=0,
+                )
+            ]
+        ]
+    )
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert response["availability"]["return_period_status"] == "ready"
+    flood_quality = response["quality"]["product_quality"]["flood_return_period"]
+    assert flood_quality["quality_state"] == "ready"
+    assert flood_quality["quality_source"] == "explicit"
+    assert flood_quality["expected_result_rows"] == 3
+    assert flood_quality["meaningful_result_rows"] == 3
+    assert flood_quality["no_frequency_curve_rows"] == 0
+    assert flood_quality["no_usable_frequency_curve_rows"] == 0
+    assert flood_quality["unavailable_products"] == []
+    assert flood_quality["residual_blockers"] == []
+
+
+def test_latest_qhh_return_period_unavailable_for_non_peak_only_rows() -> None:
+    # Scenario: explicit unavailable remains supplemental even when q_down output is present.
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    flood_return_period_rows=0,
+                    flood_result_rows=240,
+                    flood_quality_state="unavailable",
+                    flood_unavailable_products=["return_period_result"],
+                    flood_residual_blockers=[
+                        {
+                            "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                            "state": "unavailable",
+                            "residual_risk": "Flood return-period product is unavailable.",
+                        }
+                    ],
+                    flood_expected_result_rows=240,
+                    flood_meaningful_result_rows=0,
+                )
+            ]
+        ]
     )
 
     response = store.latest_qhh_display_product("gfs")
@@ -1726,10 +1857,23 @@ def test_latest_qhh_return_period_unavailable_for_non_peak_only_rows() -> None:
     assert response["status"] == "ready"  # caliber reversal does not block product
 
 
-def test_latest_qhh_return_period_caliber_matches_best_available() -> None:
-    # Scenario: 跨接口口径一致 — 同一 run 在 best-available 判 unavailable，
-    # latest-product 的 return_period_status 也为 unavailable（同一非空 peak 口径）。
-    row = _qhh_candidate_row(flood_return_period_rows=0, flood_result_rows=240)
+def test_latest_qhh_return_period_quality_matches_best_available() -> None:
+    # Scenario: 跨接口一致 — 同一 explicit quality 在 best-available 和 latest-product 都 unavailable。
+    row = _qhh_candidate_row(
+        flood_return_period_rows=0,
+        flood_result_rows=240,
+        flood_quality_state="unavailable",
+        flood_unavailable_products=["return_period_result"],
+        flood_residual_blockers=[
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "residual_risk": "Flood return-period product is unavailable.",
+            }
+        ],
+        flood_expected_result_rows=240,
+        flood_meaningful_result_rows=0,
+    )
     best_available_quality = _flood_product_quality_from_row(row)
     best_available_unavailable = "return_period_result" in best_available_quality["unavailable_products"]
 
@@ -1752,7 +1896,12 @@ def test_latest_qhh_return_period_caliber_matches_best_available() -> None:
 def test_latest_qhh_unavailable_context_response_schema_carries_return_period_field() -> None:
     # Schema consistency: 无候选/失败 run 走 unavailable-context 时，候选评估的 availability
     # 结构仍始终含 return_period_status（与 ready 分支同一 schema）。
-    context_row = _qhh_candidate_row(status="failed", flood_return_period_rows=0)
+    context_row = _qhh_candidate_row(
+        status="failed",
+        flood_return_period_rows=0,
+        flood_quality_state="unavailable",
+        flood_unavailable_products=["return_period_result"],
+    )
 
     evaluation = _qhh_latest_candidate_response(context_row, basin_id="basins_qhh")
 
@@ -3182,20 +3331,54 @@ def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
         "status": "frequency_done",
         "cycle_time": _dt("2026-05-07T00:00:00Z"),
         "created_at": _dt("2026-05-07T01:00:00Z"),
+        "flood_quality_row_present": True,
+        "flood_quality_state": "ready",
+        "flood_quality_source": "explicit",
+        "flood_unavailable_products": [],
+        "flood_residual_blockers": [],
         "flood_quality_max_over_window": True,
         "flood_result_rows": 2,
         "flood_return_period_rows": 2,
         "flood_warning_rows": 2,
+        "flood_expected_result_rows": 2,
+        "flood_expected_max_result_rows": 2,
+        "flood_expected_timestep_result_rows": 0,
+        "flood_meaningful_result_rows": 2,
+        "flood_meaningful_max_result_rows": 2,
+        "flood_meaningful_timestep_result_rows": 0,
+        "flood_no_frequency_curve_rows": 0,
+        "flood_no_usable_frequency_curve_rows": 0,
+        "flood_warning_threshold_unavailable_rows": 0,
     }
     warning_unavailable_run = {
         "run_id": "run_warning_unavailable",
         "status": "frequency_done",
         "cycle_time": _dt("2026-05-07T00:00:00Z"),
         "created_at": _dt("2026-05-07T01:00:00Z"),
+        "flood_quality_row_present": True,
+        "flood_quality_state": "unavailable",
+        "flood_quality_source": "explicit",
+        "flood_unavailable_products": ["warning_thresholds"],
+        "flood_residual_blockers": [
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "residual_risk": "warning_level remains null for return-period rows.",
+            }
+        ],
         "flood_quality_max_over_window": True,
         "flood_result_rows": 2,
         "flood_return_period_rows": 2,
         "flood_warning_rows": 0,
+        "flood_expected_result_rows": 2,
+        "flood_expected_max_result_rows": 2,
+        "flood_expected_timestep_result_rows": 0,
+        "flood_meaningful_result_rows": 2,
+        "flood_meaningful_max_result_rows": 2,
+        "flood_meaningful_timestep_result_rows": 0,
+        "flood_no_frequency_curve_rows": 0,
+        "flood_no_usable_frequency_curve_rows": 0,
+        "flood_warning_threshold_unavailable_rows": 2,
     }
     store = SqlCaptureForecastStore(
         [[{"total_count": 1}], [ready_run], [{"total_count": 2}], [ready_run, warning_unavailable_run]]
@@ -3236,7 +3419,7 @@ def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
 
 
 def test_forecast_store_materialized_quality_select_preserves_compatibility_formulas() -> None:
-    quality_select = _flood_product_quality_select("fpq")
+    quality_select = _flood_product_quality_select("fpq", available="legacy_table")
 
     assert "WHEN fpq.max_result_rows > 0 THEN fpq.max_result_rows" in quality_select
     assert "ELSE fpq.result_rows" in quality_select
@@ -3254,10 +3437,24 @@ def test_get_run_uses_materialized_flood_quality_without_result_aggregation() ->
                     "status": "frequency_done",
                     "cycle_time": _dt("2026-05-07T00:00:00Z"),
                     "created_at": _dt("2026-05-07T01:00:00Z"),
+                    "flood_quality_row_present": True,
+                    "flood_quality_state": "ready",
+                    "flood_quality_source": "explicit",
+                    "flood_unavailable_products": [],
+                    "flood_residual_blockers": [],
                     "flood_quality_max_over_window": True,
                     "flood_result_rows": 2,
                     "flood_return_period_rows": 2,
                     "flood_warning_rows": 2,
+                    "flood_expected_result_rows": 2,
+                    "flood_expected_max_result_rows": 2,
+                    "flood_expected_timestep_result_rows": 0,
+                    "flood_meaningful_result_rows": 2,
+                    "flood_meaningful_max_result_rows": 2,
+                    "flood_meaningful_timestep_result_rows": 0,
+                    "flood_no_frequency_curve_rows": 0,
+                    "flood_no_usable_frequency_curve_rows": 0,
+                    "flood_warning_threshold_unavailable_rows": 0,
                 }
             ]
         ]
@@ -3648,6 +3845,15 @@ def _qhh_candidate_row(
     flood_result_rows: int | None = None,
     flood_warning_rows: int | None = None,
     flood_quality_max_over_window: bool | None = True,
+    flood_quality_row_present: bool = True,
+    flood_quality_state: str = "ready",
+    flood_quality_source: str = "explicit",
+    flood_unavailable_products: list[str] | None = None,
+    flood_residual_blockers: list[dict[str, Any]] | None = None,
+    flood_expected_result_rows: int | None = None,
+    flood_meaningful_result_rows: int | None = None,
+    flood_no_frequency_curve_rows: int = 0,
+    flood_no_usable_frequency_curve_rows: int = 0,
 ) -> dict[str, Any]:
     default_cycle_time = _dt("2026-05-07T00:00:00Z")
     schedule_cycle_time = cycle_time or default_cycle_time
@@ -3738,6 +3944,28 @@ def _qhh_candidate_row(
             flood_warning_rows if flood_warning_rows is not None else flood_return_period_rows
         ),
         "flood_quality_max_over_window": flood_quality_max_over_window,
+        "flood_quality_row_present": flood_quality_row_present,
+        "flood_quality_state": flood_quality_state,
+        "flood_quality_source": flood_quality_source,
+        "flood_unavailable_products": flood_unavailable_products or [],
+        "flood_residual_blockers": flood_residual_blockers or [],
+        "flood_expected_result_rows": (
+            flood_expected_result_rows if flood_expected_result_rows is not None else flood_return_period_rows
+        ),
+        "flood_expected_max_result_rows": (
+            flood_expected_result_rows if flood_expected_result_rows is not None else flood_return_period_rows
+        ),
+        "flood_expected_timestep_result_rows": 0,
+        "flood_meaningful_result_rows": (
+            flood_meaningful_result_rows if flood_meaningful_result_rows is not None else flood_return_period_rows
+        ),
+        "flood_meaningful_max_result_rows": (
+            flood_meaningful_result_rows if flood_meaningful_result_rows is not None else flood_return_period_rows
+        ),
+        "flood_meaningful_timestep_result_rows": 0,
+        "flood_no_frequency_curve_rows": flood_no_frequency_curve_rows,
+        "flood_no_usable_frequency_curve_rows": flood_no_usable_frequency_curve_rows,
+        "flood_warning_threshold_unavailable_rows": 0,
     }
 
 

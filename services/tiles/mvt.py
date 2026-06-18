@@ -29,6 +29,23 @@ MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down", "water_level")
 SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
 DEFAULT_FLOOD_RETURN_PERIOD_DURATION = "1h"
+FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
+    {
+        "quality_state",
+        "quality_source",
+        "unavailable_products",
+        "residual_blockers",
+        "expected_result_rows",
+        "expected_max_result_rows",
+        "expected_timestep_result_rows",
+        "meaningful_result_rows",
+        "meaningful_max_result_rows",
+        "meaningful_timestep_result_rows",
+        "no_frequency_curve_rows",
+        "no_usable_frequency_curve_rows",
+        "warning_threshold_unavailable_rows",
+    }
+)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
 )
@@ -988,15 +1005,22 @@ def _layer_source_refs(
 
 
 def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
-    row = session.execute(
-        text(
-            """
-            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
-                   mi.river_network_version_id
-            FROM hydro.hydro_run h
-            LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
-            JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id
-            WHERE h.status IN ('frequency_done', 'published')
+    mode = _flood_product_quality_mode(session)
+    if mode == "missing_table":
+        quality_join = ""
+        quality_ready = """
+              AND EXISTS (
+                    SELECT 1
+                    FROM flood.return_period_result result
+                    WHERE result.run_id = h.run_id
+              )
+        """
+    elif mode == "explicit":
+        quality_join = "JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id"
+        quality_ready = "AND product_quality.quality_state = 'ready'"
+    else:
+        quality_join = "JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id"
+        quality_ready = """
               AND CASE
                     WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows
                     ELSE product_quality.result_rows
@@ -1015,12 +1039,53 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
                     WHEN product_quality.max_result_rows > 0 THEN product_quality.max_return_period_rows
                     ELSE product_quality.return_period_rows
                   END
+        """
+    row = session.execute(
+        text(
+            f"""
+            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
+                   mi.river_network_version_id
+            FROM hydro.hydro_run h
+            LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            {quality_join}
+            WHERE h.status IN ('frequency_done', 'published')
+              {quality_ready}
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT 1
             """
         )
     ).mappings().first()
     return dict(row) if row is not None else None
+
+
+def _flood_product_quality_mode(session: Session) -> str:
+    columns = _flood_run_product_quality_columns(session)
+    if not columns:
+        return "missing_table"
+    return "explicit" if FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS <= columns else "legacy_table"
+
+
+def _flood_run_product_quality_columns(session: Session) -> set[str]:
+    if session.get_bind().dialect.name == "sqlite":
+        try:
+            rows = session.execute(text("PRAGMA flood.table_info(run_product_quality)")).mappings()
+            return {str(row["name"]) for row in rows}
+        except SQLAlchemyError:
+            return set()
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'flood'
+                  AND table_name = 'run_product_quality'
+                """
+            )
+        ).mappings()
+        return {str(row["column_name"]) for row in rows}
+    except SQLAlchemyError:
+        return set()
 
 
 def latest_frequency_ready_run(session: Session) -> Mapping[str, Any] | None:

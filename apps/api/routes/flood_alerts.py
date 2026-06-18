@@ -84,6 +84,23 @@ WARNING_COLORS = {
 WARNING_LEVELS = tuple(WARNING_COLORS)
 USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
 FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
+FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
+    {
+        "quality_state",
+        "quality_source",
+        "unavailable_products",
+        "residual_blockers",
+        "expected_result_rows",
+        "expected_max_result_rows",
+        "expected_timestep_result_rows",
+        "meaningful_result_rows",
+        "meaningful_max_result_rows",
+        "meaningful_timestep_result_rows",
+        "no_frequency_curve_rows",
+        "no_usable_frequency_curve_rows",
+        "warning_threshold_unavailable_rows",
+    }
+)
 NO_USABLE_CURVE_NOTE = "No usable frequency curves available"
 NO_SEGMENT_CURVE_NOTE = "No frequency curve available for this segment"
 SEGMENT_LIST_DEFAULT_LIMIT = 100
@@ -479,8 +496,6 @@ def list_layer_valid_times(
         if duration is not None:
             validate_identifier(duration, "duration")
         if layer_id in {"flood-return-period", "warning-level"}:
-            if run_id is not None:
-                _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
             resolved_duration = duration or DEFAULT_FLOOD_RETURN_PERIOD_DURATION
             _validate_supported_flood_duration(resolved_duration)
         elif duration is not None:
@@ -845,13 +860,13 @@ def flood_return_period_map(
     """
     _validate_supported_flood_duration(duration)
     run = _require_frequency_ready(session, run_id)
-    product_quality = _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
-    _require_flood_route_product_ready(
+    product_quality = _require_flood_route_product_ready(
         session,
         run_id=run_id,
         duration=duration,
         valid_time=valid_time,
         max_over_window=False,
+        status=_optional_str(run.get("status")),
     )
     if return_period is not None:
         return_period = _finite_query_float(return_period, field="return_period", original=return_period)
@@ -970,13 +985,13 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
-    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     _require_flood_route_product_ready(
         session,
         run_id=run_id,
         duration=duration,
         valid_time=valid_time,
         max_over_window=False,
+        status=_optional_str(run.get("status")),
     )
     basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="flood-return-period")
     _require_flood_mvt_source_identity(
@@ -1708,7 +1723,30 @@ def _require_flood_route_product_ready(
     duration: str,
     valid_time: datetime,
     max_over_window: bool,
-) -> None:
+    status: str | None = None,
+) -> dict[str, Any]:
+    quality = _flood_product_quality(session, run_id, status=status)
+    if quality["quality_state"] != "ready":
+        unavailable_products = list(quality["unavailable_products"])
+        raise ApiError(
+            status_code=409,
+            code="FLOOD_PRODUCT_UNAVAILABLE",
+            message="Flood return-period product is unavailable or degraded for the requested tile identity.",
+            details={
+                "run_id": run_id,
+                "duration": duration,
+                "valid_time": _format_time(valid_time),
+                "max_over_window": max_over_window,
+                "return_period_result": (
+                    "unavailable" if "return_period_result" in unavailable_products else "available"
+                ),
+                "frequency_curves": "unavailable" if "frequency_curves" in unavailable_products else "available",
+                "warning_thresholds": (
+                    "unavailable" if "warning_thresholds" in unavailable_products else "available"
+                ),
+                **quality,
+            },
+        )
     row = session.execute(
         text(
             """
@@ -1735,7 +1773,7 @@ def _require_flood_route_product_ready(
     unavailable_products: list[str] = []
     residual_blockers: list[dict[str, Any]] = []
     if result_rows <= 0:
-        return
+        return quality
     if return_period_rows <= 0:
         unavailable_products.append("return_period_result")
         residual_blockers.append(
@@ -1793,6 +1831,7 @@ def _require_flood_route_product_ready(
                 "residual_blockers": residual_blockers,
             },
         )
+    return quality
 
 
 def _require_run_source_identity(run: dict[str, Any] | Any, *, layer_id: str) -> tuple[str, str]:
@@ -1898,6 +1937,14 @@ def _require_flood_product_ready(session: Session, run_id: str, *, status: str |
 
 
 def _flood_product_quality(session: Session, run_id: str, *, status: str | None = None) -> dict[str, Any]:
+    mode = _flood_product_quality_mode(session)
+    if mode == "explicit":
+        row = _explicit_flood_product_quality_row(session, run_id)
+        quality = _explicit_flood_quality_from_row(row, run_id=run_id)
+        if status is not None:
+            quality["status"] = status
+        return quality
+
     row = _flood_product_quality_counts(session, run_id, max_over_window=True)
     max_over_window: bool | None = True
     if int(row["result_rows"] or 0) <= 0:
@@ -1945,17 +1992,189 @@ def _flood_product_quality(session: Session, run_id: str, *, status: str | None 
         quality_state = "degraded"
     return {
         "quality_state": quality_state,
+        "quality_source": "legacy_row_count",
         **({"status": status} if status is not None else {}),
         "max_over_window": max_over_window,
         "result_rows": result_rows,
         "return_period_rows": return_period_rows,
         "warning_rows": warning_rows,
+        "expected_result_rows": result_rows,
+        "expected_max_result_rows": result_rows if max_over_window else 0,
+        "expected_timestep_result_rows": result_rows if max_over_window is False else 0,
+        "meaningful_result_rows": return_period_rows,
+        "meaningful_max_result_rows": return_period_rows if max_over_window else 0,
+        "meaningful_timestep_result_rows": return_period_rows if max_over_window is False else 0,
+        "no_frequency_curve_rows": max(result_rows - return_period_rows, 0),
+        "no_usable_frequency_curve_rows": 0,
+        "warning_threshold_unavailable_rows": max(return_period_rows - warning_rows, 0),
         "unavailable_products": unavailable_products,
         "residual_blockers": residual_blockers,
     }
 
 
+def _flood_product_quality_mode(session: Session) -> str:
+    columns = _flood_run_product_quality_columns(session)
+    if not columns:
+        return "missing_table"
+    return "explicit" if FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS <= columns else "legacy_table"
+
+
+def _flood_run_product_quality_columns(session: Session) -> set[str]:
+    if session.get_bind().dialect.name == "sqlite":
+        try:
+            rows = session.execute(text("PRAGMA flood.table_info(run_product_quality)")).mappings()
+            return {str(row["name"]) for row in rows}
+        except SQLAlchemyError:
+            return set()
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'flood'
+                  AND table_name = 'run_product_quality'
+                """
+            )
+        ).mappings()
+        return {str(row["column_name"]) for row in rows}
+    except SQLAlchemyError:
+        return set()
+
+
+def _explicit_flood_product_quality_row(session: Session, run_id: str) -> Any:
+    return session.execute(
+        text(
+            """
+            SELECT
+                run_id,
+                quality_state,
+                quality_source,
+                unavailable_products,
+                residual_blockers,
+                result_rows,
+                max_result_rows,
+                return_period_rows,
+                warning_rows,
+                max_return_period_rows,
+                max_warning_rows,
+                expected_result_rows,
+                expected_max_result_rows,
+                expected_timestep_result_rows,
+                meaningful_result_rows,
+                meaningful_max_result_rows,
+                meaningful_timestep_result_rows,
+                no_frequency_curve_rows,
+                no_usable_frequency_curve_rows,
+                warning_threshold_unavailable_rows
+            FROM flood.run_product_quality
+            WHERE run_id = :run_id
+            """
+        ),
+        {"run_id": run_id},
+    ).mappings().first()
+
+
+def _explicit_flood_quality_from_row(row: Any, *, run_id: str) -> dict[str, Any]:
+    if row is None:
+        return _missing_explicit_flood_quality(run_id)
+    result_rows = _non_negative_int(row.get("max_result_rows") or row.get("result_rows"))
+    return_period_rows = _non_negative_int(row.get("max_return_period_rows") or row.get("return_period_rows"))
+    warning_rows = _non_negative_int(row.get("max_warning_rows") or row.get("warning_rows"))
+    quality_state = str(row.get("quality_state") or "unavailable")
+    if quality_state not in {"ready", "degraded", "unavailable"}:
+        quality_state = "unavailable"
+    unavailable_products = _json_list(row.get("unavailable_products"), strings=True)
+    residual_blockers = _json_list(row.get("residual_blockers"), mappings=True)
+    if quality_state != "ready" and not unavailable_products:
+        unavailable_products = ["return_period_result"]
+    if quality_state != "ready" and not residual_blockers:
+        residual_blockers = [
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": quality_state,
+                "quality_flag": "explicit_flood_product_unavailable",
+                "run_id": run_id,
+                "residual_risk": "Explicit run-level flood product quality is not ready.",
+            }
+        ]
+    return {
+        "quality_state": quality_state,
+        "quality_source": str(row.get("quality_source") or "explicit"),
+        "max_over_window": bool(row.get("max_result_rows")) if result_rows > 0 else None,
+        "result_rows": result_rows,
+        "return_period_rows": return_period_rows,
+        "warning_rows": warning_rows,
+        "expected_result_rows": _non_negative_int(row.get("expected_result_rows")),
+        "expected_max_result_rows": _non_negative_int(row.get("expected_max_result_rows")),
+        "expected_timestep_result_rows": _non_negative_int(row.get("expected_timestep_result_rows")),
+        "meaningful_result_rows": _non_negative_int(row.get("meaningful_result_rows")),
+        "meaningful_max_result_rows": _non_negative_int(row.get("meaningful_max_result_rows")),
+        "meaningful_timestep_result_rows": _non_negative_int(row.get("meaningful_timestep_result_rows")),
+        "no_frequency_curve_rows": _non_negative_int(row.get("no_frequency_curve_rows")),
+        "no_usable_frequency_curve_rows": _non_negative_int(row.get("no_usable_frequency_curve_rows")),
+        "warning_threshold_unavailable_rows": _non_negative_int(row.get("warning_threshold_unavailable_rows")),
+        "unavailable_products": unavailable_products,
+        "residual_blockers": residual_blockers,
+    }
+
+
+def _missing_explicit_flood_quality(run_id: str) -> dict[str, Any]:
+    return {
+        "quality_state": "unavailable",
+        "quality_source": "explicit",
+        "max_over_window": None,
+        "result_rows": 0,
+        "return_period_rows": 0,
+        "warning_rows": 0,
+        "expected_result_rows": 0,
+        "expected_max_result_rows": 0,
+        "expected_timestep_result_rows": 0,
+        "meaningful_result_rows": 0,
+        "meaningful_max_result_rows": 0,
+        "meaningful_timestep_result_rows": 0,
+        "no_frequency_curve_rows": 0,
+        "no_usable_frequency_curve_rows": 0,
+        "warning_threshold_unavailable_rows": 0,
+        "unavailable_products": ["return_period_result"],
+        "residual_blockers": [
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": "missing_run_product_quality",
+                "run_id": run_id,
+                "residual_risk": "No run-level flood product quality row exists for this run.",
+            }
+        ],
+    }
+
+
+def _json_list(value: Any, *, strings: bool = False, mappings: bool = False) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list | tuple):
+        return []
+    if strings:
+        return [str(item) for item in value if str(item or "").strip()]
+    if mappings:
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    return list(value)
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
 def _flood_product_quality_counts(session: Session, run_id: str, *, max_over_window: bool | None) -> Any:
+    if _flood_product_quality_mode(session) == "missing_table":
+        return _missing_table_flood_product_quality_counts(session, run_id)
     row = session.execute(
         text(
             """
@@ -1981,6 +2200,27 @@ def _flood_product_quality_counts(session: Session, run_id: str, *, max_over_win
             """
         ),
     ).mappings().one()
+
+
+def _missing_table_flood_product_quality_counts(session: Session, run_id: str) -> Any:
+    row = session.execute(
+        text(
+            """
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM flood.return_period_result
+                    WHERE run_id = :run_id
+                ) AS has_product
+            """
+        ),
+        {"run_id": run_id},
+    ).mappings().one()
+    has_product = bool(row["has_product"])
+    return {
+        "result_rows": 1 if has_product else 0,
+        "return_period_rows": 1 if has_product else 0,
+        "warning_rows": 1 if has_product else 0,
+    }
 
 
 def _annotate_flood_layer_quality(layers: list[Layer], quality: dict[str, Any]) -> None:
