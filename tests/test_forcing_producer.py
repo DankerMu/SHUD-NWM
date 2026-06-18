@@ -1864,6 +1864,110 @@ def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
+def test_producer_direct_grid_enforces_max_timestep_count_before_row_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid limit failure must not call compute_idw_weights"),
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
+        lambda *_args, **_kwargs: pytest.fail("direct-grid limit failure must not reach package boundary"),
+    )
+    store = LocalObjectStore(tmp_path)
+    products = _write_canonical_products(store, forecast_hours=(0, 3, 6))
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    repository = FakeForcingRepository(
+        stations=(),
+        products=products,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3, max_timestep_count=1),
+        repository=repository,
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError, match="Forcing timestep_count 2 exceeds configured limit 1"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+
+
+def test_producer_direct_grid_enforces_max_timeseries_row_count_before_row_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid limit failure must not call compute_idw_weights"),
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
+        lambda *_args, **_kwargs: pytest.fail("direct-grid limit failure must not reach package boundary"),
+    )
+    store = LocalObjectStore(tmp_path)
+    products = _write_canonical_products(store, forecast_hours=(0, 3, 6))
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    repository = FakeForcingRepository(
+        stations=(),
+        products=products,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    expected_row_count = 2 * len(contract.stations) * len(FORCING_VARIABLES)
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(
+            workspace_root=tmp_path,
+            idw_neighbors=3,
+            max_timeseries_row_count=expected_row_count - 1,
+        ),
+        repository=repository,
+        object_store=store,
+    )
+
+    with pytest.raises(
+        ForcingProductionError,
+        match=f"Forcing timeseries_row_count {expected_row_count} exceeds configured limit {expected_row_count - 1}",
+    ):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+
+
 def test_producer_direct_grid_rows_equal_bound_canonical_grid_cell_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

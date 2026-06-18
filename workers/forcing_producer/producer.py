@@ -440,6 +440,19 @@ class ForcingProducer:
                     len(forcing_mapping_contract.stations),
                     self.config.max_station_count,
                 )
+                direct_grid_stations = _met_stations_from_direct_grid_contract(
+                    forcing_mapping_contract,
+                    basin_version_id=resolved_basin_version_id,
+                )
+                expected_valid_times = _expected_forcing_valid_times(
+                    resolved_source_id,
+                    products_by_variable,
+                    cycle_time=parsed_cycle_time,
+                )
+                self._enforce_direct_grid_timeseries_limits(
+                    expected_valid_times=expected_valid_times,
+                    station_count=len(direct_grid_stations),
+                )
                 self._ensure_direct_grid_met_stations(
                     basin_version_id=resolved_basin_version_id,
                     contract=forcing_mapping_contract,
@@ -449,10 +462,6 @@ class ForcingProducer:
                     source_id=resolved_source_id,
                     model_id=model_id,
                     grid_signature=direct_grid_signature,
-                )
-                direct_grid_stations = _met_stations_from_direct_grid_contract(
-                    forcing_mapping_contract,
-                    basin_version_id=resolved_basin_version_id,
                 )
                 forcing_version_id = (
                     str(existing["forcing_version_id"])
@@ -943,6 +952,16 @@ class ForcingProducer:
     def _enforce_limit(self, name: str, value: int, limit: int) -> None:
         if value > limit:
             raise ForcingProductionError(f"Forcing {name} {value} exceeds configured limit {limit}.")
+
+    def _enforce_direct_grid_timeseries_limits(
+        self,
+        *,
+        expected_valid_times: Sequence[datetime],
+        station_count: int,
+    ) -> None:
+        self._enforce_limit("timestep_count", len(expected_valid_times), self.config.max_timestep_count)
+        expected_row_count = len(expected_valid_times) * station_count * len(self.config.output_variables)
+        self._enforce_limit("timeseries_row_count", expected_row_count, self.config.max_timeseries_row_count)
 
     def _load_valid_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         assert self.repository is not None
