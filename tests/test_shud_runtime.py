@@ -71,6 +71,13 @@ def _write_basins_package(object_root: Path) -> None:
     (package / "alias-a.cfg.calib").write_text("calib\n", encoding="utf-8")
     (package / "alias-a.sp.riv").write_text("2 1\n", encoding="utf-8")
     (package / "alias-a.sp.rivseg").write_text("2 4\n", encoding="utf-8")
+    (package / "alias-a.sp.att").write_text(
+        "2\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t2\n"
+        "2\t0\t0\t0\t3\n",
+        encoding="utf-8",
+    )
 
 
 def _write_forcing(object_root: Path) -> None:
@@ -80,17 +87,37 @@ def _write_forcing(object_root: Path) -> None:
 
 
 def _write_standard_shud_forcing(
-    object_root: Path, *, units: dict[str, str] | None = None
+    object_root: Path,
+    *,
+    units: dict[str, str] | None = None,
+    lineage: dict[str, Any] | None = None,
+    station_ids: tuple[int, ...] = (1,),
 ) -> dict[str, str]:
     forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     shud_dir = forcing / "shud"
     shud_dir.mkdir(parents=True)
-    tsd_content = "1 20260501\n/data\nID\tLon\tLat\tX\tY\tZ\tFilename\n1\t100\t30\t1\t1\t1\tforcing.csv\n"
-    csv_content = "2\t6\t20260501\t20260501\nTime_Day\tPrecip\tTemp\tRH\tWind\tRN\n0\t1\t2\t3\t4\t5\n"
+    station_lines = []
+    csv_files: dict[str, str] = {}
+    for station_id in station_ids:
+        filename = "forcing.csv" if station_id == 1 else f"forcing_{station_id:03d}.csv"
+        station_lines.append(f"{station_id}\t100\t30\t{station_id}\t1\t1\t{filename}")
+        csv_files[filename] = (
+            "2\t6\t20260501\t20260501\n"
+            "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+            f"0\t{station_id}\t2\t3\t4\t5\n"
+        )
+    tsd_content = (
+        f"{len(station_ids)} 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        + "\n".join(station_lines)
+        + "\n"
+    )
     (shud_dir / "qhh.tsd.forc").write_text(tsd_content, encoding="utf-8")
-    (shud_dir / "forcing.csv").write_text(csv_content, encoding="utf-8")
+    for filename, content in csv_files.items():
+        (shud_dir / filename).write_text(content, encoding="utf-8")
     manifest_payload: dict[str, Any] = {
-        "station_count": 1,
+        "station_count": len(station_ids),
         "files": [
             {
                 "role": "shud_forcing",
@@ -98,23 +125,30 @@ def _write_standard_shud_forcing(
                 "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
                 "checksum": sha256_bytes(tsd_content.encode("utf-8")),
             },
-            {
-                "role": "shud_forcing_csv",
-                "relative_path": "shud/forcing.csv",
-                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing.csv",
-                "checksum": sha256_bytes(csv_content.encode("utf-8")),
-            },
         ],
     }
+    for filename, content in csv_files.items():
+        manifest_payload["files"].append(
+            {
+                "role": "shud_forcing_csv",
+                "relative_path": f"shud/{filename}",
+                "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/{filename}",
+                "checksum": sha256_bytes(content.encode("utf-8")),
+            }
+        )
     if units is not None:
         manifest_payload["units"] = units
+    if lineage is not None:
+        manifest_payload["lineage"] = lineage
     manifest_content = json_bytes(manifest_payload)
     (forcing / "forcing_package.json").write_bytes(manifest_content)
     return {
         "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
         "manifest_checksum": sha256_bytes(manifest_content),
         "tsd_checksum": sha256_bytes(tsd_content.encode("utf-8")),
-        "csv_checksum": sha256_bytes(csv_content.encode("utf-8")),
+        "csv_checksum": sha256_bytes(csv_files["forcing.csv"].encode("utf-8"))
+        if "forcing.csv" in csv_files
+        else sha256_bytes(next(iter(csv_files.values())).encode("utf-8")),
     }
 
 
@@ -440,6 +474,141 @@ def test_runtime_staging_accepts_manifest_carried_forcing_checksums(tmp_path: Pa
 
     assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
     assert (input_dir / "alias-a" / "forcing.csv").exists()
+
+
+def test_runtime_direct_grid_standard_package_stages_multi_station_without_sp_att_rewrite(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    (
+        object_root
+        / "models"
+        / "basins_basin_a_shud"
+        / "vbasins-test"
+        / "package"
+        / "alias-a.sp.att"
+    ).write_text(
+        "2\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t1\n"
+        "2\t0\t0\t0\t2\n",
+        encoding="utf-8",
+    )
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid", "spatial_mapping_method": "direct_grid"},
+        station_ids=(1, 2),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    sp_att = (model_input_dir / "alias-a.sp.att").read_text(encoding="utf-8")
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "\t2\n" in sp_att
+    assert "1\t0\t0\t0\t1" in sp_att
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert "2\t100\t30\t2\t1\t1\tforcing_002.csv" in tsd_forc
+    assert (model_input_dir / "forcing.csv").exists()
+    assert (model_input_dir / "forcing_002.csv").exists()
+
+
+def test_runtime_direct_grid_missing_standard_forcing_fails_without_sp_att_rewrite(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_forcing(object_root)
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    (forcing_dir / "forcing_debug.csv").write_text(
+        "valid_time,variable,value\n"
+        "2026-05-01T00:00:00Z,PRCP,1\n"
+        "2026-05-01T00:00:00Z,TEMP,2\n",
+        encoding="utf-8",
+    )
+    package_manifest = {
+        "lineage": {"forcing_mapping_mode": "direct_grid"},
+        "files": [],
+    }
+    manifest_content = json_bytes(package_manifest)
+    (forcing_dir / "forcing_package.json").write_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(
+        {
+            "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
+            "manifest_checksum": sha256_bytes(manifest_content),
+            "tsd_checksum": "",
+            "csv_checksum": "",
+        }
+    )
+    manifest["forcing"]["files"] = []
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING"
+    assert "\t2\n" in (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
+    assert "\t1\n" not in (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
+
+
+def test_runtime_direct_grid_sp_att_forc_out_of_tsd_id_set_fails_before_staged_status(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"spatial_mapping_method": "direct_grid"},
+        station_ids=(1, 2),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_OWNERSHIP_RANGE"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "DIRECT_GRID_FORCING_OWNERSHIP_RANGE"
+
+
+def test_runtime_legacy_non_direct_grid_fallback_rewrites_sp_att_to_single_forcing_id(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_forcing(object_root)
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    (forcing_dir / "forcing_debug.csv").write_text(
+        "valid_time,variable,value\n"
+        "2026-05-01T00:00:00Z,PRCP,1\n"
+        "2026-05-01T00:00:00Z,TEMP,2\n",
+        encoding="utf-8",
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(
+        {
+            "manifest_uri": "",
+            "manifest_checksum": "",
+            "tsd_checksum": "",
+            "csv_checksum": "",
+        }
+    )
+    manifest["forcing"].pop("package_manifest_uri")
+    manifest["forcing"].pop("package_manifest_checksum")
+    manifest["forcing"]["files"] = []
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    sp_att = (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
+    assert "1\t0\t0\t0\t1" in sp_att
+    assert "2\t0\t0\t0\t1" in sp_att
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 
 def test_runtime_staging_keeps_standard_shud_forcing_time_axis_relative_to_cfg_start(tmp_path: Path) -> None:

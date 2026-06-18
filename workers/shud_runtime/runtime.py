@@ -519,8 +519,21 @@ class SHUDRuntime:
             )
 
     def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
-        if self._stage_standard_shud_forcing(manifest, model_input_dir):
+        is_direct_grid = self._forcing_declares_direct_grid(manifest)
+        staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir)
+        if staged_ids is not None:
+            if is_direct_grid:
+                _validate_direct_grid_sp_att_forcing_ids(
+                    model_input_dir / f"{_project_name(manifest)}.sp.att",
+                    staged_ids,
+                )
             return
+        if is_direct_grid:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING",
+                "Direct-grid forcing requires standard SHUD package staging with shud/qhh.tsd.forc; "
+                "refusing legacy fallback that rewrites .sp.att FORC ownership.",
+            )
         source = model_input_dir / "forcing_debug.csv"
         if not _regular_file_exists(source, containment_root=model_input_dir):
             source = model_input_dir / "forcing.tsd.forc"
@@ -540,11 +553,11 @@ class SHUDRuntime:
             project_name=_project_name(manifest),
         )
 
-    def _stage_standard_shud_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> bool:
+    def _stage_standard_shud_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> set[int] | None:
         shud_dir = model_input_dir / "shud"
         source_tsd = shud_dir / "qhh.tsd.forc"
         if not _regular_file_exists(source_tsd, containment_root=model_input_dir):
-            return False
+            return None
         rows = _read_shud_forcing_station_rows(source_tsd)
         if not rows:
             raise SHUDRuntimeError("SHUD_FORCING_STATIONS_EMPTY", f"No stations found in {source_tsd}.")
@@ -578,7 +591,27 @@ class SHUDRuntime:
                 )
             )
         _write_text_no_follow(target_tsd, "\n".join(output_lines) + "\n", containment_root=model_input_dir)
-        return True
+        return {int(row["id"]) for row in rows}
+
+    def _forcing_declares_direct_grid(self, manifest: dict[str, Any]) -> bool:
+        forcing = manifest.get("forcing") or {}
+        if _mapping_metadata_declares_direct_grid(forcing):
+            return True
+        package_manifest = self._read_forcing_package_manifest(forcing)
+        return _mapping_metadata_declares_direct_grid(package_manifest or {})
+
+    def _read_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
+        package_manifest_uri = str(forcing.get("package_manifest_uri") or "").strip()
+        if not package_manifest_uri:
+            return None
+        try:
+            content = self.object_store.read_bytes_limited(
+                package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
+            )
+            package_manifest = json.loads(content.decode("utf-8"))
+        except Exception:
+            return None
+        return package_manifest if isinstance(package_manifest, dict) else None
 
     def verify_output(self, manifest: dict[str, Any], output_dir: Path) -> Path:
         files = sorted(
@@ -1608,6 +1641,83 @@ def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _mapping_metadata_declares_direct_grid(metadata: Mapping[str, Any]) -> bool:
+    for payload in _iter_mapping_metadata_payloads(metadata):
+        if str(payload.get("forcing_mapping_mode") or "").strip() == "direct_grid":
+            return True
+        if str(payload.get("spatial_mapping_method") or "").strip() == "direct_grid":
+            return True
+    return False
+
+
+def _iter_mapping_metadata_payloads(metadata: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    payloads: list[Mapping[str, Any]] = [metadata]
+    for key in ("lineage", "lineage_json", "metadata", "properties", "properties_json"):
+        value = metadata.get(key)
+        if isinstance(value, Mapping):
+            payloads.append(value)
+    return payloads
+
+
+def _validate_direct_grid_sp_att_forcing_ids(path: Path, allowed_ids: set[int]) -> None:
+    observed_ids = _read_sp_att_forcing_ids(path)
+    missing = sorted(observed_ids - allowed_ids)
+    if missing:
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_FORCING_OWNERSHIP_RANGE",
+            "Direct-grid .sp.att FORC ownership references forcing IDs absent from staged .tsd.forc: "
+            f"missing={missing}, allowed={sorted(allowed_ids)}.",
+        )
+
+
+def _read_sp_att_forcing_ids(path: Path) -> set[int]:
+    if not _regular_file_exists(path, containment_root=path.parent):
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_SP_ATT_MISSING",
+            f"Direct-grid forcing requires staged .sp.att ownership file: {path}",
+        )
+    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
+    if len(lines) < 3:
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_SP_ATT_INVALID",
+            f"Direct-grid .sp.att ownership file has no element rows: {path}",
+        )
+    header_tokens = lines[1].split()
+    try:
+        forcing_column = next(index for index, token in enumerate(header_tokens) if token.upper() == "FORC")
+    except StopIteration as error:
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_SP_ATT_FORC_MISSING",
+            f"Direct-grid .sp.att ownership file is missing FORC column: {path}",
+        ) from error
+
+    forcing_ids: set[int] = set()
+    for line_number, line in enumerate(lines[2:], start=3):
+        parts = line.split()
+        if not parts:
+            continue
+        if len(parts) <= forcing_column:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_SP_ATT_FORC_MISSING",
+                f"Direct-grid .sp.att row {line_number} is missing FORC value in {path}.",
+            )
+        value = parts[forcing_column]
+        try:
+            forcing_id = int(value)
+        except ValueError as error:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_SP_ATT_FORC_INVALID",
+                f"Direct-grid .sp.att row {line_number} has non-integer FORC value {value!r} in {path}.",
+            ) from error
+        forcing_ids.add(forcing_id)
+    if not forcing_ids:
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_SP_ATT_FORC_MISSING",
+            f"Direct-grid .sp.att ownership file has no FORC values: {path}",
+        )
+    return forcing_ids
 
 
 def _first_shud_forcing_time(path: Path) -> datetime:
