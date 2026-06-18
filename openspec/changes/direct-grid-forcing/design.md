@@ -607,3 +607,74 @@ Regression rows:
 - lineage persistence or finalize/readiness failure -> no finalized ready output; retry completes and binds lineage/package manifest/checksum consistently.
 - explicit direct-grid validation/value/package failure -> no legacy station loading, no IDW neighbor search, no fallback ready output.
 - legacy absent/explicit `idw` asset -> existing package, lineage, idempotency, and finite-value validation behavior remains unchanged.
+
+## Issue #547 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- `workers/shud_runtime/runtime.py` SHUD project staging after model and forcing package files are staged.
+- Runtime tests for direct-grid package lineage, standard multi-station forcing staging, `.sp.att FORC` validation, and legacy fallback compatibility.
+
+Must preserve:
+- Legacy packages without direct-grid lineage may still use the existing fallback `forcing_debug.csv` / `forcing.tsd.forc` single-station staging and `_remap_sp_att_forcing(..., forcing_index=1)`.
+- Existing standard SHUD package staging for IDW or lineage-absent packages remains compatible.
+- Existing checksum/path/symlink validation remains unchanged.
+- #547 does not change forcing production, direct-grid binding validation, or package publication semantics.
+
+Must add/change:
+- Runtime detects direct-grid forcing from forcing/package lineage metadata (`forcing_mapping_mode='direct_grid'` or `spatial_mapping_method='direct_grid'`) rather than by guessing from filenames alone.
+- Direct-grid runtime staging requires the standard `shud/qhh.tsd.forc` multi-station package path; missing standard SHUD files fail closed instead of falling back to `forcing_debug.csv` / `forcing.tsd.forc`.
+- Runtime validates staged project `.sp.att` `FORC` values against the staged `.tsd.forc` `ID` set for direct-grid packages.
+- Runtime validation failure occurs before SHUD execution and before a run can be marked `staged` / `running`.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `SHUDRuntime.prepare_workspace` / `execute` is the runtime boundary used by orchestration.
+- Config / project setup: not selected - no deployment setting or environment switch is added.
+- File IO / path safety / overwrite: selected - model package and forcing package files share a workspace, and direct-grid must not let fallback staging overwrite `.sp.att` ownership.
+- Schema / columns / units / field names: selected - `.tsd.forc` `ID` and `.sp.att` `FORC` are the runtime file contract.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - staging must fail before status transitions to `staged` / `running`.
+- Resource limits / large input / discovery: selected - validation parses staged files without unbounded object-store reads.
+- Legacy compatibility / examples: selected - IDW and lineage-absent runtime staging remain unchanged.
+- Error handling / rollback / partial outputs: selected - direct-grid validation failures must not leave a successful staged run state.
+- Release / packaging / dependency compatibility: not selected - no new dependency/package change.
+- Documentation / migration notes: selected - #547 records runtime migration rules in OpenSpec.
+- Geospatial / CRS / basin geometry: selected - `.sp.att FORC` ownership binds triangles to direct-grid forcing stations.
+- Hydro-met time series / forcing windows: selected - standard SHUD package time shifting remains unchanged.
+- SHUD numerical runtime / conservation / NaN: selected - wrong `FORC` ownership would feed triangles from the wrong forcing station.
+- PostGIS / TimescaleDB domain behavior: not selected - no DB schema/query change.
+- Slurm production lifecycle / mock-vs-real parity: selected - tests use mock runtime but validate the same staged file contract before solver execution.
+- External hydro-met providers / snapshot reproducibility: not selected - provider products are producer-side.
+- Run manifest / QC provenance: selected - runtime consumes forcing lineage/manifest metadata to select the safe staging path.
+- Published NHMS artifacts / display identity: not selected - no display artifact change.
+
+Boundary-surface checklist:
+- Shared helper roots: `_prepare_shud_project_forcing`, `_stage_standard_shud_forcing`, `_write_shud_forcing_files`, `_remap_sp_att_forcing`, `.tsd.forc` parsing, `.sp.att` parsing/validation, and forcing package manifest metadata helpers.
+- Public entrypoints: `SHUDRuntime.prepare_workspace` and `SHUDRuntime.execute`.
+- Read surfaces: runtime manifest forcing block, package manifest, staged `shud/qhh.tsd.forc`, per-station CSV files, and staged `<project>.sp.att`.
+- Write/delete/overwrite surfaces: generated `<project>.tsd.forc`, copied per-station CSVs, shifted project time inputs, and legacy fallback `.sp.att` rewrite.
+- Staging/publish/rollback surfaces: workspace preparation before `hydro_run` status transitions.
+- Producer/consumer evidence boundaries: producer lineage/manifest mapping mode, `.tsd.forc` station IDs, and `.sp.att FORC` values.
+- Stale-state/idempotency boundaries: stale staged `.sp.att` ownership must not be hidden by fallback rewrite.
+- Unchanged downstream consumers: non-project command style, legacy IDW fallback, and frontend/API payloads.
+
+Invariant Matrix - #547 runtime staging
+Governing invariant: A runtime manifest whose forcing package declares direct-grid may reach SHUD execution only when staged `.sp.att FORC` ownership references the multi-station `.tsd.forc` IDs from the package, and runtime never rewrites that ownership through the legacy single-station fallback path.
+Source-of-truth identity/contract: forcing/package lineage `forcing_mapping_mode` / `spatial_mapping_method`, staged `shud/qhh.tsd.forc` `ID` column, per-station CSV filenames, and staged `<project>.sp.att` `FORC` column.
+Surfaces:
+- Producers: #546 emits standard `shud/qhh.tsd.forc` packages and direct-grid lineage consumed by runtime.
+- Validators/preflight: runtime validates direct-grid lineage, standard SHUD package presence, CSV presence/time axis, and `.sp.att FORC` range before SHUD execution.
+- Storage/cache/query: object-store staging and checksum verification are unchanged; validation uses staged files.
+- Public routes/entrypoints: `prepare_workspace` fails closed before `execute` marks the run `staged` / `running`.
+- Frontend/downstream consumers: no API/frontend changes.
+- Failure paths/rollback/stale state: direct-grid packages missing standard SHUD files or containing out-of-range `.sp.att FORC` fail closed without fallback rewrite.
+- Evidence/audit/readiness: tests inspect staged files and error codes for direct-grid and legacy paths.
+Regression rows:
+- direct-grid package with standard `shud/qhh.tsd.forc` and `.sp.att FORC` values in the ID set -> stages multi-station `<project>.tsd.forc` and copied CSVs without fallback remap.
+- direct-grid package missing standard `shud/qhh.tsd.forc` but containing legacy fallback `forcing_debug.csv` or `forcing.tsd.forc` -> fails closed; no `_remap_sp_att_forcing(..., forcing_index=1)` rewrite.
+- direct-grid package whose staged `.sp.att FORC` references an ID absent from `.tsd.forc` -> fails closed before SHUD execution.
+- legacy package without direct-grid lineage and without standard SHUD package -> existing fallback single-station rewrite behavior remains unchanged.
+- package with absent/explicit `idw` lineage and standard SHUD package -> existing standard staging remains unchanged.
