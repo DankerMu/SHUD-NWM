@@ -272,7 +272,7 @@ class ForcingRepository(Protocol):
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
@@ -481,7 +481,10 @@ class ForcingProducer:
                     expected_station_ids=station_signature["station_ids"],
                     expected_valid_times=expected_valid_times,
                     expected_variables=self.config.output_variables,
-                    expected_component_ids=_canonical_product_ids(products_by_variable),
+                    expected_components=_forcing_components_for_products(
+                        forcing_version_id=str(existing["forcing_version_id"]) if existing else "",
+                        products_by_variable=products_by_variable,
+                    ),
                 ):
                     return self._return_existing_ready(
                         existing,
@@ -579,7 +582,10 @@ class ForcingProducer:
                 expected_station_ids=station_signature["station_ids"],
                 expected_valid_times=expected_valid_times,
                 expected_variables=self.config.output_variables,
-                expected_component_ids=_canonical_product_ids(products_by_variable),
+                expected_components=_forcing_components_for_products(
+                    forcing_version_id=str(existing["forcing_version_id"]) if existing else "",
+                    products_by_variable=products_by_variable,
+                ),
             ):
                 return self._return_existing_ready(
                     existing,
@@ -1874,7 +1880,7 @@ class ForcingProducer:
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
     ) -> bool:
         if not existing:
             return False
@@ -1940,11 +1946,16 @@ class ForcingProducer:
                 return False
             if not _lineage_identity_matches(manifest_lineage, expected_lineage_identity):
                 return False
-            if not self._existing_package_files_are_complete(manifest=manifest, lineage=manifest_lineage):
+            if not self._existing_package_files_are_complete(
+                manifest=manifest,
+                lineage=manifest_lineage,
+                fallback_lineage=lineage,
+                expected_lineage_identity=expected_lineage_identity,
+            ):
                 return False
             return self._forcing_children_are_complete(
                 forcing_version_id=str(existing["forcing_version_id"]),
-                expected_component_ids=expected_component_ids,
+                expected_components=expected_components,
                 expected_station_ids=expected_station_ids,
                 expected_valid_times=expected_valid_times,
                 expected_variables=expected_variables,
@@ -1958,13 +1969,24 @@ class ForcingProducer:
         *,
         manifest: Mapping[str, Any],
         lineage: Mapping[str, Any],
+        fallback_lineage: Mapping[str, Any],
+        expected_lineage_identity: Mapping[str, Any],
     ) -> bool:
         manifest_files = manifest.get("files")
         lineage_files = lineage.get("output_files")
         if not isinstance(manifest_files, Sequence) or isinstance(manifest_files, (str, bytes)):
             return False
         if not isinstance(lineage_files, Sequence) or isinstance(lineage_files, (str, bytes)):
-            return False
+            fallback_lineage_files = fallback_lineage.get("output_files")
+            if (
+                expected_lineage_identity.get("forcing_mapping_mode") == IDW_MODE
+                and "output_files" not in lineage
+                and isinstance(fallback_lineage_files, Sequence)
+                and not isinstance(fallback_lineage_files, (str, bytes))
+            ):
+                lineage_files = fallback_lineage_files
+            else:
+                return False
         if not manifest_files or len(manifest_files) != len(lineage_files):
             return False
         for manifest_entry, lineage_entry in zip(manifest_files, lineage_files, strict=True):
@@ -2024,7 +2046,7 @@ class ForcingProducer:
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
@@ -2035,7 +2057,7 @@ class ForcingProducer:
             return False
         proof = verifier(
             forcing_version_id=forcing_version_id,
-            expected_component_ids=expected_component_ids,
+            expected_components=expected_components,
             expected_station_ids=expected_station_ids,
             expected_valid_times=expected_valid_times,
             expected_variables=expected_variables,
@@ -2653,6 +2675,23 @@ def _canonical_product_ids(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
 ) -> tuple[str, ...]:
     return tuple(sorted(product.canonical_product_id for product in _products(products_by_variable)))
+
+
+def _forcing_components_for_products(
+    *,
+    forcing_version_id: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> tuple[ForcingComponent, ...]:
+    return tuple(
+        ForcingComponent(
+            forcing_version_id=forcing_version_id,
+            canonical_product_id=product.canonical_product_id,
+            variable=product.variable,
+            valid_time_start=product.valid_time,
+            valid_time_end=product.valid_time,
+        )
+        for product in sorted(_products(products_by_variable), key=lambda item: (item.variable, item.valid_time))
+    )
 
 
 def _time_range_manifest(valid_times: Sequence[datetime]) -> dict[str, str | int]:

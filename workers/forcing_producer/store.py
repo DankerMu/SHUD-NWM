@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -601,24 +602,46 @@ class PsycopgForcingRepository:
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
     ) -> Mapping[str, Any]:
-        expected_component_count = len(tuple(expected_component_ids))
+        expected_component_tuples = Counter(
+            (
+                component.canonical_product_id,
+                component.variable,
+                component.valid_time_start,
+                component.valid_time_end,
+                component.role,
+            )
+            for component in expected_components
+        )
+        expected_component_count = sum(expected_component_tuples.values())
         expected_timeseries_count = (
             len(tuple(expected_station_ids)) * len(tuple(expected_valid_times)) * len(tuple(expected_variables))
         )
-        component = self._fetch_one(
+        component_rows = self._fetch_all(
             """
-            SELECT COUNT(*) AS row_count,
-                   COUNT(DISTINCT canonical_product_id) AS canonical_product_count
+            SELECT canonical_product_id,
+                   variable,
+                   valid_time_start,
+                   valid_time_end,
+                   role
             FROM met.forcing_version_component
             WHERE forcing_version_id = %s
-              AND canonical_product_id = ANY(%s)
             """,
-            (forcing_version_id, list(expected_component_ids)),
+            (forcing_version_id,),
+        )
+        component_tuples = Counter(
+            (
+                str(row["canonical_product_id"]),
+                str(row["variable"]),
+                row["valid_time_start"],
+                row["valid_time_end"],
+                str(row["role"]),
+            )
+            for row in component_rows
         )
         timeseries = self._fetch_one(
             """
@@ -642,7 +665,9 @@ class PsycopgForcingRepository:
         proof = {
             "forcing_version_id": forcing_version_id,
             "expected_component_count": expected_component_count,
-            "component_count": int(component["row_count"]),
+            "component_count": sum(component_tuples.values()),
+            "component_tuple_count": len(component_tuples),
+            "expected_component_tuple_count": len(expected_component_tuples),
             "expected_timeseries_row_count": expected_timeseries_count,
             "timeseries_row_count": int(timeseries["row_count"]),
             "station_count": int(timeseries["station_count"]),
@@ -651,7 +676,7 @@ class PsycopgForcingRepository:
         }
         proof["complete"] = (
             proof["component_count"] == expected_component_count
-            and int(component["canonical_product_count"]) == expected_component_count
+            and component_tuples == expected_component_tuples
             and proof["timeseries_row_count"] == expected_timeseries_count
             and proof["station_count"] == len(tuple(expected_station_ids))
             and proof["timestep_count"] == len(tuple(expected_valid_times))

@@ -5,6 +5,7 @@ import json
 import math
 import tempfile
 import traceback
+from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -323,22 +324,36 @@ class FakeForcingRepository:
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: list[str] | tuple[str, ...],
+        expected_components: list[ForcingComponent] | tuple[ForcingComponent, ...],
         expected_station_ids: list[str] | tuple[str, ...],
         expected_valid_times: list[Any] | tuple[Any, ...],
         expected_variables: list[str] | tuple[str, ...],
     ) -> Mapping[str, Any]:
-        expected_component_set = set(expected_component_ids)
+        expected_component_tuples = Counter(
+            (
+                component.canonical_product_id,
+                component.variable,
+                component.valid_time_start,
+                component.valid_time_end,
+                component.role,
+            )
+            for component in expected_components
+        )
         components = [
             component
             for component in self.components
             if component.forcing_version_id == forcing_version_id
-            and component.canonical_product_id in expected_component_set
         ]
-        component_counts = {
-            component_id: sum(1 for component in components if component.canonical_product_id == component_id)
-            for component_id in expected_component_set
-        }
+        component_tuples = Counter(
+            (
+                component.canonical_product_id,
+                component.variable,
+                component.valid_time_start,
+                component.valid_time_end,
+                component.role,
+            )
+            for component in components
+        )
         rows = [
             row
             for row in self.timeseries
@@ -350,9 +365,10 @@ class FakeForcingRepository:
         expected_row_count = len(expected_station_ids) * len(expected_valid_times) * len(expected_variables)
         proof = {
             "forcing_version_id": forcing_version_id,
-            "expected_component_count": len(expected_component_ids),
+            "expected_component_count": len(expected_components),
             "component_count": len(components),
-            "component_distinct_count": len({component.canonical_product_id for component in components}),
+            "expected_component_tuple_count": len(expected_component_tuples),
+            "component_tuple_count": len(component_tuples),
             "expected_timeseries_row_count": expected_row_count,
             "timeseries_row_count": len(rows),
             "station_count": len({row.station_id for row in rows}),
@@ -361,8 +377,7 @@ class FakeForcingRepository:
         }
         proof["complete"] = (
             proof["component_count"] == proof["expected_component_count"]
-            and proof["component_distinct_count"] == proof["expected_component_count"]
-            and all(count == 1 for count in component_counts.values())
+            and component_tuples == expected_component_tuples
             and proof["timeseries_row_count"] == proof["expected_timeseries_row_count"]
             and proof["station_count"] == len(expected_station_ids)
             and proof["timestep_count"] == len(expected_valid_times)
@@ -811,6 +826,30 @@ def test_existing_forcing_version_not_reused_when_component_identity_is_incomple
     }
 
 
+def test_existing_forcing_version_not_reused_when_component_tuple_drifts(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    original_components = tuple(repository.components)
+    drifted_component = repository.components[0]
+    repository.components[0] = ForcingComponent(
+        forcing_version_id=drifted_component.forcing_version_id,
+        canonical_product_id=drifted_component.canonical_product_id,
+        variable=f"{drifted_component.variable}_drift",
+        valid_time_start=drifted_component.valid_time_start + timedelta(hours=1),
+        valid_time_end=drifted_component.valid_time_end + timedelta(hours=1),
+        role="drifted_role",
+    )
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.upsert_count == 2
+    assert tuple(repository.components) == original_components
+
+
 def test_direct_grid_existing_forcing_version_not_reused_when_manifest_output_files_are_missing_or_corrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -865,6 +904,35 @@ def test_legacy_idw_lineage_without_mapping_fields_remains_current(tmp_path: Pat
     assert second.status == "already_done"
     assert repository.upsert_count == 1
     assert repository.forcing_versions[first.forcing_version_id]["lineage_json"] == lineage
+
+
+def test_legacy_idw_manifest_lineage_without_output_files_remains_current(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    record = repository.forcing_versions[first.forcing_version_id]
+    db_lineage = dict(record["lineage_json"])
+    db_lineage.pop("forcing_mapping_mode")
+    db_lineage.pop("spatial_mapping_method")
+    record["lineage_json"] = db_lineage
+    manifest_uri = f"{first.forcing_package_uri.rstrip('/')}/forcing_package.json"
+    manifest = json.loads(store.read_bytes(manifest_uri).decode("utf-8"))
+    manifest_lineage = dict(manifest["lineage"])
+    manifest_lineage.pop("forcing_mapping_mode")
+    manifest_lineage.pop("spatial_mapping_method")
+    manifest_lineage.pop("output_files")
+    manifest["lineage"] = manifest_lineage
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    store.write_bytes_atomic(manifest_uri, manifest_bytes)
+    record["checksum"] = sha256_bytes(manifest_bytes)
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "already_done"
+    assert repository.upsert_count == 1
+    assert repository.forcing_versions[first.forcing_version_id]["lineage_json"] == db_lineage
 
 
 @pytest.mark.parametrize("forcing_mapping_mode", ["idw", "direct_grid"])
