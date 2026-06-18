@@ -21,6 +21,8 @@ from .producer import (
     MetStation,
 )
 
+DIRECT_GRID_CACHE_STATION_ROLE = "direct_grid_cache"
+
 
 @dataclass(frozen=True)
 class PsycopgForcingRepository:
@@ -82,9 +84,12 @@ class PsycopgForcingRepository:
             FROM met.met_station
             WHERE basin_version_id = %s
               AND active_flag = true
+              AND station_role <> %s
+              AND NOT (properties_json @> '{"derived_cache": true}'::jsonb)
+              AND COALESCE(properties_json->>'forcing_mapping_mode', '') <> 'direct_grid'
             ORDER BY station_id
             """,
-            (basin_version_id,),
+            (basin_version_id, DIRECT_GRID_CACHE_STATION_ROLE),
         )
         return tuple(
             MetStation(
@@ -346,7 +351,7 @@ class PsycopgForcingRepository:
                 station.longitude,
                 station.latitude,
                 station.z,
-                "forcing_grid",
+                DIRECT_GRID_CACHE_STATION_ROLE,
                 Json(
                     {
                         **dict(station.properties),
@@ -368,6 +373,7 @@ class PsycopgForcingRepository:
                         "x": station.x,
                         "y": station.y,
                         "z": station.z,
+                        "mirror_identity": _direct_grid_mirror_identity(contract, station.grid_id),
                     }
                 ),
             )
@@ -398,12 +404,27 @@ class PsycopgForcingRepository:
                 station_role = EXCLUDED.station_role,
                 active_flag = true,
                 properties_json = EXCLUDED.properties_json
+            WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
+              AND met.met_station.station_role = 'direct_grid_cache'
+              AND met.met_station.properties_json @> '{"derived_cache": true}'::jsonb
+              AND met.met_station.properties_json->>'forcing_mapping_mode' = 'direct_grid'
+              AND met.met_station.properties_json->>'binding_checksum' = EXCLUDED.properties_json->>'binding_checksum'
+              AND met.met_station.properties_json->>'model_input_package_id'
+                  = EXCLUDED.properties_json->>'model_input_package_id'
+              AND met.met_station.properties_json->>'grid_signature' = EXCLUDED.properties_json->>'grid_signature'
+              AND met.met_station.properties_json->>'contract_grid_id' = EXCLUDED.properties_json->>'contract_grid_id'
+              AND met.met_station.properties_json->>'grid_id' = EXCLUDED.properties_json->>'grid_id'
             """,
             rows,
             template=(
                 "(%s, %s, %s, "
                 "ST_SetSRID(ST_MakePoint(%s, %s), 4490), "
                 "%s, %s, true, %s)"
+            ),
+            expected_insert_count=len(rows),
+            conflict_error=(
+                "Direct-grid met_station mirror conflicts with an existing station_id that is not the same "
+                "derived direct-grid cache binding."
             ),
         )
 
@@ -786,6 +807,8 @@ class PsycopgForcingRepository:
         rows: Sequence[tuple[Any, ...]],
         *,
         template: str | None = None,
+        expected_insert_count: int | None = None,
+        conflict_error: str | None = None,
     ) -> None:
         try:
             import psycopg2
@@ -803,8 +826,21 @@ class PsycopgForcingRepository:
                 if delete_statement is not None:
                     cursor.execute(delete_statement, delete_parameters)
                 if rows:
-                    execute_values(cursor, insert_statement, rows, page_size=5000, template=template)
+                    execute_values(
+                        cursor,
+                        insert_statement,
+                        rows,
+                        page_size=len(rows) if expected_insert_count is not None else 5000,
+                        template=template,
+                    )
+                    if expected_insert_count is not None and cursor.rowcount != expected_insert_count:
+                        message = conflict_error or "Forcing database write affected an unexpected row count."
+                        raise MetStoreError(message)
             connection.commit()
+        except MetStoreError:
+            if connection is not None:
+                connection.rollback()
+            raise
         except psycopg2.Error as error:
             if connection is not None:
                 connection.rollback()
@@ -840,3 +876,13 @@ def _validate_interp_weight_snapshot(weights: Sequence[InterpolationWeight]) -> 
         grid_signatures.add(grid_signature)
     if len(grid_signatures) != 1:
         raise MetStoreError("Direct-grid interpolation weight snapshots must use exactly one grid_signature.")
+
+
+def _direct_grid_mirror_identity(contract: DirectGridForcingContract, station_grid_id: str) -> dict[str, str]:
+    return {
+        "binding_checksum": contract.binding_checksum,
+        "model_input_package_id": contract.model_input_package_id,
+        "grid_signature": contract.grid_signature,
+        "contract_grid_id": contract.grid_id,
+        "grid_id": station_grid_id,
+    }

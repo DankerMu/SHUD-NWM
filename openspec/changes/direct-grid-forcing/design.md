@@ -388,6 +388,8 @@ Must add/change:
 - For every bound station and output variable, the producer creates exactly one `InterpolationWeight` row with `method='direct_grid'`, `weight=1.0`, contract `grid_id`, station `grid_cell_id`, and the validated canonical `grid_signature`.
 - Direct-grid materialization persists the same `(source_id, grid_id, model_id)` scope through `upsert_interp_weights` and then stops at the #544 boundary until exact value rows are implemented by #545.
 - Direct-grid materialization must not call `compute_idw_weights()` or IDW station loading.
+- Direct-grid `met.met_station` mirror rows are FK-compatible derived cache only: they use a non-legacy role and direct-grid cache properties so legacy IDW station loading excludes them.
+- Direct-grid station mirror upserts are collision-safe: an existing `station_id` may be refreshed only when it is already the same basin and same direct-grid derived binding identity; non-derived, different-basin, or different-binding conflicts fail closed before interpolation weights are written.
 
 Selected risk packs:
 - Public API / CLI / script entry: selected - `ForcingProducer.produce` changes the explicit direct-grid success boundary observed by orchestration callers.
@@ -437,5 +439,8 @@ Regression rows:
 - direct-grid contract with a non-representative canonical product whose actual ordered grid points differ under the same source/grid metadata -> validation fails before `upsert_interp_weights`, with no ready outputs and no IDW fallback.
 - direct-grid contract with valid two-station bindings and `max_station_count=1` -> station-count validation fails before materialization, with no legacy station load, no IDW fallback, and no ready outputs.
 - direct-grid validation mismatch -> no interpolation weights are written and no ready output is produced.
+- direct-grid mirror `station_id` collides with an existing non-derived or different-binding station -> materialization fails before `met.interp_weight` writes and does not overwrite the existing station row.
+- direct-grid mirror for the same basin and binding identity is ensured repeatedly -> mirror refresh is idempotent.
+- direct-grid mirror rows exist in `met.met_station` -> absent/explicit `idw` mode still loads only legacy forcing-grid stations and recomputes IDW weights from those stations.
 - direct-grid mapping persistence failure -> no package, forcing version, station timeseries, or ready cycle state is written, and no IDW fallback occurs.
 - legacy absent/explicit `idw` asset -> existing IDW path still computes/reuses homogeneous IDW weights and writes outputs; same-scope `direct_grid` cached rows are recomputed and replaced as IDW.

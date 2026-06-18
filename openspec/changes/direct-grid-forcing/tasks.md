@@ -35,6 +35,8 @@
   - Required evidence: producer tests prove `upsert_interp_weights` failure during direct-grid materialization leaves no forcing package, forcing version, station timeseries, or ready cycle state, and does not fallback to IDW.
   - Required evidence: validation failure before materialization writes no interpolation weights, no package, no forcing version, no station timeseries, and does not fallback to IDW.
   - Required evidence: IDW mode with absent metadata and explicit `forcing_mapping_mode="idw"` recomputes and replaces same-scope cached `direct_grid` rows instead of reusing them.
+  - Required evidence: direct-grid met_station mirror rows are derived cache only, remain excluded from absent/explicit `idw` station loading, and do not replace legacy station authority.
+  - Required evidence: direct-grid met_station mirror upsert fails closed before interpolation-weight insertion on station_id collision with non-derived, different-basin, or different-binding station rows, while same-basin same-binding mirror refresh remains idempotent.
   - Required evidence: direct-grid validation checks every canonical product's actual grid definition/order for the run before materialization, failing before `upsert_interp_weights` on same-source/grid metadata with mismatched ordered points.
   - Required evidence: direct-grid mode enforces `ForcingProducerConfig.max_station_count` against contract stations before materialization, with no legacy station load, no IDW fallback, and no ready outputs.
   - Required evidence: existing absent/explicit `idw` tests still pass and continue through IDW station/weight/output behavior.
