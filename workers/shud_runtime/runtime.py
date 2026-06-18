@@ -93,6 +93,20 @@ class SHUDRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class _ForcingPackageContext:
+    package_manifest: dict[str, Any] | None
+    checksum_entries: tuple[dict[str, str], ...]
+    is_direct_grid: bool
+
+
+@dataclass(frozen=True)
+class _DirectGridSensitiveMemberLimit:
+    max_bytes: int
+    error_code: str
+    message: str
+
+
+@dataclass(frozen=True)
 class SHUDExecutionResult:
     run_id: str
     status: str
@@ -364,12 +378,16 @@ class SHUDRuntime:
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         _ensure_directory(model_input_dir, containment_root=input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
-        self._verify_forcing_manifest_checksums(manifest)
-        self._stage_artifact(manifest["forcing"]["forcing_uri"], model_input_dir)
-        self._verify_staged_forcing_checksums(manifest, model_input_dir)
+        forcing_context = self._prepare_forcing_package_context(manifest)
+        self._stage_artifact(
+            manifest["forcing"]["forcing_uri"],
+            model_input_dir,
+            forcing_context=forcing_context,
+        )
+        self._verify_staged_forcing_checksums(manifest, model_input_dir, forcing_context=forcing_context)
         self._stage_initial_state(manifest, model_input_dir)
         if _is_shud_project_mode(manifest, self.config.command_style):
-            self._prepare_shud_project_forcing(manifest, model_input_dir)
+            self._prepare_shud_project_forcing(manifest, model_input_dir, forcing_context=forcing_context)
 
         for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
             matches = _find_regular_files(model_input_dir, suffix=suffix, non_empty=True)
@@ -526,8 +544,18 @@ class SHUDRuntime:
                 str(primary.get("message", "SHUD executable preflight failed.")),
             )
 
-    def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
-        is_direct_grid = self._forcing_declares_direct_grid(manifest)
+    def _prepare_shud_project_forcing(
+        self,
+        manifest: dict[str, Any],
+        model_input_dir: Path,
+        *,
+        forcing_context: _ForcingPackageContext | None = None,
+    ) -> None:
+        is_direct_grid = (
+            forcing_context.is_direct_grid
+            if forcing_context is not None
+            else self._forcing_declares_direct_grid(manifest)
+        )
         staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir, is_direct_grid=is_direct_grid)
         if staged_ids is not None:
             if is_direct_grid:
@@ -616,11 +644,17 @@ class SHUDRuntime:
         _write_text_no_follow(target_tsd, "\n".join(output_lines) + "\n", containment_root=model_input_dir)
         return {int(row["id"]) for row in rows}
 
-    def _forcing_declares_direct_grid(self, manifest: dict[str, Any]) -> bool:
+    def _forcing_declares_direct_grid(
+        self,
+        manifest: dict[str, Any],
+        *,
+        package_manifest: Mapping[str, Any] | None = None,
+    ) -> bool:
         forcing = manifest.get("forcing") or {}
         forcing_declares_direct = _mapping_metadata_declares_direct_grid(forcing)
         forcing_declares_non_direct = _mapping_metadata_declares_non_direct_grid(forcing)
-        package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
+        if package_manifest is None:
+            package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
         if package_manifest is not None:
             if _mapping_metadata_declares_direct_grid(package_manifest):
                 return True
@@ -631,6 +665,18 @@ class SHUDRuntime:
         if forcing_declares_non_direct:
             return False
         return False
+
+    def _prepare_forcing_package_context(self, manifest: dict[str, Any]) -> _ForcingPackageContext:
+        package_manifest = self._verify_forcing_manifest_checksums(manifest)
+        checksum_entries = _forcing_checksum_entries(manifest)
+        is_direct_grid = self._forcing_declares_direct_grid(manifest, package_manifest=package_manifest)
+        if is_direct_grid and package_manifest is not None:
+            checksum_entries = _authoritative_package_manifest_checksum_entries(package_manifest)
+        return _ForcingPackageContext(
+            package_manifest=package_manifest,
+            checksum_entries=tuple(checksum_entries),
+            is_direct_grid=is_direct_grid,
+        )
 
     def _read_authoritative_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
@@ -988,7 +1034,13 @@ class SHUDRuntime:
         if callable(update_init_state):
             update_init_state(manifest["run_id"], _initial_state_id(manifest))
 
-    def _stage_artifact(self, uri: str, destination: Path) -> None:
+    def _stage_artifact(
+        self,
+        uri: str,
+        destination: Path,
+        *,
+        forcing_context: _ForcingPackageContext | None = None,
+    ) -> None:
         source = self._object_store_path(uri)
         try:
             source_stat = stat_no_follow(source, containment_root=Path(self.config.object_store_root))
@@ -999,13 +1051,20 @@ class SHUDRuntime:
 
         _ensure_directory(destination)
         if stat_module.S_ISDIR(source_stat.st_mode):
-            self._stage_directory_artifact(source, destination)
+            self._stage_directory_artifact(source, destination, forcing_context=forcing_context)
             return
 
         if not stat_module.S_ISREG(source_stat.st_mode):
             raise SHUDRuntimeError(
                 "ARTIFACT_UNSAFE",
                 f"Object storage artifact must be a regular file or directory: {uri}",
+            )
+
+        if forcing_context is not None and forcing_context.is_direct_grid:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_FORCING_TAR_UNSUPPORTED",
+                "Direct-grid forcing tar artifacts cannot be staged safely before bounded member reads; "
+                "use an object-store directory artifact with forcing_package.json files entries.",
             )
 
         content = self._read_object_artifact_bytes(source, uri)
@@ -1015,11 +1074,25 @@ class SHUDRuntime:
         target = destination / source.name
         _write_staged_bytes(target, content, root=destination)
 
-    def _stage_directory_artifact(self, source: Path, destination: Path) -> None:
+    def _stage_directory_artifact(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        forcing_context: _ForcingPackageContext | None = None,
+    ) -> None:
         object_root = Path(self.config.object_store_root)
         for source_file in _iter_regular_descendant_files_no_follow(source, containment_root=object_root):
             relative = source_file.relative_to(source)
-            content = self._read_object_artifact_bytes(source_file, str(source_file))
+            relative_posix = PurePosixPath(*relative.parts).as_posix()
+            if forcing_context is not None and forcing_context.is_direct_grid:
+                _assert_direct_grid_sensitive_member_is_manifest_bound(
+                    relative_posix,
+                    forcing_context.checksum_entries,
+                )
+                content = self._read_direct_grid_forcing_member_bytes(source_file, relative_posix)
+            else:
+                content = self._read_object_artifact_bytes(source_file, str(source_file))
             _write_staged_bytes(destination / relative, content, root=destination)
 
     def _read_object_artifact_bytes(self, source: Path, label: str) -> bytes:
@@ -1033,10 +1106,35 @@ class SHUDRuntime:
                 f"Failed to read object storage artifact {label}: {error}",
             ) from error
 
-    def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> None:
+    def _read_direct_grid_forcing_member_bytes(self, source: Path, relative_path: str) -> bytes:
+        sensitive_limit = _direct_grid_sensitive_member_limit(relative_path)
+        if sensitive_limit is None:
+            return self._read_object_artifact_bytes(source, str(source))
+        try:
+            content = read_bytes_limited_no_follow(
+                source,
+                max_bytes=sensitive_limit.max_bytes,
+                containment_root=Path(self.config.object_store_root),
+            )
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Unsafe object storage artifact {source}: {error}") from error
+        except OSError as error:
+            raise SHUDRuntimeError(
+                "ARTIFACT_READ_FAILED",
+                f"Failed to read object storage artifact {source}: {error}",
+            ) from error
+        if len(content) > sensitive_limit.max_bytes:
+            raise SHUDRuntimeError(
+                sensitive_limit.error_code,
+                f"{sensitive_limit.message}: {relative_path}",
+            )
+        return content
+
+    def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> dict[str, Any] | None:
         forcing = manifest.get("forcing") or {}
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
         expected_package_checksum = _forcing_package_manifest_checksum(forcing)
+        package_manifest: dict[str, Any] | None = None
         if package_manifest_uri or expected_package_checksum:
             if not package_manifest_uri or not expected_package_checksum:
                 raise SHUDRuntimeError(
@@ -1050,6 +1148,7 @@ class SHUDRuntime:
                     "Forcing package manifest checksum mismatch: "
                     f"expected {expected_package_checksum}, got {actual_checksum}.",
                 )
+            package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
             self._assert_forcing_prcp_unit(package_manifest_uri)
 
         for file_entry in _forcing_checksum_entries(manifest):
@@ -1061,6 +1160,7 @@ class SHUDRuntime:
                     "FORCING_FILE_CHECKSUM_MISMATCH",
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
+        return package_manifest
 
     def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
         """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
@@ -1111,10 +1211,25 @@ class SHUDRuntime:
                 "SHUD requires PRCP in mm/day; refusing to stage forcing.",
             )
 
-    def _verify_staged_forcing_checksums(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
+    def _verify_staged_forcing_checksums(
+        self,
+        manifest: dict[str, Any],
+        model_input_dir: Path,
+        *,
+        forcing_context: _ForcingPackageContext | None = None,
+    ) -> None:
         forcing_root = _object_key(manifest["forcing"]["forcing_uri"], self.config.object_store_prefix).rstrip("/")
-        is_direct_grid = self._forcing_declares_direct_grid(manifest)
-        for file_entry in _forcing_checksum_entries(manifest):
+        is_direct_grid = (
+            forcing_context.is_direct_grid
+            if forcing_context is not None
+            else self._forcing_declares_direct_grid(manifest)
+        )
+        checksum_entries = (
+            list(forcing_context.checksum_entries)
+            if forcing_context is not None
+            else _forcing_checksum_entries(manifest)
+        )
+        for file_entry in checksum_entries:
             relative_path = str(file_entry.get("relative_path") or "").strip()
             if not relative_path:
                 file_key = _object_key(str(file_entry["uri"]), self.config.object_store_prefix)
@@ -1798,6 +1913,8 @@ def _read_shud_forcing_station_rows(path: Path, *, is_direct_grid: bool) -> list
         parts = line.split()
         if len(parts) < 7:
             continue
+        filename_token = parts[6]
+        filename = _direct_grid_station_filename(filename_token) if is_direct_grid else Path(filename_token).name
         rows.append(
             {
                 "id": int(float(parts[0])),
@@ -1806,10 +1923,28 @@ def _read_shud_forcing_station_rows(path: Path, *, is_direct_grid: bool) -> list
                 "x": float(parts[3]),
                 "y": float(parts[4]),
                 "z": float(parts[5]),
-                "filename": Path(parts[6]).name,
+                "filename": filename,
             }
         )
     return rows
+
+
+def _direct_grid_station_filename(raw_token: str) -> str:
+    token = raw_token.strip()
+    candidate = PurePosixPath(token)
+    if (
+        not token
+        or "/" in token
+        or "\\" in token
+        or candidate.is_absolute()
+        or token in {".", ".."}
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_STATION_FILENAME_INVALID",
+            f"Direct-grid SHUD forcing station Filename must be a safe single filename: {raw_token}",
+        )
+    return token
 
 
 def _mapping_metadata_declares_direct_grid(metadata: Mapping[str, Any]) -> bool:
@@ -2361,6 +2496,88 @@ def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return entries
+
+
+def _authoritative_package_manifest_checksum_entries(package_manifest: Mapping[str, Any]) -> list[dict[str, str]]:
+    files = package_manifest.get("files") or []
+    if not isinstance(files, list):
+        raise SHUDRuntimeError(
+            "FORCING_CHECKSUM_INVALID",
+            "Direct-grid forcing package manifest files must be a list.",
+        )
+    entries: list[dict[str, str]] = []
+    for file_entry in files:
+        if not isinstance(file_entry, Mapping):
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_INVALID",
+                "Direct-grid forcing package manifest file entries must be objects.",
+            )
+        relative_path = _normalize_package_manifest_file_relative_path(file_entry)
+        checksum = str(file_entry.get("checksum") or "").strip()
+        if not checksum:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_MISSING",
+                f"Direct-grid forcing package manifest entry is missing checksum: {relative_path}",
+            )
+        entries.append(
+            {
+                "role": str(file_entry.get("role") or ""),
+                "relative_path": relative_path,
+                "uri": str(file_entry.get("uri") or relative_path),
+                "checksum": checksum,
+            }
+        )
+    return entries
+
+
+def _normalize_package_manifest_file_relative_path(file_entry: Mapping[str, Any]) -> str:
+    relative_path = str(file_entry.get("relative_path") or "").strip()
+    if not relative_path:
+        raise SHUDRuntimeError(
+            "FORCING_CHECKSUM_MISSING",
+            "Direct-grid forcing package manifest file entry is missing relative_path.",
+        )
+    candidate = PurePosixPath(relative_path)
+    if not relative_path or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise SHUDRuntimeError(
+            "FORCING_FILE_PATH_INVALID",
+            f"Direct-grid forcing package manifest relative_path is unsafe: {relative_path}",
+        )
+    return candidate.as_posix()
+
+
+def _assert_direct_grid_sensitive_member_is_manifest_bound(
+    relative_path: str,
+    checksum_entries: tuple[dict[str, str], ...],
+) -> None:
+    if not _is_direct_grid_sensitive_forcing_member(relative_path):
+        return
+    if any(entry["relative_path"] == relative_path for entry in checksum_entries):
+        return
+    raise SHUDRuntimeError(
+        "FORCING_CHECKSUM_MISSING",
+        f"Direct-grid sensitive forcing package member is not bound by forcing_package.json files: {relative_path}",
+    )
+
+
+def _direct_grid_sensitive_member_limit(relative_path: str) -> _DirectGridSensitiveMemberLimit | None:
+    if relative_path == "shud/qhh.tsd.forc":
+        return _DirectGridSensitiveMemberLimit(
+            max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
+            error_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
+            message="Direct-grid SHUD forcing station file exceeds the staging read cap",
+        )
+    if _is_direct_grid_station_csv_relative_path(relative_path):
+        return _DirectGridSensitiveMemberLimit(
+            max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
+            error_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+            message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
+        )
+    return None
+
+
+def _is_direct_grid_sensitive_forcing_member(relative_path: str) -> bool:
+    return relative_path == "shud/qhh.tsd.forc" or _is_direct_grid_station_csv_relative_path(relative_path)
 
 
 def _resolve_staged_forcing_path(model_input_dir: Path, relative_path: str) -> Path:
