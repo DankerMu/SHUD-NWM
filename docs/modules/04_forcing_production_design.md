@@ -82,7 +82,7 @@ UNKNOWN_ERROR
 ## 9. 验收标准
 
 - 输出 `.tsd.forc` 第一行站点数和开始日期正确。
-- 每个站点 CSV 包含 Day/PRCP/TEMP/RH/wind/Rn/Press。
+- 每个 SHUD 站点 CSV 包含 Time_Day/Precip/Temp/RH/Wind/RN；Press 可作为站点时序或 lineage 元数据持久化，但不得写入 SHUD 站点 CSV 列。
 - 时间轴覆盖 run_manifest 的 start/end。
 - 任一站点缺失要素时 forcing_version 不得进入 ready。
 
