@@ -339,11 +339,17 @@ class PsycopgForcingRepository:
             raise MetStoreError(
                 f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
             )
-        resource_profile = row.get("resource_profile") or {}
+        resource_profile = row.get("resource_profile")
+        if resource_profile is None:
+            resource_profile = {}
         if not isinstance(resource_profile, Mapping):
             raise DirectGridContractError(
                 "Model resource_profile must be a JSON object.",
-                details={"model_id": model_id, "basin_version_id": basin_version_id},
+                details={
+                    "model_id": model_id,
+                    "basin_version_id": basin_version_id,
+                    "actual_type": type(resource_profile).__name__,
+                },
             )
         return load_forcing_mapping_contract_from_manifest(
             resource_profile,

@@ -1410,6 +1410,65 @@ def test_direct_grid_contract_valid_parse_preserves_manifest_and_station_identit
     assert [station.properties for station in contract.stations] == [{}, {}]
 
 
+@pytest.mark.parametrize("field_name", ["longitude", "latitude", "x", "y", "z"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        True,
+        False,
+        "1.0",
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        [1.0],
+        {"value": 1.0},
+    ],
+)
+def test_direct_grid_contract_station_coordinates_must_be_finite_json_numbers(
+    field_name: str,
+    bad_value: Any,
+) -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][0][field_name] = bad_value
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    error = exc_info.value.to_dict()
+    assert error["error_code"] == "DIRECT_GRID_CONTRACT_INVALID"
+    assert error["field"] == field_name
+    assert error["source_id"] == "GFS"
+    assert error["station_id"] == "qhh_forc_001"
+    assert error["actual_type"] == type(bad_value).__name__
+    if type(bad_value) is float and not math.isfinite(bad_value):
+        assert error["message"] == f"Direct-grid station field {field_name!r} must be finite."
+        assert error["value"] == repr(bad_value)
+    else:
+        assert error["message"] == f"Direct-grid station field {field_name!r} must be a finite JSON number."
+
+
+def test_direct_grid_contract_station_coordinates_accept_finite_ints_and_floats() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][0].update(
+        {
+            "longitude": 100,
+            "latitude": 36.5,
+            "x": 1,
+            "y": 2.25,
+            "z": -9999,
+        }
+    )
+
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    station = contract.stations[0]
+    assert station.longitude == 100.0
+    assert station.latitude == 36.5
+    assert station.x == 1.0
+    assert station.y == 2.25
+    assert station.z == -9999.0
+
+
 @pytest.mark.parametrize("missing_field", REQUIRED_MANIFEST_FIELDS)
 def test_direct_grid_contract_missing_manifest_field_raises_structured_error(missing_field: str) -> None:
     manifest = _direct_grid_manifest()
@@ -1752,6 +1811,34 @@ def test_direct_grid_repository_returns_none_for_legacy_resource_profile() -> No
         )
         is None
     )
+
+
+@pytest.mark.parametrize("resource_profile", [[], "", 0, False])
+def test_direct_grid_repository_rejects_malformed_resource_profile(resource_profile: Any) -> None:
+    class MalformedResourceProfileRepository(PsycopgForcingRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            assert parameters == ("demo_model", "basin_v1")
+            return [{"resource_profile": resource_profile}]
+
+    repository = MalformedResourceProfileRepository()
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        repository.load_forcing_mapping_contract(
+            model_id="demo_model",
+            basin_version_id="basin_v1",
+            source_id="GFS",
+        )
+
+    assert exc_info.value.to_dict() == {
+        "error_code": "DIRECT_GRID_CONTRACT_INVALID",
+        "message": "Model resource_profile must be a JSON object.",
+        "model_id": "demo_model",
+        "basin_version_id": "basin_v1",
+        "actual_type": type(resource_profile).__name__,
+    }
 
 
 def test_station_count_resource_limit_blocks_before_records(tmp_path: Path) -> None:

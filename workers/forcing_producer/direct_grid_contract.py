@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -405,15 +406,25 @@ def _required_float(
             source_id=source_id,
             station_id=station_id,
         )
-    try:
-        return float(payload[field_name])
-    except (TypeError, ValueError) as error:
+    value = payload[field_name]
+    if type(value) not in {int, float}:
         raise DirectGridContractError(
-            f"Direct-grid station field {field_name!r} must be numeric.",
+            f"Direct-grid station field {field_name!r} must be a finite JSON number.",
             field=field_name,
             source_id=source_id,
             station_id=station_id,
-        ) from error
+            details={"actual_type": type(value).__name__},
+        )
+    parsed_value = float(value)
+    if not math.isfinite(parsed_value):
+        raise DirectGridContractError(
+            f"Direct-grid station field {field_name!r} must be finite.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__, "value": repr(value)},
+        )
+    return parsed_value
 
 
 def _safe_forcing_filename(filename: str) -> bool:
