@@ -325,6 +325,88 @@ class PsycopgForcingRepository:
             rows,
         )
 
+    def ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None:
+        if not contract.stations:
+            return
+        try:
+            from psycopg2.extras import Json
+        except ImportError as error:
+            raise MetStoreError("psycopg2 is required for forcing database operations.") from error
+
+        rows = [
+            (
+                station.station_id,
+                basin_version_id,
+                f"Direct-grid station {station.shud_forcing_index}",
+                station.longitude,
+                station.latitude,
+                station.z,
+                "forcing_grid",
+                Json(
+                    {
+                        **dict(station.properties),
+                        "derived_cache": True,
+                        "forcing_mapping_mode": "direct_grid",
+                        "direct_grid": True,
+                        "manifest_authority": True,
+                        "binding_checksum": contract.binding_checksum,
+                        "binding_uri": contract.binding_uri,
+                        "model_input_package_id": contract.model_input_package_id,
+                        "sp_att_path": contract.sp_att_path,
+                        "sp_att_checksum": contract.sp_att_checksum,
+                        "grid_id": station.grid_id,
+                        "contract_grid_id": contract.grid_id,
+                        "grid_cell_id": station.grid_cell_id,
+                        "grid_signature": contract.grid_signature,
+                        "shud_forcing_index": station.shud_forcing_index,
+                        "forcing_filename": station.forcing_filename,
+                        "x": station.x,
+                        "y": station.y,
+                        "z": station.z,
+                    }
+                ),
+            )
+            for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
+        ]
+        self._replace_values(
+            None,
+            (),
+            None,
+            (),
+            """
+            INSERT INTO met.met_station (
+                station_id,
+                basin_version_id,
+                station_name,
+                geom,
+                elevation_m,
+                station_role,
+                active_flag,
+                properties_json
+            )
+            VALUES %s
+            ON CONFLICT (station_id) DO UPDATE SET
+                basin_version_id = EXCLUDED.basin_version_id,
+                station_name = EXCLUDED.station_name,
+                geom = EXCLUDED.geom,
+                elevation_m = EXCLUDED.elevation_m,
+                station_role = EXCLUDED.station_role,
+                active_flag = true,
+                properties_json = EXCLUDED.properties_json
+            """,
+            rows,
+            template=(
+                "(%s, %s, %s, "
+                "ST_SetSRID(ST_MakePoint(%s, %s), 4490), "
+                "%s, %s, true, %s)"
+            ),
+        )
+
     def load_forcing_mapping_contract(
         self,
         *,
@@ -702,6 +784,8 @@ class PsycopgForcingRepository:
         delete_parameters: tuple[Any, ...],
         insert_statement: str,
         rows: Sequence[tuple[Any, ...]],
+        *,
+        template: str | None = None,
     ) -> None:
         try:
             import psycopg2
@@ -719,7 +803,7 @@ class PsycopgForcingRepository:
                 if delete_statement is not None:
                     cursor.execute(delete_statement, delete_parameters)
                 if rows:
-                    execute_values(cursor, insert_statement, rows, page_size=5000)
+                    execute_values(cursor, insert_statement, rows, page_size=5000, template=template)
             connection.commit()
         except psycopg2.Error as error:
             if connection is not None:

@@ -233,6 +233,13 @@ class ForcingRepository(Protocol):
 
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None: ...
 
+    def ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None: ...
+
     def load_forcing_mapping_contract(
         self,
         *,
@@ -432,6 +439,10 @@ class ForcingProducer:
                     "station_count",
                     len(forcing_mapping_contract.stations),
                     self.config.max_station_count,
+                )
+                self._ensure_direct_grid_met_stations(
+                    basin_version_id=resolved_basin_version_id,
+                    contract=forcing_mapping_contract,
                 )
                 self._materialize_direct_grid_mappings(
                     contract=forcing_mapping_contract,
@@ -657,6 +668,21 @@ class ForcingProducer:
         )
         self.repository.upsert_interp_weights(weights)
         return weights
+
+    def _ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None:
+        assert self.repository is not None
+        ensure = getattr(self.repository, "ensure_direct_grid_met_stations", None)
+        if not callable(ensure):
+            raise ForcingProductionError(
+                "Direct-grid repository does not implement ensure_direct_grid_met_stations; "
+                "cannot make contract station ids compatible with met.met_station."
+            )
+        ensure(basin_version_id=basin_version_id, contract=contract)
 
     def _validate_direct_grid_contract_for_production(
         self,

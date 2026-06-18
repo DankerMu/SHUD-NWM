@@ -57,6 +57,7 @@ class FakeForcingRepository:
         direct_grid_validation_assets: Mapping[str, Any] | None = None,
         fail_next_timeseries_replace: bool = False,
         fail_next_interp_weight_upsert: bool = False,
+        fail_next_direct_grid_station_ensure: bool = False,
     ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
         self.model_identity_by_model = {
@@ -73,6 +74,9 @@ class FakeForcingRepository:
         self.forcing_mapping_contract_error = forcing_mapping_contract_error
         self.direct_grid_validation_assets = dict(direct_grid_validation_assets or {})
         self.interp_weights: list[InterpolationWeight] = []
+        self.met_station_ids = {station.station_id for station in stations}
+        self.direct_grid_station_ensure_calls: list[dict[str, Any]] = []
+        self.direct_grid_station_ensure_count = 0
         self.forcing_versions: dict[str, dict[str, Any]] = {}
         self.components: list[ForcingComponent] = []
         self.timeseries: list[ForcingTimeseriesRow] = []
@@ -83,6 +87,7 @@ class FakeForcingRepository:
         self.load_weight_count = 0
         self.fail_next_timeseries_replace = fail_next_timeseries_replace
         self.fail_next_interp_weight_upsert = fail_next_interp_weight_upsert
+        self.fail_next_direct_grid_station_ensure = fail_next_direct_grid_station_ensure
         self.upsert_count = 0
         self.interp_weight_upsert_count = 0
 
@@ -94,7 +99,9 @@ class FakeForcingRepository:
 
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         self.load_station_count += 1
-        return tuple(station for station in self.stations if station.basin_version_id == basin_version_id)
+        loaded = tuple(station for station in self.stations if station.basin_version_id == basin_version_id)
+        self.met_station_ids.update(station.station_id for station in loaded)
+        return loaded
 
     def list_canonical_products(self, *, source_id: str, cycle_time: Any) -> tuple[CanonicalProduct, ...]:
         return tuple(
@@ -142,6 +149,9 @@ class FakeForcingRepository:
         if self.fail_next_interp_weight_upsert:
             self.fail_next_interp_weight_upsert = False
             raise RuntimeError("interp weight write failed")
+        unknown_station_ids = sorted({weight.station_id for weight in weights} - self.met_station_ids)
+        if unknown_station_ids:
+            raise RuntimeError(f"interp weight station ids missing from met_station: {unknown_station_ids}")
         if not weights:
             return
         scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
@@ -184,6 +194,20 @@ class FakeForcingRepository:
                     else existing
                     for existing in self.interp_weights
                 ]
+
+    def ensure_direct_grid_met_stations(self, *, basin_version_id: str, contract: Any) -> None:
+        self.direct_grid_station_ensure_count += 1
+        self.direct_grid_station_ensure_calls.append(
+            {
+                "basin_version_id": basin_version_id,
+                "station_ids": tuple(station.station_id for station in contract.stations),
+                "grid_cell_ids": tuple(station.grid_cell_id for station in contract.stations),
+            }
+        )
+        if self.fail_next_direct_grid_station_ensure:
+            self.fail_next_direct_grid_station_ensure = False
+            raise RuntimeError("direct-grid met_station mirror failed")
+        self.met_station_ids.update(station.station_id for station in contract.stations)
 
     def load_forcing_mapping_contract(
         self,
@@ -1625,6 +1649,15 @@ def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_bo
     ]
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
+    assert repository.direct_grid_station_ensure_calls == [
+        {
+            "basin_version_id": "basin_v1",
+            "station_ids": tuple(station.station_id for station in contract.stations),
+            "grid_cell_ids": tuple(station.grid_cell_id for station in contract.stations),
+        }
+    ]
+    assert {station.station_id for station in contract.stations}.issubset(repository.met_station_ids)
     assert repository.interp_weight_upsert_count == 1
     assert len(repository.interp_weights) == len(contract.stations) * len(FORCING_VARIABLES)
     assert {
@@ -1705,6 +1738,8 @@ def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
 
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
+    assert {station.station_id for station in contract.stations}.issubset(repository.met_station_ids)
     assert repository.interp_weight_upsert_count == 1
     assert len(repository.interp_weights) == len(contract.stations) * len(FORCING_VARIABLES)
     assert {weight.method for weight in repository.interp_weights} == {"direct_grid"}
@@ -1742,6 +1777,7 @@ def test_producer_direct_grid_interp_weight_upsert_failure_does_not_fallback_or_
 
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
     assert repository.interp_weight_upsert_count == 1
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
@@ -1753,6 +1789,92 @@ def test_producer_direct_grid_interp_weight_upsert_failure_does_not_fallback_or_
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
     assert "interp weight write failed" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_producer_direct_grid_station_mirror_failure_does_not_fallback_or_write_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid station mirror failure must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+        fail_next_direct_grid_station_ensure=True,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="direct-grid met_station mirror failed"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+    assert "direct-grid met_station mirror failed" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_producer_direct_grid_requires_station_mirror_repository_method(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid missing mirror method must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+
+    class RepositoryWithoutStationMirror:
+        def __init__(self, wrapped: FakeForcingRepository) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "ensure_direct_grid_met_stations":
+                raise AttributeError(name)
+            return getattr(self._wrapped, name)
+
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3),
+        repository=RepositoryWithoutStationMirror(repository),
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError, match="ensure_direct_grid_met_stations"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
 def test_producer_direct_grid_rejects_non_representative_canonical_product_grid_mismatch(
@@ -1807,6 +1929,7 @@ def test_producer_direct_grid_rejects_non_representative_canonical_product_grid_
     assert mismatched_product.canonical_product_id in message
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
     assert repository.interp_weight_upsert_count == 0
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
@@ -1944,6 +2067,7 @@ def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
     assert repository.parameters == ("demo_model", "basin_v1")
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
     assert repository.interp_weight_upsert_count == 1
     assert {weight.method for weight in repository.interp_weights} == {"direct_grid"}
     assert repository.forcing_versions == {}
@@ -1980,6 +2104,7 @@ def test_producer_rejects_root_direct_grid_manifest_before_station_loading(tmp_p
     ]
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
     assert repository.components == []
@@ -2011,6 +2136,7 @@ def test_producer_malformed_mapping_mode_error_fails_closed_without_ready_versio
     ]
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
     assert repository.timeseries == []
@@ -2207,6 +2333,7 @@ def test_producer_direct_grid_validation_runs_before_stale_existing_ready_reuse(
     assert '"field":"binding_checksum"' in str(exc_info.value)
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
     assert len(repository.timeseries) == row_count
     assert repository.upsert_count == 1
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
@@ -3025,6 +3152,7 @@ def _assert_direct_grid_failure_without_idw_or_ready_outputs(
 ) -> None:
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 0
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
     assert repository.components == []
@@ -3050,6 +3178,7 @@ def _build_repository(
     direct_grid_validation_assets: Mapping[str, Any] | None = None,
     fail_next_timeseries_replace: bool = False,
     fail_next_interp_weight_upsert: bool = False,
+    fail_next_direct_grid_station_ensure: bool = False,
     include_geographic_coords: bool = True,
     values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
     radiation_variable: str = "shortwave_down",
@@ -3091,6 +3220,7 @@ def _build_repository(
         direct_grid_validation_assets=direct_grid_validation_assets,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
         fail_next_interp_weight_upsert=fail_next_interp_weight_upsert,
+        fail_next_direct_grid_station_ensure=fail_next_direct_grid_station_ensure,
     )
     return store, repository
 
@@ -3475,16 +3605,23 @@ class _MemoryInterpWeightRepository(PsycopgForcingRepository):
         delete_parameters: tuple[Any, ...],
         insert_statement: str,
         rows: list[tuple[Any, ...]] | tuple[tuple[Any, ...], ...],
+        *,
+        template: str | None = None,
     ) -> None:
-        assert pre_delete_statement is not None
-        assert "pg_advisory_xact_lock" in pre_delete_statement
-        assert "hashtextextended" in pre_delete_statement
+        if pre_delete_statement is not None:
+            assert "pg_advisory_xact_lock" in pre_delete_statement
+            assert "hashtextextended" in pre_delete_statement
+            self.sql_calls.append(("lock", pre_delete_statement, pre_delete_parameters))
+        if delete_statement is not None:
+            assert "DELETE FROM met.interp_weight" in delete_statement
+            self.sql_calls.append(("delete", delete_statement, delete_parameters))
+        self.sql_calls.append(("insert", insert_statement, tuple(rows), template))
+        if "met.met_station" in insert_statement:
+            assert delete_statement is None
+            assert template is not None
+            return
         assert delete_statement is not None
-        assert "DELETE FROM met.interp_weight" in delete_statement
         assert "INSERT INTO met.interp_weight" in insert_statement
-        self.sql_calls.append(("lock", pre_delete_statement, pre_delete_parameters))
-        self.sql_calls.append(("delete", delete_statement, delete_parameters))
-        self.sql_calls.append(("insert", insert_statement, tuple(rows)))
         self.replace_calls.append((delete_parameters, tuple(rows)))
         source_id, grid_id, model_id = delete_parameters
         self.rows = [
@@ -3547,6 +3684,49 @@ def test_store_direct_grid_interp_weights_round_trip_with_grid_signature() -> No
     assert {row.method for row in loaded} == {"direct_grid"}
     assert {row.weight for row in loaded} == {1.0}
     assert {row.grid_signature for row in loaded} == {"sha256:grid-signature"}
+
+
+def test_store_ensures_direct_grid_met_station_mirror_rows_before_interp_weights() -> None:
+    repository = _MemoryInterpWeightRepository()
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest(), source_id="GFS")
+
+    repository.ensure_direct_grid_met_stations(basin_version_id="basin_v1", contract=contract)
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                contract.stations[0].station_id,
+                "PRCP",
+                contract.stations[0].grid_cell_id,
+                1.0,
+                method="direct_grid",
+                grid_signature=contract.grid_signature,
+            ),
+        )
+    )
+
+    assert [call[0] for call in repository.sql_calls] == ["insert", "lock", "delete", "insert"]
+    station_insert = repository.sql_calls[0]
+    assert "INSERT INTO met.met_station" in station_insert[1]
+    assert "ST_SetSRID(ST_MakePoint" in str(station_insert[3])
+    assert "ON CONFLICT (station_id) DO UPDATE SET" in station_insert[1]
+    assert "active_flag = true" in station_insert[1]
+    assert station_insert[3] is not None
+    station_rows = station_insert[2]
+    assert [row[0] for row in station_rows] == ["qhh_forc_001", "qhh_forc_002"]
+    assert {row[1] for row in station_rows} == {"basin_v1"}
+    assert station_rows[0][3:6] == pytest.approx((100.95, 36.25, 3657.0))
+    assert station_rows[1][3:6] == pytest.approx((101.05, 36.25, -9999.0))
+    station_properties = station_rows[0][7].adapted
+    assert station_properties["forcing_mapping_mode"] == "direct_grid"
+    assert station_properties["derived_cache"] is True
+    assert station_properties["grid_cell_id"] == "cell-001"
+    assert station_properties["binding_checksum"] == "sha256:binding"
+    assert repository.sql_calls[1][0] == "lock"
+    assert repository.sql_calls[2][0] == "delete"
+    assert "INSERT INTO met.interp_weight" in repository.sql_calls[3][1]
 
 
 def test_store_interp_weight_replacement_locks_scope_before_delete_and_insert() -> None:
