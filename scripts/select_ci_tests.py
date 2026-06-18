@@ -148,6 +148,10 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "scripts/validate_two_node_docker_source_trust.py",
         ("tests/test_two_node_docker_source_trust.py",),
     ),
+    (
+        "scripts/audit_return_period_indexes.py",
+        ("tests/test_return_period_index_audit.py", "tests/test_select_ci_tests.py"),
+    ),
     ("scripts/validate_readonly_db_boundary.py", ("tests/test_readonly_db_validation.py",)),
     ("scripts/run_qhh_continuous.py", ("tests/test_run_qhh_continuous.py",)),
     ("scripts/select_ci_tests.py", ("tests/test_select_ci_tests.py",)),
