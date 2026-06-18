@@ -3369,6 +3369,44 @@ def test_store_rejects_invalid_direct_grid_interp_weight_shape_before_replacemen
     assert repository.replace_calls == []
 
 
+def test_store_rejects_mixed_direct_grid_grid_signatures_before_replacement() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [_interp_weight_row(method="idw", grid_cell_id="existing-cell", weight=1.0)]
+    )
+    before = list(repository.rows)
+
+    with pytest.raises(MetStoreError, match="exactly one grid_signature"):
+        repository.upsert_interp_weights(
+            (
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_001",
+                    "PRCP",
+                    "cell-001",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature-a",
+                ),
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_002",
+                    "PRCP",
+                    "cell-002",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature-b",
+                ),
+            )
+        )
+
+    assert repository.replace_calls == []
+    assert repository.rows == before
+
+
 def _interp_weight_row(
     *,
     source_id: str = "GFS",

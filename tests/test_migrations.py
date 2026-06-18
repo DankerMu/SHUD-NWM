@@ -41,6 +41,7 @@ EXPECTED_MIGRATIONS = [
     "000035_qhh_display_coverage_materialization.sql",
     "000036_run_product_quality_explicit_source.sql",
     "000037_river_segment_multilinestring.sql",
+    "000038_direct_grid_interp_weight_constraints.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -592,13 +593,25 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "rt.valid_time <= cr.display_end_time" in query_source
 
 
-def test_interp_weight_grid_signature_migration_supports_direct_grid_persistence_contract() -> None:
+def test_interp_weight_grid_signature_migration_is_historical_column_only_migration() -> None:
     migration = dict(_migration_sql())["000023_interp_weight_grid_signature.sql"]
 
     assert "ADD COLUMN IF NOT EXISTS grid_signature TEXT" in migration
+    assert "interp_weight_direct_grid_exact_weight_chk" not in migration
+    assert "interp_weight_direct_grid_signature_chk" not in migration
+    assert "interp_weight_direct_grid_station_variable_uidx" not in migration
+
+
+def test_direct_grid_interp_weight_constraints_forward_migration_supports_persistence_contract() -> None:
+    migration = dict(_migration_sql())["000038_direct_grid_interp_weight_constraints.sql"]
+
+    assert "ADD COLUMN IF NOT EXISTS grid_signature TEXT" not in migration
+    assert "FROM pg_constraint" in migration
     assert "interp_weight_direct_grid_exact_weight_chk" in migration
+    assert "ADD CONSTRAINT interp_weight_direct_grid_exact_weight_chk" in migration
     assert "CHECK (method <> 'direct_grid' OR weight = 1.0)" in migration
     assert "interp_weight_direct_grid_signature_chk" in migration
+    assert "ADD CONSTRAINT interp_weight_direct_grid_signature_chk" in migration
     assert "CHECK (method <> 'direct_grid' OR NULLIF(BTRIM(grid_signature), '') IS NOT NULL)" in migration
     assert "CREATE UNIQUE INDEX IF NOT EXISTS interp_weight_direct_grid_station_variable_uidx" in migration
     assert _index_columns_by_name(migration, "interp_weight_direct_grid_station_variable_uidx") == (

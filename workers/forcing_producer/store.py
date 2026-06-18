@@ -726,6 +726,7 @@ def _validate_interp_weight_snapshot(weights: Sequence[InterpolationWeight]) -> 
         return
 
     seen: set[tuple[str, str]] = set()
+    grid_signatures: set[str] = set()
     for weight in weights:
         station_variable = (weight.station_id, weight.variable)
         if station_variable in seen:
@@ -737,5 +738,9 @@ def _validate_interp_weight_snapshot(weights: Sequence[InterpolationWeight]) -> 
             raise MetStoreError("Direct-grid interpolation weights must use weight 1.0.")
         if not str(weight.grid_cell_id).strip():
             raise MetStoreError("Direct-grid interpolation weights must include a grid_cell_id.")
-        if not str(weight.grid_signature or "").strip():
+        grid_signature = str(weight.grid_signature or "").strip()
+        if not grid_signature:
             raise MetStoreError("Direct-grid interpolation weights must include a grid_signature.")
+        grid_signatures.add(grid_signature)
+    if len(grid_signatures) != 1:
+        raise MetStoreError("Direct-grid interpolation weight snapshots must use exactly one grid_signature.")
