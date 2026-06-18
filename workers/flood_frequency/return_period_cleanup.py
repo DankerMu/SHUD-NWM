@@ -79,7 +79,9 @@ def cleanup_no_curve_results(
 ) -> dict[str, Any]:
     """Build an audit manifest and optionally delete historical no-curve rows."""
     filters = filters or NoCurveCleanupFilters()
+    _validate_filters(filters)
     _validate_cleanup_options(
+        apply_changes=apply_changes,
         batch_size=batch_size,
         sleep_interval=sleep_interval,
         manifest_path=manifest_path,
@@ -145,6 +147,15 @@ def cleanup_no_curve_results(
             details={"missing_run_ids": missing_quality},
         )
 
+    manifest["deleted_rows"] = 0
+    _persist_apply_manifest(
+        manifest,
+        manifest_path=manifest_path,
+        overwrite_manifest=overwrite_manifest,
+        database_url=database_url,
+        error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+    )
+
     deleted_total = 0
     cursor: dict[str, Any] | None = None
     batch_index = 0
@@ -164,8 +175,41 @@ def cleanup_no_curve_results(
         }
         try:
             deleted_rows = _delete_batch_identities(session, filters, identities)
+            if deleted_rows != len(identities):
+                session.rollback()
+                batch_record["status"] = "aborted"
+                batch_record["deleted_rows"] = deleted_rows
+                batch_record["error"] = (
+                    "Selected candidate identities no longer satisfy the explicit "
+                    "run_product_quality guard or cleanup predicate."
+                )
+                batch_record["duration_seconds"] = _elapsed_seconds(batch_started_at)
+                manifest["batches"].append(batch_record)
+                manifest["status"] = "failed"
+                manifest["deleted_rows"] = deleted_total
+                manifest["completed_at"] = _utc_now().isoformat()
+                manifest["resume"] = _resume_block(cursor, remaining_candidates=None)
+                _persist_apply_manifest(
+                    manifest,
+                    manifest_path=manifest_path,
+                    overwrite_manifest=True,
+                    database_url=database_url,
+                    error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+                )
+                raise NoCurveCleanupError(
+                    "EXPLICIT_QUALITY_GUARD_CHANGED",
+                    "Apply aborted because selected rows no longer satisfy the explicit quality guard.",
+                    manifest=manifest,
+                    details={
+                        "batch_index": batch_index,
+                        "selected_rows": len(identities),
+                        "deleted_rows": deleted_rows,
+                    },
+                )
             session.commit()
         except Exception as exc:
+            if isinstance(exc, NoCurveCleanupError):
+                raise
             session.rollback()
             batch_record["status"] = "failed"
             batch_record["error"] = redact_secret_text(str(exc), database_url)
@@ -175,7 +219,13 @@ def cleanup_no_curve_results(
             manifest["deleted_rows"] = deleted_total
             manifest["completed_at"] = _utc_now().isoformat()
             manifest["resume"] = _resume_block(cursor, remaining_candidates=None)
-            _write_manifest_if_requested(manifest, manifest_path=manifest_path, overwrite_manifest=overwrite_manifest)
+            _persist_apply_manifest(
+                manifest,
+                manifest_path=manifest_path,
+                overwrite_manifest=True,
+                database_url=database_url,
+                error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+            )
             raise NoCurveCleanupError(
                 "NO_CURVE_CLEANUP_BATCH_FAILED",
                 "Apply failed while deleting a cleanup batch.",
@@ -191,19 +241,58 @@ def cleanup_no_curve_results(
         batch_record["duration_seconds"] = _elapsed_seconds(batch_started_at)
         batch_record["cursor_after"] = _identity_to_manifest(cursor)
         manifest["batches"].append(batch_record)
+        manifest["deleted_rows"] = deleted_total
+        manifest["resume"] = _resume_block(cursor, remaining_candidates=None)
+        _persist_apply_manifest(
+            manifest,
+            manifest_path=manifest_path,
+            overwrite_manifest=True,
+            database_url=database_url,
+            error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+        )
         if sleep_interval > 0:
             time.sleep(sleep_interval)
 
-    remaining_candidates = _candidate_total(session, filters)
+    try:
+        remaining_candidates = _candidate_total(session, filters)
+        post_cleanup_quality = _quality_coverage_for_run_ids(session, affected_run_ids)
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["deleted_rows"] = deleted_total
+        manifest["remaining_candidates"] = None
+        manifest["completed_at"] = _utc_now().isoformat()
+        manifest["resume"] = _resume_block(cursor, remaining_candidates=None)
+        manifest["error"] = {
+            "code": "NO_CURVE_CLEANUP_POSTCHECK_FAILED",
+            "message": redact_secret_text(str(exc), database_url),
+        }
+        _persist_apply_manifest(
+            manifest,
+            manifest_path=manifest_path,
+            overwrite_manifest=True,
+            database_url=database_url,
+            error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+        )
+        raise NoCurveCleanupError(
+            "NO_CURVE_CLEANUP_POSTCHECK_FAILED",
+            "Apply committed batches but failed while collecting post-cleanup evidence.",
+            manifest=manifest,
+        ) from exc
     manifest["status"] = "completed"
     manifest["deleted_rows"] = deleted_total
     manifest["remaining_candidates"] = remaining_candidates
     manifest["post_cleanup"] = {
-        "quality_coverage": _quality_coverage_for_run_ids(session, affected_run_ids),
+        "quality_coverage": post_cleanup_quality,
     }
     manifest["completed_at"] = _utc_now().isoformat()
     manifest["resume"] = _resume_block(cursor, remaining_candidates=remaining_candidates)
-    _write_manifest_if_requested(manifest, manifest_path=manifest_path, overwrite_manifest=overwrite_manifest)
+    _persist_apply_manifest(
+        manifest,
+        manifest_path=manifest_path,
+        overwrite_manifest=True,
+        database_url=database_url,
+        error_code="NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED",
+    )
     return manifest
 
 
@@ -360,6 +449,14 @@ def _chunk_distribution(session: Session, filters: NoCurveCleanupFilters) -> dic
             "reason": "timescale_metadata_unavailable_for_dialect",
             "items": [],
         }
+    try:
+        metadata_available = bool(
+            session.execute(text("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL")).scalar_one()
+        )
+    except SQLAlchemyError as exc:
+        return {"status": "unavailable", "reason": redact_secret_text(str(exc)), "items": []}
+    if not metadata_available:
+        return {"status": "unavailable", "reason": "timescale_metadata_relation_missing", "items": []}
     where_sql, params = _candidate_where(filters, alias="r")
     try:
         rows = session.execute(
@@ -495,6 +592,7 @@ def _select_batch_identities(
     cursor: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
     where_sql, params = _candidate_where(filters, alias="r")
+    explicit_quality_sql = _explicit_quality_exists_sql("r")
     cursor_sql = _cursor_where(cursor, params)
     params["batch_size"] = batch_size
     column_sql = ", ".join(f"r.{column}" for column in IDENTITY_COLUMNS)
@@ -505,6 +603,7 @@ def _select_batch_identities(
             SELECT {column_sql}
             FROM flood.return_period_result AS r
             WHERE {where_sql}
+              AND {explicit_quality_sql}
             {cursor_sql}
             ORDER BY {order_sql}
             LIMIT :batch_size
@@ -523,6 +622,7 @@ def _delete_batch_identities(
     if not identities:
         return 0
     where_sql, params = _candidate_where(filters, alias=None)
+    explicit_quality_sql = _explicit_quality_exists_sql(None)
     identity_clauses: list[str] = []
     for index, identity in enumerate(identities):
         terms: list[str] = []
@@ -536,12 +636,24 @@ def _delete_batch_identities(
             f"""
             DELETE FROM flood.return_period_result
             WHERE {where_sql}
+              AND {explicit_quality_sql}
               AND ({' OR '.join(identity_clauses)})
             """
         ),
         params,
     )
     return _known_rowcount(result)
+
+
+def _explicit_quality_exists_sql(alias: str | None) -> str:
+    prefix = f"{alias}." if alias else ""
+    return (
+        "EXISTS ("
+        "SELECT 1 FROM flood.run_product_quality AS quality "
+        f"WHERE quality.run_id = {prefix}run_id "
+        "AND quality.quality_source = 'explicit'"
+        ")"
+    )
 
 
 def _candidate_where(filters: NoCurveCleanupFilters, *, alias: str | None) -> tuple[str, dict[str, Any]]:
@@ -643,6 +755,32 @@ def _write_manifest_if_requested(
     _write_json_atomic(manifest_path, manifest, overwrite=overwrite_manifest)
 
 
+def _persist_apply_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    manifest_path: Path | None,
+    overwrite_manifest: bool,
+    database_url: str | None,
+    error_code: str,
+) -> None:
+    if manifest_path is None:
+        return
+    try:
+        _write_json_atomic(manifest_path, manifest, overwrite=overwrite_manifest)
+    except OSError as exc:
+        failed_manifest = dict(manifest)
+        failed_manifest["status"] = "failed"
+        failed_manifest["error"] = {
+            "code": error_code,
+            "message": redact_secret_text(str(exc), database_url),
+        }
+        raise NoCurveCleanupError(
+            error_code,
+            "Failed to persist cleanup manifest.",
+            manifest=failed_manifest,
+        ) from exc
+
+
 def _write_json_atomic(path: Path, payload: Mapping[str, Any], *, overwrite: bool) -> None:
     _validate_manifest_path(path, overwrite_manifest=overwrite)
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -664,17 +802,48 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any], *, overwrite: boo
 
 def _validate_cleanup_options(
     *,
+    apply_changes: bool,
     batch_size: int,
     sleep_interval: float,
     manifest_path: Path | None,
     overwrite_manifest: bool,
 ) -> None:
+    if apply_changes and manifest_path is None:
+        raise NoCurveCleanupError(
+            "MANIFEST_PATH_REQUIRED",
+            "Apply mode requires --manifest-path so committed batches are auditable.",
+        )
     if batch_size < 1:
         raise NoCurveCleanupError("INVALID_BATCH_SIZE", "batch_size must be at least 1.")
     if sleep_interval < 0:
         raise NoCurveCleanupError("INVALID_SLEEP_INTERVAL", "sleep_interval must be non-negative.")
     if manifest_path is not None:
         _validate_manifest_path(manifest_path, overwrite_manifest=overwrite_manifest)
+
+
+def _validate_filters(filters: NoCurveCleanupFilters) -> None:
+    for field_name, values in (
+        ("run_id", filters.run_ids),
+        ("basin_version_id", filters.basin_version_ids),
+        ("source_id", filters.source_ids),
+    ):
+        for value in values:
+            if not str(value).strip():
+                raise NoCurveCleanupError(
+                    "INVALID_FILTER_VALUE",
+                    f"{field_name} filter values must be non-empty.",
+                    details={"filter": field_name},
+                )
+    for field_name, value in (
+        ("cycle_time_start", filters.cycle_time_start),
+        ("cycle_time_end", filters.cycle_time_end),
+    ):
+        if value is not None and not str(value).strip():
+            raise NoCurveCleanupError(
+                "INVALID_FILTER_VALUE",
+                f"{field_name} filter value must be non-empty.",
+                details={"filter": field_name},
+            )
 
 
 def _validate_manifest_path(path: Path, *, overwrite_manifest: bool) -> None:

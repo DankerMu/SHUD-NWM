@@ -79,7 +79,7 @@ def test_dry_run_emits_manifest_and_deletes_zero_rows(tmp_path: Path) -> None:
     assert persisted["database"]["url"] == "postgresql://operator:***@example/db?sslpassword=%2A%2A%2A"
 
 
-def test_apply_deletes_only_candidates_and_preserves_meaningful_warning_rows() -> None:
+def test_apply_deletes_only_candidates_and_preserves_meaningful_warning_rows(tmp_path: Path) -> None:
     with _store() as session:
         _insert_run(session, "run-a")
         _insert_quality(session, "run-a", quality_source="explicit", quality_state="unavailable")
@@ -101,7 +101,12 @@ def test_apply_deletes_only_candidates_and_preserves_meaningful_warning_rows() -
         _insert_result(session, "run-a", "non-candidate-flag", quality_flag="ok")
         session.commit()
 
-        manifest = cleanup_no_curve_results(session, apply_changes=True, batch_size=10)
+        manifest = cleanup_no_curve_results(
+            session,
+            apply_changes=True,
+            batch_size=10,
+            manifest_path=tmp_path / "apply.json",
+        )
 
         rows = _result_rows(session)
         quality = _quality_row(session, "run-a")
@@ -120,7 +125,7 @@ def test_apply_deletes_only_candidates_and_preserves_meaningful_warning_rows() -
     assert quality["quality_state"] == "unavailable"
 
 
-def test_filters_scope_summary_guard_batches_and_delete_consistently() -> None:
+def test_filters_scope_summary_guard_batches_and_delete_consistently(tmp_path: Path) -> None:
     with _store() as session:
         _insert_run(session, "run-a", basin_version_id="basin-a", source_id="GFS", cycle_time=datetime(2026, 5, 1))
         _insert_run(session, "run-b", basin_version_id="basin-b", source_id="IFS", cycle_time=datetime(2026, 5, 2))
@@ -145,11 +150,29 @@ def test_filters_scope_summary_guard_batches_and_delete_consistently() -> None:
         )
         _insert_result(
             session,
-            "run-b",
-            "outside-run-filter",
+            "run-a",
+            "wrong-basin",
             basin_version_id="basin-b",
             source_id="GFS",
-            cycle_time=datetime(2026, 5, 2),
+            cycle_time=datetime(2026, 5, 1),
+            quality_flag="no_frequency_curve",
+        )
+        _insert_result(
+            session,
+            "run-a",
+            "wrong-cycle",
+            basin_version_id="basin-a",
+            source_id="GFS",
+            cycle_time=datetime(2026, 5, 3),
+            quality_flag="no_frequency_curve",
+        )
+        _insert_result(
+            session,
+            "run-b",
+            "outside-run-filter",
+            basin_version_id="basin-a",
+            source_id="GFS",
+            cycle_time=datetime(2026, 5, 1),
             quality_flag="no_frequency_curve",
         )
         session.commit()
@@ -161,17 +184,28 @@ def test_filters_scope_summary_guard_batches_and_delete_consistently() -> None:
             cycle_time_start="2026-05-01 00:00:00",
             cycle_time_end="2026-05-01 23:59:59",
         )
-        manifest = cleanup_no_curve_results(session, filters=filters, apply_changes=True, batch_size=1)
+        manifest = cleanup_no_curve_results(
+            session,
+            filters=filters,
+            apply_changes=True,
+            batch_size=1,
+            manifest_path=tmp_path / "filtered-apply.json",
+        )
         rows = _result_rows(session)
 
     assert manifest["target"]["total_candidates"] == 1
     assert manifest["target"]["affected_runs"]["run_ids"] == ["run-a"]
     assert manifest["target"]["quality_coverage"]["missing_explicit_quality_run_ids"] == []
     assert manifest["deleted_rows"] == 1
-    assert [row["river_segment_id"] for row in rows] == ["outside-run-filter", "wrong-source"]
+    assert [row["river_segment_id"] for row in rows] == [
+        "outside-run-filter",
+        "wrong-basin",
+        "wrong-cycle",
+        "wrong-source",
+    ]
 
 
-def test_missing_explicit_quality_blocks_apply_before_deletion() -> None:
+def test_missing_explicit_quality_blocks_apply_before_deletion(tmp_path: Path) -> None:
     with _store() as session:
         _insert_run(session, "run-a")
         _insert_run(session, "run-b")
@@ -182,7 +216,12 @@ def test_missing_explicit_quality_blocks_apply_before_deletion() -> None:
         session.commit()
 
         with pytest.raises(NoCurveCleanupError) as error:
-            cleanup_no_curve_results(session, apply_changes=True, batch_size=1)
+            cleanup_no_curve_results(
+                session,
+                apply_changes=True,
+                batch_size=1,
+                manifest_path=tmp_path / "blocked.json",
+            )
 
         assert _row_count(session) == 2
 
@@ -192,7 +231,35 @@ def test_missing_explicit_quality_blocks_apply_before_deletion() -> None:
     assert error.value.manifest["status"] == "blocked"
 
 
-def test_batching_records_deleted_rows_and_stable_cursor_without_offset() -> None:
+def test_apply_requires_manifest_path() -> None:
+    with _store() as session:
+        with pytest.raises(NoCurveCleanupError) as error:
+            cleanup_no_curve_results(session, apply_changes=True)
+
+    assert error.value.error_code == "MANIFEST_PATH_REQUIRED"
+
+
+def test_empty_filter_value_is_rejected_before_summary_or_delete(tmp_path: Path) -> None:
+    with _store() as session:
+        _insert_run(session, "run-a")
+        _insert_quality(session, "run-a", quality_source="explicit")
+        _insert_result(session, "run-a", "candidate", quality_flag="no_frequency_curve")
+        session.commit()
+
+        with pytest.raises(NoCurveCleanupError) as error:
+            cleanup_no_curve_results(
+                session,
+                filters=NoCurveCleanupFilters(run_ids=("",)),
+                apply_changes=True,
+                manifest_path=tmp_path / "empty-filter.json",
+            )
+
+        assert _row_count(session) == 1
+
+    assert error.value.error_code == "INVALID_FILTER_VALUE"
+
+
+def test_batching_records_deleted_rows_and_stable_cursor_without_offset(tmp_path: Path) -> None:
     with _store() as session:
         _insert_run(session, "run-a")
         _insert_quality(session, "run-a", quality_source="explicit")
@@ -206,9 +273,18 @@ def test_batching_records_deleted_rows_and_stable_cursor_without_offset() -> Non
             )
         session.commit()
 
-        manifest = cleanup_no_curve_results(session, apply_changes=True, batch_size=2)
+        manifest_path = tmp_path / "batched.json"
+        manifest = cleanup_no_curve_results(
+            session,
+            apply_changes=True,
+            batch_size=2,
+            manifest_path=manifest_path,
+        )
 
     assert manifest["deleted_rows"] == 3
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert persisted["deleted_rows"] == 3
+    assert [batch["deleted_rows"] for batch in persisted["batches"]] == [2, 1]
     assert [batch["deleted_rows"] for batch in manifest["batches"]] == [2, 1]
     assert manifest["batches"][0]["cursor_after"] == {
         "run_id": "run-a",
@@ -221,6 +297,54 @@ def test_batching_records_deleted_rows_and_stable_cursor_without_offset() -> Non
     assert manifest["resume"]["pagination"] == "keyset"
     assert manifest["resume"]["offset_pagination"] is False
     assert manifest["resume"]["identity_columns"] == list(IDENTITY_COLUMNS)
+
+
+def test_delete_rechecks_explicit_quality_guard_for_selected_identities(tmp_path: Path) -> None:
+    with _store() as session:
+        _insert_run(session, "run-a")
+        _insert_quality(session, "run-a", quality_source="explicit")
+        _insert_result(session, "run-a", "candidate", quality_flag="no_frequency_curve")
+        session.commit()
+
+        def revoke_quality_guard(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            normalized = " ".join(statement.split()).upper()
+            if normalized.startswith("SELECT R.RUN_ID, R.RIVER_NETWORK_VERSION_ID"):
+                session.execute(
+                    text(
+                        """
+                        UPDATE flood.run_product_quality
+                        SET quality_source = 'historical_backfill'
+                        WHERE run_id = 'run-a'
+                        """
+                    )
+                )
+
+        bind = session.get_bind()
+        event.listen(bind, "after_cursor_execute", revoke_quality_guard)
+        try:
+            with pytest.raises(NoCurveCleanupError) as error:
+                cleanup_no_curve_results(
+                    session,
+                    apply_changes=True,
+                    batch_size=1,
+                    manifest_path=tmp_path / "race.json",
+                )
+        finally:
+            event.remove(bind, "after_cursor_execute", revoke_quality_guard)
+
+        assert _row_count(session) == 1
+
+    assert error.value.error_code == "EXPLICIT_QUALITY_GUARD_CHANGED"
+    assert error.value.manifest is not None
+    assert error.value.manifest["batches"][0]["status"] == "aborted"
+    assert error.value.manifest["batches"][0]["deleted_rows"] == 0
 
 
 def test_manifest_path_no_clobber_and_explicit_overwrite(tmp_path: Path) -> None:
@@ -303,6 +427,49 @@ def test_timescale_metadata_absence_is_non_fatal_and_records_unavailable_marker(
     ]
 
 
+def test_committed_batch_manifest_is_persisted_when_postcheck_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "postcheck-failed.json"
+    with _store() as session:
+        _insert_run(session, "run-a")
+        _insert_quality(session, "run-a", quality_source="explicit")
+        _insert_result(session, "run-a", "candidate-a", quality_flag="no_frequency_curve")
+        _insert_result(session, "run-a", "candidate-b", quality_flag="no_frequency_curve")
+        session.commit()
+
+        def fail_remaining_count(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            normalized = " ".join(statement.split()).upper()
+            if normalized.startswith("SELECT COUNT(*) FROM FLOOD.RETURN_PERIOD_RESULT"):
+                raise RuntimeError("remaining-count-failed password=leaked")
+
+        bind = session.get_bind()
+        event.listen(bind, "before_cursor_execute", fail_remaining_count)
+        try:
+            with pytest.raises(NoCurveCleanupError) as error:
+                cleanup_no_curve_results(
+                    session,
+                    apply_changes=True,
+                    batch_size=2,
+                    manifest_path=manifest_path,
+                )
+        finally:
+            event.remove(bind, "before_cursor_execute", fail_remaining_count)
+
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert error.value.error_code == "NO_CURVE_CLEANUP_POSTCHECK_FAILED"
+    assert persisted["status"] == "failed"
+    assert persisted["deleted_rows"] == 2
+    assert persisted["batches"][0]["status"] == "committed"
+    assert persisted["resume"]["last_committed_cursor"] == persisted["batches"][0]["cursor_after"]
+    assert "password=leaked" not in json.dumps(persisted)
+
+
 def test_cleanup_implementation_has_no_out_of_scope_destructive_operations() -> None:
     source = "\n".join(
         [
@@ -328,8 +495,9 @@ def test_cli_help_mentions_disk_reclamation_and_issue_491(capsys: pytest.Capture
     assert "#491 owns index, vacuum, and repack work" in help_text
 
 
-def test_apply_selects_at_most_batch_size_identities_per_batch() -> None:
-    statements: list[tuple[str, Any]] = []
+def test_apply_selects_at_most_batch_size_identities_per_batch(tmp_path: Path) -> None:
+    batch_selects: list[tuple[str, Any]] = []
+    return_period_selects: list[str] = []
     with _store() as session:
         _insert_run(session, "run-a")
         _insert_quality(session, "run-a", quality_source="explicit")
@@ -346,21 +514,37 @@ def test_apply_selects_at_most_batch_size_identities_per_batch() -> None:
             _executemany: bool,
         ) -> None:
             normalized = " ".join(statement.split()).upper()
+            if normalized.startswith("SELECT") and "FLOOD.RETURN_PERIOD_RESULT" in normalized:
+                return_period_selects.append(normalized)
             if normalized.startswith("SELECT R.RUN_ID, R.RIVER_NETWORK_VERSION_ID"):
-                statements.append((normalized, parameters))
+                batch_selects.append((normalized, parameters))
 
         bind = session.get_bind()
         event.listen(bind, "before_cursor_execute", capture_sql)
         try:
-            cleanup_no_curve_results(session, apply_changes=True, batch_size=2)
+            cleanup_no_curve_results(
+                session,
+                apply_changes=True,
+                batch_size=2,
+                manifest_path=tmp_path / "batch-size.json",
+            )
         finally:
             event.remove(bind, "before_cursor_execute", capture_sql)
 
-    assert len(statements) == 4
-    for statement, parameters in statements:
+    assert len(batch_selects) == 4
+    for statement, parameters in batch_selects:
         assert "LIMIT ?" in statement or "LIMIT :BATCH_SIZE" in statement
         assert 2 in _parameter_values(parameters)
-    assert all("OFFSET" not in statement for statement, _parameters in statements)
+    assert all("OFFSET" not in statement for statement, _parameters in batch_selects)
+    assert all("SELECT *" not in statement for statement in return_period_selects)
+    assert all(
+        (
+            "COUNT(" in statement
+            or "GROUP BY" in statement
+            or statement.startswith("SELECT R.RUN_ID, R.RIVER_NETWORK_VERSION_ID")
+        )
+        for statement in return_period_selects
+    )
 
 
 def test_candidate_predicate_constant_is_exact_fixture_contract() -> None:

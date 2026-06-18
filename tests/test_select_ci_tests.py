@@ -31,6 +31,16 @@ def test_select_tests_maps_flood_cleanup_changes_to_cleanup_tests() -> None:
     assert selected == ["tests/test_return_period_cleanup.py"]
 
 
+def test_select_tests_maps_flood_cli_to_cleanup_and_frequency_tests() -> None:
+    selected = select_tests(["workers/flood_frequency/cli.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_flood_frequency.py",
+        "tests/test_return_period.py",
+        "tests/test_return_period_cleanup.py",
+    ]
+
+
 def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
     selected = select_tests(["infra/compose.compute.yml"], repo_root=Path("."))
 
