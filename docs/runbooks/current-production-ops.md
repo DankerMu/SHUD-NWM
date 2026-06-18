@@ -594,8 +594,9 @@ uv run --no-sync python scripts/audit_return_period_indexes.py \
 
 - `flood.return_period_result` root relation/table/index/total size。
 - root index inventory、`pg_get_indexdef`、`pg_stat_user_indexes` 使用计数。
-- Timescale chunk/chunk-index size；如果 Timescale metadata 不可用，报告必须明确记录 unavailable reason，不能把 chunk 证据当作已完成。
-- summary、ranking/segments、timeline、GeoJSON fallback tile、MVT selected identity、valid-time discovery、latest-ready-run quality behavior 的 `EXPLAIN (ANALYZE, BUFFERS)` 模板。
+- live DB 模式下 root relation、index inventory、root index usage 任一失败都必须阻断并返回非 0；Timescale metadata 可降级，但报告必须明确记录 unavailable reason。
+- Timescale chunk/chunk-index size、chunk index usage，以及各 chunk section 的 total/observed/limit/truncated 元数据；不能把被截断或 unavailable 的 chunk 证据当作完整证据。
+- summary、ranking/segments、timeline、GeoJSON fallback tile、MVT selected identity、valid-time discovery、TilePublisher readiness、latest-ready-run quality behavior 的 `EXPLAIN (ANALYZE, BUFFERS)` 模板。
 - `return_period_result_null_return_period_run_idx`、`return_period_result_null_warning_level_run_idx` 等 NULL partial index 只可标为 drop/investigate 候选，不能无证据静默删除。
 
 维护窗口前后都要保存同一组证据：

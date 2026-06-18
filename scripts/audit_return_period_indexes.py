@@ -2,21 +2,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from packages.common.redaction import redact_payload, redact_text
+from packages.common.redaction import REDACTION_MARKER, redact_payload, redact_text
 
 TARGET_SCHEMA = "flood"
 TARGET_TABLE = "return_period_result"
 REPORT_SCHEMA = "nhms.flood.return_period_index_audit.v1"
 MANUAL_SQL_SCHEMA = "nhms.flood.return_period_index_maintenance.manual_sql.v1"
+TIMESCALE_CHUNK_SIZE_LIMIT = 200
+TIMESCALE_CHUNK_INDEX_LIMIT = 500
+TIMESCALE_CHUNK_INDEX_USAGE_LIMIT = 500
+SQL_PLACEHOLDER_RE = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+PATH_CREDENTIAL_RE = re.compile(r"(?P<user>[^/\s:@]+):(?P<secret>[^/\s@]+)@")
 
 ROOT_RELATION_SIZE_SQL = """
 SELECT
@@ -79,7 +87,8 @@ SELECT
   pg_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass) AS chunk_table_bytes,
   pg_indexes_size(format('%I.%I', chunk_schema, chunk_name)::regclass) AS chunk_indexes_bytes,
   pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass) AS chunk_total_bytes,
-  pg_size_pretty(pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass)) AS chunk_total_size
+  pg_size_pretty(pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass)) AS chunk_total_size,
+  COUNT(*) OVER() AS audit_total_rows
 FROM timescaledb_information.chunks
 WHERE hypertable_schema = 'flood'
   AND hypertable_name = 'return_period_result'
@@ -94,7 +103,8 @@ SELECT
   indexes.relname AS chunk_index_name,
   pg_relation_size(indexes.oid) AS chunk_index_bytes,
   pg_size_pretty(pg_relation_size(indexes.oid)) AS chunk_index_size,
-  pg_get_indexdef(indexes.oid) AS chunk_indexdef
+  pg_get_indexdef(indexes.oid) AS chunk_indexdef,
+  COUNT(*) OVER() AS audit_total_rows
 FROM timescaledb_information.chunks chunks
 JOIN pg_class chunk_table
   ON chunk_table.oid = format('%I.%I', chunks.chunk_schema, chunks.chunk_name)::regclass
@@ -103,6 +113,27 @@ JOIN pg_class indexes ON indexes.oid = pgidx.indexrelid
 WHERE chunks.hypertable_schema = 'flood'
   AND chunks.hypertable_name = 'return_period_result'
 ORDER BY pg_relation_size(indexes.oid) DESC, chunks.chunk_schema, chunks.chunk_name, indexes.relname
+LIMIT 500;
+""".strip()
+
+TIMESCALE_CHUNK_INDEX_USAGE_SQL = """
+SELECT
+  chunks.chunk_schema,
+  chunks.chunk_name,
+  indexes.relname AS chunk_index_name,
+  COALESCE(stats.idx_scan, 0) AS idx_scan,
+  COALESCE(stats.idx_tup_read, 0) AS idx_tup_read,
+  COALESCE(stats.idx_tup_fetch, 0) AS idx_tup_fetch,
+  COUNT(*) OVER() AS audit_total_rows
+FROM timescaledb_information.chunks chunks
+JOIN pg_class chunk_table
+  ON chunk_table.oid = format('%I.%I', chunks.chunk_schema, chunks.chunk_name)::regclass
+JOIN pg_index pgidx ON pgidx.indrelid = chunk_table.oid
+JOIN pg_class indexes ON indexes.oid = pgidx.indexrelid
+LEFT JOIN pg_stat_all_indexes stats ON stats.indexrelid = indexes.oid
+WHERE chunks.hypertable_schema = 'flood'
+  AND chunks.hypertable_name = 'return_period_result'
+ORDER BY COALESCE(stats.idx_scan, 0) ASC, chunks.chunk_schema, chunks.chunk_name, indexes.relname
 LIMIT 500;
 """.strip()
 
@@ -206,10 +237,11 @@ KNOWN_INDEXES: dict[str, KnownIndex] = {
     "return_period_result_run_quality_idx": KnownIndex(
         migration="000031",
         decision="investigate",
-        hot_paths=("latest-ready-run quality behavior", "legacy quality fallback"),
+        hot_paths=("TilePublisher readiness", "latest-ready-run quality behavior", "legacy quality fallback"),
         reason=(
-            "Historically supported run-quality discovery on return_period_result; after 000034/000036 "
-            "quality should prefer flood.run_product_quality, so keep only if EXPLAIN evidence still needs it."
+            "Supports run-scoped readiness/count probes over max_over_window rows and historically supported "
+            "run-quality discovery on return_period_result; after 000034/000036 quality should prefer "
+            "flood.run_product_quality, so keep only if EXPLAIN evidence still needs it."
         ),
         replacement="flood.run_product_quality quality joins and hydro_run_latest_ready_run_idx where available",
     ),
@@ -327,27 +359,31 @@ def classify_indexes(index_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, 
 
 def generate_hot_path_probes(inputs: ProbeInputs | None = None) -> list[dict[str, Any]]:
     probe_inputs = inputs or ProbeInputs()
-    sample_bindings = redact_payload(
-        {
-            "run_id": probe_inputs.run_id,
-            "duration": probe_inputs.duration,
-            "valid_time": probe_inputs.valid_time,
-            "basin_version_id": probe_inputs.basin_version_id,
-            "river_network_version_id": probe_inputs.river_network_version_id,
-            "segment_id": probe_inputs.segment_id,
-            "min_lon": probe_inputs.min_lon,
-            "min_lat": probe_inputs.min_lat,
-            "max_lon": probe_inputs.max_lon,
-            "max_lat": probe_inputs.max_lat,
-            "limit": probe_inputs.limit,
-            "usable_flags": ["ok", "partial_sample", "monotonicity_corrected"],
-        }
-    )
+    default_bindings = {
+        "run_id": probe_inputs.run_id,
+        "duration": probe_inputs.duration,
+        "valid_time": probe_inputs.valid_time,
+        "basin_version_id": probe_inputs.basin_version_id,
+        "river_network_version_id": probe_inputs.river_network_version_id,
+        "segment_id": probe_inputs.segment_id,
+        "min_lon": probe_inputs.min_lon,
+        "min_lat": probe_inputs.min_lat,
+        "max_lon": probe_inputs.max_lon,
+        "max_lat": probe_inputs.max_lat,
+        "limit": probe_inputs.limit,
+        "offset": 0,
+        "max_over_window": True,
+        "min_return_period": None,
+        "return_period": None,
+        "warning_levels": ["watch", "warning", "severe"],
+        "warning_levels_empty": False,
+        "usable_flags": ["ok", "partial_sample", "monotonicity_corrected"],
+    }
     probes = [
         (
-            "flood-alert-summary",
+            "flood-alert-summary-peak",
             "flood-alert summary",
-            "Warning-level summary plus segment and usable-curve counts.",
+            "Warning-level summary plus segment and usable-curve counts for max-over-window rows.",
             """
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT warning_level, COUNT(*) AS count
@@ -382,15 +418,54 @@ FROM (
 """.strip(),
         ),
         (
-            "ranking-segments",
+            "flood-alert-summary-valid-time",
+            "flood-alert summary",
+            "Warning-level summary plus segment and usable-curve counts for a concrete valid_time branch.",
+            """
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT warning_level, COUNT(*) AS count
+FROM flood.return_period_result
+WHERE run_id = :run_id
+  AND valid_time = :valid_time
+  AND max_over_window = false
+  AND (:min_return_period IS NULL OR return_period >= :min_return_period)
+  AND quality_flag = ANY(:usable_flags)
+  AND warning_level IS NOT NULL
+GROUP BY warning_level;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(*) AS count
+FROM (
+  SELECT river_network_version_id, river_segment_id
+  FROM flood.return_period_result
+  WHERE run_id = :run_id
+    AND valid_time = :valid_time
+    AND max_over_window = false
+  GROUP BY river_network_version_id, river_segment_id
+) AS versioned_segments;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(*) AS count
+FROM (
+  SELECT river_network_version_id, river_segment_id
+  FROM flood.return_period_result
+  WHERE run_id = :run_id
+    AND valid_time = :valid_time
+    AND max_over_window = false
+    AND quality_flag = ANY(:usable_flags)
+  GROUP BY river_network_version_id, river_segment_id
+) AS versioned_segments;
+""".strip(),
+        ),
+        (
+            "ranking-peak",
             "ranking/segments",
-            "Count and ordered peak ranking/segment list, including optional valid_time and warning filters.",
+            "Count and ordered peak ranking list without a valid_time predicate.",
             """
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT COUNT(*) AS count
 FROM flood.return_period_result r
 WHERE r.run_id = :run_id
-  AND (:valid_time IS NULL OR r.valid_time = :valid_time)
   AND r.max_over_window = :max_over_window
   AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
   AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
@@ -401,13 +476,98 @@ SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
        r.warning_level, r.duration, r.valid_time, r.river_network_version_id
 FROM flood.return_period_result r
 WHERE r.run_id = :run_id
-  AND (:valid_time IS NULL OR r.valid_time = :valid_time)
   AND r.max_over_window = :max_over_window
   AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
   AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
   AND r.quality_flag = ANY(:usable_flags)
 ORDER BY r.return_period DESC NULLS LAST, r.q_value DESC, r.river_network_version_id, r.river_segment_id,
          r.valid_time
+LIMIT :limit OFFSET :offset;
+""".strip(),
+        ),
+        (
+            "ranking-valid-time",
+            "ranking/segments",
+            "Count and ordered ranking list for a concrete valid_time branch.",
+            """
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(*) AS count
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.valid_time = :valid_time
+  AND r.max_over_window = false
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
+       r.warning_level, r.duration, r.valid_time, r.river_network_version_id
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.valid_time = :valid_time
+  AND r.max_over_window = false
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags)
+ORDER BY r.return_period DESC NULLS LAST, r.q_value DESC, r.river_network_version_id, r.river_segment_id,
+         r.valid_time
+LIMIT :limit OFFSET :offset;
+""".strip(),
+        ),
+        (
+            "segments-peak",
+            "ranking/segments",
+            "Segment-list count and page without a valid_time predicate.",
+            """
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(*) AS count
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.max_over_window = :max_over_window
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
+       r.warning_level, r.valid_time, r.river_network_version_id
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.max_over_window = :max_over_window
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags)
+ORDER BY r.return_period DESC NULLS LAST, r.river_network_version_id, r.river_segment_id, r.valid_time
+LIMIT :limit OFFSET :offset;
+""".strip(),
+        ),
+        (
+            "segments-valid-time",
+            "ranking/segments",
+            "Segment-list count and page for a concrete valid_time branch.",
+            """
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(*) AS count
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.valid_time = :valid_time
+  AND r.max_over_window = false
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
+       r.warning_level, r.valid_time, r.river_network_version_id
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.valid_time = :valid_time
+  AND r.max_over_window = false
+  AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+  AND (:warning_levels_empty OR r.warning_level = ANY(:warning_levels))
+  AND r.quality_flag = ANY(:usable_flags)
+ORDER BY r.return_period DESC NULLS LAST, r.river_network_version_id, r.river_segment_id, r.valid_time
 LIMIT :limit OFFSET :offset;
 """.strip(),
         ),
@@ -492,9 +652,9 @@ WHERE r.run_id = :run_id
 """.strip(),
         ),
         (
-            "valid-time-discovery",
+            "valid-time-discovery-selected",
             "valid-time discovery",
-            "Selected and unselected return-period valid-time discovery ordered by latest first.",
+            "Selected return-period valid-time discovery ordered by latest first.",
             """
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT DISTINCT valid_time
@@ -506,7 +666,13 @@ WHERE run_id = :run_id
   AND max_over_window = false
 ORDER BY valid_time DESC
 LIMIT :limit;
-
+""".strip(),
+        ),
+        (
+            "valid-time-discovery-unselected",
+            "valid-time discovery",
+            "Unselected return-period valid-time discovery ordered by latest first.",
+            """
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT DISTINCT valid_time
 FROM flood.return_period_result
@@ -514,6 +680,21 @@ WHERE duration = :duration
   AND max_over_window = false
 ORDER BY valid_time DESC
 LIMIT :limit;
+""".strip(),
+        ),
+        (
+            "tilepublisher-run-readiness",
+            "TilePublisher readiness",
+            "TilePublisher run-level readiness counts over max-over-window return-period result rows.",
+            """
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT COUNT(r.river_segment_id) AS result_rows,
+       SUM(CASE WHEN r.return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+       SUM(CASE WHEN r.warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows,
+       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count
+FROM flood.return_period_result r
+WHERE r.run_id = :run_id
+  AND r.max_over_window = true;
 """.strip(),
         ),
         (
@@ -542,16 +723,41 @@ SELECT EXISTS (
         ),
     ]
     return [
-        {
-            "name": name,
-            "hot_path": hot_path,
-            "description": description,
-            "parameterization": "SQL uses bind placeholders; sample values are evidence only and are not interpolated.",
-            "sample_bindings": sample_bindings,
-            "sql": sql,
-        }
+        _build_hot_path_probe(
+            name,
+            hot_path,
+            description,
+            sql,
+            default_bindings=default_bindings,
+        )
         for name, hot_path, description, sql in probes
     ]
+
+
+def _build_hot_path_probe(
+    name: str,
+    hot_path: str,
+    description: str,
+    sql: str,
+    *,
+    default_bindings: Mapping[str, Any],
+) -> dict[str, Any]:
+    placeholders = _sql_placeholders(sql)
+    sample_bindings = {placeholder: default_bindings[placeholder] for placeholder in placeholders}
+    return {
+        "name": name,
+        "hot_path": hot_path,
+        "description": description,
+        "parameterization": "SQL uses bind placeholders; sample values are evidence only and are not interpolated.",
+        "sample_bindings": redact_payload(sample_bindings),
+        "bindings": redact_payload(sample_bindings),
+        "required_bindings": placeholders,
+        "sql": sql,
+    }
+
+
+def _sql_placeholders(sql: str) -> list[str]:
+    return sorted(set(SQL_PLACEHOLDER_RE.findall(sql)))
 
 
 def collect_catalog_evidence(connection: Any) -> dict[str, Any]:
@@ -559,14 +765,28 @@ def collect_catalog_evidence(connection: Any) -> dict[str, Any]:
         root_relation = _execute_fetch_all(cursor, ROOT_RELATION_SIZE_SQL)
         index_inventory = _execute_fetch_all(cursor, INDEX_INVENTORY_SQL)
         index_usage = _execute_fetch_all(cursor, INDEX_USAGE_SQL)
-        timescale_chunks = _execute_optional_fetch_all(cursor, TIMESCALE_CHUNK_SIZE_SQL)
-        timescale_chunk_indexes = _execute_optional_fetch_all(cursor, TIMESCALE_CHUNK_INDEX_SIZE_SQL)
+        timescale_chunks = _execute_optional_fetch_all(
+            cursor,
+            TIMESCALE_CHUNK_SIZE_SQL,
+            row_limit=TIMESCALE_CHUNK_SIZE_LIMIT,
+        )
+        timescale_chunk_indexes = _execute_optional_fetch_all(
+            cursor,
+            TIMESCALE_CHUNK_INDEX_SIZE_SQL,
+            row_limit=TIMESCALE_CHUNK_INDEX_LIMIT,
+        )
+        timescale_chunk_index_usage = _execute_optional_fetch_all(
+            cursor,
+            TIMESCALE_CHUNK_INDEX_USAGE_SQL,
+            row_limit=TIMESCALE_CHUNK_INDEX_USAGE_LIMIT,
+        )
     return {
         "root_relation": {"available": True, "rows": root_relation, "sql": ROOT_RELATION_SIZE_SQL},
         "index_inventory": {"available": True, "rows": index_inventory, "sql": INDEX_INVENTORY_SQL},
         "index_usage": {"available": True, "rows": index_usage, "sql": INDEX_USAGE_SQL},
         "timescale_chunks": timescale_chunks,
         "timescale_chunk_indexes": timescale_chunk_indexes,
+        "timescale_chunk_index_usage": timescale_chunk_index_usage,
     }
 
 
@@ -591,12 +811,30 @@ def build_unavailable_catalog(reason: str) -> dict[str, Any]:
             "rows": [],
             "unavailable_reason": safe_reason,
             "sql": TIMESCALE_CHUNK_SIZE_SQL,
+            "total_rows": None,
+            "observed_rows": 0,
+            "row_limit": TIMESCALE_CHUNK_SIZE_LIMIT,
+            "truncated": None,
         },
         "timescale_chunk_indexes": {
             "available": False,
             "rows": [],
             "unavailable_reason": safe_reason,
             "sql": TIMESCALE_CHUNK_INDEX_SIZE_SQL,
+            "total_rows": None,
+            "observed_rows": 0,
+            "row_limit": TIMESCALE_CHUNK_INDEX_LIMIT,
+            "truncated": None,
+        },
+        "timescale_chunk_index_usage": {
+            "available": False,
+            "rows": [],
+            "unavailable_reason": safe_reason,
+            "sql": TIMESCALE_CHUNK_INDEX_USAGE_SQL,
+            "total_rows": None,
+            "observed_rows": 0,
+            "row_limit": TIMESCALE_CHUNK_INDEX_USAGE_LIMIT,
+            "truncated": None,
         },
     }
 
@@ -649,17 +887,13 @@ def build_report(
 
 
 def generate_manual_maintenance_sql(classifications: Sequence[Mapping[str, Any]] | None = None) -> str:
+    audit_available = classifications is not None
     drop_candidates = [
         str(item["index_name"])
         for item in classifications or []
         if item.get("operator_candidate") == "drop" or item.get("decision") == "drop"
     ]
-    if not drop_candidates:
-        drop_candidates = sorted(NULL_PARTIAL_INDEX_NAMES)
-    candidate_sql = "\n".join(
-        f"-- DROP INDEX IF EXISTS {TARGET_SCHEMA}.{_quote_identifier(index_name)};"
-        for index_name in sorted(drop_candidates)
-    )
+    candidate_sql = _manual_drop_candidate_sql(drop_candidates, audit_available=audit_available)
     return f"""-- schema: {MANUAL_SQL_SCHEMA}
 -- TARGET: {TARGET_SCHEMA}.{TARGET_TABLE}
 -- DO NOT AUTO-EXECUTE.
@@ -680,6 +914,7 @@ def generate_manual_maintenance_sql(classifications: Sequence[Mapping[str, Any]]
 --   GeoJSON fallback tile
 --   MVT selected identity
 --   valid-time discovery
+--   TilePublisher readiness
 --   latest-ready-run quality behavior
 
 -- 3. Maintenance-window DDL guidance.
@@ -712,6 +947,27 @@ COMMIT;
 """.strip() + "\n"
 
 
+def _manual_drop_candidate_sql(drop_candidates: Sequence[str], *, audit_available: bool) -> str:
+    if not audit_available:
+        return (
+            "-- No audited drop candidates are emitted because index inventory evidence is unavailable.\n"
+            "-- Re-run the audit against a live database before drafting DROP INDEX statements."
+        )
+    if not drop_candidates:
+        return (
+            "-- No audited NULL partial DROP candidates were discovered in the live index inventory.\n"
+            "-- Do not use static index-name guesses as maintenance DDL."
+        )
+    return "\n".join(
+        f"-- DROP INDEX IF EXISTS {TARGET_SCHEMA}.{_quote_identifier(index_name)};"
+        for index_name in sorted(drop_candidates)
+    )
+
+
+def _redact_output_error_text(value: object) -> str:
+    return PATH_CREDENTIAL_RE.sub(REDACTION_MARKER + "@", redact_text(str(value)))
+
+
 def write_output_file(
     path: Path,
     content: str,
@@ -737,14 +993,21 @@ def write_output_file(
             if temp_path.exists():
                 temp_path.unlink()
         finally:
+            safe_path = _redact_output_error_text(path)
+            safe_error = _redact_output_error_text(exc)
             raise ReturnPeriodIndexAuditError(
                 "OUTPUT_WRITE_FAILED",
-                f"Failed to write output path {path}: {exc}",
+                f"Failed to write output path {safe_path}: {safe_error}",
             ) from exc
 
 
 def render_report_json(report: Mapping[str, Any]) -> str:
-    return json.dumps(redact_payload(report), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return json.dumps(
+        _json_safe_value(redact_payload(report)),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -803,9 +1066,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(report_json, end="")
 
     if args.manual_sql_out:
-        manual_sql = generate_manual_maintenance_sql(report["classifications"])
+        manual_sql = generate_manual_maintenance_sql(
+            report["classifications"] if _section_available(catalog.get("index_inventory")) else None
+        )
         write_output_file(args.manual_sql_out, manual_sql, overwrite=args.overwrite)
     return 0
+
+
+def _run_cli(argv: Sequence[str] | None = None) -> None:
+    try:
+        raise SystemExit(main(argv))
+    except ReturnPeriodIndexAuditError as exc:
+        print(f"{exc.error_code}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def _catalog_from_database_url(database_url: str | None) -> dict[str, Any]:
@@ -815,12 +1088,18 @@ def _catalog_from_database_url(database_url: str | None) -> dict[str, Any]:
         import psycopg2
         from psycopg2.extras import RealDictCursor
     except ImportError as exc:
-        return build_unavailable_catalog(f"psycopg2 unavailable: {exc}")
+        raise ReturnPeriodIndexAuditError(
+            "LIVE_DB_EVIDENCE_UNAVAILABLE",
+            f"Mandatory live DB evidence unavailable: {redact_text(str(exc))}",
+        ) from exc
     try:
         with psycopg2.connect(database_url, cursor_factory=RealDictCursor) as connection:
             return collect_catalog_evidence(connection)
     except Exception as exc:  # pragma: no cover - live DB failures are environment-specific.
-        return build_unavailable_catalog(redact_text(str(exc)))
+        raise ReturnPeriodIndexAuditError(
+            "LIVE_DB_EVIDENCE_UNAVAILABLE",
+            f"Mandatory live DB evidence failed: {redact_text(str(exc))}",
+        ) from exc
 
 
 def _execute_fetch_all(cursor: Any, sql: str) -> list[dict[str, Any]]:
@@ -828,15 +1107,33 @@ def _execute_fetch_all(cursor: Any, sql: str) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in cursor.fetchall()]
 
 
-def _execute_optional_fetch_all(cursor: Any, sql: str) -> dict[str, Any]:
+def _execute_optional_fetch_all(cursor: Any, sql: str, *, row_limit: int) -> dict[str, Any]:
     try:
-        return {"available": True, "rows": _execute_fetch_all(cursor, sql), "sql": sql}
+        rows = _execute_fetch_all(cursor, sql)
+        return {
+            "available": True,
+            "rows": rows,
+            "sql": sql,
+            "total_rows": _catalog_total_rows(rows),
+            "observed_rows": len(rows),
+            "row_limit": row_limit,
+            "truncated": _catalog_truncated(rows, row_limit),
+        }
     except Exception as exc:
         connection = getattr(cursor, "connection", None)
         rollback = getattr(connection, "rollback", None)
         if callable(rollback):
             rollback()
-        return {"available": False, "rows": [], "unavailable_reason": redact_text(str(exc)), "sql": sql}
+        return {
+            "available": False,
+            "rows": [],
+            "unavailable_reason": redact_text(str(exc)),
+            "sql": sql,
+            "total_rows": None,
+            "observed_rows": 0,
+            "row_limit": row_limit,
+            "truncated": None,
+        }
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -847,12 +1144,59 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return dict(row)
 
 
+def _catalog_total_rows(rows: Sequence[Mapping[str, Any]]) -> int:
+    if not rows:
+        return 0
+    value = rows[0].get("audit_total_rows")
+    if value is None:
+        return len(rows)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return len(rows)
+
+
+def _catalog_truncated(rows: Sequence[Mapping[str, Any]], row_limit: int) -> bool:
+    return _catalog_total_rows(rows) > len(rows) or len(rows) >= row_limit
+
+
 def _rows_from_section(section: object) -> list[dict[str, Any]]:
     if isinstance(section, Mapping):
         rows = section.get("rows")
         if isinstance(rows, Sequence) and not isinstance(rows, str | bytes | bytearray):
             return [_row_to_dict(row) for row in rows]
     return []
+
+
+def _section_available(section: object) -> bool:
+    return isinstance(section, Mapping) and section.get("available") is True
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        if value.is_nan() or value.is_infinite():
+            return str(value)
+        if value == value.to_integral_value():
+            return int(value)
+        as_float = float(value)
+        return as_float if math.isfinite(as_float) else str(value)
+    if isinstance(value, bytes | bytearray):
+        return redact_text(value.decode("utf-8", errors="replace"))
+    try:
+        json.dumps(value)
+    except TypeError:
+        return redact_text(str(value))
+    return value
 
 
 def _known_index_to_dict(known: KnownIndex) -> dict[str, Any]:
@@ -870,8 +1214,4 @@ def _quote_identifier(identifier: str) -> str:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except ReturnPeriodIndexAuditError as exc:
-        print(f"{exc.error_code}: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+    _run_cli()
