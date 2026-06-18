@@ -590,6 +590,9 @@ uv run --no-sync python scripts/audit_return_period_indexes.py \
   --manual-sql-out /scratch/frd_muziyao/nhms-prod/workspace/db-maintenance/return-period-index-maintenance.manual.sql
 ```
 
+该工具必须连接 live DB；未提供 `DATABASE_URL` 时应非 0 退出且不写 report/manual SQL。`--report-out`
+和 `--manual-sql-out` 也必须是两个不同路径，即使加 `--overwrite` 也不能复用同一文件。
+
 审计报告必须包含：
 
 - `flood.return_period_result` root relation/table/index/total size。
@@ -599,7 +602,8 @@ uv run --no-sync python scripts/audit_return_period_indexes.py \
 - summary、ranking/segments、timeline、GeoJSON fallback tile、MVT selected identity、valid-time discovery、TilePublisher readiness、latest-ready-run quality behavior 的 `EXPLAIN (ANALYZE, BUFFERS)` 模板。
 - `return_period_result_null_return_period_run_idx`、`return_period_result_null_warning_level_run_idx` 等 NULL partial index 只可标为 drop/investigate 候选，不能无证据静默删除。
 
-维护窗口前后都要保存同一组证据：
+维护窗口前后都要保存同一组证据；manual SQL 产物会内置这组 before/after 查询，包含 root table/index
+和 Timescale chunk/chunk-index/usage 证据：
 
 ```sql
 select current_database() as database_name,

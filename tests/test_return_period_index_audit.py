@@ -289,10 +289,54 @@ def test_output_path_safety_rejects_existing_paths_and_cleans_partial_write(tmp_
     assert list(tmp_path.glob(".partial.json.tmp-*")) == []
 
 
+def test_output_exists_error_redacts_credential_shaped_path(tmp_path: Path) -> None:
+    secret_dir = tmp_path / "postgresql://operator:supersecret@db.example/nhms"
+    existing = secret_dir / "report.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("old\n", encoding="utf-8")
+
+    with pytest.raises(ReturnPeriodIndexAuditError) as error:
+        write_output_file(existing, "new\n")
+
+    assert error.value.error_code == "OUTPUT_EXISTS"
+    assert "supersecret" not in str(error.value)
+    assert "operator" not in str(error.value)
+    assert "[redacted]" in str(error.value)
+    assert existing.read_text(encoding="utf-8") == "old\n"
+
+
+def test_output_parent_creation_failure_is_redacted_and_wrapped(tmp_path: Path) -> None:
+    parent_file = tmp_path / "postgresql://operator:supersecret@db.example"
+    parent_file.parent.mkdir(parents=True, exist_ok=True)
+    parent_file.write_text("not a directory\n", encoding="utf-8")
+    target = parent_file / "report.json"
+
+    with pytest.raises(ReturnPeriodIndexAuditError) as error:
+        write_output_file(target, "{}\n")
+
+    assert error.value.error_code == "OUTPUT_WRITE_FAILED"
+    assert "supersecret" not in str(error.value)
+    assert "operator" not in str(error.value)
+    assert "[redacted]" in str(error.value)
+    assert not target.exists()
+
+
 def test_cli_write_failure_stderr_redacts_credentials(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     secret_dir = tmp_path / "postgresql://operator:supersecret@db.example/nhms"
     report_path = secret_dir / "report.json"
     original_writer = audit_script.write_output_file
+    connection = _FakeConnection(
+        {
+            ROOT_RELATION_SIZE_SQL: [{"table_bytes": 100, "indexes_bytes": 50, "total_bytes": 150}],
+            INDEX_INVENTORY_SQL: [_index_row("return_period_result_summary_idx")],
+            INDEX_USAGE_SQL: [{"index_name": "return_period_result_summary_idx", "idx_scan": 42}],
+            TIMESCALE_CHUNK_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_USAGE_SQL: [],
+        }
+    )
+    fake_psycopg2 = types.SimpleNamespace(connect=lambda *args, **kwargs: connection)
+    fake_extras = types.SimpleNamespace(RealDictCursor=object)
 
     def failing_write(path: Path, content: str, *, overwrite: bool = False) -> None:
         original_writer(
@@ -305,10 +349,14 @@ def test_cli_write_failure_stderr_redacts_credentials(tmp_path: Path, capsys: py
         )
 
     with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+        monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
         monkeypatch.setattr(audit_script, "write_output_file", failing_write)
         with pytest.raises(SystemExit) as exit_error:
             audit_script._run_cli(
                 [
+                    "--database-url",
+                    "postgresql://operator:supersecret@db.example:5432/nhms",
                     "--report-out",
                     str(report_path),
                 ]
@@ -320,6 +368,42 @@ def test_cli_write_failure_stderr_redacts_credentials(tmp_path: Path, capsys: py
     assert "supersecret" not in captured.err
     assert "operator" not in captured.err
     assert "[redacted]" in captured.err
+
+
+@pytest.mark.parametrize("overwrite_arg", [[], ["--overwrite"]])
+def test_cli_rejects_same_report_and_manual_sql_path_before_db_access(
+    overwrite_arg: list[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "same.sql"
+    fake_psycopg2 = types.SimpleNamespace(
+        connect=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("DB access should not happen"))
+    )
+    fake_extras = types.SimpleNamespace(RealDictCursor=object)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+        monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+        with pytest.raises(SystemExit) as exit_error:
+            audit_script._run_cli(
+                [
+                    "--database-url",
+                    "postgresql://operator:supersecret@db.example:5432/nhms",
+                    "--report-out",
+                    str(output),
+                    "--manual-sql-out",
+                    str(output),
+                    *overwrite_arg,
+                ]
+            )
+
+    captured = capsys.readouterr()
+    assert exit_error.value.code == 2
+    assert "OUTPUT_PATH_CONFLICT" in captured.err
+    assert "same.sql" in captured.err
+    assert "supersecret" not in captured.err
+    assert not output.exists()
 
 
 def test_timescale_metadata_failure_keeps_root_table_evidence() -> None:
@@ -396,6 +480,49 @@ def test_timescale_chunk_sections_include_usage_and_truncation_metadata() -> Non
     assert catalog["timescale_chunk_index_usage"]["truncated"] is True
 
 
+def test_empty_live_target_evidence_fails_closed_and_writes_no_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report_out = tmp_path / "report.json"
+    manual_out = tmp_path / "manual.sql"
+    connection = _FakeConnection(
+        {
+            ROOT_RELATION_SIZE_SQL: [],
+            INDEX_INVENTORY_SQL: [],
+            INDEX_USAGE_SQL: [],
+            TIMESCALE_CHUNK_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_USAGE_SQL: [],
+        }
+    )
+    fake_psycopg2 = types.SimpleNamespace(connect=lambda *args, **kwargs: connection)
+    fake_extras = types.SimpleNamespace(RealDictCursor=object)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+        monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+        with pytest.raises(SystemExit) as exit_error:
+            audit_script._run_cli(
+                [
+                    "--database-url",
+                    "postgresql://operator:supersecret@db.example:5432/nhms",
+                    "--report-out",
+                    str(report_out),
+                    "--manual-sql-out",
+                    str(manual_out),
+                ]
+            )
+
+    captured = capsys.readouterr()
+    assert exit_error.value.code == 2
+    assert "LIVE_DB_EVIDENCE_UNAVAILABLE" in captured.err
+    assert "root relation" in captured.err
+    assert "supersecret" not in captured.err
+    assert not report_out.exists()
+    assert not manual_out.exists()
+
+
 def test_live_database_connection_failure_is_mandatory_and_writes_no_artifacts(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -429,6 +556,33 @@ def test_live_database_connection_failure_is_mandatory_and_writes_no_artifacts(
     assert "LIVE_DB_EVIDENCE_UNAVAILABLE" in captured.err
     assert "supersecret" not in captured.err
     assert "postgresql://operator" not in captured.err
+    assert not report_out.exists()
+    assert not manual_out.exists()
+
+
+def test_missing_database_url_fails_closed_and_writes_no_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report_out = tmp_path / "report.json"
+    manual_out = tmp_path / "manual.sql"
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        with pytest.raises(SystemExit) as exit_error:
+            audit_script._run_cli(
+                [
+                    "--report-out",
+                    str(report_out),
+                    "--manual-sql-out",
+                    str(manual_out),
+                ]
+            )
+
+    captured = capsys.readouterr()
+    assert exit_error.value.code == 2
+    assert "LIVE_DB_EVIDENCE_UNAVAILABLE" in captured.err
+    assert "DATABASE_URL is required" in captured.err
     assert not report_out.exists()
     assert not manual_out.exists()
 
@@ -513,6 +667,41 @@ def test_generated_manual_sql_has_operator_guardrails_and_no_credentials() -> No
     assert "postgresql://" not in sql
     assert "-- DROP INDEX IF EXISTS flood.\"return_period_result_null_return_period_run_idx\";" in sql
     assert "\nDROP INDEX" not in sql
+
+
+def test_manual_sql_neutralizes_control_character_drop_candidate_names() -> None:
+    malicious_name = "x\nDROP TABLE flood.return_period_result;--"
+
+    sql = generate_manual_maintenance_sql(
+        [
+            {
+                "index_name": malicious_name,
+                "decision": "investigate",
+                "operator_candidate": "drop",
+            }
+        ]
+    )
+
+    assert "-- DROP INDEX IF EXISTS" not in sql
+    assert "Skipped unsafe DROP candidate name" in sql
+    assert r"x\nDROP TABLE flood.return_period_result;--" in sql
+    assert "\nDROP TABLE flood.return_period_result" not in sql
+    for line in sql.splitlines():
+        assert not line.startswith("DROP TABLE")
+        assert not line.startswith("DROP INDEX")
+
+
+def test_manual_sql_before_after_evidence_includes_timescale_chunk_index_risks() -> None:
+    sql = generate_manual_maintenance_sql([])
+
+    assert sql.count("Capture BEFORE evidence") == 1
+    assert sql.count("Capture AFTER evidence") == 1
+    assert sql.count("timescaledb_information.chunks") >= 4
+    assert sql.count("pg_stat_all_indexes") >= 2
+    assert "Timescale chunk size evidence" in sql
+    assert "Timescale chunk-index size evidence" in sql
+    assert "Timescale chunk-index usage evidence" in sql
+    assert "using the same queries from step 1" in sql
 
 
 def test_manual_sql_does_not_emit_static_drop_candidates_without_audited_inventory() -> None:

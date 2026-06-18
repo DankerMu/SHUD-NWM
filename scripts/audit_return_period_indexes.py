@@ -25,6 +25,7 @@ TIMESCALE_CHUNK_INDEX_LIMIT = 500
 TIMESCALE_CHUNK_INDEX_USAGE_LIMIT = 500
 SQL_PLACEHOLDER_RE = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 PATH_CREDENTIAL_RE = re.compile(r"(?P<user>[^/\s:@]+):(?P<secret>[^/\s@]+)@")
+SAFE_MANUAL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 ROOT_RELATION_SIZE_SQL = """
 SELECT
@@ -137,14 +138,17 @@ ORDER BY COALESCE(stats.idx_scan, 0) ASC, chunks.chunk_schema, chunks.chunk_name
 LIMIT 500;
 """.strip()
 
-PRE_POST_SIZE_EVIDENCE_SQL = """
+PRE_POST_SIZE_EVIDENCE_SQL = f"""
+-- Database-level size evidence.
 SELECT current_database() AS database_name, pg_size_pretty(pg_database_size(current_database())) AS database_size;
 
+-- Root table and root-index size evidence.
 SELECT
   pg_size_pretty(pg_relation_size('flood.return_period_result'::regclass)) AS table_size,
   pg_size_pretty(pg_indexes_size('flood.return_period_result'::regclass)) AS indexes_size,
   pg_size_pretty(pg_total_relation_size('flood.return_period_result'::regclass)) AS total_size;
 
+-- Root index definition and size evidence.
 SELECT
   idx.indexrelid::regclass::text AS index_name,
   pg_size_pretty(pg_relation_size(idx.indexrelid)) AS index_size,
@@ -152,6 +156,15 @@ SELECT
 FROM pg_index idx
 WHERE idx.indrelid = 'flood.return_period_result'::regclass
 ORDER BY pg_relation_size(idx.indexrelid) DESC;
+
+-- Timescale chunk size evidence.
+{TIMESCALE_CHUNK_SIZE_SQL}
+
+-- Timescale chunk-index size evidence.
+{TIMESCALE_CHUNK_INDEX_SIZE_SQL}
+
+-- Timescale chunk-index usage evidence.
+{TIMESCALE_CHUNK_INDEX_USAGE_SQL}
 """.strip()
 
 
@@ -763,7 +776,9 @@ def _sql_placeholders(sql: str) -> list[str]:
 def collect_catalog_evidence(connection: Any) -> dict[str, Any]:
     with connection.cursor() as cursor:
         root_relation = _execute_fetch_all(cursor, ROOT_RELATION_SIZE_SQL)
+        _require_live_target_evidence(root_relation, evidence_name="root relation")
         index_inventory = _execute_fetch_all(cursor, INDEX_INVENTORY_SQL)
+        _require_live_target_evidence(index_inventory, evidence_name="index inventory")
         index_usage = _execute_fetch_all(cursor, INDEX_USAGE_SQL)
         timescale_chunks = _execute_optional_fetch_all(
             cursor,
@@ -958,10 +973,35 @@ def _manual_drop_candidate_sql(drop_candidates: Sequence[str], *, audit_availabl
             "-- No audited NULL partial DROP candidates were discovered in the live index inventory.\n"
             "-- Do not use static index-name guesses as maintenance DDL."
         )
-    return "\n".join(
+    safe_candidates: list[str] = []
+    unsafe_candidates: list[str] = []
+    for index_name in sorted(drop_candidates):
+        if _is_safe_manual_identifier(index_name):
+            safe_candidates.append(index_name)
+        else:
+            unsafe_candidates.append(index_name)
+
+    lines = [
         f"-- DROP INDEX IF EXISTS {TARGET_SCHEMA}.{_quote_identifier(index_name)};"
-        for index_name in sorted(drop_candidates)
+        for index_name in safe_candidates
+    ]
+    lines.extend(
+        "-- Skipped unsafe DROP candidate name; no DROP statement emitted. "
+        f"Escaped audited name: {_escaped_comment_value(index_name)}"
+        for index_name in unsafe_candidates
     )
+    return "\n".join(lines)
+
+
+def _is_safe_manual_identifier(identifier: str) -> bool:
+    return bool(SAFE_MANUAL_IDENTIFIER_RE.fullmatch(identifier))
+
+
+def _escaped_comment_value(value: str, *, limit: int = 160) -> str:
+    escaped = value.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+    if len(escaped) <= limit:
+        return escaped
+    return escaped[:limit] + "...[truncated]"
 
 
 def _redact_output_error_text(value: object) -> str:
@@ -975,12 +1015,28 @@ def write_output_file(
     overwrite: bool = False,
     writer: Callable[[Path, str], None] | None = None,
 ) -> None:
-    if path.exists() and not overwrite:
+    safe_path = _redact_output_error_text(path)
+    try:
+        path_exists = path.exists()
+    except OSError as exc:
+        safe_error = _redact_output_error_text(exc)
+        raise ReturnPeriodIndexAuditError(
+            "OUTPUT_WRITE_FAILED",
+            f"Failed to inspect output path {safe_path}: {safe_error}",
+        ) from exc
+    if path_exists and not overwrite:
         raise ReturnPeriodIndexAuditError(
             "OUTPUT_EXISTS",
-            f"Refusing to overwrite existing output path without --overwrite: {path}",
+            f"Refusing to overwrite existing output path without --overwrite: {safe_path}",
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        safe_error = _redact_output_error_text(exc)
+        raise ReturnPeriodIndexAuditError(
+            "OUTPUT_WRITE_FAILED",
+            f"Failed to prepare output parent for {safe_path}: {safe_error}",
+        ) from exc
     temp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
     try:
         if writer is not None:
@@ -1043,6 +1099,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    _validate_output_paths(args.report_out, args.manual_sql_out)
     probe_inputs = ProbeInputs(
         run_id=args.run_id,
         duration=args.duration,
@@ -1083,7 +1140,10 @@ def _run_cli(argv: Sequence[str] | None = None) -> None:
 
 def _catalog_from_database_url(database_url: str | None) -> dict[str, Any]:
     if not database_url:
-        return build_unavailable_catalog("DATABASE_URL not provided; generated templates only.")
+        raise ReturnPeriodIndexAuditError(
+            "LIVE_DB_EVIDENCE_UNAVAILABLE",
+            "DATABASE_URL is required for live return-period index audit evidence; no artifacts were generated.",
+        )
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -1095,11 +1155,43 @@ def _catalog_from_database_url(database_url: str | None) -> dict[str, Any]:
     try:
         with psycopg2.connect(database_url, cursor_factory=RealDictCursor) as connection:
             return collect_catalog_evidence(connection)
+    except ReturnPeriodIndexAuditError:
+        raise
     except Exception as exc:  # pragma: no cover - live DB failures are environment-specific.
         raise ReturnPeriodIndexAuditError(
             "LIVE_DB_EVIDENCE_UNAVAILABLE",
             f"Mandatory live DB evidence failed: {redact_text(str(exc))}",
         ) from exc
+
+
+def _validate_output_paths(report_out: Path | None, manual_sql_out: Path | None) -> None:
+    if report_out is None or manual_sql_out is None:
+        return
+    report_path = _resolve_output_path(report_out)
+    manual_sql_path = _resolve_output_path(manual_sql_out)
+    if report_path == manual_sql_path:
+        raise ReturnPeriodIndexAuditError(
+            "OUTPUT_PATH_CONFLICT",
+            "--report-out and --manual-sql-out must resolve to different paths: "
+            f"{_redact_output_error_text(report_path)}",
+        )
+
+
+def _resolve_output_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return path.expanduser().absolute()
+
+
+def _require_live_target_evidence(rows: Sequence[Mapping[str, Any]], *, evidence_name: str) -> None:
+    if rows:
+        return
+    raise ReturnPeriodIndexAuditError(
+        "LIVE_DB_EVIDENCE_UNAVAILABLE",
+        f"Mandatory live DB target-table evidence returned no {evidence_name} rows for "
+        f"{TARGET_SCHEMA}.{TARGET_TABLE}.",
+    )
 
 
 def _execute_fetch_all(cursor: Any, sql: str) -> list[dict[str, Any]]:
