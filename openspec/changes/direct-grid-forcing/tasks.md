@@ -21,7 +21,12 @@
 ## 2. Direct-Grid Producer Path
 
 - [ ] 2.1 Add direct-grid mode resolution to `workers/forcing_producer/producer.py` while keeping existing IDW behavior unchanged for legacy assets.
-- [ ] 2.2 Check and update persistence compatibility for direct-grid mappings, including `met.interp_weight.method='direct_grid'`, `weight=1.0`, replacement semantics, indexes/constraints, and integration tests.
+- [ ] 2.2 (#543) Check and update persistence compatibility for direct-grid mappings, including `met.interp_weight.method='direct_grid'`, `weight=1.0`, replacement semantics, indexes/constraints, and integration tests.
+  - Required evidence: migration/DDL tests prove `met.interp_weight` can represent `method='direct_grid'`, `weight=1.0`, `grid_cell_id`, and `grid_signature` without narrowing existing IDW rows or downstream membership joins.
+  - Required evidence: store tests prove `load_interp_weights` round-trips direct-grid rows with `method`, `weight`, `grid_cell_id`, and `grid_signature` intact.
+  - Required evidence: store tests prove replacing an existing IDW snapshot with direct-grid rows for the same `(source_id, grid_id, model_id)` removes stale IDW rows and does not leave mixed-method rows in that scope.
+  - Required evidence: mixed-scope `upsert_interp_weights` still raises a stable store error before replacement, preserving no-partial-update semantics.
+  - Non-goal for #543: no direct-grid binding load/materialization, no producer value generation, no SHUD package writes, no forcing lineage/idempotency change.
 - [ ] 2.3 Load direct-grid station bindings and materialize them as exact one-cell mappings (`method='direct_grid'`, `weight=1.0`) or equivalent internal bindings, with tests proving IDW neighbor search is not called.
 - [ ] 2.4 Generate direct-grid station rows whose values equal bound canonical `grid_cell_id` values, preserving existing canonical physical conversions and adding direct-value fixture tests.
 - [ ] 2.5 Use direct-grid required `grid_cell_id`s to limit retained canonical values in the existing `_read_canonical_field` path; defer deeper NetCDF/xarray lazy indexed-read optimization to a separate performance task if profiling shows it is needed.

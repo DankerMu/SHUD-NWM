@@ -294,3 +294,71 @@ Regression rows:
 - binding checksum, model input package identity, `.sp.att` checksum, canonical `grid_id`, or canonical `grid_signature` mismatch -> validation failure with expected/actual details and no ready output.
 - `.sp.att FORC` references zero, negative, missing, or out-of-range station indexes -> validation failure with expected/actual details and no ready output.
 - legacy absent/explicit `idw` asset -> existing IDW path still succeeds.
+
+## Issue #543 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- `met.interp_weight` DDL/migrations and migration tests for direct-grid-compatible row shape.
+- `workers/forcing_producer/store.py` `load_interp_weights` and `upsert_interp_weights` replacement semantics.
+- Store/unit integration tests for exact one-cell mappings; no producer row generation in #543.
+
+Must preserve:
+- Existing IDW rows, uniqueness, load ordering, grid-signature stale-weight behavior, forecast/display/hindcast consumers, and current IDW producer tests remain compatible.
+- `upsert_interp_weights` continues to replace exactly one `(source_id, grid_id, model_id)` scope at a time.
+- #543 does not load direct-grid bindings, call producer materialization, write SHUD packages, or change lineage/idempotency behavior.
+
+Must add/change:
+- The persistence contract explicitly permits `method='direct_grid'` rows with `weight=1.0`, exactly one `grid_cell_id` per `(station_id, variable)`, and the current canonical `grid_signature`.
+- Schema/check/index behavior is reviewed and updated only if existing DDL cannot represent that contract.
+- Replacement semantics are documented and tested: direct-grid and IDW weights for the same `(source_id, grid_id, model_id)` scope are mutually replacing snapshots, not merged row sets.
+
+Selected risk packs:
+- Public API / CLI / script entry: not selected - no public route or CLI behavior changes in #543.
+- Config / project setup: not selected - no deployment setting or environment switch is added.
+- File IO / path safety / overwrite: not selected - #543 performs no file/object-store reads or writes.
+- Schema / columns / units / field names: selected - `met.interp_weight.method`, `weight`, `grid_signature`, uniqueness, and migration compatibility are the issue boundary.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - replace-one-scope semantics prevent stale IDW/direct-grid row mixing across reruns.
+- Resource limits / large input / discovery: not selected - no discovery or bulk grid ingest is added in #543.
+- Legacy compatibility / examples: selected - existing IDW weight persistence and downstream membership queries must continue unchanged.
+- Error handling / rollback / partial outputs: selected - invalid mixed-scope upserts must keep the existing stable store error and not partially replace rows.
+- Release / packaging / dependency compatibility: not selected - no new runtime dependency is expected.
+- Documentation / migration notes: selected - OpenSpec records direct-grid persistence and non-goals for later producer issues.
+- Geospatial / CRS / basin geometry: not selected - #543 stores already-authorized `grid_cell_id`s but does not validate geometry.
+- Hydro-met time series / forcing windows: not selected - no valid-time or forcing-window logic changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no value generation.
+- PostGIS / TimescaleDB domain behavior: selected - DB migration/DDL must represent direct-grid rows without breaking existing Timescale/PostGIS setup.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm surface.
+- External hydro-met providers / snapshot reproducibility: selected - source/grid/model scope and grid signature preserve provider-grid identity for GFS/IFS.
+- Run manifest / QC provenance: selected - persisted method/signature rows become later lineage inputs, but #543 does not write forcing lineage.
+- Published NHMS artifacts / display identity: not selected - no published display artifact changes.
+
+Boundary-surface checklist:
+- Shared helper roots: `InterpolationWeight` and store replacement helpers only; no producer materialization changes.
+- Public entrypoints: none in #543.
+- Read surfaces: `load_interp_weights` must round-trip IDW and direct-grid rows with method, weight, grid cell, and grid signature intact.
+- Write/delete/overwrite surfaces: `upsert_interp_weights` deletes and inserts only the supplied `(source_id, grid_id, model_id)` scope.
+- Producer/consumer evidence boundaries: downstream consumers that join `met.interp_weight` for station membership remain method-agnostic unless a later issue explicitly changes them.
+- Stale-state/idempotency boundaries: direct-grid rows carry `grid_signature`; same-scope replacement prevents stale IDW/direct-grid mixtures.
+- Unchanged downstream consumers: forecast API/display coverage/hindcast station membership queries remain compatible with existing columns and indexes.
+
+Invariant Matrix
+Governing invariant: Persisted interpolation weights for one `(source_id, grid_id, model_id)` scope represent a single coherent spatial mapping snapshot, either IDW or direct-grid, and direct-grid rows are exact one-cell weights.
+Source-of-truth identity/contract: `met.interp_weight` columns `source_id`, `grid_id`, `model_id`, `station_id`, `variable`, `grid_cell_id`, `weight`, `method`, and `grid_signature`, plus the unique key on `(source_id, grid_id, model_id, station_id, variable, grid_cell_id)`.
+Surfaces:
+- Producers: none changed in #543 - later issues will materialize direct-grid rows.
+- Validators/preflight: existing store mixed-scope guard and migration checks.
+- Storage/cache/query: `db/migrations/000005_met.sql`, follow-up migrations if needed, and `workers/forcing_producer/store.py`.
+- Public routes/entrypoints: none changed in #543.
+- Frontend/downstream consumers: forecast/display/hindcast membership joins must tolerate `method='direct_grid'` rows.
+- Failure paths/rollback/stale state: mixed-scope upsert raises `MetStoreError` before replacement; same-scope replacement removes stale rows from prior mapping method.
+- Evidence/audit/readiness: migration and store tests prove direct-grid row shape and replacement behavior.
+Regression rows:
+- upsert direct-grid rows with one `grid_cell_id` and `weight=1.0` per station/variable -> load returns `method='direct_grid'`, weight 1.0, and current `grid_signature`.
+- replace IDW rows with direct-grid rows for the same `(source_id, grid_id, model_id)` -> old IDW rows are removed and no mixed-method snapshot remains.
+- upsert rows spanning two `(source_id, grid_id, model_id)` scopes -> stable `MetStoreError` and no partial replacement.
+- existing IDW producer/store tests -> unchanged behavior and load ordering.
