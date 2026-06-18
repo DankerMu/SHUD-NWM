@@ -572,7 +572,58 @@ relation "flood.run_product_quality" does not exist
 - 正确修复是补齐 schema/migration 或调整 frequency 质量记录写入逻辑。
 - 在修复前，判断主展示是否可用以 `publish_tiles=succeeded`、`hydro.river_timeseries` 覆盖和 published logs/tiles 为准。
 
-### 8.2 IFS `SlowDown`
+### 8.2 `flood.return_period_result` 索引和空间回收
+
+#490 清理 no-curve 空行后，只是减少逻辑行数；PostgreSQL/TimescaleDB 不会因此自动把表文件、chunk 文件或索引文件空间还给文件系统。`flood.return_period_result` 的索引精简、`REINDEX`、`VACUUM FULL`、`pg_repack`、chunk rebuild 或 Timescale 压缩都必须作为单独维护窗口处理，不能放进应用启动、普通 migration、CI 或调度器 pass 自动执行。
+
+先只生成审计证据和手工 SQL：
+
+```bash
+cd /scratch/frd_muziyao/NWM
+set -a
+source infra/env/compute.host.env
+set +a
+
+uv run --no-sync python scripts/audit_return_period_indexes.py \
+  --connection-mode readonly \
+  --report-out /scratch/frd_muziyao/nhms-prod/workspace/db-maintenance/return-period-index-audit.json \
+  --manual-sql-out /scratch/frd_muziyao/nhms-prod/workspace/db-maintenance/return-period-index-maintenance.manual.sql
+```
+
+审计报告必须包含：
+
+- `flood.return_period_result` root relation/table/index/total size。
+- root index inventory、`pg_get_indexdef`、`pg_stat_user_indexes` 使用计数。
+- Timescale chunk/chunk-index size；如果 Timescale metadata 不可用，报告必须明确记录 unavailable reason，不能把 chunk 证据当作已完成。
+- summary、ranking/segments、timeline、GeoJSON fallback tile、MVT selected identity、valid-time discovery、latest-ready-run quality behavior 的 `EXPLAIN (ANALYZE, BUFFERS)` 模板。
+- `return_period_result_null_return_period_run_idx`、`return_period_result_null_warning_level_run_idx` 等 NULL partial index 只可标为 drop/investigate 候选，不能无证据静默删除。
+
+维护窗口前后都要保存同一组证据：
+
+```sql
+select current_database() as database_name,
+       pg_size_pretty(pg_database_size(current_database())) as database_size;
+
+select pg_size_pretty(pg_relation_size('flood.return_period_result'::regclass)) as table_size,
+       pg_size_pretty(pg_indexes_size('flood.return_period_result'::regclass)) as indexes_size,
+       pg_size_pretty(pg_total_relation_size('flood.return_period_result'::regclass)) as total_size;
+
+select idx.indexrelid::regclass::text as index_name,
+       pg_size_pretty(pg_relation_size(idx.indexrelid)) as index_size,
+       pg_get_indexdef(idx.indexrelid) as indexdef
+from pg_index idx
+where idx.indrelid = 'flood.return_period_result'::regclass
+order by pg_relation_size(idx.indexrelid) desc;
+```
+
+执行边界：
+
+- 使用 writer 连接前必须有明确维护窗口和人工审批。
+- 设置短 `lock_timeout`，失败时 `ROLLBACK`，先查 `pg_locks`/`pg_stat_activity`，不要在业务高峰反复重试。
+- `DROP INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` 不能放在 transaction block 内；普通 `DROP INDEX` 可进事务但锁更重，必须逐条审查。
+- 如果热路径 `EXPLAIN` 退化，停止后续索引变更，用报告中的 `pg_get_indexdef` 或原迁移 SQL 先恢复相关索引，再复测。
+
+### 8.3 IFS `SlowDown`
 
 现象：IFS availability probe 或 download 日志中出现 AWS/ECMWF `SlowDown` / HTTP 503。
 
@@ -586,7 +637,7 @@ relation "flood.run_product_quality" does not exist
 - 先看是否已进入 `download_source_cycle` 和 Slurm 是否仍在跑。
 - 若只是 probe 慢，不要误判为 scheduler 停。
 
-### 8.3 `/ghdc` 与计算节点边界
+### 8.4 `/ghdc` 与计算节点边界
 
 事实：
 
@@ -599,7 +650,7 @@ relation "flood.run_product_quality" does not exist
 - 如果作业因 `/ghdc` 路径不可见失败，说明运行根配置错了。
 - publish/copyback 到 `/ghdc` 应发生在控制面可见路径上，不应把 `/ghdc` 当作 sbatch runtime root。
 
-### 8.4 Heihe 底图和 DB 范围混用
+### 8.5 Heihe 底图和 DB 范围混用
 
 当前 DB 注册的 Heihe 使用 `/volume/data/nwm/Basins/heihe/input/heihe/gis/*`，范围覆盖下游额济纳。
 前端静态底图脚本历史上可能读取仓库 `SHUD/input/heihe/gis/*`，范围偏上游祁连。
@@ -609,7 +660,7 @@ relation "flood.run_product_quality" does not exist
 - DB/业务模型注册以 `/volume/data/nwm/Basins/...` 为准。
 - 静态底图产物需要改成同一 source-of-truth 或明确标注历史/诊断来源。
 
-### 8.5 Heihe 河段两层模型
+### 8.6 Heihe 河段两层模型
 
 Heihe DB 河网有两层：
 

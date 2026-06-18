@@ -73,6 +73,16 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
     assert not fallback_only_tests & set(selected)
 
 
+def test_select_tests_maps_return_period_index_audit_without_core_smoke_fallback() -> None:
+    selected = select_tests(["scripts/audit_return_period_indexes.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_return_period_index_audit.py",
+        "tests/test_select_ci_tests.py",
+    ]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
