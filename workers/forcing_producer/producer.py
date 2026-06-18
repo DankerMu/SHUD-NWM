@@ -233,6 +233,13 @@ class ForcingRepository(Protocol):
 
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None: ...
 
+    def ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None: ...
+
     def load_forcing_mapping_contract(
         self,
         *,
@@ -422,13 +429,28 @@ class ForcingProducer:
                 canonical_identity=canonical_identity,
             )
             if forcing_mapping_contract is not None:
-                self._validate_direct_grid_contract_for_production(
+                direct_grid_signature = self._validate_direct_grid_contract_for_production(
                     contract=forcing_mapping_contract,
                     model_id=model_id,
                     basin_version_id=resolved_basin_version_id,
                     products_by_variable=products_by_variable,
                 )
-                self._fail_direct_grid_not_implemented(forcing_mapping_contract)
+                self._enforce_limit(
+                    "station_count",
+                    len(forcing_mapping_contract.stations),
+                    self.config.max_station_count,
+                )
+                self._ensure_direct_grid_met_stations(
+                    basin_version_id=resolved_basin_version_id,
+                    contract=forcing_mapping_contract,
+                )
+                self._materialize_direct_grid_mappings(
+                    contract=forcing_mapping_contract,
+                    source_id=resolved_source_id,
+                    model_id=model_id,
+                    grid_signature=direct_grid_signature,
+                )
+                self._fail_direct_grid_values_not_implemented(forcing_mapping_contract)
 
             stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
             self._enforce_limit("station_count", len(stations), self.config.max_station_count)
@@ -614,11 +636,53 @@ class ForcingProducer:
             raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
         return contract
 
-    def _fail_direct_grid_not_implemented(self, contract: DirectGridForcingContract) -> None:
+    def _fail_direct_grid_values_not_implemented(self, contract: DirectGridForcingContract) -> None:
         raise ForcingProductionError(
-            "Direct-grid forcing production is not implemented after the issue #542 validation gate; "
+            "Direct-grid value generation is not implemented after the issue #544 mapping materialization boundary; "
             f"contract {contract.binding_checksum!r} selected direct_grid mode."
         )
+
+    def _materialize_direct_grid_mappings(
+        self,
+        *,
+        contract: DirectGridForcingContract,
+        source_id: str,
+        model_id: str,
+        grid_signature: str,
+    ) -> tuple[InterpolationWeight, ...]:
+        assert self.repository is not None
+        weights = tuple(
+            InterpolationWeight(
+                source_id=source_id,
+                grid_id=contract.grid_id,
+                model_id=model_id,
+                station_id=station.station_id,
+                variable=variable,
+                grid_cell_id=station.grid_cell_id,
+                weight=1.0,
+                method=DIRECT_GRID_MODE,
+                grid_signature=grid_signature,
+            )
+            for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
+            for variable in self.config.output_variables
+        )
+        self.repository.upsert_interp_weights(weights)
+        return weights
+
+    def _ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None:
+        assert self.repository is not None
+        ensure = getattr(self.repository, "ensure_direct_grid_met_stations", None)
+        if not callable(ensure):
+            raise ForcingProductionError(
+                "Direct-grid repository does not implement ensure_direct_grid_met_stations; "
+                "cannot make contract station ids compatible with met.met_station."
+            )
+        ensure(basin_version_id=basin_version_id, contract=contract)
 
     def _validate_direct_grid_contract_for_production(
         self,
@@ -627,7 +691,7 @@ class ForcingProducer:
         model_id: str,
         basin_version_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-    ) -> None:
+    ) -> str:
         assets = self._load_direct_grid_validation_assets(
             model_id=model_id,
             basin_version_id=basin_version_id,
@@ -678,6 +742,10 @@ class ForcingProducer:
             actual=grid_signature,
             source="canonical_product",
         )
+        self._validate_direct_grid_product_grids(
+            products_by_variable=products_by_variable,
+            expected_grid_points_by_source_grid=grid_points_by_source_grid,
+        )
 
         sp_att_content = _direct_grid_text_asset(assets.get("sp_att_content"), field="sp_att_content")
         forc_values = _parse_sp_att_forc_values(sp_att_content)
@@ -685,6 +753,34 @@ class ForcingProducer:
             forc_values,
             valid_indexes={station.shud_forcing_index for station in contract.stations},
         )
+        return grid_signature
+
+    def _validate_direct_grid_product_grids(
+        self,
+        *,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        expected_grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
+    ) -> None:
+        for products_for_variable in products_by_variable.values():
+            for product in products_for_variable.values():
+                source_grid = (product.source_id, product.grid_id)
+                expected_grid_points = expected_grid_points_by_source_grid[source_grid]
+                actual_grid_points = self._read_canonical_grid(product)
+                actual_signature = _grid_signature_hash(actual_grid_points)
+                expected_signature = _grid_signature_hash(expected_grid_points)
+                if actual_signature != expected_signature:
+                    raise _direct_grid_validation_error(
+                        "Direct-grid canonical product grid definition/order mismatch.",
+                        field="grid_signature",
+                        source="canonical_product",
+                        expected=expected_signature,
+                        actual=actual_signature,
+                        details={
+                            "canonical_product_id": product.canonical_product_id,
+                            "source_id": product.source_id,
+                            "grid_id": product.grid_id,
+                        },
+                    )
 
     def _load_direct_grid_validation_assets(
         self,
@@ -961,9 +1057,13 @@ class ForcingProducer:
         for (source_id, grid_id), grid_points in sorted(grid_points_by_source_grid.items()):
             grid_signature = grid_signature_by_source_grid[(source_id, grid_id)]
             existing = self.repository.load_interp_weights(source_id=source_id, grid_id=grid_id, model_id=model_id)
-            if _weights_cover(existing, stations, self.config.output_variables) and _weights_match_grid_signature(
-                existing,
-                grid_signature,
+            if (
+                _weights_are_idw(existing)
+                and _weights_cover(existing, stations, self.config.output_variables)
+                and _weights_match_grid_signature(
+                    existing,
+                    grid_signature,
+                )
             ):
                 _validate_weight_sums(existing)
                 weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
@@ -2942,6 +3042,12 @@ def _weights_match_grid_signature(weights: Sequence[InterpolationWeight], grid_s
     if not weights:
         return False
     return all(str(weight.grid_signature or "") == grid_signature for weight in weights)
+
+
+def _weights_are_idw(weights: Sequence[InterpolationWeight]) -> bool:
+    if not weights:
+        return False
+    return all(weight.method == IDW_MODE for weight in weights)
 
 
 def _validate_weight_sums(weights: Sequence[InterpolationWeight]) -> None:
