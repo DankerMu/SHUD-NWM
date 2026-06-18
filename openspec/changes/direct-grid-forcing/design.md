@@ -222,3 +222,75 @@ Regression rows:
 - explicit `idw` contract/absence -> existing IDW station/weight path is used.
 - explicit `direct_grid` contract -> producer stops at validation gate, records failure, and does not call IDW station/weight/output operations.
 - malformed/unsupported mapping mode from contract load -> producer fails closed and does not mark `forcing_ready`.
+
+## Issue #542 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- Direct-grid validation gate reached after #541 mode resolution and before any direct-grid value generation.
+- Contract/parser validation for station identity, source scope, WGS84 longitude convention, binding/model input identity, and duplicate-safe SHUD output filenames.
+- Producer validation against canonical product grid identity/signature and model input `.sp.att` ownership.
+- Failure-state tests proving direct-grid validation failures do not create ready outputs or fall back to IDW.
+
+Must preserve:
+- Legacy assets with absent mapping metadata and explicit `forcing_mapping_mode="idw"` continue through the existing IDW station loading, weight load/create, package output, and readiness path.
+- The #541 no-IDW-fallback invariant remains intact for explicit `direct_grid`.
+- #542 does not implement successful direct-grid row generation, direct-grid `met.interp_weight` persistence, SHUD direct-grid package writes, lineage/idempotency freshness, or SHUD runtime staging.
+
+Must add/change:
+- Direct-grid contracts are validated as complete, source-applicable, safe, basin/model-owned assets before production can proceed.
+- Validation checks include station required fields, contiguous unique `shud_forcing_index`, safe unique `forcing_filename`, finite WGS84-compatible coordinates with longitude normalized to `[-180, 180)`, `binding_checksum`, `model_input_package_id`, `.sp.att` checksum, canonical `grid_id`, canonical `grid_signature`, and `.sp.att FORC` references.
+- Failure details include the relevant field/source and expected/actual identity where a mismatch is detected.
+- Direct-grid validation errors update forecast cycle failure state and stop before IDW station loading, IDW weight computation, output package writes, forcing version readiness, components, or station timeseries.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `ForcingProducer.produce` is still the worker entrypoint and validation failures must surface as stable production failures.
+- Config / project setup: not selected - no deployment toggle or environment-level switch is introduced.
+- File IO / path safety / overwrite: selected - `.sp.att` identity and checksum are validated; SHUD forcing filenames must remain safe; #542 must not dereference arbitrary binding paths beyond explicit test fixtures.
+- Schema / columns / units / field names: selected - contract fields, canonical `grid_id`, `grid_signature`, `.sp.att FORC`, and expected/actual failure details form the behavior contract.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - validation must run before heavy IDW/output side effects and must not reuse stale ready outputs for direct-grid failures.
+- Resource limits / large input / discovery: selected - validation must remain bounded to basin/model asset data and direct-grid station bindings, not discover global grids.
+- Legacy compatibility / examples: selected - IDW behavior and legacy fake repositories remain supported.
+- Error handling / rollback / partial outputs: selected - every validation failure must be fail-closed with `failed_forcing` and no ready records/packages.
+- Release / packaging / dependency compatibility: not selected - no new runtime dependency is expected.
+- Documentation / migration notes: selected - tasks/design identify validation gates and non-goals for later producer/runtime issues.
+- Geospatial / CRS / basin geometry: selected - WGS84 longitude normalization, grid identity, grid signature, and `.sp.att FORC` ownership are core requirements.
+- Hydro-met time series / forcing windows: not selected - #542 does not generate direct-grid time series values.
+- SHUD numerical runtime / conservation / NaN: selected only for validation ownership - `.sp.att FORC` references must be valid, but runtime staging and numerical values are later tasks.
+- PostGIS / TimescaleDB domain behavior: not selected - direct-grid persistence changes are #543.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm behavior change.
+- External hydro-met providers / snapshot reproducibility: selected - canonical grid identity/signature must match current GFS/IFS source products.
+- Run manifest / QC provenance: selected - binding checksum, model input identity, `.sp.att` checksum, source scope, and grid signature are future lineage inputs and current validation evidence.
+- Published NHMS artifacts / display identity: not selected - no published display artifact changes.
+
+Boundary-surface checklist:
+- Shared helper roots: direct-grid contract helpers; any new validation helper must remain reusable by producer and tests without changing canonical conversion semantics.
+- Public entrypoints: `ForcingProducer.produce`; CLI remains a thin caller.
+- Read surfaces: repository contract loader, canonical product metadata/grid definitions, and model input `.sp.att` validation fixture/source.
+- Write/delete/overwrite surfaces: none for direct-grid success in #542; validation failures must not write packages, forcing versions, components, timeseries, or ready states.
+- Producer/consumer evidence boundaries: `failed_forcing` updates and exception details must identify field/source and expected/actual mismatch where applicable.
+- Stale-state/idempotency boundaries: direct-grid validation occurs before existing-ready reuse so stale IDW-ready versions cannot mask validation failures.
+- Unchanged downstream consumers: existing IDW package shape, IDW tests, IFS integration tests, and e2e legacy fake repositories remain compatible.
+
+Invariant Matrix
+Governing invariant: A model asset that explicitly selects `direct_grid` can proceed past the producer validation gate only when its binding contract, source scope, canonical grid identity/signature, model input identity, and `.sp.att FORC` ownership are mutually consistent; otherwise production fails closed without IDW fallback or ready outputs.
+Source-of-truth identity/contract: repository-returned direct-grid contract for the selected `model_id`, `basin_version_id`, and normalized `source_id`; canonical product grid metadata for the current source/cycle; model input package identity and `.sp.att` checksum/FORC values declared by the asset.
+Surfaces:
+- Producers: `ForcingProducer.produce` direct-grid branch ordering and validation before IDW station/weight/output work.
+- Validators/preflight: direct-grid contract parser, grid identity/signature checker, source scope checker, and `.sp.att FORC` validator.
+- Storage/cache/query: repository contract load only; #542 does not persist `direct_grid` weights or lineage.
+- Public routes/entrypoints: forcing CLI/orchestrator callers receive `ForcingProductionError` and a `failed_forcing` cycle status.
+- Frontend/downstream consumers: none in #542 - no API/frontend payload changes.
+- Failure paths/rollback/stale state: validation failures update failure state, include expected/actual details, and do not mark or reuse `forcing_ready` outputs.
+- Evidence/audit/readiness: tests cover each required validation failure, no-IDW fallback side effects, and legacy IDW compatibility.
+Regression rows:
+- valid direct-grid contract with matching source, grid identity/signature, model input identity, `.sp.att` checksum, and FORC range -> reaches the #542 validation-success boundary, then fails only because successful direct-grid row generation is a later issue.
+- missing station required field, duplicate filename, invalid longitude, or non-contiguous `shud_forcing_index` -> structured `DirectGridContractError` before ready output.
+- current source not in `applicable_source_ids` -> structured source-scope failure before ready output.
+- binding checksum, model input package identity, `.sp.att` checksum, canonical `grid_id`, or canonical `grid_signature` mismatch -> validation failure with expected/actual details and no ready output.
+- `.sp.att FORC` references zero, negative, missing, or out-of-range station indexes -> validation failure with expected/actual details and no ready output.
+- legacy absent/explicit `idw` asset -> existing IDW path still succeeds.

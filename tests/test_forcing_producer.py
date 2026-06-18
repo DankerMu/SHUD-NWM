@@ -53,6 +53,7 @@ class FakeForcingRepository:
         forcing_mapping_manifest: Mapping[str, Any] | None = None,
         forcing_mapping_contract: Any = None,
         forcing_mapping_contract_error: Exception | None = None,
+        direct_grid_validation_assets: Mapping[str, Any] | None = None,
         fail_next_timeseries_replace: bool = False,
     ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
@@ -68,6 +69,7 @@ class FakeForcingRepository:
         self.forcing_mapping_manifest = forcing_mapping_manifest
         self.forcing_mapping_contract = forcing_mapping_contract
         self.forcing_mapping_contract_error = forcing_mapping_contract_error
+        self.direct_grid_validation_assets = dict(direct_grid_validation_assets or {})
         self.interp_weights: list[InterpolationWeight] = []
         self.forcing_versions: dict[str, dict[str, Any]] = {}
         self.components: list[ForcingComponent] = []
@@ -189,6 +191,15 @@ class FakeForcingRepository:
         if self.forcing_mapping_manifest is not None:
             return load_forcing_mapping_contract_from_manifest(self.forcing_mapping_manifest, source_id=source_id)
         return self.forcing_mapping_contract
+
+    def load_direct_grid_validation_assets(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        contract: Any,
+    ) -> Mapping[str, Any]:
+        return dict(self.direct_grid_validation_assets)
 
     def get_forcing_version(self, *, source_id: str, cycle_time: Any, model_id: str) -> dict[str, Any] | None:
         for record in self.forcing_versions.values():
@@ -978,6 +989,45 @@ def _direct_grid_manifest() -> dict[str, Any]:
     }
 
 
+def _direct_grid_manifest_for_default_grid() -> dict[str, Any]:
+    manifest = _direct_grid_manifest()
+    manifest.update(
+        {
+            "binding_checksum": "sha256:binding-actual",
+            "sp_att_checksum": "sha256:sp-att-actual",
+            "grid_id": "grid_a",
+            "grid_signature": "sha256:grid-signature-actual",
+        }
+    )
+    manifest["station_bindings"][0].update(
+        {"grid_id": "grid_a", "grid_cell_id": "0", "longitude": -75.0, "latitude": 40.0}
+    )
+    manifest["station_bindings"][1].update(
+        {"grid_id": "grid_a", "grid_cell_id": "1", "longitude": -74.5, "latitude": 40.2}
+    )
+    return manifest
+
+
+def _sp_att_content(forc_values: tuple[str | int, ...] = (1, 2)) -> str:
+    rows = "\n".join(f"{index}\t0\t0\t0\t{value}" for index, value in enumerate(forc_values, start=1))
+    return f"2 1\nTRI\tA\tB\tC\tFORC\n{rows}\n"
+
+
+def _direct_grid_validation_assets(
+    *,
+    binding_checksum: str = "binding-actual",
+    model_input_package_id: str = "model-input-demo-v1",
+    sp_att_checksum: str = "sp-att-actual",
+    sp_att_content: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "binding_checksum": binding_checksum,
+        "model_input_package_id": model_input_package_id,
+        "sp_att_checksum": sp_att_checksum,
+        "sp_att_content": _sp_att_content() if sp_att_content is None else sp_att_content,
+    }
+
+
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
@@ -1495,14 +1545,23 @@ def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Pat
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
-def test_producer_direct_grid_mapping_mode_fails_closed_before_idw_side_effects(tmp_path: Path) -> None:
+def test_producer_direct_grid_mapping_mode_validates_then_fails_closed_before_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
     store, repository = _build_repository(
         tmp_path,
-        forcing_mapping_contract=parse_direct_grid_forcing_contract(_direct_grid_manifest(), source_id="GFS"),
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
     )
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="Direct-grid forcing production is not implemented"):
+    with pytest.raises(ForcingProductionError, match="not implemented after the issue #542 validation gate"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert repository.mapping_contract_calls == [
@@ -1518,6 +1577,98 @@ def test_producer_direct_grid_mapping_mode_fails_closed_before_idw_side_effects(
     assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+
+
+def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    binding_content = b'{"schema":"direct-grid-binding-v1"}'
+    sp_att_content = _sp_att_content().encode("utf-8")
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest.update(
+        {
+            "binding_checksum": f"sha256:{sha256_bytes(binding_content)}",
+            "sp_att_path": "models/demo_model/input/qhh.sp.att",
+            "sp_att_checksum": f"sha256:{sha256_bytes(sp_att_content)}",
+        }
+    )
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    class ResourceProfileBackedRepository(FakeForcingRepository):
+        def __init__(self, *, stations: tuple[MetStation, ...], products: tuple[CanonicalProduct, ...]) -> None:
+            super().__init__(stations=stations, products=products)
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            self.statement = statement
+            self.parameters = parameters
+            return {"resource_profile": {"direct_grid_forcing": manifest}}
+
+        def load_forcing_mapping_contract(
+            self,
+            *,
+            model_id: str,
+            basin_version_id: str,
+            source_id: str | None = None,
+        ) -> Any:
+            self.mapping_contract_calls.append(
+                {"model_id": model_id, "basin_version_id": basin_version_id, "source_id": source_id}
+            )
+            return PsycopgForcingRepository.load_forcing_mapping_contract(
+                self,
+                model_id=model_id,
+                basin_version_id=basin_version_id,
+                source_id=source_id,
+            )
+
+        def load_direct_grid_validation_assets(
+            self,
+            *,
+            model_id: str,
+            basin_version_id: str,
+            contract: Any,
+        ) -> Mapping[str, Any]:
+            return PsycopgForcingRepository.load_direct_grid_validation_assets(
+                self,
+                model_id=model_id,
+                basin_version_id=basin_version_id,
+                contract=contract,
+            )
+
+    store = LocalObjectStore(tmp_path)
+    store.write_bytes_atomic(contract.binding_uri, binding_content)
+    store.write_bytes_atomic(contract.sp_att_path, sp_att_content)
+    products = _write_canonical_products(store)
+    repository = ResourceProfileBackedRepository(
+        stations=(),
+        products=products,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    assets = repository.load_direct_grid_validation_assets(
+        model_id="demo_model",
+        basin_version_id="basin_v1",
+        contract=contract,
+    )
+    assert assets["model_input_package_id"] == "model-input-demo-v1"
+
+    with pytest.raises(ForcingProductionError, match="not implemented after the issue #542 validation gate"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert "FROM core.model_instance" in repository.statement
+    assert "resource_profile" in repository.statement
+    assert "met.interp_weight" not in repository.statement
+    assert repository.parameters == ("demo_model", "basin_v1")
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.forcing_versions == {}
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
 def test_producer_rejects_root_direct_grid_manifest_before_station_loading(tmp_path: Path) -> None:
@@ -1589,6 +1740,199 @@ def test_producer_malformed_mapping_mode_error_fails_closed_without_ready_versio
     assert "Invalid forcing mapping contract" in repository.cycle_updates[-1]["error_message"]
 
 
+@pytest.mark.parametrize(
+    ("asset_overrides", "manifest_overrides", "expected_field", "expected_text"),
+    [
+        ({"binding_checksum": "different-binding"}, {}, "binding_checksum", "binding-actual"),
+        ({"model_input_package_id": "other-model-input"}, {}, "model_input_package_id", "model-input-demo-v1"),
+        ({"sp_att_checksum": "different-sp-att"}, {}, "sp_att_checksum", "sp-att-actual"),
+        ({}, {"grid_id": "other_grid"}, "grid_id", "other_grid"),
+        ({}, {"grid_signature": "sha256:stale-grid"}, "grid_signature", "sha256:stale-grid"),
+    ],
+)
+def test_producer_direct_grid_validation_identity_mismatches_fail_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asset_overrides: Mapping[str, Any],
+    manifest_overrides: Mapping[str, Any],
+    expected_field: str,
+    expected_text: str,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest.update(manifest_overrides)
+    if "grid_id" in manifest_overrides:
+        for station in manifest["station_bindings"]:
+            station["grid_id"] = manifest_overrides["grid_id"]
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    assets = _direct_grid_validation_assets()
+    assets.update(asset_overrides)
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=assets,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert f'"field":"{expected_field}"' in message
+    assert expected_text in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("sp_att_content", "expected_actual"),
+    [
+        (_sp_att_content((0, 1)), "0"),
+        (_sp_att_content((-1, 1)), "-1"),
+        ("2 1\nTRI\tA\tB\tC\tFORC\n1\t0\t0\t0\n", "missing"),
+        (_sp_att_content(("x", 1)), "x"),
+        (_sp_att_content((3, 1)), "3"),
+    ],
+)
+def test_producer_direct_grid_validation_sp_att_forc_invalid_cases_fail_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sp_att_content: str,
+    expected_actual: str,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(sp_att_content=sp_att_content),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert '"field":"sp_att.FORC"' in message
+    assert expected_actual in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_validation_sp_att_forc_missing_bound_index_fails_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(sp_att_content=_sp_att_content((1, 1))),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert '"field":"sp_att.FORC"' in message
+    assert '"expected":[1,2]' in message
+    assert '"actual":[1]' in message
+    assert '"missing_indexes":[2]' in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_fallback_oversized_binding_fails_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    sp_att_content = _sp_att_content().encode("utf-8")
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest.update(
+        {
+            "binding_checksum": f"sha256:{sha256_bytes(b'expected')}",
+            "sp_att_path": "models/demo_model/input/qhh.sp.att",
+            "sp_att_checksum": f"sha256:{sha256_bytes(sp_att_content)}",
+        }
+    )
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    store, repository = _build_repository(tmp_path, forcing_mapping_contract=contract)
+    store.write_bytes_atomic(contract.binding_uri, b"x" * 17)
+    store.write_bytes_atomic(contract.sp_att_path, sp_att_content)
+
+    class RepositoryWithoutValidationLoader:
+        def __init__(self, wrapped: FakeForcingRepository) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "load_direct_grid_validation_assets":
+                raise AttributeError(name)
+            return getattr(self._wrapped, name)
+
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3, max_manifest_bytes=16),
+        repository=RepositoryWithoutValidationLoader(repository),
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert '"field":"validation_assets"' in message
+    assert "exceeds read limit" in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_validation_runs_before_stale_existing_ready_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    assert first.status == "forcing_ready"
+    row_count = len(repository.timeseries)
+    repository.forcing_mapping_contract = parse_direct_grid_forcing_contract(
+        _direct_grid_manifest_for_default_grid(),
+        source_id="GFS",
+    )
+    repository.direct_grid_validation_assets = _direct_grid_validation_assets(binding_checksum="stale-binding")
+    repository.load_station_count = 0
+    repository.load_weight_count = 0
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert "DIRECT_GRID_VALIDATION_FAILED" in str(exc_info.value)
+    assert '"field":"binding_checksum"' in str(exc_info.value)
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert len(repository.timeseries) == row_count
+    assert repository.upsert_count == 1
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
 @pytest.mark.parametrize("field_name", ["longitude", "latitude", "x", "y", "z"])
 @pytest.mark.parametrize(
     "bad_value",
@@ -1646,6 +1990,43 @@ def test_direct_grid_contract_station_coordinates_accept_finite_ints_and_floats(
     assert station.x == 1.0
     assert station.y == 2.25
     assert station.z == -9999.0
+
+
+def test_direct_grid_contract_station_longitude_is_normalized_for_shud_output() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][0]["longitude"] = 181.25
+
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert contract.stations[0].longitude == pytest.approx(-178.75)
+    assert contract.stations[0].grid_cell_id == "cell-001"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "expected_range"),
+    [
+        ("longitude", -181.0, "[-180, 360] before normalization"),
+        ("longitude", 360.1, "[-180, 360] before normalization"),
+        ("latitude", -90.1, "[-90, 90]"),
+        ("latitude", 90.1, "[-90, 90]"),
+    ],
+)
+def test_direct_grid_contract_station_coordinates_must_be_in_wgs84_bounds(
+    field_name: str,
+    bad_value: float,
+    expected_range: str,
+) -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][0][field_name] = bad_value
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    error = exc_info.value.to_dict()
+    assert error["field"] == field_name
+    assert error["station_id"] == "qhh_forc_001"
+    assert error["value"] == bad_value
+    assert error["expected_range"] == expected_range
 
 
 @pytest.mark.parametrize("missing_field", REQUIRED_MANIFEST_FIELDS)
@@ -1970,6 +2351,29 @@ def test_direct_grid_contract_non_contiguous_shud_forcing_index_is_rejected() ->
         "actual_indexes": (1, 3),
         "expected_indexes": (1, 2),
     }
+
+
+def test_direct_grid_contract_duplicate_shud_forcing_index_is_rejected() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][1]["shud_forcing_index"] = 1
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "shud_forcing_index"
+    assert exc_info.value.details["actual_indexes"] == (1, 1)
+
+
+def test_direct_grid_contract_duplicate_forcing_filename_is_rejected() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][1]["forcing_filename"] = manifest["station_bindings"][0]["forcing_filename"]
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "forcing_filename"
+    assert exc_info.value.station_id == "qhh_forc_002"
+    assert exc_info.value.to_dict()["forcing_filename"] == "X100.95Y36.25.csv"
 
 
 def test_direct_grid_contract_legacy_absence_returns_none_for_idw_compatibility() -> None:
@@ -2336,6 +2740,24 @@ def _build_producer(
     return ForcingProducer(config=config, repository=repository, object_store=store)
 
 
+def _assert_direct_grid_failure_without_idw_or_ready_outputs(
+    repository: FakeForcingRepository,
+    tmp_path: Path,
+) -> None:
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+    assert "DIRECT_GRID_VALIDATION_FAILED" in repository.cycle_updates[-1]["error_message"]
+
+
 def _build_repository(
     tmp_path: Path,
     *,
@@ -2346,6 +2768,7 @@ def _build_repository(
     forcing_mapping_manifest: Mapping[str, Any] | None = None,
     forcing_mapping_contract: Any = None,
     forcing_mapping_contract_error: Exception | None = None,
+    direct_grid_validation_assets: Mapping[str, Any] | None = None,
     fail_next_timeseries_replace: bool = False,
     include_geographic_coords: bool = True,
     values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
@@ -2385,6 +2808,7 @@ def _build_repository(
         forcing_mapping_manifest=forcing_mapping_manifest,
         forcing_mapping_contract=forcing_mapping_contract,
         forcing_mapping_contract_error=forcing_mapping_contract_error,
+        direct_grid_validation_assets=direct_grid_validation_assets,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
     )
     return store, repository

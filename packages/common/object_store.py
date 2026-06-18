@@ -125,6 +125,9 @@ class LocalObjectStore:
     def checksum(self, key_or_uri: str) -> str:
         return self.size_and_checksum(key_or_uri)[1]
 
+    def checksum_limited(self, key_or_uri: str, *, max_bytes: int) -> str:
+        return self.size_and_checksum_limited(key_or_uri, max_bytes=max_bytes)[1]
+
     def size_and_checksum(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> tuple[int, str]:
         digest = hashlib.sha256()
         size_bytes = 0
@@ -132,6 +135,17 @@ class LocalObjectStore:
             digest.update(chunk)
             size_bytes += len(chunk)
         return size_bytes, digest.hexdigest()
+
+    def size_and_checksum_limited(
+        self,
+        key_or_uri: str,
+        *,
+        max_bytes: int,
+    ) -> tuple[int, str]:
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative.")
+        content = self.read_bytes_limited(key_or_uri, max_bytes=max_bytes)
+        return len(content), sha256_bytes(content)
 
     def size(self, key_or_uri: str) -> int:
         path = self.resolve_path(key_or_uri)

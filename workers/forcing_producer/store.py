@@ -357,6 +357,59 @@ class PsycopgForcingRepository:
             allow_root_direct_grid=False,
         )
 
+    def load_direct_grid_validation_assets(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> Mapping[str, Any]:
+        row = self._fetch_optional(
+            """
+            SELECT resource_profile
+            FROM core.model_instance
+            WHERE model_id = %s
+              AND basin_version_id = %s
+            """,
+            (model_id, basin_version_id),
+        )
+        if row is None:
+            raise MetStoreError(
+                f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
+            )
+        resource_profile = row.get("resource_profile")
+        if resource_profile is None:
+            resource_profile = {}
+        if not isinstance(resource_profile, Mapping):
+            raise DirectGridContractError(
+                "Model resource_profile must be a JSON object.",
+                details={
+                    "model_id": model_id,
+                    "basin_version_id": basin_version_id,
+                    "actual_type": type(resource_profile).__name__,
+                },
+            )
+        source_id = contract.applicable_source_ids[0] if len(contract.applicable_source_ids) == 1 else None
+        authoritative_contract = load_forcing_mapping_contract_from_manifest(
+            resource_profile,
+            source_id=source_id,
+            allow_root_direct_grid=False,
+        )
+        if authoritative_contract is None:
+            return {}
+        if authoritative_contract != contract:
+            raise DirectGridContractError(
+                "Direct-grid validation contract does not match model resource_profile.",
+                field="direct_grid_forcing",
+                details={
+                    "model_id": model_id,
+                    "basin_version_id": basin_version_id,
+                },
+            )
+        return {
+            "model_input_package_id": authoritative_contract.model_input_package_id,
+        }
+
     def get_forcing_version(
         self,
         *,

@@ -361,8 +361,8 @@ def _station_bindings(
                 station_id=station_id,
                 shud_forcing_index=forcing_index,
                 forcing_filename=filename,
-                longitude=_required_float(raw_station, "longitude", source_id=source_id, station_id=station_id),
-                latitude=_required_float(raw_station, "latitude", source_id=source_id, station_id=station_id),
+                longitude=_required_longitude(raw_station, source_id=source_id, station_id=station_id),
+                latitude=_required_latitude(raw_station, source_id=source_id, station_id=station_id),
                 x=_required_float(raw_station, "x", source_id=source_id, station_id=station_id),
                 y=_required_float(raw_station, "y", source_id=source_id, station_id=station_id),
                 z=_required_float(raw_station, "z", source_id=source_id, station_id=station_id),
@@ -435,6 +435,43 @@ def _required_float(
             details={"actual_type": type(value).__name__, "value": repr(value)},
         )
     return parsed_value
+
+
+def _required_longitude(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str | None,
+    station_id: str,
+) -> float:
+    longitude = _required_float(payload, "longitude", source_id=source_id, station_id=station_id)
+    if not -180.0 <= longitude <= 360.0:
+        raise DirectGridContractError(
+            "Direct-grid station longitude must be within WGS84-compatible bounds.",
+            field="longitude",
+            source_id=source_id,
+            station_id=station_id,
+            details={"value": longitude, "expected_range": "[-180, 360] before normalization"},
+        )
+    normalized = ((longitude + 180.0) % 360.0) - 180.0
+    return 0.0 if normalized == -0.0 else normalized
+
+
+def _required_latitude(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str | None,
+    station_id: str,
+) -> float:
+    latitude = _required_float(payload, "latitude", source_id=source_id, station_id=station_id)
+    if not -90.0 <= latitude <= 90.0:
+        raise DirectGridContractError(
+            "Direct-grid station latitude must be within WGS84 bounds.",
+            field="latitude",
+            source_id=source_id,
+            station_id=station_id,
+            details={"value": latitude, "expected_range": "[-90, 90]"},
+        )
+    return latitude
 
 
 def _safe_forcing_filename(filename: str) -> bool:

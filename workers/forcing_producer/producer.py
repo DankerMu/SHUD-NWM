@@ -241,6 +241,14 @@ class ForcingRepository(Protocol):
         source_id: str | None = None,
     ) -> DirectGridForcingContract | None: ...
 
+    def load_direct_grid_validation_assets(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> Mapping[str, Any]: ...
+
     def get_forcing_version(
         self,
         *,
@@ -378,11 +386,7 @@ class ForcingProducer:
                 basin_version_id=resolved_basin_version_id,
                 source_id=resolved_source_id,
             )
-            if forcing_mapping_contract is not None:
-                self._fail_direct_grid_not_implemented(forcing_mapping_contract)
 
-            stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
-            self._enforce_limit("station_count", len(stations), self.config.max_station_count)
             required_variables = self._required_canonical_variables(resolved_source_id)
             canonical_to_forcing = self._canonical_to_forcing(resolved_source_id)
             products_by_variable = self._load_canonical_products(
@@ -417,6 +421,17 @@ class ForcingProducer:
                 canonical_product_id=canonical_product_id,
                 canonical_identity=canonical_identity,
             )
+            if forcing_mapping_contract is not None:
+                self._validate_direct_grid_contract_for_production(
+                    contract=forcing_mapping_contract,
+                    model_id=model_id,
+                    basin_version_id=resolved_basin_version_id,
+                    products_by_variable=products_by_variable,
+                )
+                self._fail_direct_grid_not_implemented(forcing_mapping_contract)
+
+            stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
+            self._enforce_limit("station_count", len(stations), self.config.max_station_count)
             lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
             expected_valid_times = _expected_forcing_valid_times(
                 resolved_source_id,
@@ -601,9 +616,123 @@ class ForcingProducer:
 
     def _fail_direct_grid_not_implemented(self, contract: DirectGridForcingContract) -> None:
         raise ForcingProductionError(
-            "Direct-grid forcing production is not implemented in issue #541; "
+            "Direct-grid forcing production is not implemented after the issue #542 validation gate; "
             f"contract {contract.binding_checksum!r} selected direct_grid mode."
         )
+
+    def _validate_direct_grid_contract_for_production(
+        self,
+        *,
+        contract: DirectGridForcingContract,
+        model_id: str,
+        basin_version_id: str,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    ) -> None:
+        assets = self._load_direct_grid_validation_assets(
+            model_id=model_id,
+            basin_version_id=basin_version_id,
+            contract=contract,
+        )
+        _validate_direct_grid_identity(
+            field="binding_checksum",
+            expected=contract.binding_checksum,
+            actual=assets.get("binding_checksum"),
+            source="binding_uri",
+        )
+        _validate_direct_grid_identity(
+            field="model_input_package_id",
+            expected=contract.model_input_package_id,
+            actual=assets.get("model_input_package_id"),
+            source="model_input_package",
+        )
+        _validate_direct_grid_identity(
+            field="sp_att_checksum",
+            expected=contract.sp_att_checksum,
+            actual=assets.get("sp_att_checksum"),
+            source="sp_att",
+        )
+
+        grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
+        source_grid_keys = tuple(sorted(grid_points_by_source_grid))
+        grid_ids = tuple(sorted({grid_id for _, grid_id in source_grid_keys}))
+        actual_grid_id = grid_ids[0] if len(grid_ids) == 1 else "mixed"
+        _validate_direct_grid_identity(
+            field="grid_id",
+            expected=contract.grid_id,
+            actual=actual_grid_id,
+            source="canonical_product",
+        )
+        if len(source_grid_keys) != 1:
+            raise _direct_grid_validation_error(
+                "Direct-grid canonical products must use one source/grid identity.",
+                field="grid_id",
+                source="canonical_product",
+                expected=contract.grid_id,
+                actual=actual_grid_id,
+                details={"canonical_source_grids": source_grid_keys},
+            )
+        grid_signature = _grid_signature_hash(grid_points_by_source_grid[source_grid_keys[0]])
+        _validate_direct_grid_identity(
+            field="grid_signature",
+            expected=contract.grid_signature,
+            actual=grid_signature,
+            source="canonical_product",
+        )
+
+        sp_att_content = _direct_grid_text_asset(assets.get("sp_att_content"), field="sp_att_content")
+        forc_values = _parse_sp_att_forc_values(sp_att_content)
+        _validate_sp_att_forc_values(
+            forc_values,
+            valid_indexes={station.shud_forcing_index for station in contract.stations},
+        )
+
+    def _load_direct_grid_validation_assets(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> Mapping[str, Any]:
+        assert self.repository is not None
+        loader = getattr(self.repository, "load_direct_grid_validation_assets", None)
+        assets: dict[str, Any] = {}
+        if callable(loader):
+            loaded_assets = loader(model_id=model_id, basin_version_id=basin_version_id, contract=contract)
+            if not isinstance(loaded_assets, Mapping):
+                raise _direct_grid_validation_error(
+                    "Direct-grid validation assets must be returned as a mapping.",
+                    field="validation_assets",
+                    source="repository",
+                    expected="mapping",
+                    actual=type(loaded_assets).__name__,
+                )
+            assets.update(dict(loaded_assets))
+
+        assets.setdefault("model_input_package_id", contract.model_input_package_id)
+        try:
+            if contract.binding_uri and not assets.get("binding_checksum"):
+                assets["binding_checksum"] = self.object_store.checksum_limited(
+                    contract.binding_uri,
+                    max_bytes=self.config.max_manifest_bytes,
+                )
+            if contract.sp_att_path and not assets.get("sp_att_content"):
+                sp_att_content = self.object_store.read_bytes_limited(
+                    contract.sp_att_path,
+                    max_bytes=self.config.max_manifest_bytes,
+                )
+                assets["sp_att_content"] = sp_att_content
+            if assets.get("sp_att_content") is not None and not assets.get("sp_att_checksum"):
+                sp_att_content = _direct_grid_text_asset(assets["sp_att_content"], field="sp_att_content")
+                assets["sp_att_checksum"] = sha256_bytes(sp_att_content.encode("utf-8"))
+        except (OSError, ObjectStoreError, TypeError, ValueError) as error:
+            raise _direct_grid_validation_error(
+                "Failed to load direct-grid validation assets.",
+                field="validation_assets",
+                source="object_store",
+                expected="readable binding/sp_att assets",
+                actual=str(error),
+            ) from error
+        return assets
 
     def _validate_scheduler_canonical_identity(
         self,
@@ -2340,6 +2469,170 @@ def _validate_canonical_product_units(
                 )
     if mismatches:
         raise ForcingProductionError(f"Canonical product unit mismatch: {', '.join(mismatches[:10])}")
+
+
+def _validate_direct_grid_identity(
+    *,
+    field: str,
+    expected: Any,
+    actual: Any,
+    source: str,
+) -> None:
+    expected_text = str(expected or "").strip()
+    actual_text = str(actual or "").strip()
+    if field.endswith("checksum"):
+        expected_compare = _normalize_checksum_identity(expected_text)
+        actual_compare = _normalize_checksum_identity(actual_text)
+    else:
+        expected_compare = expected_text
+        actual_compare = actual_text
+    if not actual_text or actual_compare != expected_compare:
+        raise _direct_grid_validation_error(
+            f"Direct-grid {field} mismatch.",
+            field=field,
+            source=source,
+            expected=expected_text,
+            actual=actual_text,
+        )
+
+
+def _normalize_checksum_identity(value: str) -> str:
+    return value.removeprefix("sha256:").strip().lower()
+
+
+def _direct_grid_validation_error(
+    message: str,
+    *,
+    field: str,
+    source: str,
+    expected: Any,
+    actual: Any,
+    details: Mapping[str, Any] | None = None,
+) -> ForcingProductionError:
+    payload = {
+        "error_code": "DIRECT_GRID_VALIDATION_FAILED",
+        "message": message,
+        "field": field,
+        "source": source,
+        "expected": _json_round_trip(expected),
+        "actual": _json_round_trip(actual),
+    }
+    payload.update(dict(details or {}))
+    return ForcingProductionError(f"Direct-grid validation failed: {_json_bytes(payload).decode('utf-8')}")
+
+
+def _direct_grid_text_asset(value: Any, *, field: str) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise _direct_grid_validation_error(
+                "Direct-grid text asset must be UTF-8.",
+                field=field,
+                source="repository",
+                expected="UTF-8 text",
+                actual="non-UTF-8 bytes",
+            ) from error
+    if isinstance(value, str):
+        return value
+    raise _direct_grid_validation_error(
+        "Direct-grid validation asset is missing.",
+        field=field,
+        source="repository",
+        expected="text",
+        actual=type(value).__name__,
+    )
+
+
+def _parse_sp_att_forc_values(content: str) -> tuple[tuple[int, int], ...]:
+    lines = content.splitlines()
+    if len(lines) < 3:
+        raise _direct_grid_validation_error(
+            "Direct-grid .sp.att is missing FORC data rows.",
+            field="sp_att.FORC",
+            source="sp_att",
+            expected="FORC column with triangle rows",
+            actual="missing",
+        )
+    header_tokens = lines[1].split()
+    try:
+        forcing_column = next(index for index, token in enumerate(header_tokens) if token.upper() == "FORC")
+    except StopIteration:
+        forcing_column = 4
+    values: list[tuple[int, int]] = []
+    for line_number, line in enumerate(lines[2:], start=3):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) <= forcing_column:
+            raise _direct_grid_validation_error(
+                "Direct-grid .sp.att row is missing FORC.",
+                field="sp_att.FORC",
+                source="sp_att",
+                expected="integer shud_forcing_index",
+                actual="missing",
+                details={"line_number": line_number},
+            )
+        raw_value = parts[forcing_column]
+        try:
+            value = int(raw_value)
+        except ValueError as error:
+            raise _direct_grid_validation_error(
+                "Direct-grid .sp.att FORC must be an integer.",
+                field="sp_att.FORC",
+                source="sp_att",
+                expected="integer shud_forcing_index",
+                actual=raw_value,
+                details={"line_number": line_number},
+            ) from error
+        values.append((line_number, value))
+    if not values:
+        raise _direct_grid_validation_error(
+            "Direct-grid .sp.att is missing FORC data rows.",
+            field="sp_att.FORC",
+            source="sp_att",
+            expected="at least one FORC value",
+            actual="missing",
+        )
+    return tuple(values)
+
+
+def _validate_sp_att_forc_values(
+    forc_values: Sequence[tuple[int, int]],
+    *,
+    valid_indexes: AbstractSet[int],
+) -> None:
+    expected = tuple(sorted(valid_indexes))
+    actual = tuple(sorted({value for _, value in forc_values}))
+    for line_number, value in forc_values:
+        if value <= 0:
+            raise _direct_grid_validation_error(
+                "Direct-grid .sp.att FORC must be positive.",
+                field="sp_att.FORC",
+                source="sp_att",
+                expected=expected,
+                actual=value,
+                details={"line_number": line_number},
+            )
+        if value not in valid_indexes:
+            raise _direct_grid_validation_error(
+                "Direct-grid .sp.att FORC references an unknown shud_forcing_index.",
+                field="sp_att.FORC",
+                source="sp_att",
+                expected=expected,
+                actual=value,
+                details={"line_number": line_number},
+            )
+    missing = tuple(index for index in expected if index not in actual)
+    if missing:
+        raise _direct_grid_validation_error(
+            "Direct-grid .sp.att FORC is missing bound shud_forcing_index values.",
+            field="sp_att.FORC",
+            source="sp_att",
+            expected=expected,
+            actual=actual,
+            details={"missing_indexes": missing},
+        )
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:
