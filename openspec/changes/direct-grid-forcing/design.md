@@ -154,3 +154,71 @@ Regression rows:
 - valid direct-grid manifest with two contiguous station bindings and source `GFS` -> parsed contract preserves every identity and station `grid_cell_id`.
 - manifest missing `binding_checksum`, `grid_signature`, station `grid_cell_id`, or current source scope -> structured contract error with field/source detail.
 - legacy asset without direct-grid contract -> repository interface returns no direct-grid contract or IDW-compatible absence without changing existing IDW behavior.
+
+## Issue #541 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- `workers/forcing_producer/producer.py` production entrypoint mode resolution before spatial mapping work.
+- Repository contract consumption via `load_forcing_mapping_contract(model_id, basin_version_id, source_id)`.
+- Unit tests proving legacy IDW compatibility, explicit IDW compatibility, direct-grid selection, and unsupported/malformed mode failure behavior.
+
+Must preserve:
+- Existing model assets without direct-grid metadata continue through the current IDW station loading, canonical product validation, weight load/create, output, and readiness path.
+- Explicit `forcing_mapping_mode="idw"` behaves the same as absent metadata.
+- No direct-grid value generation, exact mapping materialization, `met.interp_weight` direct-grid persistence, lineage/idempotency change, or SHUD runtime staging behavior is introduced in #541.
+
+Must add/change:
+- Producer resolves mapping mode from the authoritative repository contract entrypoint after model/basin identity is known and before IDW station/weight work that direct-grid must not fallback into.
+- Explicit `direct_grid` selects a direct-grid validation gate placeholder and fails closed until later issues implement successful validation/value generation.
+- Unsupported mapping mode or malformed direct-grid contract errors surface as forcing production failures, update the forecast cycle failure state, and do not mark outputs ready.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `ForcingProducer.produce` is the worker entrypoint used by CLI/orchestration.
+- Config / project setup: not selected - no deployment setting or environment switch is added.
+- File IO / path safety / overwrite: not selected - #541 does not read binding files or write new path classes beyond existing IDW path.
+- Schema / columns / units / field names: selected - `forcing_mapping_mode` values and contract error fields drive control flow.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - mode must be resolved before IDW weights/output readiness side effects.
+- Resource limits / large input / discovery: not selected - station binding parsing limits were #540; #541 does not add discovery.
+- Legacy compatibility / examples: selected - absent/explicit IDW assets must keep existing behavior.
+- Error handling / rollback / partial outputs: selected - direct-grid/unsupported failures must not create ready outputs and must update failure state.
+- Release / packaging / dependency compatibility: not selected - no dependency/package change.
+- Documentation / migration notes: selected - OpenSpec fixture documents this PR boundary and later tasks.
+- Geospatial / CRS / basin geometry: not selected - no grid geometry validation in #541.
+- Hydro-met time series / forcing windows: not selected - no time-window behavior changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no numerical value generation.
+- PostGIS / TimescaleDB domain behavior: not selected - no persistence/schema changes.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm surface.
+- External hydro-met providers / snapshot reproducibility: selected - mode resolution is source-aware through `source_id` passed to the contract loader.
+- Run manifest / QC provenance: selected - failure/readiness state must truthfully represent selected mapping mode.
+- Published NHMS artifacts / display identity: not selected - no published display artifact changes.
+
+Boundary-surface checklist:
+- Shared helper roots: direct-grid contract parser from #540; producer mode resolver helper if introduced.
+- Public entrypoints: `ForcingProducer.produce`; CLI remains a thin caller.
+- Read surfaces: repository `load_forcing_mapping_contract` using selected `model_id`, `basin_version_id`, and `source_id`.
+- Write/delete/overwrite surfaces: existing IDW output path only for legacy/IDW; explicit direct-grid failure must not write package/records.
+- Producer/consumer evidence boundaries: forecast-cycle failure state and exceptions must distinguish unsupported/direct-grid-not-implemented from legacy IDW success.
+- Stale-state/idempotency boundaries: existing already-done path must remain legacy-only unless direct-grid readiness is implemented later.
+- Unchanged downstream consumers: existing forcing package shape and IDW tests.
+
+Invariant Matrix
+Governing invariant: Once a model asset explicitly selects `direct_grid`, the producer must not silently continue into IDW station/weight/output readiness work.
+Source-of-truth identity/contract: repository-returned forcing mapping contract for the selected `model_id`, `basin_version_id`, and normalized `source_id`; absent contract means legacy IDW.
+Surfaces:
+- Producers: `ForcingProducer.produce` mode resolution and branch ordering.
+- Validators/preflight: direct-grid contract loader errors and direct-grid-not-yet-implemented gate in #541.
+- Storage/cache/query: repository contract load only; no `met.interp_weight` direct-grid writes in #541.
+- Public routes/entrypoints: forcing CLI/orchestrator callers see stable `ForcingProductionError` and failure state.
+- Frontend/downstream consumers: none in #541 - no API/frontend payload changes.
+- Failure paths/rollback/stale state: unsupported/direct-grid failures update forecast cycle failure state and do not create ready forcing outputs.
+- Evidence/audit/readiness: tests must prove no IDW fallback calls occur for explicit direct-grid or unsupported mode.
+Regression rows:
+- legacy asset with no contract -> existing IDW path succeeds and existing tests remain valid.
+- explicit `idw` contract/absence -> existing IDW station/weight path is used.
+- explicit `direct_grid` contract -> producer stops at validation gate, records failure, and does not call IDW station/weight/output operations.
+- malformed/unsupported mapping mode from contract load -> producer fails closed and does not mark `forcing_ready`.

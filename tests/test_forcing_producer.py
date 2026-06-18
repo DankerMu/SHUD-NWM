@@ -50,6 +50,9 @@ class FakeForcingRepository:
         *,
         stations: tuple[MetStation, ...],
         products: tuple[CanonicalProduct, ...],
+        forcing_mapping_manifest: Mapping[str, Any] | None = None,
+        forcing_mapping_contract: Any = None,
+        forcing_mapping_contract_error: Exception | None = None,
         fail_next_timeseries_replace: bool = False,
     ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
@@ -62,12 +65,18 @@ class FakeForcingRepository:
         }
         self.stations = stations
         self.products = products
+        self.forcing_mapping_manifest = forcing_mapping_manifest
+        self.forcing_mapping_contract = forcing_mapping_contract
+        self.forcing_mapping_contract_error = forcing_mapping_contract_error
         self.interp_weights: list[InterpolationWeight] = []
         self.forcing_versions: dict[str, dict[str, Any]] = {}
         self.components: list[ForcingComponent] = []
         self.timeseries: list[ForcingTimeseriesRow] = []
         self.cycle_updates: list[dict[str, Any]] = []
         self.events: list[tuple[str, Any]] = []
+        self.mapping_contract_calls: list[dict[str, Any]] = []
+        self.load_station_count = 0
+        self.load_weight_count = 0
         self.fail_next_timeseries_replace = fail_next_timeseries_replace
         self.upsert_count = 0
 
@@ -78,6 +87,7 @@ class FakeForcingRepository:
         return dict(self.model_identity_by_model[model_id])
 
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
+        self.load_station_count += 1
         return tuple(station for station in self.stations if station.basin_version_id == basin_version_id)
 
     def list_canonical_products(self, *, source_id: str, cycle_time: Any) -> tuple[CanonicalProduct, ...]:
@@ -114,6 +124,7 @@ class FakeForcingRepository:
         grid_id: str,
         model_id: str,
     ) -> tuple[InterpolationWeight, ...]:
+        self.load_weight_count += 1
         return tuple(
             weight
             for weight in self.interp_weights
@@ -169,8 +180,15 @@ class FakeForcingRepository:
         model_id: str,
         basin_version_id: str,
         source_id: str | None = None,
-    ) -> None:
-        return None
+    ) -> Any:
+        self.mapping_contract_calls.append(
+            {"model_id": model_id, "basin_version_id": basin_version_id, "source_id": source_id}
+        )
+        if self.forcing_mapping_contract_error is not None:
+            raise self.forcing_mapping_contract_error
+        if self.forcing_mapping_manifest is not None:
+            return load_forcing_mapping_contract_from_manifest(self.forcing_mapping_manifest, source_id=source_id)
+        return self.forcing_mapping_contract
 
     def get_forcing_version(self, *, source_id: str, cycle_time: Any, model_id: str) -> dict[str, Any] | None:
         for record in self.forcing_versions.values():
@@ -1411,6 +1429,166 @@ def test_direct_grid_contract_valid_parse_preserves_manifest_and_station_identit
     assert [station.properties for station in contract.stations] == [{}, {}]
 
 
+def test_producer_legacy_absent_mapping_contract_uses_existing_idw_path(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert repository.mapping_contract_calls == [
+        {"model_id": "demo_model", "basin_version_id": "basin_v1", "source_id": "gfs"}
+    ]
+    assert repository.load_station_count == 1
+    assert repository.load_weight_count == 1
+    assert repository.interp_weights
+    assert repository.forcing_versions[result.forcing_version_id]["checksum"] == result.checksum
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
+def test_producer_legacy_repository_without_mapping_mode_contract_method_uses_idw_path(tmp_path: Path) -> None:
+    class LegacyRepository:
+        def __init__(self, wrapped: FakeForcingRepository) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "load_forcing_mapping_contract":
+                raise AttributeError(name)
+            return getattr(self._wrapped, name)
+
+    store, repository = _build_repository(tmp_path)
+    legacy_repository = LegacyRepository(repository)
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3),
+        repository=legacy_repository,
+        object_store=store,
+    )
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert repository.mapping_contract_calls == []
+    assert repository.load_station_count == 1
+    assert repository.load_weight_count == 1
+    assert repository.interp_weights
+    assert repository.timeseries
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
+def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_manifest={"forcing_mapping_mode": "idw"},
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert repository.mapping_contract_calls == [
+        {"model_id": "demo_model", "basin_version_id": "basin_v1", "source_id": "gfs"}
+    ]
+    assert repository.load_station_count == 1
+    assert repository.load_weight_count == 1
+    assert repository.interp_weights
+    assert repository.timeseries
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
+def test_producer_direct_grid_mapping_mode_fails_closed_before_idw_side_effects(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=parse_direct_grid_forcing_contract(_direct_grid_manifest(), source_id="GFS"),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Direct-grid forcing production is not implemented"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.mapping_contract_calls == [
+        {"model_id": "demo_model", "basin_version_id": "basin_v1", "source_id": "gfs"}
+    ]
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+
+
+def test_producer_rejects_root_direct_grid_manifest_before_station_loading(tmp_path: Path) -> None:
+    class RootDirectGridManifestRepository(FakeForcingRepository):
+        def load_forcing_mapping_contract(
+            self,
+            *,
+            model_id: str,
+            basin_version_id: str,
+            source_id: str | None = None,
+        ) -> Any:
+            self.mapping_contract_calls.append(
+                {"model_id": model_id, "basin_version_id": basin_version_id, "source_id": source_id}
+            )
+            return load_forcing_mapping_contract_from_manifest(
+                _direct_grid_manifest(),
+                source_id=source_id,
+                allow_root_direct_grid=False,
+            )
+
+    store, repository = _build_repository(tmp_path)
+    repository = RootDirectGridManifestRepository(stations=repository.stations, products=repository.products)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Invalid forcing mapping contract"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.mapping_contract_calls == [
+        {"model_id": "demo_model", "basin_version_id": "basin_v1", "source_id": "gfs"}
+    ]
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+    assert "Invalid forcing mapping contract" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_producer_malformed_mapping_mode_error_fails_closed_without_ready_version(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract_error=DirectGridContractError(
+            "Unsupported forcing_mapping_mode 'nearest'.",
+            field="forcing_mapping_mode",
+            source_id="gfs",
+        ),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Invalid forcing mapping contract"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.mapping_contract_calls == [
+        {"model_id": "demo_model", "basin_version_id": "basin_v1", "source_id": "gfs"}
+    ]
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert "Invalid forcing mapping contract" in repository.cycle_updates[-1]["error_message"]
+
+
 @pytest.mark.parametrize("field_name", ["longitude", "latitude", "x", "y", "z"])
 @pytest.mark.parametrize(
     "bad_value",
@@ -1650,6 +1828,30 @@ def test_direct_grid_contract_valid_root_direct_manifest_still_parses_for_helper
     assert contract.binding_checksum == "sha256:binding"
 
 
+def test_direct_grid_contract_rejects_explicit_root_direct_grid_when_root_authority_disabled() -> None:
+    with pytest.raises(DirectGridContractError) as exc_info:
+        load_forcing_mapping_contract_from_manifest(
+            _direct_grid_manifest(),
+            source_id="GFS",
+            allow_root_direct_grid=False,
+        )
+
+    assert exc_info.value.to_dict() == {
+        "error_code": "DIRECT_GRID_CONTRACT_INVALID",
+        "message": (
+            "Root-level forcing_mapping_mode='direct_grid' requires an authoritative nested direct-grid "
+            "contract section."
+        ),
+        "field": "forcing_mapping_mode",
+        "source_id": "GFS",
+        "supported_sections": (
+            "direct_grid_forcing",
+            "direct_grid_contract",
+            "forcing_mapping_contract",
+        ),
+    }
+
+
 @pytest.mark.parametrize("bad_index", [True, 1.5, "1", "1.5"])
 def test_direct_grid_contract_shud_forcing_index_must_be_json_integer(bad_index: Any) -> None:
     manifest = _direct_grid_manifest()
@@ -1816,7 +2018,7 @@ def test_direct_grid_repository_loads_manifest_backed_contract_from_single_entry
     assert repository.parameters == ("demo_model", "basin_v1")
 
 
-def test_direct_grid_repository_ignores_root_level_resource_profile_mirror_fields() -> None:
+def test_direct_grid_repository_rejects_explicit_root_level_resource_profile_direct_grid() -> None:
     class MirrorOnlyRepository(PsycopgForcingRepository):
         def __init__(self) -> None:
             super().__init__("postgresql://example")
@@ -1827,14 +2029,12 @@ def test_direct_grid_repository_ignores_root_level_resource_profile_mirror_field
 
     repository = MirrorOnlyRepository()
 
-    assert (
+    with pytest.raises(DirectGridContractError, match="authoritative nested direct-grid contract section"):
         repository.load_forcing_mapping_contract(
             model_id="demo_model",
             basin_version_id="basin_v1",
             source_id="GFS",
         )
-        is None
-    )
 
 
 def test_direct_grid_repository_returns_none_for_legacy_resource_profile() -> None:
@@ -2143,6 +2343,9 @@ def _build_repository(
     omitted_variables: set[str] | None = None,
     omitted_by_time: set[tuple[str, int]] | None = None,
     stations: tuple[MetStation, ...] | None = None,
+    forcing_mapping_manifest: Mapping[str, Any] | None = None,
+    forcing_mapping_contract: Any = None,
+    forcing_mapping_contract_error: Exception | None = None,
     fail_next_timeseries_replace: bool = False,
     include_geographic_coords: bool = True,
     values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
@@ -2179,6 +2382,9 @@ def _build_repository(
             ),
         ),
         products=products,
+        forcing_mapping_manifest=forcing_mapping_manifest,
+        forcing_mapping_contract=forcing_mapping_contract,
+        forcing_mapping_contract_error=forcing_mapping_contract_error,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
     )
     return store, repository

@@ -17,7 +17,12 @@ from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
-from workers.forcing_producer.direct_grid_contract import DirectGridForcingContract
+from workers.forcing_producer.direct_grid_contract import (
+    DIRECT_GRID_MODE,
+    IDW_MODE,
+    DirectGridContractError,
+    DirectGridForcingContract,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -368,6 +373,14 @@ class ForcingProducer:
             resolved_basin_version_id = str(model_identity["basin_version_id"])
             resolved_river_network_version_id = str(model_identity.get("river_network_version_id") or "")
             _safe_path_component(resolved_basin_version_id)
+            forcing_mapping_contract = self._resolve_forcing_mapping_contract(
+                model_id=model_id,
+                basin_version_id=resolved_basin_version_id,
+                source_id=resolved_source_id,
+            )
+            if forcing_mapping_contract is not None:
+                self._fail_direct_grid_not_implemented(forcing_mapping_contract)
+
             stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
             self._enforce_limit("station_count", len(stations), self.config.max_station_count)
             required_variables = self._required_canonical_variables(resolved_source_id)
@@ -556,6 +569,41 @@ class ForcingProducer:
                 raise ForcingProductionError(
                     f"Scheduler {field_name} {expected_value!r} does not match repository value {actual_value!r}."
                 )
+
+    def _resolve_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str,
+    ) -> DirectGridForcingContract | None:
+        assert self.repository is not None
+        load_contract = getattr(self.repository, "load_forcing_mapping_contract", None)
+        if not callable(load_contract):
+            return None
+        try:
+            contract = load_contract(
+                model_id=model_id,
+                basin_version_id=basin_version_id,
+                source_id=source_id,
+            )
+        except DirectGridContractError as error:
+            raise ForcingProductionError(f"Invalid forcing mapping contract: {error}") from error
+        if contract is None:
+            return None
+
+        mode = str(getattr(contract, "forcing_mapping_mode", "") or "").strip()
+        if mode == IDW_MODE:
+            return None
+        if mode != DIRECT_GRID_MODE:
+            raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
+        return contract
+
+    def _fail_direct_grid_not_implemented(self, contract: DirectGridForcingContract) -> None:
+        raise ForcingProductionError(
+            "Direct-grid forcing production is not implemented in issue #541; "
+            f"contract {contract.binding_checksum!r} selected direct_grid mode."
+        )
 
     def _validate_scheduler_canonical_identity(
         self,

@@ -132,7 +132,13 @@ def load_forcing_mapping_contract_from_manifest(
         contract_payload = _direct_grid_section_payload(manifest)
         if contract_payload is None:
             if not allow_root_direct_grid:
-                return None
+                raise DirectGridContractError(
+                    "Root-level forcing_mapping_mode='direct_grid' requires an authoritative nested direct-grid "
+                    "contract section.",
+                    field="forcing_mapping_mode",
+                    source_id=source_id,
+                    details={"supported_sections": DIRECT_GRID_SECTION_KEYS},
+                )
             contract_payload = manifest
         return parse_direct_grid_forcing_contract(contract_payload, source_id=source_id)
 
