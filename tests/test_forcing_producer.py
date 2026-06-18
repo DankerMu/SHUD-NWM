@@ -1579,6 +1579,98 @@ def test_producer_direct_grid_mapping_mode_validates_then_fails_closed_before_ge
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
 
 
+def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    binding_content = b'{"schema":"direct-grid-binding-v1"}'
+    sp_att_content = _sp_att_content().encode("utf-8")
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest.update(
+        {
+            "binding_checksum": f"sha256:{sha256_bytes(binding_content)}",
+            "sp_att_path": "models/demo_model/input/qhh.sp.att",
+            "sp_att_checksum": f"sha256:{sha256_bytes(sp_att_content)}",
+        }
+    )
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    class ResourceProfileBackedRepository(FakeForcingRepository):
+        def __init__(self, *, stations: tuple[MetStation, ...], products: tuple[CanonicalProduct, ...]) -> None:
+            super().__init__(stations=stations, products=products)
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            self.statement = statement
+            self.parameters = parameters
+            return {"resource_profile": {"direct_grid_forcing": manifest}}
+
+        def load_forcing_mapping_contract(
+            self,
+            *,
+            model_id: str,
+            basin_version_id: str,
+            source_id: str | None = None,
+        ) -> Any:
+            self.mapping_contract_calls.append(
+                {"model_id": model_id, "basin_version_id": basin_version_id, "source_id": source_id}
+            )
+            return PsycopgForcingRepository.load_forcing_mapping_contract(
+                self,
+                model_id=model_id,
+                basin_version_id=basin_version_id,
+                source_id=source_id,
+            )
+
+        def load_direct_grid_validation_assets(
+            self,
+            *,
+            model_id: str,
+            basin_version_id: str,
+            contract: Any,
+        ) -> Mapping[str, Any]:
+            return PsycopgForcingRepository.load_direct_grid_validation_assets(
+                self,
+                model_id=model_id,
+                basin_version_id=basin_version_id,
+                contract=contract,
+            )
+
+    store = LocalObjectStore(tmp_path)
+    store.write_bytes_atomic(contract.binding_uri, binding_content)
+    store.write_bytes_atomic(contract.sp_att_path, sp_att_content)
+    products = _write_canonical_products(store)
+    repository = ResourceProfileBackedRepository(
+        stations=(),
+        products=products,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    assets = repository.load_direct_grid_validation_assets(
+        model_id="demo_model",
+        basin_version_id="basin_v1",
+        contract=contract,
+    )
+    assert assets["model_input_package_id"] == "model-input-demo-v1"
+
+    with pytest.raises(ForcingProductionError, match="not implemented after the issue #542 validation gate"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert "FROM core.model_instance" in repository.statement
+    assert "resource_profile" in repository.statement
+    assert "met.interp_weight" not in repository.statement
+    assert repository.parameters == ("demo_model", "basin_v1")
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.forcing_versions == {}
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
 def test_producer_rejects_root_direct_grid_manifest_before_station_loading(tmp_path: Path) -> None:
     class RootDirectGridManifestRepository(FakeForcingRepository):
         def load_forcing_mapping_contract(
@@ -1730,6 +1822,81 @@ def test_producer_direct_grid_validation_sp_att_forc_invalid_cases_fail_before_i
     assert "DIRECT_GRID_VALIDATION_FAILED" in message
     assert '"field":"sp_att.FORC"' in message
     assert expected_actual in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_validation_sp_att_forc_missing_bound_index_fails_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(sp_att_content=_sp_att_content((1, 1))),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert '"field":"sp_att.FORC"' in message
+    assert '"expected":[1,2]' in message
+    assert '"actual":[1]' in message
+    assert '"missing_indexes":[2]' in message
+    _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_fallback_oversized_binding_fails_before_idw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    sp_att_content = _sp_att_content().encode("utf-8")
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest.update(
+        {
+            "binding_checksum": f"sha256:{sha256_bytes(b'expected')}",
+            "sp_att_path": "models/demo_model/input/qhh.sp.att",
+            "sp_att_checksum": f"sha256:{sha256_bytes(sp_att_content)}",
+        }
+    )
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    store, repository = _build_repository(tmp_path, forcing_mapping_contract=contract)
+    store.write_bytes_atomic(contract.binding_uri, b"x" * 17)
+    store.write_bytes_atomic(contract.sp_att_path, sp_att_content)
+
+    class RepositoryWithoutValidationLoader:
+        def __init__(self, wrapped: FakeForcingRepository) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "load_direct_grid_validation_assets":
+                raise AttributeError(name)
+            return getattr(self._wrapped, name)
+
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3, max_manifest_bytes=16),
+        repository=RepositoryWithoutValidationLoader(repository),
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert '"field":"validation_assets"' in message
+    assert "exceeds read limit" in message
     _assert_direct_grid_failure_without_idw_or_ready_outputs(repository, tmp_path)
 
 

@@ -695,29 +695,35 @@ class ForcingProducer:
     ) -> Mapping[str, Any]:
         assert self.repository is not None
         loader = getattr(self.repository, "load_direct_grid_validation_assets", None)
+        assets: dict[str, Any] = {}
         if callable(loader):
-            assets = loader(model_id=model_id, basin_version_id=basin_version_id, contract=contract)
-            if not isinstance(assets, Mapping):
+            loaded_assets = loader(model_id=model_id, basin_version_id=basin_version_id, contract=contract)
+            if not isinstance(loaded_assets, Mapping):
                 raise _direct_grid_validation_error(
                     "Direct-grid validation assets must be returned as a mapping.",
                     field="validation_assets",
                     source="repository",
                     expected="mapping",
-                    actual=type(assets).__name__,
+                    actual=type(loaded_assets).__name__,
                 )
-            return assets
+            assets.update(dict(loaded_assets))
 
-        assets: dict[str, Any] = {}
+        assets.setdefault("model_input_package_id", contract.model_input_package_id)
         try:
-            if contract.binding_uri:
-                assets["binding_checksum"] = self.object_store.checksum(contract.binding_uri)
-            if contract.sp_att_path:
+            if contract.binding_uri and not assets.get("binding_checksum"):
+                assets["binding_checksum"] = self.object_store.checksum_limited(
+                    contract.binding_uri,
+                    max_bytes=self.config.max_manifest_bytes,
+                )
+            if contract.sp_att_path and not assets.get("sp_att_content"):
                 sp_att_content = self.object_store.read_bytes_limited(
                     contract.sp_att_path,
                     max_bytes=self.config.max_manifest_bytes,
                 )
                 assets["sp_att_content"] = sp_att_content
-                assets["sp_att_checksum"] = sha256_bytes(sp_att_content)
+            if assets.get("sp_att_content") is not None and not assets.get("sp_att_checksum"):
+                sp_att_content = _direct_grid_text_asset(assets["sp_att_content"], field="sp_att_content")
+                assets["sp_att_checksum"] = sha256_bytes(sp_att_content.encode("utf-8"))
         except (OSError, ObjectStoreError, TypeError, ValueError) as error:
             raise _direct_grid_validation_error(
                 "Failed to load direct-grid validation assets.",
@@ -2597,6 +2603,7 @@ def _validate_sp_att_forc_values(
     valid_indexes: AbstractSet[int],
 ) -> None:
     expected = tuple(sorted(valid_indexes))
+    actual = tuple(sorted({value for _, value in forc_values}))
     for line_number, value in forc_values:
         if value <= 0:
             raise _direct_grid_validation_error(
@@ -2616,6 +2623,16 @@ def _validate_sp_att_forc_values(
                 actual=value,
                 details={"line_number": line_number},
             )
+    missing = tuple(index for index in expected if index not in actual)
+    if missing:
+        raise _direct_grid_validation_error(
+            "Direct-grid .sp.att FORC is missing bound shud_forcing_index values.",
+            field="sp_att.FORC",
+            source="sp_att",
+            expected=expected,
+            actual=actual,
+            details={"missing_indexes": missing},
+        )
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:
