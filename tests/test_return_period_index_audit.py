@@ -523,6 +523,48 @@ def test_empty_live_target_evidence_fails_closed_and_writes_no_artifacts(
     assert not manual_out.exists()
 
 
+def test_empty_live_index_usage_fails_closed_and_writes_no_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report_out = tmp_path / "report.json"
+    manual_out = tmp_path / "manual.sql"
+    connection = _FakeConnection(
+        {
+            ROOT_RELATION_SIZE_SQL: [{"table_bytes": 100, "indexes_bytes": 50, "total_bytes": 150}],
+            INDEX_INVENTORY_SQL: [_index_row("return_period_result_summary_idx")],
+            INDEX_USAGE_SQL: [],
+            TIMESCALE_CHUNK_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_SIZE_SQL: [],
+            TIMESCALE_CHUNK_INDEX_USAGE_SQL: [],
+        }
+    )
+    fake_psycopg2 = types.SimpleNamespace(connect=lambda *args, **kwargs: connection)
+    fake_extras = types.SimpleNamespace(RealDictCursor=object)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+        monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+        with pytest.raises(SystemExit) as exit_error:
+            audit_script._run_cli(
+                [
+                    "--database-url",
+                    "postgresql://operator:supersecret@db.example:5432/nhms",
+                    "--report-out",
+                    str(report_out),
+                    "--manual-sql-out",
+                    str(manual_out),
+                ]
+            )
+
+    captured = capsys.readouterr()
+    assert exit_error.value.code == 2
+    assert "LIVE_DB_EVIDENCE_UNAVAILABLE" in captured.err
+    assert "index usage" in captured.err
+    assert not report_out.exists()
+    assert not manual_out.exists()
+
+
 def test_live_database_connection_failure_is_mandatory_and_writes_no_artifacts(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -689,6 +731,24 @@ def test_manual_sql_neutralizes_control_character_drop_candidate_names() -> None
     for line in sql.splitlines():
         assert not line.startswith("DROP TABLE")
         assert not line.startswith("DROP INDEX")
+
+
+def test_no_clobber_final_publish_is_atomic_when_target_appears_late(tmp_path: Path) -> None:
+    target = tmp_path / "report.json"
+    original_link = audit_script.os.link
+
+    def racing_link(src: Path, dst: Path) -> None:
+        target.write_text("first artifact\n", encoding="utf-8")
+        original_link(src, dst)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(audit_script.os, "link", racing_link)
+        with pytest.raises(ReturnPeriodIndexAuditError) as error:
+            write_output_file(target, "second artifact\n")
+
+    assert error.value.error_code == "OUTPUT_EXISTS"
+    assert target.read_text(encoding="utf-8") == "first artifact\n"
+    assert list(tmp_path.glob(".report.json.tmp-*")) == []
 
 
 def test_manual_sql_before_after_evidence_includes_timescale_chunk_index_risks() -> None:

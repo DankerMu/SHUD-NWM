@@ -574,7 +574,7 @@ relation "flood.run_product_quality" does not exist
 
 ### 8.2 `flood.return_period_result` 索引和空间回收
 
-#490 清理 no-curve 空行后，只是减少逻辑行数；PostgreSQL/TimescaleDB 不会因此自动把表文件、chunk 文件或索引文件空间还给文件系统。`flood.return_period_result` 的索引精简、`REINDEX`、`VACUUM FULL`、`pg_repack`、chunk rebuild 或 Timescale 压缩都必须作为单独维护窗口处理，不能放进应用启动、普通 migration、CI 或调度器 pass 自动执行。
+`#490` 清理 no-curve 空行后，只是减少逻辑行数；PostgreSQL/TimescaleDB 不会因此自动把表文件、chunk 文件或索引文件空间还给文件系统。`flood.return_period_result` 的索引精简、`REINDEX`、`VACUUM FULL`、`pg_repack`、chunk rebuild 或 Timescale 压缩都必须作为单独维护窗口处理，不能放进应用启动、普通 migration、CI 或调度器 pass 自动执行。
 
 先只生成审计证据和手工 SQL：
 

@@ -780,6 +780,7 @@ def collect_catalog_evidence(connection: Any) -> dict[str, Any]:
         index_inventory = _execute_fetch_all(cursor, INDEX_INVENTORY_SQL)
         _require_live_target_evidence(index_inventory, evidence_name="index inventory")
         index_usage = _execute_fetch_all(cursor, INDEX_USAGE_SQL)
+        _require_live_target_evidence(index_usage, evidence_name="index usage")
         timescale_chunks = _execute_optional_fetch_all(
             cursor,
             TIMESCALE_CHUNK_SIZE_SQL,
@@ -1043,7 +1044,7 @@ def write_output_file(
             writer(temp_path, content)
         else:
             temp_path.write_text(content, encoding="utf-8")
-        os.replace(temp_path, path)
+        _publish_output_file(temp_path, path, overwrite=overwrite)
     except OSError as exc:
         try:
             if temp_path.exists():
@@ -1055,6 +1056,23 @@ def write_output_file(
                 "OUTPUT_WRITE_FAILED",
                 f"Failed to write output path {safe_path}: {safe_error}",
             ) from exc
+
+
+def _publish_output_file(temp_path: Path, path: Path, *, overwrite: bool) -> None:
+    if overwrite:
+        os.replace(temp_path, path)
+        return
+    try:
+        os.link(temp_path, path)
+    except FileExistsError as exc:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise ReturnPeriodIndexAuditError(
+            "OUTPUT_EXISTS",
+            f"Refusing to overwrite existing output path without --overwrite: {_redact_output_error_text(path)}",
+        ) from exc
+    else:
+        temp_path.unlink()
 
 
 def render_report_json(report: Mapping[str, Any]) -> str:
