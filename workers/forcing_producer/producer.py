@@ -440,6 +440,19 @@ class ForcingProducer:
                     len(forcing_mapping_contract.stations),
                     self.config.max_station_count,
                 )
+                direct_grid_stations = _met_stations_from_direct_grid_contract(
+                    forcing_mapping_contract,
+                    basin_version_id=resolved_basin_version_id,
+                )
+                expected_valid_times = _expected_forcing_valid_times(
+                    resolved_source_id,
+                    products_by_variable,
+                    cycle_time=parsed_cycle_time,
+                )
+                self._enforce_direct_grid_timeseries_limits(
+                    expected_valid_times=expected_valid_times,
+                    station_count=len(direct_grid_stations),
+                )
                 self._ensure_direct_grid_met_stations(
                     basin_version_id=resolved_basin_version_id,
                     contract=forcing_mapping_contract,
@@ -450,7 +463,37 @@ class ForcingProducer:
                     model_id=model_id,
                     grid_signature=direct_grid_signature,
                 )
-                self._fail_direct_grid_values_not_implemented(forcing_mapping_contract)
+                forcing_version_id = (
+                    str(existing["forcing_version_id"])
+                    if existing is not None
+                    else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
+                )
+                direct_grid_weights = _weights_by_source_grid(
+                    self._direct_grid_weights_from_contract(
+                        contract=forcing_mapping_contract,
+                        source_id=resolved_source_id,
+                        model_id=model_id,
+                        grid_signature=direct_grid_signature,
+                    )
+                )
+                grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
+                values, components = self._generate_timeseries_streaming(
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    forcing_version_id=forcing_version_id,
+                    basin_version_id=resolved_basin_version_id,
+                    products_by_variable=products_by_variable,
+                    stations=direct_grid_stations,
+                    weights=direct_grid_weights,
+                    grid_points_by_source_grid=grid_points_by_source_grid,
+                    canonical_to_forcing=canonical_to_forcing,
+                    validate_all_field_values=False,
+                )
+                self._stop_at_direct_grid_package_boundary(
+                    contract=forcing_mapping_contract,
+                    rows=values,
+                    components=components,
+                )
 
             stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
             self._enforce_limit("station_count", len(stations), self.config.max_station_count)
@@ -636,10 +679,24 @@ class ForcingProducer:
             raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
         return contract
 
-    def _fail_direct_grid_values_not_implemented(self, contract: DirectGridForcingContract) -> None:
+    def _stop_at_direct_grid_package_boundary(
+        self,
+        *,
+        contract: DirectGridForcingContract,
+        rows: Sequence[ForcingTimeseriesRow],
+        components: Sequence[ForcingComponent],
+    ) -> None:
+        if not rows:
+            raise ForcingProductionError(
+                f"Direct-grid contract {contract.binding_checksum!r} generated no station value rows."
+            )
+        if not components:
+            raise ForcingProductionError(
+                f"Direct-grid contract {contract.binding_checksum!r} generated no forcing components."
+            )
         raise ForcingProductionError(
-            "Direct-grid value generation is not implemented after the issue #544 mapping materialization boundary; "
-            f"contract {contract.binding_checksum!r} selected direct_grid mode."
+            "Direct-grid rows/components generated; stopping at the issue #546 package/lineage boundary for "
+            f"contract {contract.binding_checksum!r}."
         )
 
     def _materialize_direct_grid_mappings(
@@ -651,7 +708,24 @@ class ForcingProducer:
         grid_signature: str,
     ) -> tuple[InterpolationWeight, ...]:
         assert self.repository is not None
-        weights = tuple(
+        weights = self._direct_grid_weights_from_contract(
+            contract=contract,
+            source_id=source_id,
+            model_id=model_id,
+            grid_signature=grid_signature,
+        )
+        self.repository.upsert_interp_weights(weights)
+        return weights
+
+    def _direct_grid_weights_from_contract(
+        self,
+        *,
+        contract: DirectGridForcingContract,
+        source_id: str,
+        model_id: str,
+        grid_signature: str,
+    ) -> tuple[InterpolationWeight, ...]:
+        return tuple(
             InterpolationWeight(
                 source_id=source_id,
                 grid_id=contract.grid_id,
@@ -666,8 +740,6 @@ class ForcingProducer:
             for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
             for variable in self.config.output_variables
         )
-        self.repository.upsert_interp_weights(weights)
-        return weights
 
     def _ensure_direct_grid_met_stations(
         self,
@@ -881,6 +953,16 @@ class ForcingProducer:
     def _enforce_limit(self, name: str, value: int, limit: int) -> None:
         if value > limit:
             raise ForcingProductionError(f"Forcing {name} {value} exceeds configured limit {limit}.")
+
+    def _enforce_direct_grid_timeseries_limits(
+        self,
+        *,
+        expected_valid_times: Sequence[datetime],
+        station_count: int,
+    ) -> None:
+        self._enforce_limit("timestep_count", len(expected_valid_times), self.config.max_timestep_count)
+        expected_row_count = len(expected_valid_times) * station_count * len(self.config.output_variables)
+        self._enforce_limit("timeseries_row_count", expected_row_count, self.config.max_timeseries_row_count)
 
     def _load_valid_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         assert self.repository is not None
@@ -1164,6 +1246,7 @@ class ForcingProducer:
         required_grid_cell_ids: AbstractSet[str] | None = None,
         expected_grid_points: Sequence[GridPoint] | None = None,
         retain_grid_points: bool = True,
+        validate_all_values: bool = True,
     ) -> CanonicalField:
         try:
             import xarray as xr
@@ -1196,12 +1279,13 @@ class ForcingProducer:
             values_by_grid_cell_id: dict[str, float] = {}
             for point, raw_value in zip(grid_points, flat_values, strict=True):
                 value = float(raw_value)
-                if not math.isfinite(value):
+                is_required = required_grid_cell_ids is None or point.grid_cell_id in required_grid_cell_ids
+                if (validate_all_values or is_required) and not math.isfinite(value):
                     raise ForcingProductionError(
                         f"Canonical product {product.canonical_product_id} has non-finite field value "
                         f"for grid cell {point.grid_cell_id}."
                     )
-                if required_grid_cell_ids is None or point.grid_cell_id in required_grid_cell_ids:
+                if is_required:
                     values_by_grid_cell_id[point.grid_cell_id] = value
             if required_grid_cell_ids is not None:
                 missing = sorted(required_grid_cell_ids.difference(values_by_grid_cell_id))
@@ -1337,6 +1421,7 @@ class ForcingProducer:
         weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
         grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
         canonical_to_forcing: Mapping[str, str],
+        validate_all_field_values: bool = True,
     ) -> tuple[tuple[ForcingTimeseriesRow, ...], tuple[ForcingComponent, ...]]:
         forcing_times = _expected_forcing_valid_times(
             source_id,
@@ -1374,6 +1459,7 @@ class ForcingProducer:
                     required_grid_cell_ids=required_grid_cell_ids_by_source_grid.get(source_grid),
                     expected_grid_points=expected_grid_points,
                     retain_grid_points=False,
+                    validate_all_values=validate_all_field_values,
                 )
                 field_cache[variable] = field
                 return field
@@ -2125,6 +2211,40 @@ def _validate_unique_station_forcing_contract(stations: Sequence[MetStation]) ->
             "Fixed forcing_grid stations must use contiguous SHUD forcing indexes "
             f"{expected_indexes}; got {actual_indexes}."
         )
+
+
+def _met_stations_from_direct_grid_contract(
+    contract: DirectGridForcingContract,
+    *,
+    basin_version_id: str,
+) -> tuple[MetStation, ...]:
+    stations = tuple(
+        MetStation(
+            station_id=station.station_id,
+            basin_version_id=basin_version_id,
+            longitude=station.longitude,
+            latitude=station.latitude,
+            elevation_m=station.z,
+            station_role="forcing_grid",
+            station_name=f"Direct-grid station {station.shud_forcing_index}",
+            properties_json={
+                **dict(station.properties),
+                "shud_forcing_index": station.shud_forcing_index,
+                "forcing_filename": station.forcing_filename,
+                "x": station.x,
+                "y": station.y,
+                "z": station.z,
+                "forcing_mapping_mode": DIRECT_GRID_MODE,
+                "grid_id": station.grid_id,
+                "grid_cell_id": station.grid_cell_id,
+                "binding_checksum": contract.binding_checksum,
+                "grid_signature": contract.grid_signature,
+            },
+        )
+        for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
+    )
+    _validate_unique_station_forcing_contract(stations)
+    return stations
 
 
 def _station_forcing_index(station: MetStation) -> int:
@@ -2996,6 +3116,18 @@ def _required_grid_cell_ids_by_source_grid(
     return {
         source_grid: frozenset(weight.grid_cell_id for weight in source_grid_weights)
         for source_grid, source_grid_weights in weights.items()
+    }
+
+
+def _weights_by_source_grid(
+    weights: Sequence[InterpolationWeight],
+) -> dict[tuple[str, str], tuple[InterpolationWeight, ...]]:
+    grouped: dict[tuple[str, str], list[InterpolationWeight]] = {}
+    for weight in weights:
+        grouped.setdefault((weight.source_id, weight.grid_id), []).append(weight)
+    return {
+        source_grid: tuple(sorted(group, key=lambda item: (item.station_id, item.variable, item.grid_cell_id)))
+        for source_grid, group in grouped.items()
     }
 
 
