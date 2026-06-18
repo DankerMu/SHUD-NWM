@@ -592,6 +592,28 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "rt.valid_time <= cr.display_end_time" in query_source
 
 
+def test_interp_weight_grid_signature_migration_supports_direct_grid_persistence_contract() -> None:
+    migration = dict(_migration_sql())["000023_interp_weight_grid_signature.sql"]
+
+    assert "ADD COLUMN IF NOT EXISTS grid_signature TEXT" in migration
+    assert "interp_weight_direct_grid_exact_weight_chk" in migration
+    assert "CHECK (method <> 'direct_grid' OR weight = 1.0)" in migration
+    assert "interp_weight_direct_grid_signature_chk" in migration
+    assert "CHECK (method <> 'direct_grid' OR NULLIF(BTRIM(grid_signature), '') IS NOT NULL)" in migration
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS interp_weight_direct_grid_station_variable_uidx" in migration
+    assert _index_columns_by_name(migration, "interp_weight_direct_grid_station_variable_uidx") == (
+        "source_id",
+        "grid_id",
+        "model_id",
+        "station_id",
+        "variable",
+    )
+    assert "WHERE method = 'direct_grid'" in _index_sql_by_name(
+        migration,
+        "interp_weight_direct_grid_station_variable_uidx",
+    )
+
+
 def test_search_discovery_performance_migration_adds_trgm_and_quality_indexes() -> None:
     migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
 
@@ -827,7 +849,7 @@ def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
 
 def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
     match = re.search(
-        rf"CREATE INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\s+ON\s+",
+        rf"CREATE (?:UNIQUE )?INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\s+ON\s+",
         migration,
     )
     assert match is not None
@@ -848,7 +870,7 @@ def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
 
 
 def _index_sql_by_name(migration: str, index_name: str) -> str:
-    match = re.search(rf"CREATE INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\b", migration)
+    match = re.search(rf"CREATE (?:UNIQUE )?INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\b", migration)
     assert match is not None
     end = migration.index(";", match.start())
     return re.sub(r"\s+", " ", migration[match.start() : end]).strip()
