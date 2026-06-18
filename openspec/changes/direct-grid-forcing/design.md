@@ -525,3 +525,85 @@ Regression rows:
 - direct-grid required-cell set contains only bound cells -> `_read_canonical_field` receives the direct-grid required cells and retains only those values.
 - direct-grid wind rows -> wind speed is derived from bound U/V canonical cells using existing `wind_speed` logic.
 - legacy absent/explicit `idw` asset -> existing IDW generation and package output remain unchanged.
+
+## Issue #546 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- `workers/forcing_producer/producer.py` direct-grid branch after #545 row/component generation.
+- SHUD package writing, package manifest and forcing version lineage metadata, `met.forcing_station_timeseries` persistence, and existing-ready freshness checks.
+- Producer tests for direct-grid package shape, lineage identity, idempotency, stale binding invalidation, pressure handling, no-IDW fallback, and legacy IDW compatibility.
+
+Must preserve:
+- Legacy absent/explicit `idw` behavior continues to use current station loading, IDW weights, SHUD package output, lineage, idempotency, and finite-value validation.
+- #542/#544/#545 fail-closed validation, direct-grid mirror isolation, exact one-cell mapping, exact canonical cell values, required-cell retention, and no-IDW fallback invariants remain intact.
+- Direct-grid per-station SHUD CSV files keep the SHUD five-variable contract `Precip`, `Temp`, `RH`, `Wind`, and `RN`; pressure may be persisted in station timeseries and lineage/metadata but must not appear in SHUD station CSV columns.
+- #546 does not change SHUD runtime staging, does not validate staged `.sp.att` `FORC` against `.tsd.forc` IDs, and does not alter the runtime fallback single-station rewrite path; those are #547.
+
+Must add/change:
+- After direct-grid rows/components are generated, direct-grid production writes the standard SHUD forcing package instead of stopping at the #546 boundary.
+- Direct-grid `.tsd.forc` IDs, coordinates, filenames, and station count come from the validated direct-grid station contract and rewritten `.sp.att` `FORC` ownership.
+- Direct-grid package manifest and `met.forcing_version.lineage_json` record `forcing_mapping_mode='direct_grid'`, `spatial_mapping_method='direct_grid'`, binding URI/checksum, model input package id, `.sp.att` path/checksum, applicable source ids, grid id, grid signature, direct-grid station signature, and canonical input signature.
+- Direct-grid `met.forcing_station_timeseries` rows are persisted for every generated variable, station, and valid time; `Press` remains persisted there when generated but is excluded from SHUD station CSV files.
+- Existing-ready freshness checks compare mapping mode and direct-grid contract identity. Recompute-able drift, such as binding URI, `.sp.att` checksum/path, applicable source ids, direct-grid station signature, canonical input signature, or mapping mode, invalidates prior ready outputs for the same source/model/cycle and replaces the same forcing version. Identity drift that would require overwriting an existing derived direct-grid station mirror with a different binding checksum, model input package id, or canonical grid identity/signature remains fail-closed before weight writes or ready publication, preserving the #544 mirror-collision invariant.
+- Parent pending-version creation, package file writes, package manifest write/checksum, component child rows, station timeseries child rows, lineage persistence, and finalize/readiness failures leave no finalized ready output and remain retryable through existing incomplete-version replacement semantics.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `ForcingProducer.produce` explicit direct-grid behavior changes from a boundary failure to a successful ready output observed by orchestration callers.
+- Config / project setup: not selected - no deployment setting or environment switch is added.
+- File IO / path safety / overwrite: selected - #546 writes package files, SHUD station CSVs, and package manifests; filenames come from validated direct-grid contract fields and must remain safe.
+- Schema / columns / units / field names: selected - package manifest/lineage fields, SHUD CSV columns, `met.forcing_station_timeseries`, and `met.forcing_version` lineage are the behavior contract.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - direct-grid ready publication must preserve parent/child/finalize ordering and retry semantics.
+- Resource limits / large input / discovery: selected - station/time/row/manifest limits must apply before package writes.
+- Legacy compatibility / examples: selected - IDW package generation and existing-ready reuse remain unchanged.
+- Error handling / rollback / partial outputs: selected - failed validation/package/persistence cannot produce a finalized ready direct-grid version or fallback to IDW.
+- Release / packaging / dependency compatibility: not selected - no new dependency/package change.
+- Documentation / migration notes: selected - OpenSpec records package/lineage boundary and defers runtime staging to #547.
+- Geospatial / CRS / basin geometry: selected - `.tsd.forc` station IDs/coordinates must match validated direct-grid contract and `.sp.att` ownership.
+- Hydro-met time series / forcing windows: selected - persisted station timeseries and package time ranges must match generated direct-grid rows.
+- SHUD numerical runtime / conservation / NaN: selected - package output must use finite canonical-converted values and keep pressure out of SHUD station CSVs.
+- PostGIS / TimescaleDB domain behavior: selected - `met.forcing_version`, component rows, and station timeseries persistence/readiness are changed for direct-grid success.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm surface.
+- External hydro-met providers / snapshot reproducibility: selected - lineage must bind output to provider/source scope and canonical grid signature.
+- Run manifest / QC provenance: selected - package manifest and DB lineage must carry direct-grid binding/canonical identity.
+- Published NHMS artifacts / display identity: selected - a direct-grid forcing package becomes a published worker artifact that downstream stages will consume.
+
+Boundary-surface checklist:
+- Shared helper roots: direct-grid branch, `_write_outputs_and_records`, package/manifest lineage helpers, `_existing_forcing_version_is_current`, SHUD package formatting, and direct-grid station conversion helper.
+- Public entrypoints: `ForcingProducer.produce` returns `forcing_ready` or `already_done` for valid direct-grid assets.
+- Read surfaces: validated direct-grid contract, canonical products, existing forcing version/manifest, and child-row completeness checks.
+- Write/delete/overwrite surfaces: object-store forcing package files/manifest, `met.forcing_version`, `met.forcing_version_component`, and `met.forcing_station_timeseries`.
+- Staging/publish/rollback surfaces: parent forcing version is inserted with pending checksum, files/children are replaced, then finalized with manifest checksum; failures must be retryable and not finalized.
+- Producer/consumer evidence boundaries: package manifest and DB lineage must bind the same direct-grid contract identity, grid signature, canonical inputs, and output files.
+- Stale-state/idempotency boundaries: existing-ready reuse must be invalidated by mapping mode or direct-grid contract identity drift; direct-grid mirror identity collisions are invalidation failures, not automatic mirror overwrites.
+- Unchanged downstream consumers: legacy IDW package consumers, runtime staging behavior, and frontend/API payloads remain compatible.
+
+Invariant Matrix
+Governing invariant: A ready direct-grid forcing version is publishable only when its package files, station timeseries, lineage, manifest, and freshness key all bind to the same validated direct-grid contract and canonical product grid identity.
+Source-of-truth identity/contract: `DirectGridForcingContract` fields `forcing_mapping_mode`, `binding_uri`, `binding_checksum`, `model_input_package_id`, `sp_att_path`, `sp_att_checksum`, `applicable_source_ids`, `grid_id`, `grid_signature`, `stations[*].station_id`, `stations[*].shud_forcing_index`, `stations[*].forcing_filename`, `stations[*].grid_cell_id`, selected canonical product ids/signature, and output file checksums.
+Surfaces:
+- Producers: `ForcingProducer.produce` direct-grid branch and package writing path.
+- Validators/preflight: #542/#544 validation plus #545 value generation remain prerequisites before ready publication.
+- Storage/cache/query: direct-grid station mirror, `met.interp_weight`, `met.forcing_version`, `met.forcing_version_component`, and `met.forcing_station_timeseries`.
+- Public routes/entrypoints: orchestration observes `forcing_ready`/`already_done` only for a current direct-grid identity.
+- Frontend/downstream consumers: package manifest and object-store URIs remain the stable forcing package contract; runtime staging validation is #547.
+- Failure paths/rollback/stale state: invalid or stale direct-grid identity, package write failure, child-row failure, or manifest mismatch leaves no finalized ready output and no IDW fallback.
+- Evidence/audit/readiness: tests inspect object-store package files, DB lineage, manifest lineage, persisted timeseries, idempotency reuse, stale invalidation, and failure side effects.
+Regression rows:
+- valid direct-grid contract after #545 row generation -> production writes SHUD `.tsd.forc`, per-station SHUD CSVs, package manifest, forcing version, components, and station timeseries, then marks cycle `forcing_ready`.
+- station `qhh_forc_001` with `shud_forcing_index=1` and contract filename -> `.tsd.forc` contains ID `1`, matching coordinates, and per-station CSV path from the contract.
+- direct-grid SHUD station CSV -> columns are time plus `Precip`, `Temp`, `RH`, `Wind`, `RN`; `Press` is absent from the CSV and present in persisted station timeseries.
+- direct-grid lineage/manifest -> contains mapping mode, spatial mapping method, binding URI/checksum, model input package id, `.sp.att` path/checksum, applicable source ids, grid id/signature, station signature, canonical input signature, and output file checksums.
+- rerun unchanged direct-grid source/model/cycle -> returns existing-ready/already-done behavior and does not create duplicate ready forcing versions.
+- direct-grid binding URI, `.sp.att` path/checksum, applicable source ids, station signature, canonical input signature, or mapping mode changes -> existing ready output is considered stale and the same forcing version is recomputed/replaced when no mirror identity collision is introduced.
+- direct-grid binding checksum, model input id, `grid_id`, or grid signature changes that collide with existing derived direct-grid mirror station ids -> production fails closed before weight writes or ready publication; no stale `already_done`, IDW fallback, or finalized wrong package is allowed.
+- parent pending-version creation failure -> no package files or child rows are published and retry can complete normally.
+- package file or package manifest write/checksum failure -> no finalized ready output; retry replaces package files/manifest without duplicate ready versions.
+- component child-row or station-timeseries child-row failure -> parent remains pending/unfinalized; retry replaces child rows without duplicates or stale orphaned rows.
+- lineage persistence or finalize/readiness failure -> no finalized ready output; retry completes and binds lineage/package manifest/checksum consistently.
+- explicit direct-grid validation/value/package failure -> no legacy station loading, no IDW neighbor search, no fallback ready output.
+- legacy absent/explicit `idw` asset -> existing package, lineage, idempotency, and finite-value validation behavior remains unchanged.

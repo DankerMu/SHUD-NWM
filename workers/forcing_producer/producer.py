@@ -268,11 +268,13 @@ class ForcingRepository(Protocol):
 
     def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]: ...
 
+    def clear_forcing_version_checksum(self, forcing_version_id: str) -> dict[str, Any]: ...
+
     def verify_forcing_version_children(
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
@@ -453,6 +455,46 @@ class ForcingProducer:
                     expected_valid_times=expected_valid_times,
                     station_count=len(direct_grid_stations),
                 )
+                grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
+                lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
+                station_signature = _station_signature(direct_grid_stations)
+                scheduler_canonical_identity = _scheduler_canonical_identity_manifest(
+                    canonical_product_id=canonical_product_id,
+                    canonical_identity=canonical_identity,
+                )
+                canonical_input_signature = self._canonical_input_signature(products_by_variable, parsed_cycle_time)
+                grid_signature_by_source_grid = {
+                    source_grid: _grid_signature_hash(grid_points)
+                    for source_grid, grid_points in grid_points_by_source_grid.items()
+                }
+                direct_grid_identity = _direct_grid_lineage_identity(
+                    contract=forcing_mapping_contract,
+                    grid_signature=direct_grid_signature,
+                    station_signature=station_signature,
+                    canonical_input_signature=canonical_input_signature,
+                )
+                if self._existing_forcing_version_is_current(
+                    existing,
+                    lead_window=lead_window,
+                    station_signature=station_signature,
+                    canonical_input_signature=canonical_input_signature,
+                    scheduler_canonical_identity=scheduler_canonical_identity,
+                    expected_lineage_identity=direct_grid_identity,
+                    expected_station_ids=station_signature["station_ids"],
+                    expected_valid_times=expected_valid_times,
+                    expected_variables=self.config.output_variables,
+                    expected_components=_forcing_components_for_products(
+                        forcing_version_id=str(existing["forcing_version_id"]) if existing else "",
+                        products_by_variable=products_by_variable,
+                    ),
+                ):
+                    return self._return_existing_ready(
+                        existing,
+                        source_id=resolved_source_id,
+                        cycle_time=parsed_cycle_time,
+                        products_by_variable=products_by_variable,
+                        expected_valid_times=expected_valid_times,
+                    )
                 self._ensure_direct_grid_met_stations(
                     basin_version_id=resolved_basin_version_id,
                     contract=forcing_mapping_contract,
@@ -476,7 +518,6 @@ class ForcingProducer:
                         grid_signature=direct_grid_signature,
                     )
                 )
-                grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
                 values, components = self._generate_timeseries_streaming(
                     source_id=resolved_source_id,
                     cycle_time=parsed_cycle_time,
@@ -489,11 +530,32 @@ class ForcingProducer:
                     canonical_to_forcing=canonical_to_forcing,
                     validate_all_field_values=False,
                 )
-                self._stop_at_direct_grid_package_boundary(
-                    contract=forcing_mapping_contract,
+                result = self._write_outputs_and_records(
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    model_id=model_id,
+                    basin_id=resolved_basin_id,
+                    basin_version_id=resolved_basin_version_id,
+                    river_network_version_id=resolved_river_network_version_id,
+                    scheduler_canonical_identity=scheduler_canonical_identity,
+                    grid_id=forcing_mapping_contract.grid_id,
+                    stations=direct_grid_stations,
                     rows=values,
                     components=components,
+                    products_by_variable=products_by_variable,
+                    fallback_lineage=fallback_lineage,
+                    lead_window=lead_window,
+                    station_signature=station_signature,
+                    grid_signature_by_source_grid=grid_signature_by_source_grid,
+                    canonical_input_signature=canonical_input_signature,
+                    lineage_overrides=direct_grid_identity,
                 )
+                self._mark_cycle_ready_after_publication(
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    forcing_version_id=result.forcing_version_id,
+                )
+                return result
 
             stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
             self._enforce_limit("station_count", len(stations), self.config.max_station_count)
@@ -516,32 +578,21 @@ class ForcingProducer:
                 station_signature=station_signature,
                 canonical_input_signature=canonical_input_signature,
                 scheduler_canonical_identity=scheduler_canonical_identity,
+                expected_lineage_identity=_idw_lineage_identity(),
                 expected_station_ids=station_signature["station_ids"],
                 expected_valid_times=expected_valid_times,
                 expected_variables=self.config.output_variables,
-                expected_component_ids=_canonical_product_ids(products_by_variable),
+                expected_components=_forcing_components_for_products(
+                    forcing_version_id=str(existing["forcing_version_id"]) if existing else "",
+                    products_by_variable=products_by_variable,
+                ),
             ):
-                existing_coverage_end = _forcing_coverage_end_time(
-                    resolved_source_id,
-                    products_by_variable,
-                    row_times=expected_valid_times,
-                )
-                return ForcingProductionResult(
-                    status="already_done",
-                    forcing_version_id=str(existing["forcing_version_id"]),
-                    forcing_package_uri=str(existing["forcing_package_uri"]),
-                    checksum=str(existing["checksum"]),
-                    station_count=int(existing["station_count"]),
-                    timestep_count=len(expected_valid_times),
-                    variable_count=len(self.config.output_variables),
-                    time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
-                    units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
-                    file_uris={
-                        "package_manifest": _package_manifest_uri(
-                            str(existing["forcing_package_uri"]),
-                            self.config.package_manifest_filename,
-                        ),
-                    },
+                return self._return_existing_ready(
+                    existing,
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    products_by_variable=products_by_variable,
+                    expected_valid_times=expected_valid_times,
                 )
 
             grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
@@ -598,13 +649,12 @@ class ForcingProducer:
                 station_signature=station_signature,
                 grid_signature_by_source_grid=grid_signature_by_source_grid,
                 canonical_input_signature=canonical_input_signature,
+                lineage_overrides=_idw_lineage_identity(),
             )
-            self.repository.update_forecast_cycle(
+            self._mark_cycle_ready_after_publication(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
-                status="forcing_ready",
-                error_code="",
-                error_message="",
+                forcing_version_id=result.forcing_version_id,
             )
             return result
         except Exception as error:
@@ -1649,6 +1699,7 @@ class ForcingProducer:
         station_signature: Mapping[str, Any] | None = None,
         grid_signature_by_source_grid: Mapping[tuple[str, str], str] | None = None,
         canonical_input_signature: Mapping[str, Any] | None = None,
+        lineage_overrides: Mapping[str, Any] | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -1728,6 +1779,8 @@ class ForcingProducer:
             "station_order": station_order,
             "canonical_product_ids": canonical_product_ids,
         }
+        if lineage_overrides:
+            lineage_json.update(_json_round_trip(dict(lineage_overrides)))
         if fallback_lineage is not None:
             lineage_json.update(
                 {
@@ -1738,6 +1791,12 @@ class ForcingProducer:
                     ],
                 }
             )
+        file_entries = [
+            {"role": "tsd_forc", "uri": tsd_uri, "checksum": tsd_checksum},
+            {"role": "csv_debug", "uri": csv_uri, "checksum": csv_checksum},
+            *shud_file_entries,
+        ]
+        lineage_json["output_files"] = file_entries
         package_manifest = {
             "forcing_version_id": forcing_version_id,
             "model_id": model_id,
@@ -1758,11 +1817,7 @@ class ForcingProducer:
             "units": units,
             "quality_flags": quality_flags,
             "station_order": station_order,
-            "files": [
-                {"role": "tsd_forc", "uri": tsd_uri, "checksum": tsd_checksum},
-                {"role": "csv_debug", "uri": csv_uri, "checksum": csv_checksum},
-                *shud_file_entries,
-            ],
+            "files": file_entries,
             "lineage": lineage_json,
         }
         package_content = _json_bytes(package_manifest)
@@ -1783,7 +1838,6 @@ class ForcingProducer:
                 **lineage_json,
                 "forcing_package_manifest_uri": package_manifest_uri,
                 "forcing_package_manifest_checksum": package_checksum,
-                "output_files": package_manifest["files"],
             },
         }
         self.repository.upsert_forcing_version(record)
@@ -1820,10 +1874,11 @@ class ForcingProducer:
         station_signature: Mapping[str, Any],
         canonical_input_signature: Mapping[str, Any],
         scheduler_canonical_identity: Mapping[str, Any],
+        expected_lineage_identity: Mapping[str, Any],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
     ) -> bool:
         if not existing:
             return False
@@ -1860,6 +1915,8 @@ class ForcingProducer:
             scheduler_canonical_identity,
         ):
             return False
+        if not _lineage_identity_matches(lineage, expected_lineage_identity):
+            return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
             if not self.object_store.exists(manifest_uri) or self.object_store.checksum(manifest_uri) != checksum:
@@ -1885,9 +1942,27 @@ class ForcingProducer:
                 scheduler_canonical_identity,
             ):
                 return False
+            if not _lineage_identity_matches(manifest_lineage, expected_lineage_identity):
+                return False
+            if not self._existing_package_files_are_complete(
+                manifest=manifest,
+                lineage=manifest_lineage,
+                fallback_lineage=lineage,
+                expected_lineage_identity=expected_lineage_identity,
+            ):
+                return False
+            if not self._existing_db_lineage_matches_manifest(
+                lineage=lineage,
+                manifest=manifest,
+                manifest_lineage=manifest_lineage,
+                manifest_uri=manifest_uri,
+                manifest_checksum=checksum,
+                expected_lineage_identity=expected_lineage_identity,
+            ):
+                return False
             return self._forcing_children_are_complete(
                 forcing_version_id=str(existing["forcing_version_id"]),
-                expected_component_ids=expected_component_ids,
+                expected_components=expected_components,
                 expected_station_ids=expected_station_ids,
                 expected_valid_times=expected_valid_times,
                 expected_variables=expected_variables,
@@ -1896,11 +1971,123 @@ class ForcingProducer:
             LOGGER.warning("Existing forcing package checksum could not be verified for %s", package_uri)
             return False
 
+    def _existing_package_files_are_complete(
+        self,
+        *,
+        manifest: Mapping[str, Any],
+        lineage: Mapping[str, Any],
+        fallback_lineage: Mapping[str, Any],
+        expected_lineage_identity: Mapping[str, Any],
+    ) -> bool:
+        manifest_files = manifest.get("files")
+        lineage_files = lineage.get("output_files")
+        if not isinstance(manifest_files, Sequence) or isinstance(manifest_files, (str, bytes)):
+            return False
+        if not isinstance(lineage_files, Sequence) or isinstance(lineage_files, (str, bytes)):
+            fallback_lineage_files = fallback_lineage.get("output_files")
+            if (
+                expected_lineage_identity.get("forcing_mapping_mode") == IDW_MODE
+                and "output_files" not in lineage
+                and isinstance(fallback_lineage_files, Sequence)
+                and not isinstance(fallback_lineage_files, (str, bytes))
+            ):
+                lineage_files = fallback_lineage_files
+            else:
+                return False
+        if not manifest_files or len(manifest_files) != len(lineage_files):
+            return False
+        for manifest_entry, lineage_entry in zip(manifest_files, lineage_files, strict=True):
+            if not isinstance(manifest_entry, Mapping) or not isinstance(lineage_entry, Mapping):
+                return False
+            if _stable_identity(manifest_entry) != _stable_identity(lineage_entry):
+                return False
+            uri = str(manifest_entry.get("uri") or "").strip()
+            checksum = str(manifest_entry.get("checksum") or "").strip()
+            if not uri or not checksum:
+                return False
+            if not self.object_store.exists(uri) or self.object_store.checksum(uri) != checksum:
+                return False
+        return True
+
+    def _existing_db_lineage_matches_manifest(
+        self,
+        *,
+        lineage: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        manifest_lineage: Mapping[str, Any],
+        manifest_uri: str,
+        manifest_checksum: str,
+        expected_lineage_identity: Mapping[str, Any],
+    ) -> bool:
+        if expected_lineage_identity.get("forcing_mapping_mode") != DIRECT_GRID_MODE:
+            return True
+        manifest_files = manifest.get("files")
+        manifest_lineage_files = manifest_lineage.get("output_files")
+        db_lineage_files = lineage.get("output_files")
+        if (
+            not isinstance(manifest_files, Sequence)
+            or isinstance(manifest_files, (str, bytes))
+            or not isinstance(manifest_lineage_files, Sequence)
+            or isinstance(manifest_lineage_files, (str, bytes))
+            or not isinstance(db_lineage_files, Sequence)
+            or isinstance(db_lineage_files, (str, bytes))
+        ):
+            return False
+        if _stable_identity(db_lineage_files) != _stable_identity(manifest_files):
+            return False
+        if _stable_identity(db_lineage_files) != _stable_identity(manifest_lineage_files):
+            return False
+        if str(lineage.get("forcing_package_manifest_uri") or "") != manifest_uri:
+            return False
+        if str(lineage.get("forcing_package_manifest_checksum") or "") != manifest_checksum:
+            return False
+        return True
+
+    def _return_existing_ready(
+        self,
+        existing: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        expected_valid_times: Sequence[datetime],
+    ) -> ForcingProductionResult:
+        assert self.repository is not None
+        self.repository.update_forecast_cycle(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            status="forcing_ready",
+            error_code="",
+            error_message="",
+        )
+        existing_coverage_end = _forcing_coverage_end_time(
+            source_id,
+            products_by_variable,
+            row_times=expected_valid_times,
+        )
+        return ForcingProductionResult(
+            status="already_done",
+            forcing_version_id=str(existing["forcing_version_id"]),
+            forcing_package_uri=str(existing["forcing_package_uri"]),
+            checksum=str(existing["checksum"]),
+            station_count=int(existing["station_count"]),
+            timestep_count=len(expected_valid_times),
+            variable_count=len(self.config.output_variables),
+            time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
+            units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
+            file_uris={
+                "package_manifest": _package_manifest_uri(
+                    str(existing["forcing_package_uri"]),
+                    self.config.package_manifest_filename,
+                ),
+            },
+        )
+
     def _forcing_children_are_complete(
         self,
         *,
         forcing_version_id: str,
-        expected_component_ids: Sequence[str],
+        expected_components: Sequence[ForcingComponent],
         expected_station_ids: Sequence[str],
         expected_valid_times: Sequence[datetime],
         expected_variables: Sequence[str],
@@ -1911,12 +2098,45 @@ class ForcingProducer:
             return False
         proof = verifier(
             forcing_version_id=forcing_version_id,
-            expected_component_ids=expected_component_ids,
+            expected_components=expected_components,
             expected_station_ids=expected_station_ids,
             expected_valid_times=expected_valid_times,
             expected_variables=expected_variables,
         )
         return bool(proof.get("complete"))
+
+    def _mark_cycle_ready_after_publication(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        forcing_version_id: str,
+    ) -> None:
+        assert self.repository is not None
+        try:
+            self.repository.update_forecast_cycle(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                status="forcing_ready",
+                error_code="",
+                error_message="",
+            )
+        except Exception:
+            try:
+                self._mark_forcing_version_pending(forcing_version_id)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to clear finalized checksum for forcing version %s after readiness update failure.",
+                    forcing_version_id,
+                )
+            raise
+
+    def _mark_forcing_version_pending(self, forcing_version_id: str) -> None:
+        assert self.repository is not None
+        clearer = getattr(self.repository, "clear_forcing_version_checksum", None)
+        if not callable(clearer):
+            return
+        clearer(forcing_version_id)
 
     def _canonical_input_signature(
         self,
@@ -2442,6 +2662,81 @@ def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> boo
     )
 
 
+def _idw_lineage_identity() -> dict[str, Any]:
+    return {
+        "forcing_mapping_mode": IDW_MODE,
+        "spatial_mapping_method": IDW_MODE,
+    }
+
+
+def _direct_grid_lineage_identity(
+    *,
+    contract: DirectGridForcingContract,
+    grid_signature: str,
+    station_signature: Mapping[str, Any],
+    canonical_input_signature: Mapping[str, Any],
+) -> dict[str, Any]:
+    stations = [
+        {
+            "station_id": station.station_id,
+            "shud_forcing_index": station.shud_forcing_index,
+            "forcing_filename": station.forcing_filename,
+            "longitude": station.longitude,
+            "latitude": station.latitude,
+            "x": station.x,
+            "y": station.y,
+            "z": station.z,
+            "grid_id": station.grid_id,
+            "grid_cell_id": station.grid_cell_id,
+        }
+        for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
+    ]
+    station_identity = {
+        "schema_version": "nhms.direct_grid_station_identity.v1",
+        "station_count": len(stations),
+        "station_ids": [station["station_id"] for station in stations],
+        "checksum": sha256_bytes(_json_bytes({"stations": stations})),
+        "stations": stations,
+    }
+    return {
+        "forcing_mapping_mode": DIRECT_GRID_MODE,
+        "spatial_mapping_method": DIRECT_GRID_MODE,
+        "binding_uri": contract.binding_uri,
+        "binding_checksum": contract.binding_checksum,
+        "model_input_package_id": contract.model_input_package_id,
+        "sp_att_path": contract.sp_att_path,
+        "sp_att_checksum": contract.sp_att_checksum,
+        "applicable_source_ids": list(contract.applicable_source_ids),
+        "grid_id": contract.grid_id,
+        "grid_signature": grid_signature,
+        "validated_grid_signature": grid_signature,
+        "contract_grid_signature": contract.grid_signature,
+        "direct_grid_station_identity": station_identity,
+        "direct_grid_station_signature": station_identity["checksum"],
+        "station_signature": station_signature,
+        "canonical_input_signature": canonical_input_signature,
+    }
+
+
+def _lineage_identity_matches(lineage: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    if not expected:
+        return True
+    for key, expected_value in expected.items():
+        if key in {"station_signature", "canonical_input_signature"}:
+            continue
+        existing_value = lineage.get(key)
+        if (
+            expected.get("forcing_mapping_mode") == IDW_MODE
+            and key in {"forcing_mapping_mode", "spatial_mapping_method"}
+            and existing_value in (None, "")
+            and expected_value == IDW_MODE
+        ):
+            continue
+        if _stable_identity(existing_value) != _stable_identity(expected_value):
+            return False
+    return True
+
+
 def _products(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
 ) -> tuple[CanonicalProduct, ...]:
@@ -2454,6 +2749,23 @@ def _canonical_product_ids(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
 ) -> tuple[str, ...]:
     return tuple(sorted(product.canonical_product_id for product in _products(products_by_variable)))
+
+
+def _forcing_components_for_products(
+    *,
+    forcing_version_id: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> tuple[ForcingComponent, ...]:
+    return tuple(
+        ForcingComponent(
+            forcing_version_id=forcing_version_id,
+            canonical_product_id=product.canonical_product_id,
+            variable=product.variable,
+            valid_time_start=product.valid_time,
+            valid_time_end=product.valid_time,
+        )
+        for product in sorted(_products(products_by_variable), key=lambda item: (item.variable, item.valid_time))
+    )
 
 
 def _time_range_manifest(valid_times: Sequence[datetime]) -> dict[str, str | int]:
