@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import tempfile
+import traceback
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1580,6 +1581,11 @@ def test_direct_grid_contract_unsupported_source_scope_entry_uses_bounded_error_
     assert "invalid_source_id" not in error
     assert invalid_source not in str(exc_info.value)
     assert invalid_source not in error.values()
+    assert exc_info.value.__cause__ is None
+    assert invalid_source not in repr(exc_info.value.__cause__)
+    assert invalid_source not in "".join(
+        traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+    )
 
 
 def test_direct_grid_contract_unsupported_mode_fails_closed() -> None:
