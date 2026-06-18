@@ -1699,7 +1699,7 @@ def test_producer_idw_mode_after_direct_grid_mirror_uses_only_legacy_stations(
     )
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     direct_grid_station_ids = {station.station_id for station in contract.stations}
@@ -1734,7 +1734,7 @@ def test_producer_idw_mode_after_direct_grid_mirror_uses_only_legacy_stations(
     assert lineage["station_signature"]["station_ids"] == ["legacy_forc_001"]
 
 
-def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_boundary(
+def test_producer_direct_grid_materializes_exact_mappings_then_stops_at_package_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1754,7 +1754,7 @@ def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_bo
     )
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert repository.mapping_contract_calls == [
@@ -1809,7 +1809,7 @@ def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_bo
     assert not (tmp_path / "forcing").exists()
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
-    assert "issue #544 mapping materialization boundary" in repository.cycle_updates[-1]["error_message"]
+    assert "issue #546 package/lineage boundary" in repository.cycle_updates[-1]["error_message"]
 
 
 def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
@@ -1846,7 +1846,7 @@ def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
     ]
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert repository.load_station_count == 0
@@ -1862,6 +1862,187 @@ def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
     assert repository.forcing_versions == {}
     assert repository.timeseries == []
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+def test_producer_direct_grid_rows_equal_bound_canonical_grid_cell_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid row generation must not call compute_idw_weights"),
+    )
+    captured: dict[str, Any] = {}
+    _capture_direct_grid_package_boundary(monkeypatch, captured)
+    store = LocalObjectStore(tmp_path)
+    products = _write_canonical_products(
+        store,
+        forecast_hours=(0, 3),
+        values_by_variable={
+            "prcp_rate_or_amount": (1.0, 2.0, 999.0),
+            "air_temperature_2m": (10.0, 20.0, 999.0),
+            "relative_humidity_2m": (0.50, 0.75, 999.0),
+            "shortwave_down": (100.0, 200.0, 999.0),
+            "wind_u_10m": (3.0, 6.0, 999.0),
+            "wind_v_10m": (4.0, 8.0, 999.0),
+            "pressure_surface": (101000.0, 102000.0, 999.0),
+        },
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    repository = FakeForcingRepository(
+        stations=(),
+        products=products,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    rows: tuple[ForcingTimeseriesRow, ...] = captured["rows"]
+    components: tuple[ForcingComponent, ...] = captured["components"]
+    planned_valid_time = parse_cycle_time("2026050700")
+    assert {row.valid_time for row in rows} == {planned_valid_time}
+    values = {(row.station_id, row.variable): row.value for row in rows}
+    assert values[("qhh_forc_001", "PRCP")] == pytest.approx(1.0)
+    assert values[("qhh_forc_001", "TEMP")] == pytest.approx(10.0)
+    assert values[("qhh_forc_001", "RH")] == pytest.approx(0.50)
+    assert values[("qhh_forc_001", "Rn")] == pytest.approx(100.0)
+    assert values[("qhh_forc_001", "wind")] == pytest.approx(5.0)
+    assert values[("qhh_forc_002", "PRCP")] == pytest.approx(2.0)
+    assert values[("qhh_forc_002", "TEMP")] == pytest.approx(20.0)
+    assert values[("qhh_forc_002", "RH")] == pytest.approx(0.75)
+    assert values[("qhh_forc_002", "Rn")] == pytest.approx(200.0)
+    assert values[("qhh_forc_002", "wind")] == pytest.approx(10.0)
+    assert {row.station_id for row in rows} == {"qhh_forc_001", "qhh_forc_002"}
+    assert {row.variable for row in rows} == set(FORCING_VARIABLES)
+    assert {component.canonical_product_id for component in components} == {
+        product.canonical_product_id for product in products
+    }
+    assert {component.variable for component in components} == {product.variable for product in products}
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+def test_producer_direct_grid_reads_only_required_bound_grid_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    _capture_direct_grid_package_boundary(monkeypatch, {})
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+    original_read = producer._read_canonical_field
+    read_proof: list[tuple[str, frozenset[str] | None, tuple[str, ...]]] = []
+
+    def capture_read(*args: Any, **kwargs: Any) -> Any:
+        field = original_read(*args, **kwargs)
+        product = args[0]
+        read_proof.append(
+            (
+                product.variable,
+                kwargs.get("required_grid_cell_ids"),
+                tuple(sorted(field.values_by_grid_cell_id)),
+            )
+        )
+        return field
+
+    monkeypatch.setattr(producer, "_read_canonical_field", capture_read)
+
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert read_proof
+    assert {required for _, required, _ in read_proof} == {frozenset({"0", "1"})}
+    assert {retained for _, _, retained in read_proof} == {("0", "1")}
+
+
+def test_producer_direct_grid_missing_bound_grid_cell_fails_before_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid missing-cell failure must not call compute_idw_weights"),
+    )
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest["station_bindings"][1]["grid_cell_id"] = "missing-cell"
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="missing required interpolation grid cells: missing-cell"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    _assert_direct_grid_value_failure_without_ready_outputs(repository, tmp_path)
+
+
+def test_producer_direct_grid_non_finite_bound_canonical_value_fails_before_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid non-finite failure must not call compute_idw_weights"),
+    )
+    store = LocalObjectStore(tmp_path)
+    products = _write_canonical_products(
+        store,
+        forecast_hours=(0, 3),
+        values_by_variable={
+            "air_temperature_2m": (10.0, math.nan, 999.0),
+            "relative_humidity_2m": (0.50, 0.75, 999.0),
+            "wind_u_10m": (3.0, 6.0, 999.0),
+            "wind_v_10m": (4.0, 8.0, 999.0),
+            "pressure_surface": (101000.0, 102000.0, 999.0),
+            "prcp_rate_or_amount": (1.0, 2.0, 999.0),
+            "shortwave_down": (100.0, 200.0, 999.0),
+        },
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    repository = FakeForcingRepository(
+        stations=(),
+        products=products,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="non-finite field value for grid cell 1"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    _assert_direct_grid_value_failure_without_ready_outputs(repository, tmp_path)
 
 
 def test_producer_direct_grid_interp_weight_upsert_failure_does_not_fallback_or_write_outputs(
@@ -2171,7 +2352,7 @@ def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
     )
     assert assets["model_input_package_id"] == "model-input-demo-v1"
 
-    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
+    with pytest.raises(ForcingProductionError, match="issue #546 package/lineage boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert "FROM core.model_instance" in repository.statement
@@ -3276,6 +3457,38 @@ def _assert_direct_grid_failure_without_idw_or_ready_outputs(
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
     assert "DIRECT_GRID_VALIDATION_FAILED" in repository.cycle_updates[-1]["error_message"]
+
+
+def _assert_direct_grid_value_failure_without_ready_outputs(
+    repository: FakeForcingRepository,
+    tmp_path: Path,
+) -> None:
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.direct_grid_station_ensure_count == 1
+    assert repository.interp_weight_upsert_count == 1
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+
+
+def _capture_direct_grid_package_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, Any],
+) -> None:
+    def stop_at_boundary(self: ForcingProducer, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        raise ForcingProductionError("issue #546 package/lineage boundary")
+
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
+        stop_at_boundary,
+    )
 
 
 def _build_repository(

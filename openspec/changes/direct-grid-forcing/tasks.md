@@ -41,7 +41,18 @@
   - Required evidence: direct-grid mode enforces `ForcingProducerConfig.max_station_count` against contract stations before materialization, with no legacy station load, no IDW fallback, and no ready outputs.
   - Required evidence: existing absent/explicit `idw` tests still pass and continue through IDW station/weight/output behavior.
   - Non-goal for #544: no direct-grid station value rows, no station coordinate revalidation beyond #542 validated contract consumption, no SHUD package writes for direct-grid success, no forcing lineage/idempotency freshness, and no SHUD runtime staging change.
-- [ ] 2.4 Generate direct-grid station rows whose values equal bound canonical `grid_cell_id` values, preserving existing canonical physical conversions and adding direct-value fixture tests.
+- [x] 2.4 (#545) Generate direct-grid station rows whose values equal bound canonical `grid_cell_id` values, preserving existing canonical physical conversions and adding direct-value fixture tests.
+  - Required evidence: producer tests prove generated direct-grid rows use the contract station ids and values from each station's bound canonical `grid_cell_id` for `PRCP`, `TEMP`, `RH`, `Rn`, and `wind`.
+  - Required evidence: direct-value fixture uses station `qhh_forc_001 -> grid_cell_id 0` and `qhh_forc_002 -> grid_cell_id 1`; canonical cells provide PRCP `1.0/2.0`, TEMP `10.0/20.0`, RH `0.50/0.75`, Rn `100.0/200.0`, wind U `3.0/6.0`, wind V `4.0/8.0`; expected rows are PRCP/TEMP/RH/Rn/wind `1.0/10.0/0.50/100.0/5.0` and `2.0/20.0/0.75/200.0/10.0`.
+  - Required evidence: tests prove wind is derived from bound `wind_u_10m`/`wind_v_10m` canonical cells via existing `wind_speed` logic, and precipitation/radiation use the same conversion factors as IDW.
+  - Required evidence: generated direct-grid rows use the same valid-time plan as existing forcing production for the selected source/cycle, and generated components cover the selected canonical product inputs.
+  - Required evidence: producer tests prove direct-grid canonical reads retain only the required bound `grid_cell_id` set where the current `_read_canonical_field` path supports selective retention.
+  - Required evidence: missing bound `grid_cell_id` in any required canonical product fails closed before package, forcing version, station timeseries, or ready cycle state, and does not fallback to IDW.
+  - Required evidence: non-finite canonical value at a bound direct-grid cell fails closed before package, forcing version, station timeseries, or ready cycle state, and does not fallback to IDW.
+  - Required evidence: explicit `direct_grid` still does not call IDW station loading, IDW neighbor search, or legacy IDW fallback during row generation.
+  - Required evidence: generated direct-grid rows/components stop at a stable #546 package/lineage boundary; #545 does not write SHUD packages, ready forcing versions, station timeseries, lineage/idempotency freshness, or runtime staging.
+  - Required evidence: existing absent/explicit `idw` row generation and package output tests still pass unchanged.
+  - Non-goal for #545: no SHUD package writes for direct-grid success, no direct-grid forcing lineage/idempotency freshness, no runtime staging validation, and no deeper NetCDF/xarray lazy indexed-read optimization beyond using the existing required-cell retention hook.
 - [ ] 2.5 Use direct-grid required `grid_cell_id`s to limit retained canonical values in the existing `_read_canonical_field` path; defer deeper NetCDF/xarray lazy indexed-read optimization to a separate performance task if profiling shows it is needed.
 
 ## 3. Persistence, Lineage, and Compatibility

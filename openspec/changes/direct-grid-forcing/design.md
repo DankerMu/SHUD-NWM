@@ -444,3 +444,84 @@ Regression rows:
 - direct-grid mirror rows exist in `met.met_station` -> absent/explicit `idw` mode still loads only legacy forcing-grid stations and recomputes IDW weights from those stations.
 - direct-grid mapping persistence failure -> no package, forcing version, station timeseries, or ready cycle state is written, and no IDW fallback occurs.
 - legacy absent/explicit `idw` asset -> existing IDW path still computes/reuses homogeneous IDW weights and writes outputs; same-scope `direct_grid` cached rows are recomputed and replaced as IDW.
+
+## Issue #545 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- `workers/forcing_producer/producer.py` direct-grid branch after #544 mapping materialization.
+- Direct-grid station row generation from canonical products using exact bound `grid_cell_id` values.
+- Tests for exact value equality, missing bound cells, canonical conversion preservation, and legacy IDW compatibility.
+
+Must preserve:
+- Legacy absent/explicit `idw` behavior continues to load legacy stations, compute/reuse IDW weights, write current outputs, and ignore direct-grid derived station mirrors.
+- #542 validation, #544 station mirror isolation, direct-grid weight shape, all-product grid checks, and no-IDW fallback invariants remain intact.
+- Canonical physical conversion semantics remain mandatory: direct-grid consumes canonical products, preserves precipitation/unit/radiation/wind/RH/pressure handling semantics, and does not read raw IFS/GFS products.
+- #545 does not write SHUD packages, ready forcing versions, forcing lineage/idempotency freshness, or runtime staging outputs.
+
+Must add/change:
+- After direct-grid mappings are materialized, the producer builds direct-grid station objects from the validated contract and generates `ForcingTimeseriesRow` values from canonical products.
+- For every station/variable/valid time, each value equals the canonical value from the station's bound `grid_cell_id` after the same canonical-to-forcing conversion path used by IDW.
+- Canonical product reads are limited to required direct-grid `grid_cell_id`s through the existing required-cell retention path where supported.
+- Missing bound `grid_cell_id` in any required canonical product fails closed before package/version/timeseries/ready outputs and does not fall back to IDW.
+- Non-finite canonical values at a bound cell fail through the existing non-finite interpolated-value guard before package/version/timeseries/ready outputs.
+- Direct-grid generation stops at the #546 package/lineage boundary after rows/components are generated, until package persistence is implemented.
+
+Concrete #545 value fixture:
+- Station `qhh_forc_001` binds `grid_cell_id='0'`; station `qhh_forc_002` binds `grid_cell_id='1'`.
+- At one generated valid time, canonical cell values are: PRCP `1.0/2.0` mm/day, TEMP `10.0/20.0` degC, RH `0.50/0.75`, net radiation `100.0/200.0`, wind U `3.0/6.0`, wind V `4.0/8.0`.
+- Expected direct-grid rows are: `qhh_forc_001` PRCP `1.0`, TEMP `10.0`, RH `0.50`, Rn `100.0`, wind `5.0`; `qhh_forc_002` PRCP `2.0`, TEMP `20.0`, RH `0.75`, Rn `200.0`, wind `10.0`.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `ForcingProducer.produce` explicit direct-grid behavior advances from mapping-only to row-generation boundary.
+- Config / project setup: not selected - no deployment setting or environment switch is added.
+- File IO / path safety / overwrite: not selected - #545 only reads already-selected canonical products and writes no packages.
+- Schema / columns / units / field names: selected - generated rows must use existing `ForcingTimeseriesRow` variable/unit/source fields and not add SHUD CSV `Press`.
+- Auth / permissions / secrets: not selected - no credential or permission boundary changes.
+- Concurrency / shared state / ordering: selected - direct-grid rows must be generated only after validated mapping snapshot and before any ready-output side effects.
+- Resource limits / large input / discovery: selected - canonical reads must retain only required bound cells where supported; no global grid search or IDW neighbor discovery.
+- Legacy compatibility / examples: selected - IDW row generation and output behavior remain unchanged.
+- Error handling / rollback / partial outputs: selected - missing cells or non-finite values fail with no package/version/timeseries/ready state.
+- Release / packaging / dependency compatibility: not selected - no new dependency/package change.
+- Documentation / migration notes: selected - OpenSpec records #545 package/lineage non-goals.
+- Geospatial / CRS / basin geometry: selected - value lookup uses validated `grid_cell_id` rather than coordinate proximity.
+- Hydro-met time series / forcing windows: selected - valid-time planning, fallback time plan, and canonical variable mapping must match existing forcing semantics.
+- SHUD numerical runtime / conservation / NaN: selected - generated values must be finite and use existing unit/conversion semantics; runtime staging remains later.
+- PostGIS / TimescaleDB domain behavior: not selected - #545 does not persist `met.forcing_station_timeseries`.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm surface.
+- External hydro-met providers / snapshot reproducibility: selected - values remain canonical GFS/IFS products bound by grid signature and source scope.
+- Run manifest / QC provenance: selected - components/row evidence are prepared for later lineage, but #545 does not write lineage.
+- Published NHMS artifacts / display identity: not selected - no published display artifact is created.
+
+Boundary-surface checklist:
+- Shared helper roots: direct-grid branch, `_generate_timeseries_streaming`, `_read_canonical_field`, and direct-grid station conversion helper.
+- Public entrypoints: `ForcingProducer.produce` returns a stable #546 package/lineage boundary failure after row generation.
+- Read surfaces: canonical products selected by source/cycle and required direct-grid cells only.
+- Write/delete/overwrite surfaces: no direct-grid package/version/timeseries writes in #545; `met.interp_weight` materialization remains #544 behavior.
+- Producer/consumer evidence boundaries: generated rows/components are in-memory evidence for #546, not ready artifacts.
+- Stale-state/idempotency boundaries: existing-ready reuse still cannot mask invalid or changed direct-grid bindings.
+- Unchanged downstream consumers: legacy IDW package generation and station mirror exclusion remain compatible.
+
+Invariant Matrix
+Governing invariant: A direct-grid station value is exactly the canonical forcing value for its validated bound `grid_cell_id`, after the same canonical physical conversions as IDW, and no IDW spatial interpolation or fallback can affect explicit direct-grid rows.
+Source-of-truth identity/contract: validated `DirectGridForcingContract.stations[*].grid_cell_id`, direct-grid `InterpolationWeight` rows, selected canonical products, product valid-time plan, and `OUTPUT_UNITS`.
+Surfaces:
+- Producers: `ForcingProducer.produce` direct-grid branch and row-generation boundary.
+- Validators/preflight: #542/#544 validation and direct-grid weight materialization remain prerequisites.
+- Storage/cache/query: direct-grid weights are read/generated as derived cache; no station timeseries persistence in #545.
+- Public routes/entrypoints: orchestration sees a stable #546 boundary failure with no ready outputs after rows are generated.
+- Frontend/downstream consumers: none in #545 - no API/frontend payload changes.
+- Failure paths/rollback/stale state: missing bound cells, mismatched grids, non-finite values, or package-boundary failures leave no ready package/version/timeseries.
+- Evidence/audit/readiness: tests prove exact values, required-cell retention, missing-cell failure, no IDW calls, and IDW compatibility.
+Regression rows:
+- valid direct-grid contract with station `grid_cell_id='0'` and canonical PRCP/TEMP/RH/Rn/Wind values -> generated station rows equal bound cell values after existing conversions and stop at #546 boundary.
+- two-station fixture with canonical cells `0` and `1` as listed above -> rows contain PRCP/TEMP/RH/Rn/wind values `1/10/0.50/100/5` and `2/20/0.75/200/10` at the planned valid time.
+- direct-grid valid-time plan with the same GFS cycle/products as IDW -> generated row valid times match `_expected_forcing_valid_times` and component set matches selected canonical products.
+- direct-grid product lacks a bound `grid_cell_id` -> production fails before package/version/timeseries writes and no IDW fallback occurs.
+- direct-grid bound cell has non-finite canonical value -> production fails before package/version/timeseries writes and no IDW fallback occurs.
+- direct-grid required-cell set contains only bound cells -> `_read_canonical_field` receives the direct-grid required cells and retains only those values.
+- direct-grid wind rows -> wind speed is derived from bound U/V canonical cells using existing `wind_speed` logic.
+- legacy absent/explicit `idw` asset -> existing IDW generation and package output remain unchanged.
