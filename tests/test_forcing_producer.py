@@ -1629,6 +1629,34 @@ def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Pat
 
 
 @pytest.mark.parametrize("forcing_mapping_manifest", [None, {"forcing_mapping_mode": "idw"}])
+def test_producer_idw_mode_rejects_non_finite_unchosen_canonical_cell_before_outputs(
+    tmp_path: Path,
+    forcing_mapping_manifest: Mapping[str, Any] | None,
+) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_manifest=forcing_mapping_manifest,
+        values_by_variable={"prcp_rate_or_amount": (1.0, 2.0, math.nan)},
+    )
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=1),
+        repository=repository,
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError, match="non-finite field value for grid cell 2"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+@pytest.mark.parametrize("forcing_mapping_manifest", [None, {"forcing_mapping_mode": "idw"}])
 def test_producer_idw_mode_recomputes_when_cached_scope_contains_direct_grid_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2053,10 +2081,19 @@ def test_producer_direct_grid_reads_only_required_bound_grid_cells(
         tmp_path,
         forcing_mapping_contract=contract,
         direct_grid_validation_assets=_direct_grid_validation_assets(),
+        values_by_variable={
+            "air_temperature_2m": (10.0, 11.0, math.nan),
+            "relative_humidity_2m": (0.50, 0.75, math.nan),
+            "wind_u_10m": (3.0, 6.0, math.nan),
+            "wind_v_10m": (4.0, 8.0, math.nan),
+            "pressure_surface": (101000.0, 102000.0, math.nan),
+            "prcp_rate_or_amount": (1.0, 2.0, math.nan),
+            "shortwave_down": (100.0, 200.0, math.nan),
+        },
     )
     producer = _build_producer(tmp_path, repository, store)
     original_read = producer._read_canonical_field
-    read_proof: list[tuple[str, frozenset[str] | None, tuple[str, ...]]] = []
+    read_proof: list[tuple[str, frozenset[str] | None, tuple[str, ...], bool]] = []
 
     def capture_read(*args: Any, **kwargs: Any) -> Any:
         field = original_read(*args, **kwargs)
@@ -2066,6 +2103,7 @@ def test_producer_direct_grid_reads_only_required_bound_grid_cells(
                 product.variable,
                 kwargs.get("required_grid_cell_ids"),
                 tuple(sorted(field.values_by_grid_cell_id)),
+                kwargs.get("validate_all_values", True),
             )
         )
         return field
@@ -2076,8 +2114,9 @@ def test_producer_direct_grid_reads_only_required_bound_grid_cells(
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert read_proof
-    assert {required for _, required, _ in read_proof} == {frozenset({"0", "1"})}
-    assert {retained for _, _, retained in read_proof} == {("0", "1")}
+    assert {required for _, required, _, _ in read_proof} == {frozenset({"0", "1"})}
+    assert {retained for _, _, retained, _ in read_proof} == {("0", "1")}
+    assert {validate_all for _, _, _, validate_all in read_proof} == {False}
 
 
 def test_producer_direct_grid_missing_bound_grid_cell_fails_before_outputs(

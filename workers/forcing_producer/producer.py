@@ -487,6 +487,7 @@ class ForcingProducer:
                     weights=direct_grid_weights,
                     grid_points_by_source_grid=grid_points_by_source_grid,
                     canonical_to_forcing=canonical_to_forcing,
+                    validate_all_field_values=False,
                 )
                 self._stop_at_direct_grid_package_boundary(
                     contract=forcing_mapping_contract,
@@ -1245,6 +1246,7 @@ class ForcingProducer:
         required_grid_cell_ids: AbstractSet[str] | None = None,
         expected_grid_points: Sequence[GridPoint] | None = None,
         retain_grid_points: bool = True,
+        validate_all_values: bool = True,
     ) -> CanonicalField:
         try:
             import xarray as xr
@@ -1276,15 +1278,15 @@ class ForcingProducer:
                 self._validate_field_grid_matches_product(product, grid_points, expected_grid_points)
             values_by_grid_cell_id: dict[str, float] = {}
             for point, raw_value in zip(grid_points, flat_values, strict=True):
-                if required_grid_cell_ids is not None and point.grid_cell_id not in required_grid_cell_ids:
-                    continue
                 value = float(raw_value)
-                if not math.isfinite(value):
+                is_required = required_grid_cell_ids is None or point.grid_cell_id in required_grid_cell_ids
+                if (validate_all_values or is_required) and not math.isfinite(value):
                     raise ForcingProductionError(
                         f"Canonical product {product.canonical_product_id} has non-finite field value "
                         f"for grid cell {point.grid_cell_id}."
                     )
-                values_by_grid_cell_id[point.grid_cell_id] = value
+                if is_required:
+                    values_by_grid_cell_id[point.grid_cell_id] = value
             if required_grid_cell_ids is not None:
                 missing = sorted(required_grid_cell_ids.difference(values_by_grid_cell_id))
                 if missing:
@@ -1419,6 +1421,7 @@ class ForcingProducer:
         weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
         grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
         canonical_to_forcing: Mapping[str, str],
+        validate_all_field_values: bool = True,
     ) -> tuple[tuple[ForcingTimeseriesRow, ...], tuple[ForcingComponent, ...]]:
         forcing_times = _expected_forcing_valid_times(
             source_id,
@@ -1456,6 +1459,7 @@ class ForcingProducer:
                     required_grid_cell_ids=required_grid_cell_ids_by_source_grid.get(source_grid),
                     expected_grid_points=expected_grid_points,
                     retain_grid_points=False,
+                    validate_all_values=validate_all_field_values,
                 )
                 field_cache[variable] = field
                 return field
