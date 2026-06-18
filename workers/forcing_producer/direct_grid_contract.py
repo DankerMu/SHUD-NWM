@@ -14,6 +14,7 @@ DIRECT_GRID_SECTION_KEYS: tuple[str, ...] = (
     "direct_grid_contract",
     "forcing_mapping_contract",
 )
+MAX_DIRECT_GRID_STATION_BINDINGS = 10_000
 REQUIRED_MANIFEST_FIELDS: tuple[str, ...] = (
     "binding_uri",
     "binding_checksum",
@@ -103,6 +104,7 @@ def load_forcing_mapping_contract_from_manifest(
     manifest: Mapping[str, Any] | None,
     *,
     source_id: str | None = None,
+    allow_root_direct_grid: bool = True,
 ) -> DirectGridForcingContract | None:
     """Parse direct-grid metadata from an in-memory model asset manifest/profile.
 
@@ -115,7 +117,25 @@ def load_forcing_mapping_contract_from_manifest(
     if not isinstance(manifest, Mapping):
         raise DirectGridContractError("Model asset manifest must be a JSON object.")
 
-    contract_payload = _direct_grid_payload(manifest)
+    if "forcing_mapping_mode" in manifest:
+        mode = _required_text(manifest, "forcing_mapping_mode", source_id=source_id)
+        if mode == IDW_MODE:
+            return None
+        if mode != DIRECT_GRID_MODE:
+            raise DirectGridContractError(
+                f"Unsupported forcing_mapping_mode {mode!r}.",
+                field="forcing_mapping_mode",
+                source_id=source_id,
+                details={"supported_modes": [IDW_MODE, DIRECT_GRID_MODE]},
+            )
+        contract_payload = _direct_grid_section_payload(manifest)
+        if contract_payload is None:
+            if not allow_root_direct_grid:
+                return None
+            contract_payload = manifest
+        return parse_direct_grid_forcing_contract(contract_payload, source_id=source_id)
+
+    contract_payload = _direct_grid_section_payload(manifest)
     if contract_payload is None:
         return None
 
@@ -171,7 +191,7 @@ def parse_direct_grid_forcing_contract(
     )
 
 
-def _direct_grid_payload(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def _direct_grid_section_payload(manifest: Mapping[str, Any]) -> Mapping[str, Any] | None:
     for key in DIRECT_GRID_SECTION_KEYS:
         value = manifest.get(key)
         if value is None:
@@ -179,8 +199,6 @@ def _direct_grid_payload(manifest: Mapping[str, Any]) -> Mapping[str, Any] | Non
         if not isinstance(value, Mapping):
             raise DirectGridContractError(f"{key} must be a JSON object.", field=key)
         return value
-    if "forcing_mapping_mode" in manifest:
-        return manifest
     return None
 
 
@@ -191,7 +209,7 @@ def _required_text(
     source_id: str | None,
     station_id: str | None = None,
 ) -> str:
-    value = _optional_text(payload.get(field_name))
+    value = payload.get(field_name)
     if value is None:
         raise DirectGridContractError(
             f"Direct-grid contract is missing required field {field_name!r}.",
@@ -199,14 +217,23 @@ def _required_text(
             source_id=source_id,
             station_id=station_id,
         )
-    return value
-
-
-def _optional_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+    if not isinstance(value, str):
+        raise DirectGridContractError(
+            f"Direct-grid contract field {field_name!r} must be a JSON string.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__},
+        )
+    text = value.strip()
+    if not text:
+        raise DirectGridContractError(
+            f"Direct-grid contract is missing required field {field_name!r}.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+        )
+    return text
 
 
 def _applicable_source_ids(payload: Mapping[str, Any], *, source_id: str | None) -> tuple[str, ...]:
@@ -219,8 +246,15 @@ def _applicable_source_ids(payload: Mapping[str, Any], *, source_id: str | None)
         )
     normalized: list[str] = []
     for raw_source in raw_sources:
+        if not isinstance(raw_source, str):
+            raise DirectGridContractError(
+                "Direct-grid contract source identifiers must be JSON strings.",
+                field="applicable_source_ids",
+                source_id=source_id,
+                details={"invalid_source_id": raw_source, "actual_type": type(raw_source).__name__},
+            )
         try:
-            normalized_source = normalize_source_id(str(raw_source))
+            normalized_source = normalize_source_id(raw_source)
         except ValueError as error:
             raise DirectGridContractError(
                 f"Direct-grid contract includes unsupported source {raw_source!r}.",
@@ -266,6 +300,16 @@ def _station_bindings(
             "Direct-grid contract requires at least one station binding.",
             field="station_bindings",
             source_id=source_id,
+        )
+    if len(raw_stations) > MAX_DIRECT_GRID_STATION_BINDINGS:
+        raise DirectGridContractError(
+            "Direct-grid contract exceeds the station binding count limit.",
+            field="station_bindings",
+            source_id=source_id,
+            details={
+                "observed_count": len(raw_stations),
+                "max_count": MAX_DIRECT_GRID_STATION_BINDINGS,
+            },
         )
 
     bindings: list[DirectGridStationBinding] = []
@@ -313,7 +357,7 @@ def _station_bindings(
                 z=_required_float(raw_station, "z", source_id=source_id, station_id=station_id),
                 grid_id=station_grid_id,
                 grid_cell_id=_required_text(raw_station, "grid_cell_id", source_id=source_id, station_id=station_id),
-                properties=dict(raw_station),
+                properties={},
             )
         )
 
@@ -329,23 +373,22 @@ def _required_positive_int(
     station_id: str,
 ) -> int:
     value = payload.get(field_name)
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as error:
+    if type(value) is not int:
         raise DirectGridContractError(
-            f"Direct-grid station field {field_name!r} must be an integer.",
+            f"Direct-grid station field {field_name!r} must be a JSON integer.",
             field=field_name,
             source_id=source_id,
             station_id=station_id,
-        ) from error
-    if parsed <= 0:
+            details={"actual_type": type(value).__name__},
+        )
+    if value <= 0:
         raise DirectGridContractError(
             f"Direct-grid station field {field_name!r} must be positive.",
             field=field_name,
             source_id=source_id,
             station_id=station_id,
         )
-    return parsed
+    return value
 
 
 def _required_float(

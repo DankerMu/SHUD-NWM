@@ -345,7 +345,11 @@ class PsycopgForcingRepository:
                 "Model resource_profile must be a JSON object.",
                 details={"model_id": model_id, "basin_version_id": basin_version_id},
             )
-        return load_forcing_mapping_contract_from_manifest(resource_profile, source_id=source_id)
+        return load_forcing_mapping_contract_from_manifest(
+            resource_profile,
+            source_id=source_id,
+            allow_root_direct_grid=False,
+        )
 
     def get_forcing_version(
         self,
