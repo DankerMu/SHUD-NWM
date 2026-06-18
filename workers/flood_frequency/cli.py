@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -24,6 +25,13 @@ from workers.flood_frequency.hindcast import (
     submit_hindcast_slurm,
 )
 from workers.flood_frequency.return_period import ReturnPeriodError, compute_return_periods
+from workers.flood_frequency.return_period_cleanup import (
+    DEFAULT_BATCH_SIZE,
+    OPERATOR_DISK_NOTE,
+    NoCurveCleanupError,
+    NoCurveCleanupFilters,
+    cleanup_no_curve_results,
+)
 
 
 def _session_from_env() -> Session:
@@ -171,6 +179,39 @@ def _backfill_run_quality(run_ids: Sequence[str] | None = None) -> dict[str, obj
             "run_ids": [quality.run_id for quality in result],
             "run_ids_included": True,
         }
+
+
+def _cleanup_no_curve_results(
+    *,
+    apply_changes: bool = False,
+    run_ids: Sequence[str] = (),
+    basin_version_ids: Sequence[str] = (),
+    source_ids: Sequence[str] = (),
+    cycle_time_start: str | None = None,
+    cycle_time_end: str | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    sleep_interval: float = 0.0,
+    manifest_path: Path | None = None,
+    overwrite_manifest: bool = False,
+) -> dict[str, object]:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    with _session_from_env() as session:
+        return cleanup_no_curve_results(
+            session,
+            filters=NoCurveCleanupFilters(
+                run_ids=tuple(run_ids),
+                basin_version_ids=tuple(basin_version_ids),
+                source_ids=tuple(source_ids),
+                cycle_time_start=cycle_time_start,
+                cycle_time_end=cycle_time_end,
+            ),
+            apply_changes=apply_changes,
+            batch_size=batch_size,
+            sleep_interval=sleep_interval,
+            manifest_path=manifest_path,
+            overwrite_manifest=overwrite_manifest,
+            database_url=database_url,
+        )
 
 
 def _call_compute_return_period(
@@ -487,6 +528,63 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{code}: {message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command(
+        "cleanup-no-curve-results",
+        help=(
+            "Audit and optionally delete historical empty no-curve return-period rows. "
+            f"Default mode is dry-run. {OPERATOR_DISK_NOTE}"
+        ),
+    )
+    @click.option("--apply", "apply_changes", is_flag=True, help="Explicitly delete matching candidates.")
+    @click.option("--run-id", multiple=True)
+    @click.option("--basin-version-id", multiple=True)
+    @click.option("--source-id", multiple=True)
+    @click.option("--cycle-time-start")
+    @click.option("--cycle-time-end")
+    @click.option("--batch-size", type=click.IntRange(min=1), default=DEFAULT_BATCH_SIZE, show_default=True)
+    @click.option("--sleep-interval", type=float, default=0.0, show_default=True)
+    @click.option("--manifest-path", type=click.Path(dir_okay=False, path_type=Path))
+    @click.option("--overwrite-manifest", is_flag=True, help="Explicitly replace an existing manifest file.")
+    def cleanup_no_curve_results_command(
+        apply_changes: bool,
+        run_id: tuple[str, ...],
+        basin_version_id: tuple[str, ...],
+        source_id: tuple[str, ...],
+        cycle_time_start: str | None,
+        cycle_time_end: str | None,
+        batch_size: int,
+        sleep_interval: float,
+        manifest_path: Path | None,
+        overwrite_manifest: bool,
+    ) -> None:
+        try:
+            click.echo(
+                json.dumps(
+                    _cleanup_no_curve_results(
+                        apply_changes=apply_changes,
+                        run_ids=run_id,
+                        basin_version_ids=basin_version_id,
+                        source_ids=source_id,
+                        cycle_time_start=cycle_time_start,
+                        cycle_time_end=cycle_time_end,
+                        batch_size=batch_size,
+                        sleep_interval=sleep_interval,
+                        manifest_path=manifest_path,
+                        overwrite_manifest=overwrite_manifest,
+                    ),
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+        except (HindcastError, NoCurveCleanupError) as error:
+            message = getattr(error, "message", str(error))
+            code = getattr(error, "error_code", "NO_CURVE_CLEANUP_ERROR")
+            manifest = getattr(error, "manifest", None)
+            if manifest is not None:
+                click.echo(json.dumps(manifest, sort_keys=True, default=str))
+            click.echo(f"{code}: {message}", err=True)
+            raise SystemExit(1) from error
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -528,6 +626,25 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
 
     backfill_parser = subparsers.add_parser("backfill-run-quality")
     backfill_parser.add_argument("--run-id", action="append", default=[])
+
+    cleanup_parser = subparsers.add_parser(
+        "cleanup-no-curve-results",
+        description=(
+            "Audit and optionally delete historical empty no-curve return-period rows. "
+            "Default mode is dry-run."
+        ),
+        epilog=OPERATOR_DISK_NOTE,
+    )
+    cleanup_parser.add_argument("--apply", dest="apply_changes", action="store_true")
+    cleanup_parser.add_argument("--run-id", action="append", default=[])
+    cleanup_parser.add_argument("--basin-version-id", action="append", default=[])
+    cleanup_parser.add_argument("--source-id", action="append", default=[])
+    cleanup_parser.add_argument("--cycle-time-start")
+    cleanup_parser.add_argument("--cycle-time-end")
+    cleanup_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    cleanup_parser.add_argument("--sleep-interval", type=float, default=0.0)
+    cleanup_parser.add_argument("--manifest-path", type=Path)
+    cleanup_parser.add_argument("--overwrite-manifest", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -591,9 +708,31 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         if args.command == "backfill-run-quality":
             print(json.dumps(_backfill_run_quality(args.run_id or None), default=str))
             return 0
-    except (ManifestValidationError, HindcastError, FrequencyFitError, ReturnPeriodError) as error:
+        if args.command == "cleanup-no-curve-results":
+            print(
+                json.dumps(
+                    _cleanup_no_curve_results(
+                        apply_changes=args.apply_changes,
+                        run_ids=args.run_id,
+                        basin_version_ids=args.basin_version_id,
+                        source_ids=args.source_id,
+                        cycle_time_start=args.cycle_time_start,
+                        cycle_time_end=args.cycle_time_end,
+                        batch_size=args.batch_size,
+                        sleep_interval=args.sleep_interval,
+                        manifest_path=args.manifest_path,
+                        overwrite_manifest=args.overwrite_manifest,
+                    ),
+                    default=str,
+                )
+            )
+            return 0
+    except (ManifestValidationError, HindcastError, FrequencyFitError, ReturnPeriodError, NoCurveCleanupError) as error:
         message = getattr(error, "message", str(error))
         code = getattr(error, "error_code", "FREQUENCY_FIT_ERROR")
+        manifest = getattr(error, "manifest", None)
+        if manifest is not None:
+            print(json.dumps(manifest, default=str))
         print(f"{code}: {message}", file=sys.stderr)
         return 1
     parser.error(f"Unsupported command: {args.command}")

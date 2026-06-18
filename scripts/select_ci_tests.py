@@ -52,7 +52,30 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("workers/output_parser/**", ("tests/test_output_parser.py",)),
-    ("workers/flood_frequency/**", ("tests/test_flood_frequency.py", "tests/test_return_period.py")),
+    (
+        "workers/flood_frequency/return_period_cleanup.py",
+        ("tests/test_return_period_cleanup.py",),
+    ),
+    (
+        "workers/flood_frequency/return_period.py",
+        ("tests/test_return_period.py",),
+    ),
+    (
+        "workers/flood_frequency/cli.py",
+        ("tests/test_flood_frequency.py", "tests/test_return_period.py", "tests/test_return_period_cleanup.py"),
+    ),
+    (
+        "workers/flood_frequency/frequency.py",
+        ("tests/test_flood_frequency.py",),
+    ),
+    (
+        "workers/flood_frequency/hindcast.py",
+        ("tests/test_flood_frequency.py",),
+    ),
+    (
+        "workers/flood_frequency/config.py",
+        ("tests/test_flood_frequency.py",),
+    ),
     (
         "services/orchestrator/**",
         (
