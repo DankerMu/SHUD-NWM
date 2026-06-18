@@ -87,3 +87,70 @@ For direct-grid mode, the producer reads canonical values for required `grid_cel
 6. Add runtime staging validation so direct-grid packages use the standard multi-station SHUD forcing path and never trigger single-station `.sp.att` rewrites.
 7. Migrate basins gradually by publishing new model/input versions that declare `direct_grid`; old versions continue to run with IDW.
 8. Rollback by deactivating the direct-grid model/input version and reactivating the prior IDW asset version.
+
+## Issue #540 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+- Contract parsing/types for direct-grid model asset manifests and station bindings.
+- Repository/store interface boundary that exposes the authoritative manifest-backed contract.
+- Tests for parse errors, required fields, source scope, and grid signature field handling.
+
+Must preserve:
+- Existing forcing producer behavior remains IDW-only until later issues add mode selection and direct-grid production.
+- Existing model asset/public projections do not start treating database mirrors as authoritative direct-grid bindings.
+- Existing SHUD forcing station validation and package formatting remain unchanged.
+
+Must add/change:
+- A single authoritative in-process contract model for direct-grid binding manifests.
+- A repository/store read interface for `load_forcing_mapping_contract(model_id, basin_version_id)` or an equivalent name.
+- Structured contract errors for missing required manifest or station fields.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - repository interfaces are consumed by worker entrypoints even though #540 does not wire producer switching.
+- Config / project setup: not selected - no deployment/runtime config is changed.
+- File IO / path safety / overwrite: selected - binding and `.sp.att` paths/checksums are accepted as manifest identities but #540 must not read arbitrary files or publish outputs.
+- Schema / columns / units / field names: selected - JSON field names, source scope, grid identity, and station binding fields are the main contract.
+- Auth / permissions / secrets: not selected - no credentials or permission boundary changes.
+- Concurrency / shared state / ordering: not selected - no mutable shared state or scheduling behavior changes.
+- Resource limits / large input / discovery: selected - binding parsers must reject malformed/unbounded station structures at unit-test scale and avoid global discovery.
+- Legacy compatibility / examples: selected - absent direct-grid metadata must leave existing IDW assets unaffected.
+- Error handling / rollback / partial outputs: selected - invalid contracts must raise structured errors and must not create ready forcing outputs in later producer issues.
+- Release / packaging / dependency compatibility: not selected - no new runtime dependency is required for #540.
+- Documentation / migration notes: selected - docs and OpenSpec must identify manifest authority and DB mirror non-authority.
+- Geospatial / CRS / basin geometry: selected - station coordinates, longitude convention, `grid_id`, and `grid_signature` fields are part of the contract.
+- Hydro-met time series / forcing windows: not selected - #540 defines spatial contract only, no time-window logic.
+- SHUD numerical runtime / conservation / NaN: not selected - no value generation or runtime execution in #540.
+- PostGIS / TimescaleDB domain behavior: not selected - persistence changes are #543.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm surface.
+- External hydro-met providers / snapshot reproducibility: selected - `applicable_source_ids`, `grid_id`, and `grid_signature` bind GFS/IFS compatibility.
+- Run manifest / QC provenance: selected - binding checksum, model input package identity, and `.sp.att` checksum are future lineage inputs.
+- Published NHMS artifacts / display identity: not selected - no published products are created in #540.
+
+Boundary-surface checklist:
+- Shared helper roots: new direct-grid contract helpers only; do not modify canonical conversion or SHUD package helpers.
+- Public entrypoints: no CLI/API behavior change in #540.
+- Read surfaces: manifest mapping input supplied as in-memory metadata or repository-returned JSON; no direct file/object-store reads in this issue.
+- Write/delete/overwrite surfaces: none.
+- Producer/consumer evidence boundaries: contract fields must preserve binding checksum, model input identity, `.sp.att` checksum, source scope, grid identity, and grid signature without deriving authority from DB mirrors.
+- Stale-state/idempotency boundaries: parsed contract must carry identities needed by later freshness checks, but #540 does not implement freshness.
+- Unchanged downstream consumers: legacy IDW station loading and existing model asset APIs remain compatible.
+
+Invariant Matrix
+Governing invariant: A direct-grid forcing contract is valid only when the selected model asset manifest is the single authority for binding identity, source scope, grid identity, and station-to-grid-cell fields.
+Source-of-truth identity/contract: model asset manifest fields `forcing_mapping_mode`, `binding_uri`, `binding_checksum`, `model_input_package_id`, `sp_att_path`, `sp_att_checksum`, `applicable_source_ids`, `grid_id`, `grid_signature`, and station binding rows.
+Surfaces:
+- Producers: `workers/forcing_producer` repository protocol and later producer consumers; #540 adds interface/types only.
+- Validators/preflight: direct-grid contract parser and structured `DirectGridContractError`.
+- Storage/cache/query: repository/store load interface; DB mirror values are derived cache only.
+- Public routes/entrypoints: none in #540 - producer/CLI wiring is #541+.
+- Frontend/downstream consumers: none in #540 - no API payload changes.
+- Failure paths/rollback/stale state: missing or malformed contract fields raise errors before any ready output can be produced by later issues.
+- Evidence/audit/readiness: parsed contract retains checksums, package identity, source scope, and grid signature for later lineage/freshness.
+Regression rows:
+- valid direct-grid manifest with two contiguous station bindings and source `GFS` -> parsed contract preserves every identity and station `grid_cell_id`.
+- manifest missing `binding_checksum`, `grid_signature`, station `grid_cell_id`, or current source scope -> structured contract error with field/source detail.
+- legacy asset without direct-grid contract -> repository interface returns no direct-grid contract or IDW-compatible absence without changing existing IDW behavior.

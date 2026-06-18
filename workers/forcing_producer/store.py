@@ -7,6 +7,11 @@ from typing import Any
 
 from packages.common.met_store import MetStoreError, default_database_url
 
+from .direct_grid_contract import (
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
 from .producer import (
     CanonicalProduct,
     ForcingComponent,
@@ -312,6 +317,44 @@ class PsycopgForcingRepository:
                 grid_signature = EXCLUDED.grid_signature
             """,
             rows,
+        )
+
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> DirectGridForcingContract | None:
+        row = self._fetch_optional(
+            """
+            SELECT resource_profile
+            FROM core.model_instance
+            WHERE model_id = %s
+              AND basin_version_id = %s
+            """,
+            (model_id, basin_version_id),
+        )
+        if row is None:
+            raise MetStoreError(
+                f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
+            )
+        resource_profile = row.get("resource_profile")
+        if resource_profile is None:
+            resource_profile = {}
+        if not isinstance(resource_profile, Mapping):
+            raise DirectGridContractError(
+                "Model resource_profile must be a JSON object.",
+                details={
+                    "model_id": model_id,
+                    "basin_version_id": basin_version_id,
+                    "actual_type": type(resource_profile).__name__,
+                },
+            )
+        return load_forcing_mapping_contract_from_manifest(
+            resource_profile,
+            source_id=source_id,
+            allow_root_direct_grid=False,
         )
 
     def get_forcing_version(

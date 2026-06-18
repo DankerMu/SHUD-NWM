@@ -1,6 +1,10 @@
 ## 1. Mapping Mode and Asset Contract
 
-- [ ] 1.1 Define the authoritative direct-grid JSON asset contract and repository interface, including manifest path/fields, binding checksum, model input package identity, `.sp.att` checksum, `applicable_source_ids`, `grid_id`, `grid_cell_id`, and grid signature algorithm.
+- [x] 1.1 (#540) Define the authoritative direct-grid JSON asset contract and repository interface, including manifest path/fields, binding checksum, model input package identity, `.sp.att` checksum, `applicable_source_ids`, `grid_id`, `grid_cell_id`, and grid signature algorithm.
+  - Required evidence: unit tests parse a valid manifest and preserve `binding_uri`, `binding_checksum`, `model_input_package_id`, `sp_att_path`, `sp_att_checksum`, `applicable_source_ids`, `grid_id`, `grid_signature`, and every station `grid_cell_id`.
+  - Required evidence: unit tests reject missing manifest fields, missing station fields, empty source scope, current source not in `applicable_source_ids`, unsupported `forcing_mapping_mode`, unsafe `forcing_filename`, and non-contiguous `shud_forcing_index` with structured contract errors.
+  - Required evidence: repository/store interface tests or protocol tests prove manifest-backed contracts are read through a single authoritative entrypoint and DB mirrors are not treated as authoritative direct-grid sources in #540.
+  - Non-goal for #540: no producer behavior switch, no direct-grid value generation, no `met.interp_weight` persistence change, no SHUD runtime staging change.
 - [ ] 1.2 Add model/basin asset metadata parsing for `forcing_mapping_mode`, defaulting absent values or explicit `idw` to the legacy IDW path and rejecting unsupported values, with resolver unit tests.
 - [ ] 1.3 Add validation for direct-grid station indexes, filenames, grid identity/signature, source scope, WGS84 longitude normalization, model input identity, and `.sp.att` `FORC` references, with failure tests.
 

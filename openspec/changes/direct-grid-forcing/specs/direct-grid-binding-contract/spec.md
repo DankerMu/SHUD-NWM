@@ -39,6 +39,21 @@ A direct-grid basin/model asset SHALL provide a complete binding from every SHUD
 - **THEN** the binding maps that station to exactly one `grid_cell_id`
 - **THEN** runtime direct-grid production treats that grid cell as weight 1.0 for every output variable.
 
+### Requirement: Direct-grid contract is loaded through an authoritative repository entrypoint
+The system SHALL expose direct-grid forcing mapping metadata through a single repository/store entrypoint backed by the selected model asset manifest.
+
+#### Scenario: Repository reads manifest-backed direct-grid contract
+- **WHEN** forcing production asks the repository for the forcing mapping contract for a `model_id` and `basin_version_id`
+- **THEN** the repository returns the contract derived from the selected model asset manifest
+- **THEN** the returned contract preserves `binding_uri`, `binding_checksum`, `model_input_package_id`, `.sp.att` path and checksum, `applicable_source_ids`, `grid_id`, `grid_signature`, and station `grid_cell_id` values
+- **THEN** callers do not need to read direct-grid contract fields from unrelated database tables.
+
+#### Scenario: Database mirror cannot override manifest identity
+- **WHEN** database rows mirror direct-grid station or mapping metadata for query performance
+- **THEN** those rows are treated only as derived cache
+- **THEN** a database mirror value cannot replace or override manifest `binding_checksum`, `model_input_package_id`, `.sp.att` checksum, `applicable_source_ids`, `grid_id`, or `grid_signature`
+- **THEN** a mismatch between mirror values and manifest identities is handled as a direct-grid contract validation failure before readiness.
+
 ### Requirement: Direct-grid assets declare grid identity
 A direct-grid basin/model asset SHALL declare the canonical grid identity that its bindings target.
 
