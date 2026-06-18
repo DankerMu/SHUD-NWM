@@ -246,13 +246,13 @@ def _applicable_source_ids(payload: Mapping[str, Any], *, source_id: str | None)
             source_id=source_id,
         )
     normalized: list[str] = []
-    for raw_source in raw_sources:
+    for source_index, raw_source in enumerate(raw_sources):
         if not isinstance(raw_source, str):
             raise DirectGridContractError(
                 "Direct-grid contract source identifiers must be JSON strings.",
                 field="applicable_source_ids",
                 source_id=source_id,
-                details={"invalid_source_id": raw_source, "actual_type": type(raw_source).__name__},
+                details={"invalid_source_index": source_index, "actual_type": type(raw_source).__name__},
             )
         try:
             normalized_source = normalize_source_id(raw_source)
