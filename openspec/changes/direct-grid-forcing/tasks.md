@@ -34,6 +34,9 @@
   - Required evidence: producer tests prove direct-grid materialization persists through the existing interpolation-weight store path and replaces the same `(source_id, grid_id, model_id)` scope without mixed IDW/direct-grid snapshots.
   - Required evidence: producer tests prove `upsert_interp_weights` failure during direct-grid materialization leaves no forcing package, forcing version, station timeseries, or ready cycle state, and does not fallback to IDW.
   - Required evidence: validation failure before materialization writes no interpolation weights, no package, no forcing version, no station timeseries, and does not fallback to IDW.
+  - Required evidence: IDW mode with absent metadata and explicit `forcing_mapping_mode="idw"` recomputes and replaces same-scope cached `direct_grid` rows instead of reusing them.
+  - Required evidence: direct-grid validation checks every canonical product's actual grid definition/order for the run before materialization, failing before `upsert_interp_weights` on same-source/grid metadata with mismatched ordered points.
+  - Required evidence: direct-grid mode enforces `ForcingProducerConfig.max_station_count` against contract stations before materialization, with no legacy station load, no IDW fallback, and no ready outputs.
   - Required evidence: existing absent/explicit `idw` tests still pass and continue through IDW station/weight/output behavior.
   - Non-goal for #544: no direct-grid station value rows, no station coordinate revalidation beyond #542 validated contract consumption, no SHUD package writes for direct-grid success, no forcing lineage/idempotency freshness, and no SHUD runtime staging change.
 - [ ] 2.4 Generate direct-grid station rows whose values equal bound canonical `grid_cell_id` values, preserving existing canonical physical conversions and adding direct-value fixture tests.

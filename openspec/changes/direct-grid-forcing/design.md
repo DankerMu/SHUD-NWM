@@ -376,12 +376,15 @@ Change surface:
 
 Must preserve:
 - Legacy assets with absent mapping metadata and explicit `forcing_mapping_mode="idw"` continue through existing station loading, IDW weight reuse/compute, package output, and readiness behavior.
+- IDW weight reuse remains limited to homogeneous `method='idw'` snapshots; same-scope `direct_grid` rows or mixed-method rows are treated as stale and replaced by recomputed IDW weights in absent/explicit `idw` mode.
 - #542 fail-closed validation remains before direct-grid materialization and before existing-ready reuse.
 - #543 store replacement semantics remain the only persistence path for materialized direct-grid weights.
 - #544 does not generate direct-grid station values, write SHUD packages, change lineage/idempotency, or stage runtime assets.
 
 Must add/change:
 - After direct-grid validation succeeds, the producer derives station-like binding metadata from the authoritative contract instead of `met.met_station`.
+- Before direct-grid materialization, every canonical product in the run must have the same actual grid definition/order as the validated representative grid for its `(source_id, grid_id)` group.
+- Direct-grid mode enforces the configured station-count limit against `DirectGridForcingContract.stations` before writing interpolation weights.
 - For every bound station and output variable, the producer creates exactly one `InterpolationWeight` row with `method='direct_grid'`, `weight=1.0`, contract `grid_id`, station `grid_cell_id`, and the validated canonical `grid_signature`.
 - Direct-grid materialization persists the same `(source_id, grid_id, model_id)` scope through `upsert_interp_weights` and then stops at the #544 boundary until exact value rows are implemented by #545.
 - Direct-grid materialization must not call `compute_idw_weights()` or IDW station loading.
@@ -410,7 +413,7 @@ Selected risk packs:
 Boundary-surface checklist:
 - Shared helper roots: direct-grid contract helpers, producer direct-grid branch, and interpolation-weight store helper only.
 - Public entrypoints: `ForcingProducer.produce` returns a stable not-yet-implemented/direct-value-boundary failure after materialization until #545.
-- Read surfaces: repository contract loader and validation assets already covered by #542; no new direct file reads in #544.
+- Read surfaces: repository contract loader and validation assets already covered by #542; #544 also reads canonical product grid definitions/coordinates for every product before direct-grid materialization.
 - Write/delete/overwrite surfaces: `upsert_interp_weights` replaces only the validated direct-grid `(source_id, grid_id, model_id)` scope.
 - Producer/consumer evidence boundaries: persisted direct-grid weights become derived cache from the manifest, not a new authority.
 - Stale-state/idempotency boundaries: materialization must run after validation and before any ready-output reuse that could mask changed direct-grid bindings.
@@ -431,6 +434,8 @@ Regression rows:
 - valid direct-grid contract with two stations and matching canonical grid -> `upsert_interp_weights` receives `len(stations) * len(output_variables)` direct-grid rows, no ready output is written, and production stops at the stable #545 value-generation boundary.
 - direct-grid station bound to `cell-001` for variable `Precip` -> persisted row uses `grid_cell_id='cell-001'`, `method='direct_grid'`, `weight=1.0`, and validated `grid_signature`.
 - explicit direct-grid contract -> `load_met_stations` and `compute_idw_weights()` are not called.
+- direct-grid contract with a non-representative canonical product whose actual ordered grid points differ under the same source/grid metadata -> validation fails before `upsert_interp_weights`, with no ready outputs and no IDW fallback.
+- direct-grid contract with valid two-station bindings and `max_station_count=1` -> station-count validation fails before materialization, with no legacy station load, no IDW fallback, and no ready outputs.
 - direct-grid validation mismatch -> no interpolation weights are written and no ready output is produced.
 - direct-grid mapping persistence failure -> no package, forcing version, station timeseries, or ready cycle state is written, and no IDW fallback occurs.
-- legacy absent/explicit `idw` asset -> existing IDW path still computes/reuses IDW weights and writes outputs.
+- legacy absent/explicit `idw` asset -> existing IDW path still computes/reuses homogeneous IDW weights and writes outputs; same-scope `direct_grid` cached rows are recomputed and replaced as IDW.

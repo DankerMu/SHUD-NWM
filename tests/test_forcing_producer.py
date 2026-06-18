@@ -1554,6 +1554,49 @@ def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Pat
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
+@pytest.mark.parametrize("forcing_mapping_manifest", [None, {"forcing_mapping_mode": "idw"}])
+def test_producer_idw_mode_recomputes_when_cached_scope_contains_direct_grid_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forcing_mapping_manifest: Mapping[str, Any] | None,
+) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_manifest=forcing_mapping_manifest,
+    )
+    current_signature = "current-grid"
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: current_signature,
+    )
+    repository.interp_weights = [
+        InterpolationWeight(
+            "gfs",
+            "grid_a",
+            "demo_model",
+            "station_1",
+            variable,
+            "0",
+            1.0,
+            method="direct_grid",
+            grid_signature=current_signature,
+        )
+        for variable in FORCING_VARIABLES
+    ]
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert repository.load_station_count == 1
+    assert repository.load_weight_count == 1
+    assert repository.interp_weight_upsert_count == 1
+    assert {weight.method for weight in repository.interp_weights} == {"idw"}
+    assert {weight.grid_signature for weight in repository.interp_weights} == {current_signature}
+    assert repository.timeseries
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
 def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1710,6 +1753,107 @@ def test_producer_direct_grid_interp_weight_upsert_failure_does_not_fallback_or_
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
     assert "interp weight write failed" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_producer_direct_grid_rejects_non_representative_canonical_product_grid_mismatch(
+    tmp_path: Path,
+) -> None:
+    store, repository = _build_repository(tmp_path)
+    representative_product = repository.products[0]
+    contract_signature = sha256_bytes(
+        json.dumps(
+            {
+                "grid_points": [
+                    ("0", -75.0, 40.0),
+                    ("1", -74.5, 40.2),
+                    ("2", -74.0, 40.4),
+                ]
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    manifest = _direct_grid_manifest_for_default_grid()
+    manifest["grid_signature"] = contract_signature
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    mismatched_product = next(
+        product
+        for product in repository.products
+        if (
+            product.variable != representative_product.variable
+            or product.valid_time != representative_product.valid_time
+        )
+    )
+    replacement_product = _write_replacement_canonical_product(
+        store,
+        mismatched_product,
+        values=(12.0, 13.0, 14.0),
+        object_suffix="grid-mismatch",
+        longitudes=(-75.0, -74.5, -73.5),
+        latitudes=(40.0, 40.2, 40.4),
+    )
+    repository.products = tuple(
+        replacement_product if product is mismatched_product else product for product in repository.products
+    )
+    repository.forcing_mapping_contract = contract
+    repository.direct_grid_validation_assets = _direct_grid_validation_assets()
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    message = str(exc_info.value)
+    assert "DIRECT_GRID_VALIDATION_FAILED" in message
+    assert "grid definition/order mismatch" in message
+    assert mismatched_product.canonical_product_id in message
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+def test_producer_direct_grid_enforces_max_station_count_before_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid station limit failure must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3, max_station_count=1),
+        repository=repository,
+        object_store=store,
+    )
+
+    with pytest.raises(ForcingProductionError, match="station_count 2 exceeds configured limit 1"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 0
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert "station_count 2 exceeds configured limit 1" in repository.cycle_updates[-1]["error_message"]
 
 
 def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
