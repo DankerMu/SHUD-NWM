@@ -449,32 +449,30 @@ def _chunk_distribution(session: Session, filters: NoCurveCleanupFilters) -> dic
             "reason": "timescale_metadata_unavailable_for_dialect",
             "items": [],
         }
-    try:
-        metadata_available = bool(
-            session.execute(text("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL")).scalar_one()
-        )
-    except SQLAlchemyError as exc:
-        return {"status": "unavailable", "reason": redact_secret_text(str(exc)), "items": []}
+    metadata_available, unavailable_reason = _timescale_chunks_available(session)
     if not metadata_available:
-        return {"status": "unavailable", "reason": "timescale_metadata_relation_missing", "items": []}
+        return {"status": "unavailable", "reason": unavailable_reason, "items": []}
     where_sql, params = _candidate_where(filters, alias="r")
     try:
-        rows = session.execute(
-            text(
-                f"""
-                SELECT chunks.chunk_name, COUNT(*) AS rows
-                FROM flood.return_period_result AS r
-                JOIN timescaledb_information.chunks AS chunks
-                  ON chunks.hypertable_schema = 'flood'
-                 AND chunks.hypertable_name = 'return_period_result'
-                 AND format('%I.%I', chunks.chunk_schema, chunks.chunk_name)::regclass = r.tableoid::regclass
-                WHERE {where_sql}
-                GROUP BY chunks.chunk_name
-                ORDER BY chunks.chunk_name
-                """
-            ),
-            params,
-        ).mappings()
+        with session.begin_nested():
+            rows = list(
+                session.execute(
+                    text(
+                        f"""
+                        SELECT chunks.chunk_name, COUNT(*) AS rows
+                        FROM flood.return_period_result AS r
+                        JOIN timescaledb_information.chunks AS chunks
+                          ON chunks.hypertable_schema = 'flood'
+                         AND chunks.hypertable_name = 'return_period_result'
+                         AND format('%I.%I', chunks.chunk_schema, chunks.chunk_name)::regclass = r.tableoid::regclass
+                        WHERE {where_sql}
+                        GROUP BY chunks.chunk_name
+                        ORDER BY chunks.chunk_name
+                        """
+                    ),
+                    params,
+                ).mappings()
+            )
     except SQLAlchemyError as exc:
         return {"status": "unavailable", "reason": redact_secret_text(str(exc)), "items": []}
     return {
@@ -482,6 +480,21 @@ def _chunk_distribution(session: Session, filters: NoCurveCleanupFilters) -> dic
         "metadata_relation": "timescaledb_information.chunks",
         "items": [{"chunk_name": str(row["chunk_name"]), "rows": int(row["rows"] or 0)} for row in rows],
     }
+
+
+def _timescale_chunks_available(session: Session) -> tuple[bool, str]:
+    try:
+        with session.begin_nested():
+            available = session.execute(
+                text(
+                    """
+                    SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL AS available
+                    """
+                )
+            ).scalar_one()
+    except SQLAlchemyError as exc:
+        return False, redact_secret_text(str(exc))
+    return bool(available), "timescale_metadata_relation_missing"
 
 
 def _quality_coverage(session: Session, filters: NoCurveCleanupFilters) -> dict[str, Any]:
@@ -621,25 +634,37 @@ def _delete_batch_identities(
 ) -> int:
     if not identities:
         return 0
-    where_sql, params = _candidate_where(filters, alias=None)
-    explicit_quality_sql = _explicit_quality_exists_sql(None)
+    target_alias = "r"
+    where_sql, params = _candidate_where(filters, alias=target_alias)
+    explicit_quality_sql = _explicit_quality_exists_sql(target_alias)
     identity_clauses: list[str] = []
     for index, identity in enumerate(identities):
         terms: list[str] = []
         for column in IDENTITY_COLUMNS:
             param_name = f"identity_{index}_{column}"
-            terms.append(f"{column} = :{param_name}")
+            terms.append(f"{target_alias}.{column} = :{param_name}")
             params[param_name] = identity[column]
         identity_clauses.append("(" + " AND ".join(terms) + ")")
-    result = session.execute(
-        text(
-            f"""
+    if _dialect_name(session) == "sqlite":
+        statement = f"""
             DELETE FROM flood.return_period_result
+            WHERE rowid IN (
+                SELECT {target_alias}.rowid
+                FROM flood.return_period_result AS {target_alias}
+                WHERE {where_sql}
+                  AND {explicit_quality_sql}
+                  AND ({' OR '.join(identity_clauses)})
+            )
+        """
+    else:
+        statement = f"""
+            DELETE FROM flood.return_period_result AS {target_alias}
             WHERE {where_sql}
               AND {explicit_quality_sql}
               AND ({' OR '.join(identity_clauses)})
-            """
-        ),
+        """
+    result = session.execute(
+        text(statement),
         params,
     )
     return _known_rowcount(result)
@@ -767,7 +792,7 @@ def _persist_apply_manifest(
         return
     try:
         _write_json_atomic(manifest_path, manifest, overwrite=overwrite_manifest)
-    except OSError as exc:
+    except (NoCurveCleanupError, OSError) as exc:
         failed_manifest = dict(manifest)
         failed_manifest["status"] = "failed"
         failed_manifest["error"] = {
@@ -795,9 +820,20 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any], *, overwrite: boo
         else:
             os.link(tmp_path, path)
             tmp_path.unlink()
+        _fsync_directory(path.parent)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _validate_cleanup_options(

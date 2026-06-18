@@ -2,8 +2,8 @@
 
 ## Fixture Level
 
-Fixture level: expanded  
-Repair intensity: high  
+Fixture level: expanded
+Repair intensity: high
 Project profile: NHMS
 
 Why:

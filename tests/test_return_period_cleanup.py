@@ -302,7 +302,9 @@ def test_batching_records_deleted_rows_and_stable_cursor_without_offset(tmp_path
 def test_delete_rechecks_explicit_quality_guard_for_selected_identities(tmp_path: Path) -> None:
     with _store() as session:
         _insert_run(session, "run-a")
+        _insert_run(session, "run-b")
         _insert_quality(session, "run-a", quality_source="explicit")
+        _insert_quality(session, "run-b", quality_source="explicit")
         _insert_result(session, "run-a", "candidate", quality_flag="no_frequency_curve")
         session.commit()
 
@@ -340,6 +342,7 @@ def test_delete_rechecks_explicit_quality_guard_for_selected_identities(tmp_path
             event.remove(bind, "after_cursor_execute", revoke_quality_guard)
 
         assert _row_count(session) == 1
+        assert _quality_row(session, "run-b")["quality_source"] == "explicit"
 
     assert error.value.error_code == "EXPLICIT_QUALITY_GUARD_CHANGED"
     assert error.value.manifest is not None
@@ -468,6 +471,47 @@ def test_committed_batch_manifest_is_persisted_when_postcheck_fails(tmp_path: Pa
     assert persisted["batches"][0]["status"] == "committed"
     assert persisted["resume"]["last_committed_cursor"] == persisted["batches"][0]["cursor_after"]
     assert "password=leaked" not in json.dumps(persisted)
+
+
+def test_manifest_path_validation_failure_after_commit_returns_in_memory_audit(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    with _store() as session:
+        _insert_run(session, "run-a")
+        _insert_quality(session, "run-a", quality_source="explicit")
+        _insert_result(session, "run-a", "candidate", quality_flag="no_frequency_curve")
+        session.commit()
+
+        def replace_manifest_with_directory(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            normalized = " ".join(statement.split()).upper()
+            if normalized.startswith("DELETE FROM FLOOD.RETURN_PERIOD_RESULT"):
+                manifest_path.unlink()
+                manifest_path.mkdir()
+
+        bind = session.get_bind()
+        event.listen(bind, "after_cursor_execute", replace_manifest_with_directory)
+        try:
+            with pytest.raises(NoCurveCleanupError) as error:
+                cleanup_no_curve_results(
+                    session,
+                    apply_changes=True,
+                    batch_size=1,
+                    manifest_path=manifest_path,
+                )
+        finally:
+            event.remove(bind, "after_cursor_execute", replace_manifest_with_directory)
+
+    assert error.value.error_code == "NO_CURVE_CLEANUP_MANIFEST_WRITE_FAILED"
+    assert error.value.manifest is not None
+    assert error.value.manifest["deleted_rows"] == 1
+    assert error.value.manifest["batches"][0]["status"] == "committed"
+    assert error.value.manifest["resume"]["last_committed_cursor"] == error.value.manifest["batches"][0]["cursor_after"]
 
 
 def test_cleanup_implementation_has_no_out_of_scope_destructive_operations() -> None:
