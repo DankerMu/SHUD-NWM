@@ -5,7 +5,7 @@
   - Required evidence: unit tests reject missing manifest fields, missing station fields, empty source scope, current source not in `applicable_source_ids`, unsupported `forcing_mapping_mode`, unsafe `forcing_filename`, and non-contiguous `shud_forcing_index` with structured contract errors.
   - Required evidence: repository/store interface tests or protocol tests prove manifest-backed contracts are read through a single authoritative entrypoint and DB mirrors are not treated as authoritative direct-grid sources in #540.
   - Non-goal for #540: no producer behavior switch, no direct-grid value generation, no `met.interp_weight` persistence change, no SHUD runtime staging change.
-- [ ] 1.2 (#541) Add model/basin asset metadata parsing for `forcing_mapping_mode`, defaulting absent values or explicit `idw` to the legacy IDW path and rejecting unsupported values, with resolver unit tests.
+- [x] 1.2 (#541) Add model/basin asset metadata parsing for `forcing_mapping_mode`, defaulting absent values or explicit `idw` to the legacy IDW path and rejecting unsupported values, with resolver unit tests.
   - Required evidence: producer tests prove legacy assets with no contract still use the existing IDW station/weight/output path.
   - Required evidence: producer tests prove explicit `forcing_mapping_mode="idw"` uses the same IDW path and does not require direct-grid bindings.
   - Required evidence: producer tests prove explicit `forcing_mapping_mode="direct_grid"` enters a fail-closed direct-grid validation gate in #541 and does not call IDW station loading, IDW weight computation, or ready output writing.

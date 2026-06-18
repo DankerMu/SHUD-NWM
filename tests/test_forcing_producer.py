@@ -1446,6 +1446,35 @@ def test_producer_legacy_absent_mapping_contract_uses_existing_idw_path(tmp_path
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
+def test_producer_legacy_repository_without_mapping_mode_contract_method_uses_idw_path(tmp_path: Path) -> None:
+    class LegacyRepository:
+        def __init__(self, wrapped: FakeForcingRepository) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "load_forcing_mapping_contract":
+                raise AttributeError(name)
+            return getattr(self._wrapped, name)
+
+    store, repository = _build_repository(tmp_path)
+    legacy_repository = LegacyRepository(repository)
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3),
+        repository=legacy_repository,
+        object_store=store,
+    )
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert repository.mapping_contract_calls == []
+    assert repository.load_station_count == 1
+    assert repository.load_weight_count == 1
+    assert repository.interp_weights
+    assert repository.timeseries
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
 def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Path) -> None:
     store, repository = _build_repository(
         tmp_path,

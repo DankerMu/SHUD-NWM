@@ -578,8 +578,11 @@ class ForcingProducer:
         source_id: str,
     ) -> DirectGridForcingContract | None:
         assert self.repository is not None
+        load_contract = getattr(self.repository, "load_forcing_mapping_contract", None)
+        if not callable(load_contract):
+            return None
         try:
-            contract = self.repository.load_forcing_mapping_contract(
+            contract = load_contract(
                 model_id=model_id,
                 basin_version_id=basin_version_id,
                 source_id=source_id,
