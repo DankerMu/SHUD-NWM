@@ -422,13 +422,19 @@ class ForcingProducer:
                 canonical_identity=canonical_identity,
             )
             if forcing_mapping_contract is not None:
-                self._validate_direct_grid_contract_for_production(
+                direct_grid_signature = self._validate_direct_grid_contract_for_production(
                     contract=forcing_mapping_contract,
                     model_id=model_id,
                     basin_version_id=resolved_basin_version_id,
                     products_by_variable=products_by_variable,
                 )
-                self._fail_direct_grid_not_implemented(forcing_mapping_contract)
+                self._materialize_direct_grid_mappings(
+                    contract=forcing_mapping_contract,
+                    source_id=resolved_source_id,
+                    model_id=model_id,
+                    grid_signature=direct_grid_signature,
+                )
+                self._fail_direct_grid_values_not_implemented(forcing_mapping_contract)
 
             stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
             self._enforce_limit("station_count", len(stations), self.config.max_station_count)
@@ -614,11 +620,38 @@ class ForcingProducer:
             raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
         return contract
 
-    def _fail_direct_grid_not_implemented(self, contract: DirectGridForcingContract) -> None:
+    def _fail_direct_grid_values_not_implemented(self, contract: DirectGridForcingContract) -> None:
         raise ForcingProductionError(
-            "Direct-grid forcing production is not implemented after the issue #542 validation gate; "
+            "Direct-grid value generation is not implemented after the issue #544 mapping materialization boundary; "
             f"contract {contract.binding_checksum!r} selected direct_grid mode."
         )
+
+    def _materialize_direct_grid_mappings(
+        self,
+        *,
+        contract: DirectGridForcingContract,
+        source_id: str,
+        model_id: str,
+        grid_signature: str,
+    ) -> tuple[InterpolationWeight, ...]:
+        assert self.repository is not None
+        weights = tuple(
+            InterpolationWeight(
+                source_id=source_id,
+                grid_id=contract.grid_id,
+                model_id=model_id,
+                station_id=station.station_id,
+                variable=variable,
+                grid_cell_id=station.grid_cell_id,
+                weight=1.0,
+                method=DIRECT_GRID_MODE,
+                grid_signature=grid_signature,
+            )
+            for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index)
+            for variable in self.config.output_variables
+        )
+        self.repository.upsert_interp_weights(weights)
+        return weights
 
     def _validate_direct_grid_contract_for_production(
         self,
@@ -627,7 +660,7 @@ class ForcingProducer:
         model_id: str,
         basin_version_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-    ) -> None:
+    ) -> str:
         assets = self._load_direct_grid_validation_assets(
             model_id=model_id,
             basin_version_id=basin_version_id,
@@ -685,6 +718,7 @@ class ForcingProducer:
             forc_values,
             valid_indexes={station.shud_forcing_index for station in contract.stations},
         )
+        return grid_signature
 
     def _load_direct_grid_validation_assets(
         self,

@@ -56,6 +56,7 @@ class FakeForcingRepository:
         forcing_mapping_contract_error: Exception | None = None,
         direct_grid_validation_assets: Mapping[str, Any] | None = None,
         fail_next_timeseries_replace: bool = False,
+        fail_next_interp_weight_upsert: bool = False,
     ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
         self.model_identity_by_model = {
@@ -81,7 +82,9 @@ class FakeForcingRepository:
         self.load_station_count = 0
         self.load_weight_count = 0
         self.fail_next_timeseries_replace = fail_next_timeseries_replace
+        self.fail_next_interp_weight_upsert = fail_next_interp_weight_upsert
         self.upsert_count = 0
+        self.interp_weight_upsert_count = 0
 
     def resolve_model_basin_version(self, *, model_id: str) -> str:
         return self.basin_by_model[model_id]
@@ -135,6 +138,10 @@ class FakeForcingRepository:
         )
 
     def upsert_interp_weights(self, weights: list[InterpolationWeight] | tuple[InterpolationWeight, ...]) -> None:
+        self.interp_weight_upsert_count += 1
+        if self.fail_next_interp_weight_upsert:
+            self.fail_next_interp_weight_upsert = False
+            raise RuntimeError("interp weight write failed")
         if not weights:
             return
         scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
@@ -1547,13 +1554,17 @@ def test_producer_explicit_idw_mapping_mode_uses_existing_idw_path(tmp_path: Pat
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
-def test_producer_direct_grid_mapping_mode_validates_then_fails_closed_before_generation(
+def test_producer_direct_grid_materializes_exact_mappings_then_fails_at_value_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "workers.forcing_producer.producer._grid_signature_hash",
         lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid materialization must not call compute_idw_weights"),
     )
     contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
     store, repository = _build_repository(
@@ -1563,7 +1574,7 @@ def test_producer_direct_grid_mapping_mode_validates_then_fails_closed_before_ge
     )
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="not implemented after the issue #542 validation gate"):
+    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert repository.mapping_contract_calls == [
@@ -1571,14 +1582,134 @@ def test_producer_direct_grid_mapping_mode_validates_then_fails_closed_before_ge
     ]
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 1
+    assert len(repository.interp_weights) == len(contract.stations) * len(FORCING_VARIABLES)
+    assert {
+        (
+            weight.source_id,
+            weight.grid_id,
+            weight.model_id,
+            weight.station_id,
+            weight.variable,
+            weight.grid_cell_id,
+            weight.method,
+            weight.weight,
+            weight.grid_signature,
+        )
+        for weight in repository.interp_weights
+    } == {
+        (
+            "gfs",
+            "grid_a",
+            "demo_model",
+            station.station_id,
+            variable,
+            station.grid_cell_id,
+            "direct_grid",
+            1.0,
+            "sha256:grid-signature-actual",
+        )
+        for station in contract.stations
+        for variable in FORCING_VARIABLES
+    }
+    assert repository.forcing_versions == {}
+    assert repository.components == []
+    assert repository.timeseries == []
+    assert repository.upsert_count == 0
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+    assert "issue #544 mapping materialization boundary" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_producer_direct_grid_materialization_replaces_same_scope_idw_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid materialization must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+    )
+    repository.interp_weights = [
+        InterpolationWeight(
+            "gfs",
+            "grid_a",
+            "demo_model",
+            "station_1",
+            variable,
+            "legacy-idw-cell",
+            1.0,
+            method="idw",
+            grid_signature="old-grid",
+        )
+        for variable in FORCING_VARIABLES
+    ]
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 1
+    assert len(repository.interp_weights) == len(contract.stations) * len(FORCING_VARIABLES)
+    assert {weight.method for weight in repository.interp_weights} == {"direct_grid"}
+    assert {weight.grid_cell_id for weight in repository.interp_weights} == {"0", "1"}
+    assert {weight.grid_cell_id for weight in repository.interp_weights}.isdisjoint({"legacy-idw-cell"})
+    assert {weight.grid_signature for weight in repository.interp_weights} == {"sha256:grid-signature-actual"}
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
+def test_producer_direct_grid_interp_weight_upsert_failure_does_not_fallback_or_write_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid materialization must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_repository(
+        tmp_path,
+        forcing_mapping_contract=contract,
+        direct_grid_validation_assets=_direct_grid_validation_assets(),
+        fail_next_interp_weight_upsert=True,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="interp weight write failed"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.load_station_count == 0
+    assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 1
     assert repository.interp_weights == []
     assert repository.forcing_versions == {}
     assert repository.components == []
     assert repository.timeseries == []
     assert repository.upsert_count == 0
     assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+    assert not (tmp_path / "forcing").exists()
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
+    assert "interp weight write failed" in repository.cycle_updates[-1]["error_message"]
 
 
 def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
@@ -1660,7 +1791,7 @@ def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
     )
     assert assets["model_input_package_id"] == "model-input-demo-v1"
 
-    with pytest.raises(ForcingProductionError, match="not implemented after the issue #542 validation gate"):
+    with pytest.raises(ForcingProductionError, match="issue #544 mapping materialization boundary"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert "FROM core.model_instance" in repository.statement
@@ -1669,6 +1800,8 @@ def test_producer_direct_grid_real_store_style_loader_reaches_validation_gate(
     assert repository.parameters == ("demo_model", "basin_v1")
     assert repository.load_station_count == 0
     assert repository.load_weight_count == 0
+    assert repository.interp_weight_upsert_count == 1
+    assert {weight.method for weight in repository.interp_weights} == {"direct_grid"}
     assert repository.forcing_versions == {}
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
@@ -2772,6 +2905,7 @@ def _build_repository(
     forcing_mapping_contract_error: Exception | None = None,
     direct_grid_validation_assets: Mapping[str, Any] | None = None,
     fail_next_timeseries_replace: bool = False,
+    fail_next_interp_weight_upsert: bool = False,
     include_geographic_coords: bool = True,
     values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
     radiation_variable: str = "shortwave_down",
@@ -2812,6 +2946,7 @@ def _build_repository(
         forcing_mapping_contract_error=forcing_mapping_contract_error,
         direct_grid_validation_assets=direct_grid_validation_assets,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
+        fail_next_interp_weight_upsert=fail_next_interp_weight_upsert,
     )
     return store, repository
 
