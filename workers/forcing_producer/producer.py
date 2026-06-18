@@ -268,6 +268,8 @@ class ForcingRepository(Protocol):
 
     def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]: ...
 
+    def clear_forcing_version_checksum(self, forcing_version_id: str) -> dict[str, Any]: ...
+
     def verify_forcing_version_children(
         self,
         *,
@@ -548,12 +550,10 @@ class ForcingProducer:
                     canonical_input_signature=canonical_input_signature,
                     lineage_overrides=direct_grid_identity,
                 )
-                self.repository.update_forecast_cycle(
+                self._mark_cycle_ready_after_publication(
                     source_id=resolved_source_id,
                     cycle_time=parsed_cycle_time,
-                    status="forcing_ready",
-                    error_code="",
-                    error_message="",
+                    forcing_version_id=result.forcing_version_id,
                 )
                 return result
 
@@ -651,12 +651,10 @@ class ForcingProducer:
                 canonical_input_signature=canonical_input_signature,
                 lineage_overrides=_idw_lineage_identity(),
             )
-            self.repository.update_forecast_cycle(
+            self._mark_cycle_ready_after_publication(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
-                status="forcing_ready",
-                error_code="",
-                error_message="",
+                forcing_version_id=result.forcing_version_id,
             )
             return result
         except Exception as error:
@@ -1953,6 +1951,15 @@ class ForcingProducer:
                 expected_lineage_identity=expected_lineage_identity,
             ):
                 return False
+            if not self._existing_db_lineage_matches_manifest(
+                lineage=lineage,
+                manifest=manifest,
+                manifest_lineage=manifest_lineage,
+                manifest_uri=manifest_uri,
+                manifest_checksum=checksum,
+                expected_lineage_identity=expected_lineage_identity,
+            ):
+                return False
             return self._forcing_children_are_complete(
                 forcing_version_id=str(existing["forcing_version_id"]),
                 expected_components=expected_components,
@@ -2000,6 +2007,40 @@ class ForcingProducer:
                 return False
             if not self.object_store.exists(uri) or self.object_store.checksum(uri) != checksum:
                 return False
+        return True
+
+    def _existing_db_lineage_matches_manifest(
+        self,
+        *,
+        lineage: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        manifest_lineage: Mapping[str, Any],
+        manifest_uri: str,
+        manifest_checksum: str,
+        expected_lineage_identity: Mapping[str, Any],
+    ) -> bool:
+        if expected_lineage_identity.get("forcing_mapping_mode") != DIRECT_GRID_MODE:
+            return True
+        manifest_files = manifest.get("files")
+        manifest_lineage_files = manifest_lineage.get("output_files")
+        db_lineage_files = lineage.get("output_files")
+        if (
+            not isinstance(manifest_files, Sequence)
+            or isinstance(manifest_files, (str, bytes))
+            or not isinstance(manifest_lineage_files, Sequence)
+            or isinstance(manifest_lineage_files, (str, bytes))
+            or not isinstance(db_lineage_files, Sequence)
+            or isinstance(db_lineage_files, (str, bytes))
+        ):
+            return False
+        if _stable_identity(db_lineage_files) != _stable_identity(manifest_files):
+            return False
+        if _stable_identity(db_lineage_files) != _stable_identity(manifest_lineage_files):
+            return False
+        if str(lineage.get("forcing_package_manifest_uri") or "") != manifest_uri:
+            return False
+        if str(lineage.get("forcing_package_manifest_checksum") or "") != manifest_checksum:
+            return False
         return True
 
     def _return_existing_ready(
@@ -2063,6 +2104,39 @@ class ForcingProducer:
             expected_variables=expected_variables,
         )
         return bool(proof.get("complete"))
+
+    def _mark_cycle_ready_after_publication(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        forcing_version_id: str,
+    ) -> None:
+        assert self.repository is not None
+        try:
+            self.repository.update_forecast_cycle(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                status="forcing_ready",
+                error_code="",
+                error_message="",
+            )
+        except Exception:
+            try:
+                self._mark_forcing_version_pending(forcing_version_id)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to clear finalized checksum for forcing version %s after readiness update failure.",
+                    forcing_version_id,
+                )
+            raise
+
+    def _mark_forcing_version_pending(self, forcing_version_id: str) -> None:
+        assert self.repository is not None
+        clearer = getattr(self.repository, "clear_forcing_version_checksum", None)
+        if not callable(clearer):
+            return
+        clearer(forcing_version_id)
 
     def _canonical_input_signature(
         self,

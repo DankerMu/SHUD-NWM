@@ -598,6 +598,17 @@ class PsycopgForcingRepository:
             (checksum, forcing_version_id),
         )
 
+    def clear_forcing_version_checksum(self, forcing_version_id: str) -> dict[str, Any]:
+        return self._fetch_one(
+            """
+            UPDATE met.forcing_version
+            SET checksum = NULL
+            WHERE forcing_version_id = %s
+            RETURNING *
+            """,
+            (forcing_version_id,),
+        )
+
     def verify_forcing_version_children(
         self,
         *,
@@ -643,24 +654,25 @@ class PsycopgForcingRepository:
             )
             for row in component_rows
         )
-        timeseries = self._fetch_one(
+        timeseries_rows = self._fetch_all(
             """
-            SELECT COUNT(*) AS row_count,
-                   COUNT(DISTINCT station_id) AS station_count,
-                   COUNT(DISTINCT valid_time) AS timestep_count,
-                   COUNT(DISTINCT variable) AS variable_count
+            SELECT station_id,
+                   valid_time,
+                   variable
             FROM met.forcing_station_timeseries
             WHERE forcing_version_id = %s
-              AND station_id = ANY(%s)
-              AND valid_time = ANY(%s)
-              AND variable = ANY(%s)
             """,
-            (
-                forcing_version_id,
-                list(expected_station_ids),
-                list(expected_valid_times),
-                list(expected_variables),
-            ),
+            (forcing_version_id,),
+        )
+        timeseries_tuples = Counter(
+            (str(row["station_id"]), row["valid_time"], str(row["variable"]))
+            for row in timeseries_rows
+        )
+        expected_timeseries_tuples = Counter(
+            (station_id, valid_time, variable)
+            for station_id in expected_station_ids
+            for valid_time in expected_valid_times
+            for variable in expected_variables
         )
         proof = {
             "forcing_version_id": forcing_version_id,
@@ -669,15 +681,18 @@ class PsycopgForcingRepository:
             "component_tuple_count": len(component_tuples),
             "expected_component_tuple_count": len(expected_component_tuples),
             "expected_timeseries_row_count": expected_timeseries_count,
-            "timeseries_row_count": int(timeseries["row_count"]),
-            "station_count": int(timeseries["station_count"]),
-            "timestep_count": int(timeseries["timestep_count"]),
-            "variable_count": int(timeseries["variable_count"]),
+            "timeseries_row_count": sum(timeseries_tuples.values()),
+            "timeseries_tuple_count": len(timeseries_tuples),
+            "expected_timeseries_tuple_count": len(expected_timeseries_tuples),
+            "station_count": len({station_id for station_id, _, _ in timeseries_tuples}),
+            "timestep_count": len({valid_time for _, valid_time, _ in timeseries_tuples}),
+            "variable_count": len({variable for _, _, variable in timeseries_tuples}),
         }
         proof["complete"] = (
             proof["component_count"] == expected_component_count
             and component_tuples == expected_component_tuples
             and proof["timeseries_row_count"] == expected_timeseries_count
+            and timeseries_tuples == expected_timeseries_tuples
             and proof["station_count"] == len(tuple(expected_station_ids))
             and proof["timestep_count"] == len(tuple(expected_valid_times))
             and proof["variable_count"] == len(tuple(expected_variables))

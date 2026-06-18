@@ -320,6 +320,11 @@ class FakeForcingRepository:
         self.events.append(("finalize_forcing_version", checksum))
         return dict(self.forcing_versions[forcing_version_id])
 
+    def clear_forcing_version_checksum(self, forcing_version_id: str) -> dict[str, Any]:
+        self.forcing_versions[forcing_version_id]["checksum"] = None
+        self.events.append(("clear_forcing_version_checksum", forcing_version_id))
+        return dict(self.forcing_versions[forcing_version_id])
+
     def verify_forcing_version_children(
         self,
         *,
@@ -358,10 +363,17 @@ class FakeForcingRepository:
             row
             for row in self.timeseries
             if row.forcing_version_id == forcing_version_id
-            and row.station_id in set(expected_station_ids)
-            and row.valid_time in set(expected_valid_times)
-            and row.variable in set(expected_variables)
         ]
+        timeseries_tuples = Counter(
+            (row.station_id, row.valid_time, row.variable)
+            for row in rows
+        )
+        expected_timeseries_tuples = Counter(
+            (station_id, valid_time, variable)
+            for station_id in expected_station_ids
+            for valid_time in expected_valid_times
+            for variable in expected_variables
+        )
         expected_row_count = len(expected_station_ids) * len(expected_valid_times) * len(expected_variables)
         proof = {
             "forcing_version_id": forcing_version_id,
@@ -371,6 +383,8 @@ class FakeForcingRepository:
             "component_tuple_count": len(component_tuples),
             "expected_timeseries_row_count": expected_row_count,
             "timeseries_row_count": len(rows),
+            "expected_timeseries_tuple_count": len(expected_timeseries_tuples),
+            "timeseries_tuple_count": len(timeseries_tuples),
             "station_count": len({row.station_id for row in rows}),
             "timestep_count": len({row.valid_time for row in rows}),
             "variable_count": len({row.variable for row in rows}),
@@ -379,6 +393,7 @@ class FakeForcingRepository:
             proof["component_count"] == proof["expected_component_count"]
             and component_tuples == expected_component_tuples
             and proof["timeseries_row_count"] == proof["expected_timeseries_row_count"]
+            and timeseries_tuples == expected_timeseries_tuples
             and proof["station_count"] == len(expected_station_ids)
             and proof["timestep_count"] == len(expected_valid_times)
             and proof["variable_count"] == len(expected_variables)
@@ -959,16 +974,18 @@ def test_retry_after_cycle_ready_update_failure_repairs_ready_status_without_dup
     with pytest.raises(ForcingProductionError, match="forecast cycle ready update failed"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
     finalized = next(iter(repository.forcing_versions.values()))
-    assert finalized["checksum"]
+    assert finalized["checksum"] is None
+    assert any(event[0] == "clear_forcing_version_checksum" for event in repository.events)
     row_count = len(repository.timeseries)
     component_count = len(repository.components)
 
     result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
-    assert result.status == "already_done"
+    assert result.status == "forcing_ready"
     assert len(repository.forcing_versions) == 1
     assert len(repository.timeseries) == row_count
     assert len(repository.components) == component_count
+    assert repository.forcing_versions[result.forcing_version_id]["checksum"] == result.checksum
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
@@ -2365,6 +2382,98 @@ def test_producer_direct_grid_lineage_manifest_identity_and_idempotency(
     assert len(repository.components) == component_count
     assert [event[0] for event in repository.events].count("finalize_forcing_version") == 1
     _assert_direct_grid_package_contract(tmp_path, first, repository, contract)
+
+
+def test_producer_direct_grid_extra_timeseries_rows_invalidate_existing_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail("direct-grid stale child checks must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_direct_grid_repository(tmp_path, contract=contract)
+    producer = _build_producer(tmp_path, repository, store)
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    extra_row = repository.timeseries[0]
+    repository.timeseries.append(
+        ForcingTimeseriesRow(
+            forcing_version_id=first.forcing_version_id,
+            basin_version_id=extra_row.basin_version_id,
+            station_id="unexpected_station",
+            valid_time=extra_row.valid_time,
+            source_id=extra_row.source_id,
+            variable=extra_row.variable,
+            value=extra_row.value,
+            unit=extra_row.unit,
+            native_resolution=extra_row.native_resolution,
+            quality_flag=extra_row.quality_flag,
+        )
+    )
+    drifted_count = len(repository.timeseries)
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert len(repository.timeseries) == drifted_count - 1
+    assert {row.station_id for row in repository.timeseries} == {station.station_id for station in contract.stations}
+    assert [event[0] for event in repository.events].count("replace_forcing_timeseries") == 2
+
+
+@pytest.mark.parametrize(
+    ("case_name", "mutate"),
+    [
+        (
+            "output_files_checksum",
+            lambda lineage: lineage["output_files"][0].update({"checksum": "sha256:stale-db-lineage"}),
+        ),
+        ("output_files_missing", lambda lineage: lineage.pop("output_files")),
+        (
+            "manifest_uri",
+            lambda lineage: lineage.update({"forcing_package_manifest_uri": "s3://stale/forcing_package.json"}),
+        ),
+        (
+            "manifest_checksum",
+            lambda lineage: lineage.update({"forcing_package_manifest_checksum": "sha256:stale-manifest"}),
+        ),
+    ],
+)
+def test_producer_direct_grid_db_lineage_output_file_drift_invalidate_existing_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    mutate: Any,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer.compute_idw_weights",
+        lambda **_kwargs: pytest.fail(f"direct-grid {case_name} stale lineage check must not call compute_idw_weights"),
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_direct_grid_repository(tmp_path, contract=contract)
+    producer = _build_producer(tmp_path, repository, store)
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    row_count = len(repository.timeseries)
+    lineage = json.loads(json.dumps(repository.forcing_versions[first.forcing_version_id]["lineage_json"]))
+    mutate(lineage)
+    repository.forcing_versions[first.forcing_version_id]["lineage_json"] = lineage
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert len(repository.timeseries) == row_count
+    assert repository.upsert_count == 2
+    _assert_direct_grid_package_contract(tmp_path, second, repository, contract)
 
 
 @pytest.mark.parametrize(
