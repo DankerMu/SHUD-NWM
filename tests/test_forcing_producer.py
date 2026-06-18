@@ -14,6 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from workers.forcing_producer import (
     CanonicalProduct,
+    DirectGridContractError,
     ForcingProducer,
     ForcingProducerConfig,
     ForcingProductionError,
@@ -21,7 +22,9 @@ from workers.forcing_producer import (
     InterpolationWeight,
     MetStation,
     compute_idw_weights,
+    load_forcing_mapping_contract_from_manifest,
     parse_cycle_time,
+    parse_direct_grid_forcing_contract,
     wind_speed,
 )
 from workers.forcing_producer.producer import (
@@ -32,6 +35,7 @@ from workers.forcing_producer.producer import (
     ForcingTimeseriesRow,
     format_shud_forcing_package,
 )
+from workers.forcing_producer.store import PsycopgForcingRepository
 
 
 class FakeForcingRepository:
@@ -152,6 +156,15 @@ class FakeForcingRepository:
                     else existing
                     for existing in self.interp_weights
                 ]
+
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> None:
+        return None
 
     def get_forcing_version(self, *, source_id: str, cycle_time: Any, model_id: str) -> dict[str, Any] | None:
         for record in self.forcing_versions.values():
@@ -901,6 +914,46 @@ def _make_precip_product(*, unit: str, native_time_resolution: str | None) -> Ca
     )
 
 
+def _direct_grid_manifest() -> dict[str, Any]:
+    return {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": "s3://nhms/models/demo/direct-grid/binding.json",
+        "binding_checksum": "sha256:binding",
+        "model_input_package_id": "model-input-demo-v1",
+        "sp_att_path": "input/qhh.sp.att",
+        "sp_att_checksum": "sha256:sp-att",
+        "applicable_source_ids": ["GFS", "IFS"],
+        "grid_id": "ifs_gfs_025deg",
+        "grid_signature": "sha256:grid-signature",
+        "station_bindings": [
+            {
+                "station_id": "qhh_forc_001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.95Y36.25.csv",
+                "longitude": 100.95,
+                "latitude": 36.25,
+                "x": 1,
+                "y": 2,
+                "z": 3657,
+                "grid_id": "ifs_gfs_025deg",
+                "grid_cell_id": "cell-001",
+            },
+            {
+                "station_id": "qhh_forc_002",
+                "shud_forcing_index": 2,
+                "forcing_filename": "X101.05Y36.25.csv",
+                "longitude": 101.05,
+                "latitude": 36.25,
+                "x": 2,
+                "y": 3,
+                "z": -9999,
+                "grid_id": "ifs_gfs_025deg",
+                "grid_cell_id": "cell-002",
+            },
+        ],
+    }
+
+
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
@@ -1332,6 +1385,178 @@ def test_reserved_qhh_tsd_forc_station_filename_blocks_record_creation(tmp_path:
 
     assert repository.upsert_count == 0
     assert repository.forcing_versions == {}
+
+
+def test_direct_grid_contract_valid_parse_preserves_manifest_and_station_identity() -> None:
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest(), source_id="GFS")
+
+    assert contract.forcing_mapping_mode == "direct_grid"
+    assert contract.binding_uri == "s3://nhms/models/demo/direct-grid/binding.json"
+    assert contract.binding_checksum == "sha256:binding"
+    assert contract.model_input_package_id == "model-input-demo-v1"
+    assert contract.sp_att_path == "input/qhh.sp.att"
+    assert contract.sp_att_checksum == "sha256:sp-att"
+    assert contract.applicable_source_ids == ("gfs", "IFS")
+    assert contract.grid_id == "ifs_gfs_025deg"
+    assert contract.grid_signature == "sha256:grid-signature"
+    assert [station.station_id for station in contract.stations] == ["qhh_forc_001", "qhh_forc_002"]
+    assert [station.grid_cell_id for station in contract.stations] == ["cell-001", "cell-002"]
+    assert [station.shud_forcing_index for station in contract.stations] == [1, 2]
+
+
+@pytest.mark.parametrize("missing_field", ["binding_checksum", "grid_signature"])
+def test_direct_grid_contract_missing_manifest_field_raises_structured_error(missing_field: str) -> None:
+    manifest = _direct_grid_manifest()
+    del manifest[missing_field]
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == missing_field
+    assert exc_info.value.source_id == "GFS"
+    assert exc_info.value.to_dict()["error_code"] == "DIRECT_GRID_CONTRACT_INVALID"
+
+
+def test_direct_grid_contract_metadata_without_mode_fails_closed() -> None:
+    manifest = _direct_grid_manifest()
+    del manifest["forcing_mapping_mode"]
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        load_forcing_mapping_contract_from_manifest({"direct_grid_forcing": manifest}, source_id="GFS")
+
+    assert exc_info.value.field == "forcing_mapping_mode"
+
+
+def test_direct_grid_contract_missing_station_grid_cell_id_raises_structured_error() -> None:
+    manifest = _direct_grid_manifest()
+    del manifest["station_bindings"][0]["grid_cell_id"]
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "grid_cell_id"
+    assert exc_info.value.station_id == "qhh_forc_001"
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "source_id", "expected_source"),
+    [
+        ([], "GFS", "GFS"),
+        (["IFS"], "GFS", "gfs"),
+    ],
+)
+def test_direct_grid_contract_source_scope_must_be_nonempty_and_apply_to_current_source(
+    source_scope: list[str],
+    source_id: str,
+    expected_source: str,
+) -> None:
+    manifest = _direct_grid_manifest()
+    manifest["applicable_source_ids"] = source_scope
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id=source_id)
+
+    assert exc_info.value.field == "applicable_source_ids"
+    assert exc_info.value.source_id == expected_source
+
+
+def test_direct_grid_contract_unsupported_mode_fails_closed() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["forcing_mapping_mode"] = "nearest_neighbor"
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        load_forcing_mapping_contract_from_manifest(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "forcing_mapping_mode"
+
+
+def test_direct_grid_contract_unsafe_forcing_filename_is_rejected() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][0]["forcing_filename"] = "../station.csv"
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "forcing_filename"
+    assert exc_info.value.station_id == "qhh_forc_001"
+
+
+def test_direct_grid_contract_non_contiguous_shud_forcing_index_is_rejected() -> None:
+    manifest = _direct_grid_manifest()
+    manifest["station_bindings"][1]["shud_forcing_index"] = 3
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    assert exc_info.value.field == "shud_forcing_index"
+    assert exc_info.value.details["actual_indexes"] == (1, 3)
+
+
+def test_direct_grid_contract_legacy_absence_returns_none_for_idw_compatibility() -> None:
+    assert load_forcing_mapping_contract_from_manifest({}) is None
+    assert load_forcing_mapping_contract_from_manifest({"forcing_mapping_mode": "idw"}) is None
+    assert load_forcing_mapping_contract_from_manifest({"grid_id": "legacy_grid"}) is None
+    assert load_forcing_mapping_contract_from_manifest({"stations": []}) is None
+    assert load_forcing_mapping_contract_from_manifest({"binding_checksum": "sha256:old"}) is None
+
+
+def test_direct_grid_repository_loads_manifest_backed_contract_from_single_entrypoint() -> None:
+    class CapturingRepository(PsycopgForcingRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            self.statement = statement
+            self.parameters = parameters
+            return [
+                {
+                    "resource_profile": {
+                        "binding_checksum": "sha256:stale-mirror",
+                        "grid_signature": "sha256:stale-mirror",
+                        "direct_grid_forcing": _direct_grid_manifest(),
+                    }
+                }
+            ]
+
+    repository = CapturingRepository()
+
+    contract = repository.load_forcing_mapping_contract(
+        model_id="demo_model",
+        basin_version_id="basin_v1",
+        source_id="GFS",
+    )
+
+    assert contract is not None
+    assert contract.binding_checksum == "sha256:binding"
+    assert contract.grid_signature == "sha256:grid-signature"
+    assert [station.grid_cell_id for station in contract.stations] == ["cell-001", "cell-002"]
+    assert "FROM core.model_instance" in repository.statement
+    assert "resource_profile" in repository.statement
+    assert "met.interp_weight" not in repository.statement
+    assert repository.parameters == ("demo_model", "basin_v1")
+
+
+def test_direct_grid_repository_returns_none_for_legacy_resource_profile() -> None:
+    class LegacyRepository(PsycopgForcingRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            assert parameters == ("demo_model", "basin_v1")
+            return [{"resource_profile": {"memory_gb": 8}}]
+
+    repository = LegacyRepository()
+
+    assert (
+        repository.load_forcing_mapping_contract(
+            model_id="demo_model",
+            basin_version_id="basin_v1",
+            source_id="GFS",
+        )
+        is None
+    )
 
 
 def test_station_count_resource_limit_blocks_before_records(tmp_path: Path) -> None:

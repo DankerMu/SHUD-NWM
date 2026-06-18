@@ -17,6 +17,7 @@ from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
+from workers.forcing_producer.direct_grid_contract import DirectGridForcingContract
 
 LOGGER = logging.getLogger(__name__)
 
@@ -227,6 +228,13 @@ class ForcingRepository(Protocol):
 
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None: ...
 
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> DirectGridForcingContract | None: ...
 
     def get_forcing_version(
         self,

@@ -7,6 +7,11 @@ from typing import Any
 
 from packages.common.met_store import MetStoreError, default_database_url
 
+from .direct_grid_contract import (
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
 from .producer import (
     CanonicalProduct,
     ForcingComponent,
@@ -313,6 +318,34 @@ class PsycopgForcingRepository:
             """,
             rows,
         )
+
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> DirectGridForcingContract | None:
+        row = self._fetch_optional(
+            """
+            SELECT resource_profile
+            FROM core.model_instance
+            WHERE model_id = %s
+              AND basin_version_id = %s
+            """,
+            (model_id, basin_version_id),
+        )
+        if row is None:
+            raise MetStoreError(
+                f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
+            )
+        resource_profile = row.get("resource_profile") or {}
+        if not isinstance(resource_profile, Mapping):
+            raise DirectGridContractError(
+                "Model resource_profile must be a JSON object.",
+                details={"model_id": model_id, "basin_version_id": basin_version_id},
+            )
+        return load_forcing_mapping_contract_from_manifest(resource_profile, source_id=source_id)
 
     def get_forcing_version(
         self,
