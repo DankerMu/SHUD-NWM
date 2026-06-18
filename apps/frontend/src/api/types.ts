@@ -1112,13 +1112,50 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @enum {string} */
+        FloodReturnPeriodQualityState: "ready" | "degraded" | "unavailable";
+        FloodReturnPeriodProductQuality: {
+            quality_state: components["schemas"]["FloodReturnPeriodQualityState"];
+            /**
+             * @description Source of the run-level flood product quality. `legacy_row_count` is used only when current explicit quality columns are absent and the API falls back to pre-explicit row-count semantics.
+             * @enum {string}
+             */
+            quality_source: "explicit" | "historical_backfill" | "legacy_row_count";
+            /** @description True when counters are based on peak/max-over-window rows, false when timestep rows were used, or null when no result rows exist. */
+            max_over_window: boolean | null;
+            result_rows: number;
+            return_period_rows: number;
+            warning_rows: number;
+            expected_result_rows: number;
+            expected_max_result_rows: number;
+            expected_timestep_result_rows: number;
+            meaningful_result_rows: number;
+            meaningful_max_result_rows: number;
+            meaningful_timestep_result_rows: number;
+            no_frequency_curve_rows: number;
+            no_usable_frequency_curve_rows: number;
+            warning_threshold_unavailable_rows: number;
+            unavailable_products: string[];
+            residual_blockers: {
+                [key: string]: unknown;
+            }[];
+            /** @description Hydro run status when the quality object is attached to a route scoped to a run. */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        QhhLatestProductQuality: {
+            flood_return_period: components["schemas"]["FloodReturnPeriodProductQuality"];
+        } & {
+            [key: string]: unknown;
+        };
         QhhLatestAvailability: {
             ready: boolean;
             unavailable_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
             quality_flags: string[];
             quality_notes: components["schemas"]["QhhLatestQualityNote"][];
             /**
-             * @description Supplemental flood return-period availability for this run, derived from the same non-null peak-row caliber as best-available / runs (flood_return_period_rows > 0). Independent of `ready`: a run with streamflow output but no return-period baseline still returns with `return_period_status = unavailable`. Never part of the blocking `unavailable_reasons` set.
+             * @description Supplemental flood return-period availability for this run. Current explicit schemas derive it from `product_quality.flood_return_period.quality_state`: `ready` maps to ready, while `degraded` and `unavailable` map to unavailable. Only missing or pre-explicit quality schemas fall back to the legacy row-count signal (`flood_return_period_rows > 0`). Independent of `ready`: a run with streamflow output but no return-period baseline still returns with `return_period_status = unavailable`. Never part of the blocking `unavailable_reasons` set.
              * @enum {string}
              */
             return_period_status: "ready" | "unavailable";
@@ -1130,6 +1167,8 @@ export interface components {
             river_sample_count: number;
             required_station_variables: ("PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press")[];
             station_variable_coverage: components["schemas"]["QhhLatestStationVariableCoverage"][];
+            /** @description Supplemental per-product quality details. `flood_return_period` carries explicit flood run quality when available and never blocks q_down display readiness. */
+            product_quality?: components["schemas"]["QhhLatestProductQuality"] | null;
             candidate_limit: number;
             search_limit: number;
             context_limit: number;
@@ -1255,9 +1294,9 @@ export interface components {
             error_code?: string | null;
             error_message?: string | null;
             /** @description Product readiness evidence keyed by product family, including flood_return_period readiness. */
-            product_quality?: {
+            product_quality?: ({
                 [key: string]: unknown;
-            } | null;
+            } & components["schemas"]["QhhLatestProductQuality"]) | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1675,9 +1714,9 @@ export interface components {
             type: "FeatureCollection";
             features: components["schemas"]["FloodReturnPeriodFeature"][];
             /** @description Flood return-period readiness evidence for the selected run. */
-            product_quality?: {
+            product_quality?: ({
                 [key: string]: unknown;
-            } | null;
+            } & components["schemas"]["FloodReturnPeriodProductQuality"]) | null;
         };
         FloodReturnPeriodFeature: {
             /** @enum {string} */

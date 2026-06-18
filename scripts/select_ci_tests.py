@@ -81,6 +81,14 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "services/tiles/mvt.py",
+        (
+            "tests/test_flood_alerts_api.py",
+            "tests/test_migrations.py",
+            "tests/test_openapi_drift.py",
+        ),
+    ),
+    (
         "services/production_closure/**",
         (
             "tests/test_production_readiness_validation.py",
@@ -91,6 +99,16 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("packages/common/object_store.py", ("tests/test_object_store_roots.py", "tests/test_storage.py")),
+    (
+        "packages/common/forecast_store.py",
+        (
+            "tests/test_forecast_api.py",
+            "tests/test_forecast_store_product_quality_sql.py",
+            "tests/test_list_search_contract.py",
+            "tests/test_migrations.py",
+            "tests/test_model_registry_list_basins.py",
+        ),
+    ),
     ("packages/common/state_manager.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
     ("packages/common/state_cli.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
     ("packages/common/redaction.py", ("tests/test_redaction.py",)),

@@ -16,14 +16,15 @@ concurrency:
 
 jobs:
   # Path scoping: each job below runs only when its area changed, so a frontend-only or docs-only PR
-  # never pays the ~16-min backend pytest, and a backend PR never pays the frontend build. master is
-  # unprotected (no required status checks), so a skipped job does not deadlock merge.
+  # never pays the backend pytest or real-DB dry run, and a backend PR never pays the frontend build.
+  # master is unprotected (no required status checks), so a skipped job does not deadlock merge.
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      database: ${{ steps.filter.outputs.database }}
       frontend: ${{ steps.filter.outputs.frontend }}
       docs: ${{ steps.filter.outputs.docs }}
       openapi: ${{ steps.filter.outputs.openapi }}
@@ -47,6 +48,20 @@ jobs:
               - 'schemas/**'
               - 'db/**'
               - 'scripts/validate_*.py'
+            database:
+              - 'db/**'
+              - 'packages/common/migrate.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'tests/conftest.py'
+              - 'tests/integration_helpers.py'
+              - 'tests/*integration*.py'
+              - 'tests/**/*integration*.py'
+              - 'tests/test_basins_registry_import.py'
+              - 'tests/test_migrations.py'
+              - 'tests/test_qhh_production_bootstrap.py'
+              - 'tests/test_real_*.py'
+              - 'tests/test_worker_chain_smoke.py'
             frontend:
               - 'apps/frontend/**'
               - 'openapi/**'
@@ -123,15 +138,19 @@ jobs:
             fi
           done
 
-  # Merge-gate database suite. Full unit pytest is reserved for push-to-master or manual
-  # workflow_dispatch; PRs run the focused unit-test job below so ready PRs do not wait on
-  # a half-hour full suite for every push. node-22/local review remains the full-suite oracle.
+  # Merge-gate database suite. PR and push runs are limited to migration, database,
+  # integration-test, or dependency surfaces; workflow_dispatch remains an explicit
+  # real-DB dry-run escape hatch. Full unit pytest is reserved for push-to-master or
+  # manual workflow_dispatch; PRs run the focused unit-test job below.
   real-db-integration:
     name: SQL Migration Dry Run
     needs: changes
     if: >-
-      needs.changes.outputs.backend == 'true' &&
-      (github.event_name == 'push' || github.event.pull_request.draft == false)
+      github.event_name == 'workflow_dispatch' ||
+      (
+        needs.changes.outputs.database == 'true' &&
+        (github.event_name == 'push' || github.event.pull_request.draft == false)
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:

@@ -31,6 +31,32 @@ def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
     assert selected == ["tests/test_two_node_docker_runtime.py"]
 
 
+def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
+    selected = select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
+    fallback_only_tests = set(CORE_SMOKE_TESTS) - {"tests/test_migrations.py"}
+
+    assert selected == [
+        "tests/test_forecast_api.py",
+        "tests/test_forecast_store_product_quality_sql.py",
+        "tests/test_list_search_contract.py",
+        "tests/test_migrations.py",
+        "tests/test_model_registry_list_basins.py",
+    ]
+    assert not fallback_only_tests & set(selected)
+
+
+def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
+    selected = select_tests(["services/tiles/mvt.py"], repo_root=Path("."))
+    fallback_only_tests = set(CORE_SMOKE_TESTS) - {"tests/test_migrations.py"}
+
+    assert selected == [
+        "tests/test_flood_alerts_api.py",
+        "tests/test_migrations.py",
+        "tests/test_openapi_drift.py",
+    ]
+    assert not fallback_only_tests & set(selected)
+
+
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 

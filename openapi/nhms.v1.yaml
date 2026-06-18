@@ -2957,6 +2957,103 @@ components:
           type: string
           nullable: true
       additionalProperties: true
+    FloodReturnPeriodQualityState:
+      type: string
+      enum: [ready, degraded, unavailable]
+    FloodReturnPeriodProductQuality:
+      type: object
+      required:
+        - quality_state
+        - quality_source
+        - max_over_window
+        - result_rows
+        - return_period_rows
+        - warning_rows
+        - expected_result_rows
+        - expected_max_result_rows
+        - expected_timestep_result_rows
+        - meaningful_result_rows
+        - meaningful_max_result_rows
+        - meaningful_timestep_result_rows
+        - no_frequency_curve_rows
+        - no_usable_frequency_curve_rows
+        - warning_threshold_unavailable_rows
+        - unavailable_products
+        - residual_blockers
+      properties:
+        quality_state:
+          $ref: "#/components/schemas/FloodReturnPeriodQualityState"
+        quality_source:
+          type: string
+          enum: [explicit, historical_backfill, legacy_row_count]
+          description: >-
+            Source of the run-level flood product quality. `legacy_row_count`
+            is used only when current explicit quality columns are absent and
+            the API falls back to pre-explicit row-count semantics.
+        max_over_window:
+          type: boolean
+          nullable: true
+          description: >-
+            True when counters are based on peak/max-over-window rows, false
+            when timestep rows were used, or null when no result rows exist.
+        result_rows:
+          type: integer
+          minimum: 0
+        return_period_rows:
+          type: integer
+          minimum: 0
+        warning_rows:
+          type: integer
+          minimum: 0
+        expected_result_rows:
+          type: integer
+          minimum: 0
+        expected_max_result_rows:
+          type: integer
+          minimum: 0
+        expected_timestep_result_rows:
+          type: integer
+          minimum: 0
+        meaningful_result_rows:
+          type: integer
+          minimum: 0
+        meaningful_max_result_rows:
+          type: integer
+          minimum: 0
+        meaningful_timestep_result_rows:
+          type: integer
+          minimum: 0
+        no_frequency_curve_rows:
+          type: integer
+          minimum: 0
+        no_usable_frequency_curve_rows:
+          type: integer
+          minimum: 0
+        warning_threshold_unavailable_rows:
+          type: integer
+          minimum: 0
+        unavailable_products:
+          type: array
+          items:
+            type: string
+        residual_blockers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        status:
+          type: string
+          nullable: true
+          description: Hydro run status when the quality object is attached to a route scoped to a run.
+      additionalProperties: true
+    QhhLatestProductQuality:
+      type: object
+      required:
+        - flood_return_period
+      properties:
+        flood_return_period:
+          $ref: "#/components/schemas/FloodReturnPeriodProductQuality"
+      additionalProperties: true
     QhhLatestAvailability:
       type: object
       required:
@@ -2985,12 +3082,14 @@ components:
           type: string
           enum: [ready, unavailable]
           description: >-
-            Supplemental flood return-period availability for this run, derived
-            from the same non-null peak-row caliber as best-available / runs
-            (flood_return_period_rows > 0). Independent of `ready`: a run with
-            streamflow output but no return-period baseline still returns with
-            `return_period_status = unavailable`. Never part of the blocking
-            `unavailable_reasons` set.
+            Supplemental flood return-period availability for this run. Current
+            explicit schemas derive it from `product_quality.flood_return_period.quality_state`:
+            `ready` maps to ready, while `degraded` and `unavailable` map to
+            unavailable. Only missing or pre-explicit quality schemas fall back
+            to the legacy row-count signal (`flood_return_period_rows > 0`).
+            Independent of `ready`: a run with streamflow output but no
+            return-period baseline still returns with `return_period_status =
+            unavailable`. Never part of the blocking `unavailable_reasons` set.
         return_period_reasons:
           type: array
           description: >-
@@ -3025,6 +3124,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/QhhLatestStationVariableCoverage"
+        product_quality:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/QhhLatestProductQuality"
+          nullable: true
+          description: >-
+            Supplemental per-product quality details. `flood_return_period`
+            carries explicit flood run quality when available and never blocks
+            q_down display readiness.
         candidate_limit:
           type: integer
           minimum: 1
@@ -3341,6 +3449,8 @@ components:
           nullable: true
         product_quality:
           type: object
+          allOf:
+            - $ref: "#/components/schemas/QhhLatestProductQuality"
           additionalProperties: true
           nullable: true
           description: Product readiness evidence keyed by product family, including flood_return_period readiness.
@@ -4377,6 +4487,8 @@ components:
             $ref: "#/components/schemas/FloodReturnPeriodFeature"
         product_quality:
           type: object
+          allOf:
+            - $ref: "#/components/schemas/FloodReturnPeriodProductQuality"
           additionalProperties: true
           nullable: true
           description: Flood return-period readiness evidence for the selected run.
