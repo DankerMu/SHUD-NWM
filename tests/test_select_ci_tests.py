@@ -25,6 +25,12 @@ def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:
     assert "tests/test_production_scheduler.py" in selected
 
 
+def test_select_tests_maps_flood_cleanup_changes_to_cleanup_tests() -> None:
+    selected = select_tests(["workers/flood_frequency/return_period_cleanup.py"], repo_root=Path("."))
+
+    assert selected == ["tests/test_return_period_cleanup.py"]
+
+
 def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
     selected = select_tests(["infra/compose.compute.yml"], repo_root=Path("."))
 
