@@ -409,8 +409,8 @@ class PsycopgForcingRepository:
               AND met.met_station.properties_json @> '{"derived_cache": true}'::jsonb
               AND met.met_station.properties_json->>'forcing_mapping_mode' = 'direct_grid'
               AND met.met_station.properties_json->>'binding_checksum' = EXCLUDED.properties_json->>'binding_checksum'
-              AND met.met_station.properties_json->>'model_input_package_id'
-                  = EXCLUDED.properties_json->>'model_input_package_id'
+              AND met.met_station.properties_json->>'model_input_package_id' =
+                  EXCLUDED.properties_json->>'model_input_package_id'
               AND met.met_station.properties_json->>'grid_signature' = EXCLUDED.properties_json->>'grid_signature'
               AND met.met_station.properties_json->>'contract_grid_id' = EXCLUDED.properties_json->>'contract_grid_id'
               AND met.met_station.properties_json->>'grid_id' = EXCLUDED.properties_json->>'grid_id'

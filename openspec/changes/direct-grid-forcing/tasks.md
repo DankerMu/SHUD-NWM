@@ -58,11 +58,23 @@
 ## 3. Persistence, Lineage, and Compatibility
 
 - [ ] 3.1 Extend repository/store interfaces to load direct-grid mapping metadata from authoritative model asset manifests, allowing database mirrors only as derived cache.
-- [ ] 3.2 Write SHUD `.tsd.forc` and per-station CSV packages for direct-grid rows, keeping SHUD CSV columns to `Precip`, `Temp`, `RH`, `Wind`, and `RN` while persisting pressure only outside the SHUD CSV contract.
-- [ ] 3.3 Record `forcing_mapping_mode`, binding identity/checksum, model input identity, `.sp.att` checksum, grid signature, source scope, and spatial mapping method in forcing lineage and package manifest metadata.
-- [ ] 3.4 Update idempotency/freshness checks so mapping mode, binding identity, grid signature, or model input identity changes invalidate an existing ready forcing version for the same model/source/cycle.
-- [ ] 3.5 Ensure explicit `direct_grid` validation failures never fallback to IDW and leave no ready forcing outputs, with no-ready-output regression tests.
-- [ ] 3.6 Preserve existing IDW tests and behavior for model assets without `forcing_mapping_mode` or with explicit `forcing_mapping_mode="idw"`.
+- [x] 3.2 (#546) Write SHUD `.tsd.forc` and per-station CSV packages for direct-grid rows, keeping SHUD CSV columns to `Precip`, `Temp`, `RH`, `Wind`, and `RN` while persisting pressure only outside the SHUD CSV contract.
+  - Required evidence: producer tests prove successful direct-grid production writes the standard SHUD package, package manifest, debug CSV, and per-station `shud/*.csv` files using contract `shud_forcing_index`/coordinates/filenames.
+  - Required evidence: tests prove per-station SHUD CSV files contain `Precip`, `Temp`, `RH`, `Wind`, and `RN` only, while `Press` remains in `met.forcing_station_timeseries` and lineage/metadata when generated.
+  - Required evidence: tests prove direct-grid package success persists `met.forcing_station_timeseries` rows for every station, variable, and valid time and writes no duplicate ready forcing versions on rerun.
+- [x] 3.3 (#546) Record `forcing_mapping_mode`, binding identity/checksum, model input identity, `.sp.att` checksum, grid signature, source scope, and spatial mapping method in forcing lineage and package manifest metadata.
+  - Required evidence: producer tests inspect `met.forcing_version.lineage_json` and the package manifest `lineage` for direct-grid mode, binding checksum/URI, model input package identity, `.sp.att` path/checksum, applicable source ids, grid id/signature, and spatial mapping method.
+  - Required evidence: tests prove package file entries and lineage remain bound to the same direct-grid contract identity and canonical grid signature used for validation/materialization.
+- [x] 3.4 (#546) Update idempotency/freshness checks so mapping mode, binding identity, grid signature, or model input identity changes invalidate an existing ready forcing version for the same model/source/cycle.
+  - Required evidence: rerun with unchanged direct-grid contract returns `already_done` or existing-ready behavior without duplicate ready versions.
+  - Required evidence: changing direct-grid binding URI, binding checksum, model input package id, `.sp.att` path, `.sp.att` checksum, applicable source ids/scope, `grid_id`, `grid_signature`, direct-grid station signature, canonical input signature, or mapping mode invalidates the prior ready output and recomputes/replaces the same forcing version according to existing retry semantics.
+- [x] 3.5 (#546) Ensure explicit `direct_grid` validation failures never fallback to IDW and leave no ready forcing outputs, with no-ready-output regression tests.
+  - Required evidence: direct-grid validation/value/package/lineage/idempotency failures mark `failed_forcing`, do not call legacy station loading or IDW neighbor search, and leave no finalized ready package/version/timeseries beyond existing incomplete-retry semantics.
+  - Required evidence: failure-injection tests cover each publication phase separately: parent `met.forcing_version` pending creation, package file writes, package manifest write/checksum, component child rows, station timeseries child rows, lineage persistence in the parent record, and finalization/readiness. Each failure leaves no finalized ready output.
+  - Required evidence: retry after each publication-phase failure completes the same forcing version without duplicate ready versions, duplicate component rows, duplicate station timeseries rows, or orphaned stale package/manifest identity.
+- [x] 3.6 (#546) Preserve existing IDW tests and behavior for model assets without `forcing_mapping_mode` or with explicit `forcing_mapping_mode="idw"`.
+  - Required evidence: existing absent/explicit IDW package output, lineage, idempotency, and finite-value validation tests still pass unchanged.
+  - Non-goal for #546: no SHUD runtime staging validation, no `.sp.att` runtime FORC-vs-`.tsd.forc` check, and no runtime fallback rewrite changes; those remain #547.
 
 ## 4. SHUD Runtime Integration
 

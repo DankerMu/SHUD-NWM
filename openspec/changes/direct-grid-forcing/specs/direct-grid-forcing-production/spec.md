@@ -43,6 +43,7 @@ Direct-grid forcing production SHALL emit the same SHUD-readable package shape a
 - **THEN** per-station CSV files contain the SHUD forcing columns `Precip`, `Temp`, `RH`, `Wind`, and `RN` plus the time axis required by the runtime.
 
 #### Scenario: Direct-grid runtime staging preserves multi-station ownership
+- **ISSUE BOUNDARY** This scenario is implemented by #547, not #546. #546 only writes producer packages and lineage that #547 runtime staging later consumes.
 - **WHEN** SHUD runtime stages a forcing package whose lineage declares `forcing_mapping_mode="direct_grid"`
 - **THEN** runtime uses the standard multi-station SHUD forcing package path
 - **THEN** runtime refuses any fallback path that rewrites all `.sp.att` `FORC` values to a single forcing index
