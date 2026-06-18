@@ -21,7 +21,7 @@
 ## 2. Direct-Grid Producer Path
 
 - [ ] 2.1 Add direct-grid mode resolution to `workers/forcing_producer/producer.py` while keeping existing IDW behavior unchanged for legacy assets.
-- [ ] 2.2 (#543) Check and update persistence compatibility for direct-grid mappings, including `met.interp_weight.method='direct_grid'`, `weight=1.0`, replacement semantics, indexes/constraints, and integration tests.
+- [x] 2.2 (#543) Check and update persistence compatibility for direct-grid mappings, including `met.interp_weight.method='direct_grid'`, `weight=1.0`, replacement semantics, indexes/constraints, and integration tests.
   - Required evidence: migration/DDL tests prove `met.interp_weight` can represent `method='direct_grid'`, `weight=1.0`, `grid_cell_id`, and `grid_signature` without narrowing existing IDW rows or downstream membership joins.
   - Required evidence: store tests prove `load_interp_weights` round-trips direct-grid rows with `method`, `weight`, `grid_cell_id`, and `grid_signature` intact.
   - Required evidence: store tests prove replacing an existing IDW snapshot with direct-grid rows for the same `(source_id, grid_id, model_id)` removes stale IDW rows and does not leave mixed-method rows in that scope.

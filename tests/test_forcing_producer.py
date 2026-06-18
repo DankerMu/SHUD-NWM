@@ -3177,6 +3177,7 @@ class _MemoryInterpWeightRepository(PsycopgForcingRepository):
         super().__init__(database_url="memory://interp-weight")
         object.__setattr__(self, "rows", list(rows or []))
         object.__setattr__(self, "replace_calls", [])
+        object.__setattr__(self, "sql_calls", [])
 
     def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
         assert "FROM met.interp_weight" in statement
@@ -3189,14 +3190,22 @@ class _MemoryInterpWeightRepository(PsycopgForcingRepository):
 
     def _replace_values(
         self,
+        pre_delete_statement: str | None,
+        pre_delete_parameters: tuple[Any, ...],
         delete_statement: str | None,
         delete_parameters: tuple[Any, ...],
         insert_statement: str,
         rows: list[tuple[Any, ...]] | tuple[tuple[Any, ...], ...],
     ) -> None:
+        assert pre_delete_statement is not None
+        assert "pg_advisory_xact_lock" in pre_delete_statement
+        assert "hashtextextended" in pre_delete_statement
         assert delete_statement is not None
         assert "DELETE FROM met.interp_weight" in delete_statement
         assert "INSERT INTO met.interp_weight" in insert_statement
+        self.sql_calls.append(("lock", pre_delete_statement, pre_delete_parameters))
+        self.sql_calls.append(("delete", delete_statement, delete_parameters))
+        self.sql_calls.append(("insert", insert_statement, tuple(rows)))
         self.replace_calls.append((delete_parameters, tuple(rows)))
         source_id, grid_id, model_id = delete_parameters
         self.rows = [
@@ -3259,6 +3268,32 @@ def test_store_direct_grid_interp_weights_round_trip_with_grid_signature() -> No
     assert {row.method for row in loaded} == {"direct_grid"}
     assert {row.weight for row in loaded} == {1.0}
     assert {row.grid_signature for row in loaded} == {"sha256:grid-signature"}
+
+
+def test_store_interp_weight_replacement_locks_scope_before_delete_and_insert() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [_interp_weight_row(method="idw", grid_cell_id="stale-cell", weight=1.0)]
+    )
+
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                "qhh_forc_001",
+                "PRCP",
+                "cell-001",
+                1.0,
+                method="direct_grid",
+                grid_signature="sha256:grid-signature",
+            ),
+        )
+    )
+
+    assert [call[0] for call in repository.sql_calls] == ["lock", "delete", "insert"]
+    assert repository.sql_calls[0][2] == ("met.interp_weight:GFS\x1fifs_gfs_025deg\x1fdemo_model",)
+    assert repository.sql_calls[1][2] == ("GFS", "ifs_gfs_025deg", "demo_model")
 
 
 def test_store_direct_grid_snapshot_replaces_same_scope_idw_rows_without_mixing() -> None:
