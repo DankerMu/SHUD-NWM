@@ -548,7 +548,7 @@ Must add/change:
 - Direct-grid `.tsd.forc` IDs, coordinates, filenames, and station count come from the validated direct-grid station contract and rewritten `.sp.att` `FORC` ownership.
 - Direct-grid package manifest and `met.forcing_version.lineage_json` record `forcing_mapping_mode='direct_grid'`, `spatial_mapping_method='direct_grid'`, binding URI/checksum, model input package id, `.sp.att` path/checksum, applicable source ids, grid id, grid signature, direct-grid station signature, and canonical input signature.
 - Direct-grid `met.forcing_station_timeseries` rows are persisted for every generated variable, station, and valid time; `Press` remains persisted there when generated but is excluded from SHUD station CSV files.
-- Existing-ready freshness checks compare mapping mode and direct-grid contract identity. Changes to binding checksum/URI, model input package id, `.sp.att` checksum/path, applicable source ids, grid id/signature, direct-grid station signature, or mapping mode invalidate prior ready outputs for the same source/model/cycle.
+- Existing-ready freshness checks compare mapping mode and direct-grid contract identity. Recompute-able drift, such as binding URI, `.sp.att` checksum/path, applicable source ids, direct-grid station signature, canonical input signature, or mapping mode, invalidates prior ready outputs for the same source/model/cycle and replaces the same forcing version. Identity drift that would require overwriting an existing derived direct-grid station mirror with a different binding checksum, model input package id, or canonical grid identity/signature remains fail-closed before weight writes or ready publication, preserving the #544 mirror-collision invariant.
 - Parent pending-version creation, package file writes, package manifest write/checksum, component child rows, station timeseries child rows, lineage persistence, and finalize/readiness failures leave no finalized ready output and remain retryable through existing incomplete-version replacement semantics.
 
 Selected risk packs:
@@ -579,7 +579,7 @@ Boundary-surface checklist:
 - Write/delete/overwrite surfaces: object-store forcing package files/manifest, `met.forcing_version`, `met.forcing_version_component`, and `met.forcing_station_timeseries`.
 - Staging/publish/rollback surfaces: parent forcing version is inserted with pending checksum, files/children are replaced, then finalized with manifest checksum; failures must be retryable and not finalized.
 - Producer/consumer evidence boundaries: package manifest and DB lineage must bind the same direct-grid contract identity, grid signature, canonical inputs, and output files.
-- Stale-state/idempotency boundaries: existing-ready reuse must be invalidated by mapping mode or direct-grid contract identity drift.
+- Stale-state/idempotency boundaries: existing-ready reuse must be invalidated by mapping mode or direct-grid contract identity drift; direct-grid mirror identity collisions are invalidation failures, not automatic mirror overwrites.
 - Unchanged downstream consumers: legacy IDW package consumers, runtime staging behavior, and frontend/API payloads remain compatible.
 
 Invariant Matrix
@@ -599,7 +599,8 @@ Regression rows:
 - direct-grid SHUD station CSV -> columns are time plus `Precip`, `Temp`, `RH`, `Wind`, `RN`; `Press` is absent from the CSV and present in persisted station timeseries.
 - direct-grid lineage/manifest -> contains mapping mode, spatial mapping method, binding URI/checksum, model input package id, `.sp.att` path/checksum, applicable source ids, grid id/signature, station signature, canonical input signature, and output file checksums.
 - rerun unchanged direct-grid source/model/cycle -> returns existing-ready/already-done behavior and does not create duplicate ready forcing versions.
-- direct-grid binding URI/checksum, model input id, `.sp.att` path/checksum, applicable source ids, `grid_id`, grid signature, station signature, canonical input signature, or mapping mode changes -> existing ready output is considered stale and the same forcing version is recomputed/replaced.
+- direct-grid binding URI, `.sp.att` path/checksum, applicable source ids, station signature, canonical input signature, or mapping mode changes -> existing ready output is considered stale and the same forcing version is recomputed/replaced when no mirror identity collision is introduced.
+- direct-grid binding checksum, model input id, `grid_id`, or grid signature changes that collide with existing derived direct-grid mirror station ids -> production fails closed before weight writes or ready publication; no stale `already_done`, IDW fallback, or finalized wrong package is allowed.
 - parent pending-version creation failure -> no package files or child rows are published and retry can complete normally.
 - package file or package manifest write/checksum failure -> no finalized ready output; retry replaces package files/manifest without duplicate ready versions.
 - component child-row or station-timeseries child-row failure -> parent remains pending/unfinalized; retry replaces child rows without duplicates or stale orphaned rows.

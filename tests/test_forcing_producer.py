@@ -59,6 +59,7 @@ class FakeForcingRepository:
         fail_next_component_replace: bool = False,
         fail_next_timeseries_replace: bool = False,
         fail_next_finalize: bool = False,
+        fail_next_cycle_ready_update: bool = False,
         fail_next_interp_weight_upsert: bool = False,
         fail_next_direct_grid_station_ensure: bool = False,
     ) -> None:
@@ -92,6 +93,7 @@ class FakeForcingRepository:
         self.fail_next_component_replace = fail_next_component_replace
         self.fail_next_timeseries_replace = fail_next_timeseries_replace
         self.fail_next_finalize = fail_next_finalize
+        self.fail_next_cycle_ready_update = fail_next_cycle_ready_update
         self.fail_next_interp_weight_upsert = fail_next_interp_weight_upsert
         self.fail_next_direct_grid_station_ensure = fail_next_direct_grid_station_ensure
         self.upsert_count = 0
@@ -326,12 +328,17 @@ class FakeForcingRepository:
         expected_valid_times: list[Any] | tuple[Any, ...],
         expected_variables: list[str] | tuple[str, ...],
     ) -> Mapping[str, Any]:
+        expected_component_set = set(expected_component_ids)
         components = [
             component
             for component in self.components
             if component.forcing_version_id == forcing_version_id
-            and component.canonical_product_id in set(expected_component_ids)
+            and component.canonical_product_id in expected_component_set
         ]
+        component_counts = {
+            component_id: sum(1 for component in components if component.canonical_product_id == component_id)
+            for component_id in expected_component_set
+        }
         rows = [
             row
             for row in self.timeseries
@@ -345,6 +352,7 @@ class FakeForcingRepository:
             "forcing_version_id": forcing_version_id,
             "expected_component_count": len(expected_component_ids),
             "component_count": len(components),
+            "component_distinct_count": len({component.canonical_product_id for component in components}),
             "expected_timeseries_row_count": expected_row_count,
             "timeseries_row_count": len(rows),
             "station_count": len({row.station_id for row in rows}),
@@ -353,6 +361,8 @@ class FakeForcingRepository:
         }
         proof["complete"] = (
             proof["component_count"] == proof["expected_component_count"]
+            and proof["component_distinct_count"] == proof["expected_component_count"]
+            and all(count == 1 for count in component_counts.values())
             and proof["timeseries_row_count"] == proof["expected_timeseries_row_count"]
             and proof["station_count"] == len(expected_station_ids)
             and proof["timestep_count"] == len(expected_valid_times)
@@ -388,6 +398,9 @@ class FakeForcingRepository:
 
     def update_forecast_cycle(self, **kwargs: Any) -> dict[str, Any]:
         self.cycle_updates.append(dict(kwargs))
+        if kwargs.get("status") == "forcing_ready" and self.fail_next_cycle_ready_update:
+            self.fail_next_cycle_ready_update = False
+            raise RuntimeError("forecast cycle ready update failed")
         return dict(kwargs)
 
 
@@ -775,6 +788,120 @@ def test_existing_forcing_version_not_reused_when_child_rows_are_missing(tmp_pat
     assert second.forcing_version_id == first.forcing_version_id
     assert repository.upsert_count == 2
     assert len(repository.components) == len(repository.products)
+
+
+def test_existing_forcing_version_not_reused_when_component_identity_is_incomplete(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    missing_component = repository.components[0]
+    duplicate_component = repository.components[1]
+    repository.components = [
+        duplicate_component if component is missing_component else component for component in repository.components
+    ]
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.upsert_count == 2
+    assert {component.canonical_product_id for component in repository.components} == {
+        product.canonical_product_id for product in repository.products
+    }
+
+
+def test_direct_grid_existing_forcing_version_not_reused_when_manifest_output_files_are_missing_or_corrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "sha256:grid-signature-actual",
+    )
+    contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+    store, repository = _build_direct_grid_repository(tmp_path, contract=contract)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    package_root = tmp_path / first.forcing_package_uri.strip("/")
+    manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+    station_csv_entry = next(entry for entry in manifest["files"] if entry["role"] == "shud_forcing_csv")
+    (package_root / "shud" / "qhh.tsd.forc").write_text("corrupt\n", encoding="utf-8")
+    (tmp_path / station_csv_entry["uri"].strip("/")).unlink()
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    restored_manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+    restored_entries = {
+        entry["relative_path"]: entry for entry in restored_manifest["files"] if "relative_path" in entry
+    }
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.upsert_count == 2
+    assert store.checksum("forcing/gfs/2026050700/basin_v1/demo_model/shud/qhh.tsd.forc") == restored_entries[
+        "shud/qhh.tsd.forc"
+    ]["checksum"]
+    assert store.exists(station_csv_entry["uri"])
+    assert store.checksum(station_csv_entry["uri"]) == next(
+        entry["checksum"] for entry in restored_manifest["files"] if entry["uri"] == station_csv_entry["uri"]
+    )
+
+
+def test_legacy_idw_lineage_without_mapping_fields_remains_current(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    record = repository.forcing_versions[first.forcing_version_id]
+    lineage = dict(record["lineage_json"])
+    lineage.pop("forcing_mapping_mode")
+    lineage.pop("spatial_mapping_method")
+    record["lineage_json"] = lineage
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "already_done"
+    assert repository.upsert_count == 1
+    assert repository.forcing_versions[first.forcing_version_id]["lineage_json"] == lineage
+
+
+@pytest.mark.parametrize("forcing_mapping_mode", ["idw", "direct_grid"])
+def test_retry_after_cycle_ready_update_failure_repairs_ready_status_without_duplicate_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forcing_mapping_mode: str,
+) -> None:
+    if forcing_mapping_mode == "direct_grid":
+        monkeypatch.setattr(
+            "workers.forcing_producer.producer._grid_signature_hash",
+            lambda _grid_points: "sha256:grid-signature-actual",
+        )
+        contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
+        store, repository = _build_direct_grid_repository(
+            tmp_path,
+            contract=contract,
+            fail_next_cycle_ready_update=True,
+        )
+    else:
+        store, repository = _build_repository(tmp_path, fail_next_cycle_ready_update=True)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="forecast cycle ready update failed"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    finalized = next(iter(repository.forcing_versions.values()))
+    assert finalized["checksum"]
+    row_count = len(repository.timeseries)
+    component_count = len(repository.components)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "already_done"
+    assert len(repository.forcing_versions) == 1
+    assert len(repository.timeseries) == row_count
+    assert len(repository.components) == component_count
+    assert repository.cycle_updates[-1]["status"] == "forcing_ready"
 
 
 def test_existing_forcing_version_not_reused_when_producer_version_is_stale(tmp_path: Path) -> None:
@@ -2146,6 +2273,15 @@ def test_producer_direct_grid_lineage_manifest_identity_and_idempotency(
     producer = _build_producer(tmp_path, repository, store)
 
     first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    repository.direct_grid_station_ensure_count = 0
+    repository.interp_weight_upsert_count = 0
+    repository.fail_next_direct_grid_station_ensure = True
+    repository.fail_next_interp_weight_upsert = True
+    monkeypatch.setattr(
+        producer,
+        "_read_canonical_field",
+        lambda *_args, **_kwargs: pytest.fail("already-current direct-grid rerun must not read row fields"),
+    )
     row_count = len(repository.timeseries)
     component_count = len(repository.components)
     second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
@@ -2153,6 +2289,8 @@ def test_producer_direct_grid_lineage_manifest_identity_and_idempotency(
     assert first.status == "forcing_ready"
     assert second.status == "already_done"
     assert second.forcing_version_id == first.forcing_version_id
+    assert repository.direct_grid_station_ensure_count == 0
+    assert repository.interp_weight_upsert_count == 0
     assert repository.upsert_count == 1
     assert len(repository.forcing_versions) == 1
     assert len(repository.timeseries) == row_count
@@ -3996,6 +4134,7 @@ def _build_repository(
     fail_next_component_replace: bool = False,
     fail_next_timeseries_replace: bool = False,
     fail_next_finalize: bool = False,
+    fail_next_cycle_ready_update: bool = False,
     fail_next_interp_weight_upsert: bool = False,
     fail_next_direct_grid_station_ensure: bool = False,
     include_geographic_coords: bool = True,
@@ -4041,6 +4180,7 @@ def _build_repository(
         fail_next_component_replace=fail_next_component_replace,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
         fail_next_finalize=fail_next_finalize,
+        fail_next_cycle_ready_update=fail_next_cycle_ready_update,
         fail_next_interp_weight_upsert=fail_next_interp_weight_upsert,
         fail_next_direct_grid_station_ensure=fail_next_direct_grid_station_ensure,
     )

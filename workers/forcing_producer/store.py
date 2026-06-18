@@ -651,6 +651,7 @@ class PsycopgForcingRepository:
         }
         proof["complete"] = (
             proof["component_count"] == expected_component_count
+            and int(component["canonical_product_count"]) == expected_component_count
             and proof["timeseries_row_count"] == expected_timeseries_count
             and proof["station_count"] == len(tuple(expected_station_ids))
             and proof["timestep_count"] == len(tuple(expected_valid_times))

@@ -453,42 +453,7 @@ class ForcingProducer:
                     expected_valid_times=expected_valid_times,
                     station_count=len(direct_grid_stations),
                 )
-                self._ensure_direct_grid_met_stations(
-                    basin_version_id=resolved_basin_version_id,
-                    contract=forcing_mapping_contract,
-                )
-                self._materialize_direct_grid_mappings(
-                    contract=forcing_mapping_contract,
-                    source_id=resolved_source_id,
-                    model_id=model_id,
-                    grid_signature=direct_grid_signature,
-                )
-                forcing_version_id = (
-                    str(existing["forcing_version_id"])
-                    if existing is not None
-                    else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
-                )
-                direct_grid_weights = _weights_by_source_grid(
-                    self._direct_grid_weights_from_contract(
-                        contract=forcing_mapping_contract,
-                        source_id=resolved_source_id,
-                        model_id=model_id,
-                        grid_signature=direct_grid_signature,
-                    )
-                )
                 grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
-                values, components = self._generate_timeseries_streaming(
-                    source_id=resolved_source_id,
-                    cycle_time=parsed_cycle_time,
-                    forcing_version_id=forcing_version_id,
-                    basin_version_id=resolved_basin_version_id,
-                    products_by_variable=products_by_variable,
-                    stations=direct_grid_stations,
-                    weights=direct_grid_weights,
-                    grid_points_by_source_grid=grid_points_by_source_grid,
-                    canonical_to_forcing=canonical_to_forcing,
-                    validate_all_field_values=False,
-                )
                 lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
                 station_signature = _station_signature(direct_grid_stations)
                 scheduler_canonical_identity = _scheduler_canonical_identity_manifest(
@@ -518,28 +483,48 @@ class ForcingProducer:
                     expected_variables=self.config.output_variables,
                     expected_component_ids=_canonical_product_ids(products_by_variable),
                 ):
-                    existing_coverage_end = _forcing_coverage_end_time(
-                        resolved_source_id,
-                        products_by_variable,
-                        row_times=expected_valid_times,
+                    return self._return_existing_ready(
+                        existing,
+                        source_id=resolved_source_id,
+                        cycle_time=parsed_cycle_time,
+                        products_by_variable=products_by_variable,
+                        expected_valid_times=expected_valid_times,
                     )
-                    return ForcingProductionResult(
-                        status="already_done",
-                        forcing_version_id=str(existing["forcing_version_id"]),
-                        forcing_package_uri=str(existing["forcing_package_uri"]),
-                        checksum=str(existing["checksum"]),
-                        station_count=int(existing["station_count"]),
-                        timestep_count=len(expected_valid_times),
-                        variable_count=len(self.config.output_variables),
-                        time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
-                        units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
-                        file_uris={
-                            "package_manifest": _package_manifest_uri(
-                                str(existing["forcing_package_uri"]),
-                                self.config.package_manifest_filename,
-                            ),
-                        },
+                self._ensure_direct_grid_met_stations(
+                    basin_version_id=resolved_basin_version_id,
+                    contract=forcing_mapping_contract,
+                )
+                self._materialize_direct_grid_mappings(
+                    contract=forcing_mapping_contract,
+                    source_id=resolved_source_id,
+                    model_id=model_id,
+                    grid_signature=direct_grid_signature,
+                )
+                forcing_version_id = (
+                    str(existing["forcing_version_id"])
+                    if existing is not None
+                    else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
+                )
+                direct_grid_weights = _weights_by_source_grid(
+                    self._direct_grid_weights_from_contract(
+                        contract=forcing_mapping_contract,
+                        source_id=resolved_source_id,
+                        model_id=model_id,
+                        grid_signature=direct_grid_signature,
                     )
+                )
+                values, components = self._generate_timeseries_streaming(
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    forcing_version_id=forcing_version_id,
+                    basin_version_id=resolved_basin_version_id,
+                    products_by_variable=products_by_variable,
+                    stations=direct_grid_stations,
+                    weights=direct_grid_weights,
+                    grid_points_by_source_grid=grid_points_by_source_grid,
+                    canonical_to_forcing=canonical_to_forcing,
+                    validate_all_field_values=False,
+                )
                 result = self._write_outputs_and_records(
                     source_id=resolved_source_id,
                     cycle_time=parsed_cycle_time,
@@ -596,27 +581,12 @@ class ForcingProducer:
                 expected_variables=self.config.output_variables,
                 expected_component_ids=_canonical_product_ids(products_by_variable),
             ):
-                existing_coverage_end = _forcing_coverage_end_time(
-                    resolved_source_id,
-                    products_by_variable,
-                    row_times=expected_valid_times,
-                )
-                return ForcingProductionResult(
-                    status="already_done",
-                    forcing_version_id=str(existing["forcing_version_id"]),
-                    forcing_package_uri=str(existing["forcing_package_uri"]),
-                    checksum=str(existing["checksum"]),
-                    station_count=int(existing["station_count"]),
-                    timestep_count=len(expected_valid_times),
-                    variable_count=len(self.config.output_variables),
-                    time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
-                    units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
-                    file_uris={
-                        "package_manifest": _package_manifest_uri(
-                            str(existing["forcing_package_uri"]),
-                            self.config.package_manifest_filename,
-                        ),
-                    },
+                return self._return_existing_ready(
+                    existing,
+                    source_id=resolved_source_id,
+                    cycle_time=parsed_cycle_time,
+                    products_by_variable=products_by_variable,
+                    expected_valid_times=expected_valid_times,
                 )
 
             grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
@@ -1970,6 +1940,8 @@ class ForcingProducer:
                 return False
             if not _lineage_identity_matches(manifest_lineage, expected_lineage_identity):
                 return False
+            if not self._existing_package_files_are_complete(manifest=manifest, lineage=manifest_lineage):
+                return False
             return self._forcing_children_are_complete(
                 forcing_version_id=str(existing["forcing_version_id"]),
                 expected_component_ids=expected_component_ids,
@@ -1980,6 +1952,73 @@ class ForcingProducer:
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.warning("Existing forcing package checksum could not be verified for %s", package_uri)
             return False
+
+    def _existing_package_files_are_complete(
+        self,
+        *,
+        manifest: Mapping[str, Any],
+        lineage: Mapping[str, Any],
+    ) -> bool:
+        manifest_files = manifest.get("files")
+        lineage_files = lineage.get("output_files")
+        if not isinstance(manifest_files, Sequence) or isinstance(manifest_files, (str, bytes)):
+            return False
+        if not isinstance(lineage_files, Sequence) or isinstance(lineage_files, (str, bytes)):
+            return False
+        if not manifest_files or len(manifest_files) != len(lineage_files):
+            return False
+        for manifest_entry, lineage_entry in zip(manifest_files, lineage_files, strict=True):
+            if not isinstance(manifest_entry, Mapping) or not isinstance(lineage_entry, Mapping):
+                return False
+            if _stable_identity(manifest_entry) != _stable_identity(lineage_entry):
+                return False
+            uri = str(manifest_entry.get("uri") or "").strip()
+            checksum = str(manifest_entry.get("checksum") or "").strip()
+            if not uri or not checksum:
+                return False
+            if not self.object_store.exists(uri) or self.object_store.checksum(uri) != checksum:
+                return False
+        return True
+
+    def _return_existing_ready(
+        self,
+        existing: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        expected_valid_times: Sequence[datetime],
+    ) -> ForcingProductionResult:
+        assert self.repository is not None
+        self.repository.update_forecast_cycle(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            status="forcing_ready",
+            error_code="",
+            error_message="",
+        )
+        existing_coverage_end = _forcing_coverage_end_time(
+            source_id,
+            products_by_variable,
+            row_times=expected_valid_times,
+        )
+        return ForcingProductionResult(
+            status="already_done",
+            forcing_version_id=str(existing["forcing_version_id"]),
+            forcing_package_uri=str(existing["forcing_package_uri"]),
+            checksum=str(existing["checksum"]),
+            station_count=int(existing["station_count"]),
+            timestep_count=len(expected_valid_times),
+            variable_count=len(self.config.output_variables),
+            time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
+            units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
+            file_uris={
+                "package_manifest": _package_manifest_uri(
+                    str(existing["forcing_package_uri"]),
+                    self.config.package_manifest_filename,
+                ),
+            },
+        )
 
     def _forcing_children_are_complete(
         self,
@@ -2590,6 +2629,13 @@ def _lineage_identity_matches(lineage: Mapping[str, Any], expected: Mapping[str,
         if key in {"station_signature", "canonical_input_signature"}:
             continue
         existing_value = lineage.get(key)
+        if (
+            expected.get("forcing_mapping_mode") == IDW_MODE
+            and key in {"forcing_mapping_mode", "spatial_mapping_method"}
+            and existing_value in (None, "")
+            and expected_value == IDW_MODE
+        ):
+            continue
         if _stable_identity(existing_value) != _stable_identity(expected_value):
             return False
     return True
