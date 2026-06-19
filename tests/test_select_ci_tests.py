@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.select_ci_tests import CORE_SMOKE_TESTS, main, select_tests
+from scripts.select_ci_tests import CORE_SMOKE_TESTS, ORCHESTRATOR_MANIFEST_SURFACE_TESTS, main, select_tests
 
 
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
@@ -23,6 +23,61 @@ def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:
     assert "tests/test_ifs_adapter.py" in selected
     assert "tests/test_data_adapter_resolution.py" in selected
     assert "tests/test_production_scheduler.py" in selected
+
+
+def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
+    selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_runtime_ic_header.py",
+        "tests/test_runtime_mode.py",
+        "tests/test_shud_runtime.py",
+    ]
+
+
+def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:
+    selected = select_tests(["services/orchestrator/chain_types.py"], repo_root=Path("."))
+
+    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
+    assert "tests/test_orchestration_chain.py" not in selected
+    assert "tests/test_orchestrator.py" not in selected
+    assert "tests/test_scheduler_backfill.py" not in selected
+    assert "tests/test_warm_start_chaining.py" not in selected
+
+
+def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suites() -> None:
+    selected = select_tests(["services/orchestrator/chain_manifests.py"], repo_root=Path("."))
+
+    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
+    assert all("::" in test_path for test_path in selected)
+
+
+def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:
+    selected = select_tests(
+        ["services/orchestrator/chain_types.py", "tests/test_orchestration_chain.py"],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
+    assert "tests/test_orchestration_chain.py" not in selected
+
+
+def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() -> None:
+    selected = select_tests(["tests/test_orchestration_chain.py"], repo_root=Path("."))
+
+    assert selected == ["tests/test_orchestration_chain.py"]
+
+
+def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
+    selected = select_tests(["services/orchestrator/retry.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_orchestration_chain.py",
+        "tests/test_orchestrator.py",
+        "tests/test_production_scheduler.py",
+        "tests/test_scheduler_backfill.py",
+        "tests/test_warm_start_chaining.py",
+    ]
 
 
 def test_select_tests_maps_flood_cleanup_changes_to_cleanup_tests() -> None:

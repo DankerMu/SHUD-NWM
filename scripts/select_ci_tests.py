@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
@@ -16,8 +17,72 @@ CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py",
 )
 
-PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
+
+@dataclass(frozen=True)
+class PathTestRule:
+    pattern: str
+    tests: tuple[str, ...]
+    stop_on_match: bool = False
+    only_when_any_changed: tuple[str, ...] = ()
+
+
+ORCHESTRATOR_MANIFEST_SURFACE_TESTS: tuple[str, ...] = (
+    "tests/test_orchestration_chain.py::test_static_chain_type_module_import_resolves_hints_without_heavy_runtime_imports",
+    "tests/test_orchestration_chain.py::test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts",
+    "tests/test_orchestration_chain.py::test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest",
+    "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
+    "tests/test_production_scheduler.py::test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate",
+    "tests/test_production_scheduler.py::test_scheduler_propagates_produced_forcing_identity_to_orchestration",
+    "tests/test_production_scheduler.py::test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count",
+)
+
+
+ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
+    "services/orchestrator/chain_types.py",
+    "services/orchestrator/chain_manifests.py",
+    "services/orchestrator/chain.py",
+    "services/orchestrator/scheduler.py",
+)
+
+
+CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        "tests/test_orchestration_chain.py",
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+        only_when_any_changed=ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS,
+    ),
+    PathTestRule(
+        "tests/test_production_scheduler.py",
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+        only_when_any_changed=ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS,
+    ),
+)
+
+
+PATH_TEST_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[1],
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[2],
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[3],
+        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "workers/data_adapters/**",
         (
             "tests/test_gfs_adapter.py",
@@ -27,7 +92,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_production_scheduler.py",
         ),
     ),
-    (
+    PathTestRule(
         "workers/forcing_producer/**",
         (
             "tests/test_forcing_producer.py",
@@ -35,7 +100,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_worker_chain_smoke.py",
         ),
     ),
-    (
+    PathTestRule(
         "workers/shud_runtime/**",
         (
             "tests/test_shud_runtime.py",
@@ -43,7 +108,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_runtime_ic_header.py",
         ),
     ),
-    (
+    PathTestRule(
         "workers/model_registry/**",
         (
             "tests/test_model_registration.py",
@@ -51,32 +116,39 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_model_registry_list_basins.py",
         ),
     ),
-    ("workers/output_parser/**", ("tests/test_output_parser.py",)),
-    (
+    PathTestRule(
+        "workers/output_parser/**",
+        ("tests/test_output_parser.py",),
+    ),
+    PathTestRule(
         "workers/flood_frequency/return_period_cleanup.py",
         ("tests/test_return_period_cleanup.py",),
     ),
-    (
+    PathTestRule(
         "workers/flood_frequency/return_period.py",
         ("tests/test_return_period.py",),
     ),
-    (
+    PathTestRule(
         "workers/flood_frequency/cli.py",
-        ("tests/test_flood_frequency.py", "tests/test_return_period.py", "tests/test_return_period_cleanup.py"),
+        (
+            "tests/test_flood_frequency.py",
+            "tests/test_return_period.py",
+            "tests/test_return_period_cleanup.py",
+        ),
     ),
-    (
+    PathTestRule(
         "workers/flood_frequency/frequency.py",
         ("tests/test_flood_frequency.py",),
     ),
-    (
+    PathTestRule(
         "workers/flood_frequency/hindcast.py",
         ("tests/test_flood_frequency.py",),
     ),
-    (
+    PathTestRule(
         "workers/flood_frequency/config.py",
         ("tests/test_flood_frequency.py",),
     ),
-    (
+    PathTestRule(
         "services/orchestrator/**",
         (
             "tests/test_orchestrator.py",
@@ -86,7 +158,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_warm_start_chaining.py",
         ),
     ),
-    (
+    PathTestRule(
         "services/slurm_gateway/**",
         (
             "tests/test_gateway.py",
@@ -95,7 +167,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_slurm_route_contract.py",
         ),
     ),
-    (
+    PathTestRule(
         "services/tile_publisher/**",
         (
             "tests/test_tile_publisher.py",
@@ -103,7 +175,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_static_serving.py",
         ),
     ),
-    (
+    PathTestRule(
         "services/tiles/mvt.py",
         (
             "tests/test_flood_alerts_api.py",
@@ -111,7 +183,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_openapi_drift.py",
         ),
     ),
-    (
+    PathTestRule(
         "services/production_closure/**",
         (
             "tests/test_production_readiness_validation.py",
@@ -121,8 +193,14 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_production_scale_validation.py",
         ),
     ),
-    ("packages/common/object_store.py", ("tests/test_object_store_roots.py", "tests/test_storage.py")),
-    (
+    PathTestRule(
+        "packages/common/object_store.py",
+        (
+            "tests/test_object_store_roots.py",
+            "tests/test_storage.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
@@ -132,7 +210,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_model_registry_list_basins.py",
         ),
     ),
-    (
+    PathTestRule(
         "packages/common/flood_quality.py",
         (
             "tests/test_forecast_api.py",
@@ -140,31 +218,83 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_return_period_integration.py",
         ),
     ),
-    ("packages/common/state_manager.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
-    ("packages/common/state_cli.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
-    ("packages/common/redaction.py", ("tests/test_redaction.py",)),
-    ("apps/api/**", ("tests/test_api.py", "tests/test_api_contract.py", "tests/test_monitoring_api.py")),
-    ("db/**", ("tests/test_migrations.py",)),
-    ("infra/compose.compute.yml", ("tests/test_two_node_docker_runtime.py",)),
-    ("infra/compose.display.yml", ("tests/test_two_node_docker_runtime.py",)),
-    ("infra/env/**", ("tests/test_two_node_docker_runtime.py",)),
-    (
+    PathTestRule(
+        "packages/common/state_manager.py",
+        (
+            "tests/test_state_manager.py",
+            "tests/test_state_qc.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/state_cli.py",
+        (
+            "tests/test_state_manager.py",
+            "tests/test_state_qc.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/redaction.py",
+        ("tests/test_redaction.py",),
+    ),
+    PathTestRule(
+        "apps/api/**",
+        (
+            "tests/test_api.py",
+            "tests/test_api_contract.py",
+            "tests/test_monitoring_api.py",
+        ),
+    ),
+    PathTestRule(
+        "db/**",
+        ("tests/test_migrations.py",),
+    ),
+    PathTestRule(
+        "infra/compose.compute.yml",
+        ("tests/test_two_node_docker_runtime.py",),
+    ),
+    PathTestRule(
+        "infra/compose.display.yml",
+        ("tests/test_two_node_docker_runtime.py",),
+    ),
+    PathTestRule(
+        "infra/env/**",
+        ("tests/test_two_node_docker_runtime.py",),
+    ),
+    PathTestRule(
         "scripts/validate_two_node_docker_runtime.py",
         ("tests/test_two_node_docker_runtime.py",),
     ),
-    (
+    PathTestRule(
         "scripts/validate_two_node_docker_source_trust.py",
         ("tests/test_two_node_docker_source_trust.py",),
     ),
-    (
+    PathTestRule(
         "scripts/audit_return_period_indexes.py",
-        ("tests/test_return_period_index_audit.py", "tests/test_select_ci_tests.py"),
+        (
+            "tests/test_return_period_index_audit.py",
+            "tests/test_select_ci_tests.py",
+        ),
     ),
-    ("scripts/validate_readonly_db_boundary.py", ("tests/test_readonly_db_validation.py",)),
-    ("scripts/run_qhh_continuous.py", ("tests/test_run_qhh_continuous.py",)),
-    ("scripts/select_ci_tests.py", ("tests/test_select_ci_tests.py",)),
-    ("pyproject.toml", CORE_SMOKE_TESTS),
-    ("uv.lock", CORE_SMOKE_TESTS),
+    PathTestRule(
+        "scripts/validate_readonly_db_boundary.py",
+        ("tests/test_readonly_db_validation.py",),
+    ),
+    PathTestRule(
+        "scripts/run_qhh_continuous.py",
+        ("tests/test_run_qhh_continuous.py",),
+    ),
+    PathTestRule(
+        "scripts/select_ci_tests.py",
+        ("tests/test_select_ci_tests.py",),
+    ),
+    PathTestRule(
+        "pyproject.toml",
+        CORE_SMOKE_TESTS,
+    ),
+    PathTestRule(
+        "uv.lock",
+        CORE_SMOKE_TESTS,
+    ),
 )
 
 
@@ -175,13 +305,25 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
-            selected.add(path)
+            matched_changed_test = False
+            for rule in CHANGED_TEST_FILE_RULES:
+                if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
+                    continue
+                if fnmatch.fnmatch(path, rule.pattern):
+                    selected.update(rule.tests)
+                    matched_changed_test = True
+                    if rule.stop_on_match:
+                        break
+            if not matched_changed_test:
+                selected.add(path)
             continue
         matched = False
-        for pattern, tests in PATH_TEST_RULES:
-            if fnmatch.fnmatch(path, pattern):
-                selected.update(tests)
+        for rule in PATH_TEST_RULES:
+            if fnmatch.fnmatch(path, rule.pattern):
+                selected.update(rule.tests)
                 matched = True
+                if rule.stop_on_match:
+                    break
 
         if _is_backend_python_path(path) and not matched:
             unknown_backend_python = True
@@ -189,7 +331,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     if unknown_backend_python:
         selected.update(CORE_SMOKE_TESTS)
 
-    return sorted(path for path in selected if (repo_root / path).is_file())
+    return sorted(path for path in selected if _test_target_exists(path, repo_root=repo_root))
 
 
 def changed_paths_from_git(base_ref: str) -> list[str]:
@@ -208,6 +350,15 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
 
 def _is_backend_python_path(path: str) -> bool:
     return path.endswith(".py") and path.startswith(("apps/api/", "packages/", "services/", "workers/", "scripts/"))
+
+
+def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for path in paths for pattern in patterns)
+
+
+def _test_target_exists(target: str, *, repo_root: Path) -> bool:
+    test_path = target.split("::", 1)[0]
+    return (repo_root / test_path).is_file()
 
 
 def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
