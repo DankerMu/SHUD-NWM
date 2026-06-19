@@ -58,6 +58,7 @@ jobs:
               - 'tests/*integration*.py'
               - 'tests/**/*integration*.py'
               - 'tests/test_basins_registry_import.py'
+              - 'tests/test_basins_reingest.py'
               - 'tests/test_migrations.py'
               - 'tests/test_qhh_production_bootstrap.py'
               - 'tests/test_real_*.py'
