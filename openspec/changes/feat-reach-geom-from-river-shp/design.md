@@ -90,6 +90,31 @@ PR #534（commit 17d1c03）通过列升 MultiLineString + parser greedy stitchin
 - 不 zero-padding（如 `<model_id>_reach_1`）：字典序排列错乱（reach_1 < reach_10 < reach_2）；不取。
 - 复用既有 `_shud_riv_<iRiv:06d>` 命名（替换 `reach` 关键字）：但 `_shud_riv_` 路径目前是 `shud_output_river=true` 行的命名，与本 change 删除该路径有歧义；用 `reach` 更清晰。
 
+### D7：API endpoint 保留 segment-level contract，几何在 API 层从 reach polyline 按 length proportion 切片（Path C）
+
+**Why**：OQ2 explorer 实物核验 ([docs/runbooks/feat-reach-geom-oq-findings.md](../../../docs/runbooks/feat-reach-geom-oq-findings.md)) 发现前端 [M11MapLibreSurface.tsx](../../../apps/frontend/src/components/map/M11MapLibreSurface.tsx) 的 hover/popup/coloring/promoteId/forecast 全部 keyed by `river_segment_id` (segment-level, 3738/qhh)；naive 切换到 reach-level + 改名 ID 会瞬间炸前端契约。Path C 保留前端契约：
+
+- `core.river_segment` 行粒度仍是 **reach** (1633/qhh, 见 D1)
+- `core.river_segment_crosswalk` 写 segment 级映射（iRiv, iEle, segment_order, length_m），见 D2
+- **API endpoint `GET /api/v1/basin-versions/{basin_version_id}/river-segments` 返回的是 segment-level FeatureCollection** (3738 features/qhh)，每个 segment feature 的 geometry 由 PostGIS `ST_LineSubstring(reach_geom, start_fraction, end_fraction)` 从 parent reach polyline 切出来的 slice
+- `start_fraction` / `end_fraction` 按 `sp.rivseg.Length` 在 reach 内的累积长度比例计算（与 segment_order 配合，从 reach 起点累加）
+- `river_segment_id` 在 API 输出仍是 segment-level identifier — 复用 crosswalk `external_id` 衍生：`<model_id>_seg_<iRiv>_<iEle>`（zero-padded 或 raw 由前端兼容性决定，见下）
+- `core.river_segment.river_segment_id` 在 DB 内是 reach-level `<model_id>_reach_<iRiv:06d>`，跟 API 输出的 segment-level identifier **解耦**
+
+**关键不变量**：切出的 segment slice **始终是 parent reach polyline 的子集**，永远不会越过 reach 范围跳到别处——这跟 PR #534 时代的"假桥"完全不同，假桥是因为 multi-part stitching 拉了原始 polyline 中根本不存在的直线段。Path C 沿 reach polyline 切，永不引入合成坐标。
+
+**Alternatives considered**：
+
+- **Path A（前后端都 reach-level）**：DB + API 都 1633 行/qhh，前端 hover/popup/colour/forecast 改成 reach 粒度。产品 UX 简化但需大量前端改动（store/tooltip/colour-mapper/forecast-panel 多组件重写）；本 change scope 已大，不收紧。
+- **Path B（API JOIN crosswalk 共享 reach geom）**：每 segment feature 共享同一 reach geom，前端不动。但 3738 features 渲染同一根线 → per-segment colour 视觉上完全无法分辨（覆盖语义）+ payload 膨胀 2.3×。**功能上不可接受**。
+
+**Path C 选定，trade-off**：
+
+- API 层 +1 个 `_split_reach_into_segment_slices(reach_geom, segment_lengths)` 函数 + PR 2 / PR 6 多加几个单测
+- ST_LineSubstring 已是 PostGIS 内置函数（PostGIS 2.x+），node-22 / node-27 现有 nhms-db 都支持
+- 切片精度：sp.rivseg Length 之和不一定精确等于 reach Length（浮点 + 模型预处理累积误差 in qhh ≈ 0.02m），用 cumulative proportion + 末段补到 1.0 的 saturation 策略保证最后 segment 几何收尾到 reach 终点
+- segment_order 必须严格从 sp.rivseg 的 record 顺序导出（SHUD 模型保证 flow-ordered）；若 sp.rivseg 顺序与 reach polyline 方向不一致，需在 ingestion 时检测 + 翻转。这是 PR 1 / PR 2 单测覆盖项。
+
 ### D6：迁移走"重 ingest 每个 basin"而非新写 backfill 脚本
 
 **Why**：ingestion 入口 `workers/model_registry/basins_registry_import.py` 本身就是幂等写（`Changed package checksum is not silently overwritten` Scenario 已经覆盖），重跑会自然覆盖旧行。专门的 backfill 脚本（如刚删除的 `scripts/backfill_river_segment_multilinestring.py`）属于一次性产物，不再需要。

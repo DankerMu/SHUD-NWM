@@ -43,6 +43,18 @@
 - [ ] 2.14 单元测试 事务：`test_per_basin_ingest_is_transactional`（构造 seg.shp 写入时抛错，断言同 basin 的 river_segment 写入回滚）
 - [ ] 2.14a 集成测试 FK 顺序：`test_river_segment_and_crosswalk_atomic_fk_order`（用 node-22 真实 DB，断言同事务内先写 reach 行再写 crosswalk 行，FK constraint 永远满足；反向写顺序则 FK 报错）
 - [ ] 2.14b 集成测试 reingest 替换：`test_re_ingest_replaces_legacy_seg_ids`（构造 basin 含旧 `<model>_seg_*` 行，跑 PR 2 ingestion，断言事务后 `core.river_segment` 行全是 `_reach_*` 格式 + 旧 crosswalk 行全部清除 + 无 FK 孤儿）
+
+### 2c. API segment-slice view (Path C, D7) — 与 PR 2 atomic switch 同 PR
+
+- [ ] 2c.1 在 `apps/api/routes/models.py`（或承载 `/api/v1/basin-versions/{id}/river-segments` 的实际 router）的 endpoint handler 内新增"按 length proportion 切 reach polyline"路径：从 `core.river_segment` 拉 reach geom + 从 `core.river_segment_crosswalk` 拉同 reach 的全部 segment 元数据（`iRiv`, `iEle`, `segment_order`, `length_m`），算每 segment 的 cumulative `(start_fraction, end_fraction)`（按 `segment_order` 累加 `length_m / sum(length_m)`），调用 PostGIS `ST_LineSubstring(reach_geom, start_fraction, end_fraction)` 切片
+- [ ] 2c.2 最后一个 segment 的 `end_fraction` 强制 saturate 到 `1.0`，补偿 `sum(sp.rivseg.Length)` 与 reach `Length` 的浮点误差
+- [ ] 2c.3 segment-level `river_segment_id` 衍生自 crosswalk `external_id`：`<model_id>_seg_<iRiv>_<iEle>`（保留前端契约 [M11MapLibreSurface.tsx promoteId='river_segment_id'](../../../apps/frontend/src/components/map/M11MapLibreSurface.tsx:987)）；DB 行的 `<model_id>_reach_<iRiv:06d>` ID 不暴露
+- [ ] 2c.4 检测 `sp.rivseg` segment_order 是否与 reach polyline 流向一致；若不一致 fail-fast `BASINS_REGISTRY_SEGMENT_ORDER_MISMATCH`（实际中 SHUD 模型通常 flow-ordered，但留 invariant）
+- [ ] 2c.5 单测 `test_segment_slice_count_matches_sp_rivseg`：用 qhh-sample fixture (5 reach, 18 segment) 跑 API endpoint，断言返回 18 features
+- [ ] 2c.6 单测 `test_segment_slice_geometry_is_subset_of_reach`：用 PostGIS `ST_Within(slice_geom, ST_Buffer(reach_geom, 1e-9))` 断言每个 slice 几何严格在 reach polyline 上
+- [ ] 2c.7 单测 `test_segment_slice_last_endpoint_saturates_to_reach_terminus`：构造 sum(length) < reach Length 的 fixture，断言最后 segment 终点 = reach 终点
+- [ ] 2c.8 集成测试 `test_segment_slice_river_segment_id_preserves_frontend_contract`：断言 API 返回的 `river_segment_id` 全部匹配 `<model>_seg_<iRiv>_<iEle>` 格式 + 前端 hover/popup 路径仍可命中
+- [ ] 2c.9 性能 sanity check：qhh basin (3738 segments) endpoint p95 < 500ms（与当前 baseline 同量级）
 - [ ] 2.15 node-22 真实 DB pytest oracle 通过；qhh basin reach 行数从 3738 → 1633；任意 reach geom 内最大边长 ≤ `max(300m, 4× median_edge)`
 - [ ] 2.16 ruff + openspec validate 全绿
 
@@ -90,7 +102,9 @@
 - [ ] 6.1 `tests/test_basins_registry_import.py`：删 `assert ...geometry.type == "MultiLineString"` 旧风格断言；新增三条核心断言：(a) 每行 single-part；(b) reach 行数对 `.sp.riv`；(c) crosswalk 行数对 seg.shp record 数
 - [ ] 6.2 `tests/test_real_database_integration.py`：reach 级几何断言对齐；增加 `test_no_cross_gap_invariant_holds_after_ingest` 用 PostGIS `ST_NPoints` + `ST_Length` 算各 reach 内最大相邻顶点距离
 - [ ] 6.3 `tests/test_model_registration.py`：删 `line_or_multiline_to_wkt` 相关单测（PR 5a 已删函数）
-- [ ] 6.4 同步 OpenAPI yaml description：`openapi/nhms.v1.yaml` 中 `/api/v1/basin-versions/{basin_version_id}/river-segments` path description + `GeoJsonMultiLineString` schema description 把 "segment"→"reach"（schema 不变；schema 不变不需要前端 client 重生成，但 description 文本要 align）；运行 `pnpm check:api-types` 确认前端 client 仍然 build 通过
+- [ ] 6.4 同步 OpenAPI yaml description：`openapi/nhms.v1.yaml` 中 `/api/v1/basin-versions/{basin_version_id}/river-segments` path description 改成 "segment-level features sliced from parent reach polyline via ST_LineSubstring (Path C)"（schema 不变）；运行 `pnpm check:api-types` 确认前端 client 仍然 build 通过
+- [ ] 6.4a 同步 MVT 路由 audit (OQ3)：检查 `services/tiles/mvt.py:1473-1480` (`build_layer_metadata` / `resolve_tile_layer_identity`) + `apps/api/routes/flood_alerts.py:1434-1487` (`_fetch_river_network_mvt_tile_bytes`) 的 SQL 是否与新 `core.river_segment.geom` MultiLineString shape + reach-level row 粒度一致；`river_network_version_id` 变化触发 tile_cache 自然失效已 OK，但 SQL 表达式（如 `rs.geom` join 或 segment-level 过滤）若假设 segment-level 行需更新为 reach-level 解读 + 后续 ST_LineSubstring 在 MVT 内是否也需切片决策
+- [ ] 6.4b MVT 路由的 segment-slice 决策（如 6.4a 发现需要）：MVT vector tile 通常 reach-level 渲染已够（缩放级别 ≤ 13 时 segment 区分不明显）；若决定 MVT 不切片，在 spec.md 加 Non-Goal 声明"MVT 路由按 reach-level 输出"
 - [ ] 6.5 同步 `docs/spec/03_database_design.md`：把 `river_segment.geom` 列类型从 `LineString(4490)` 改为 `MultiLineString(4490)`（与 [migration 000037](../../../db/migrations/000037_river_segment_multilinestring.sql) + live schema 对齐；CLAUDE.md DOC_STATUS 顺序：live schema 是 truth）
 - [ ] 6.6 同步 `docs/appendices/A_id_and_versioning_convention.md`：把 `_riv_` 标准段补一条 `<model_id>_reach_<iRiv:06d>` 现行规范
 - [ ] 6.7 `tests/test_migrations.py` 不变（000037 已是 master 历史，不需调整）

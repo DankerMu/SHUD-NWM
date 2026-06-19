@@ -34,13 +34,17 @@ Each imported reach geometry SHALL be a single-part `MULTILINESTRING` (a `LINEST
 - **THEN** imported `core.river_segment` rows preserve these fields under `properties_json` (or dedicated columns where they already exist), and `downstream_segment_id` is resolved from the `Down` reach index to the corresponding `<model_id>_reach_<Down:06d>` ID
 - **AND** unresolved `Down` references (e.g. terminal reach with `Down=0` or `Down=-1`) are stored as `NULL` with a `terminal_reach=true` property flag
 
-#### Scenario: River segment map query returns reach-level geometry
+#### Scenario: River segment map query returns segment-level features sliced from parent reach polyline
 
 - **WHEN** the imported basin version is queried through `GET /api/v1/basin-versions/{basin_version_id}/river-segments`
-- **THEN** the response contains GeoJSON features with `river_segment_id`, `river_network_version_id`, `basin_version_id`, and a `MultiLineString` geometry where every feature is a single-part reach polyline
-- **AND** the per-basin feature count equals the `.sp.riv` reach count
-- **AND** every feature geometry satisfies the no-fabricated-bridge invariant defined above
-- **AND** the OpenAPI schema name (`GeoJsonMultiLineString`) and response structure are unchanged; only the description text is updated to reflect "reach" semantics instead of "segment"
+- **THEN** the response contains GeoJSON features with `river_segment_id`, `river_network_version_id`, `basin_version_id`, and a `MultiLineString` geometry
+- **AND** the per-basin feature count equals the `.sp.rivseg` segment record count (NOT the reach count); each feature corresponds to one `(iRiv, iEle)` segment recorded in `core.river_segment_crosswalk`
+- **AND** every feature's `river_segment_id` follows the segment-level form `<model_id>_seg_<iRiv>_<iEle>` derived from the crosswalk row's `external_id`, preserving the frontend contract observed at `apps/frontend/src/components/map/M11MapLibreSurface.tsx` (hover/popup/coloring/promoteId/forecast paths)
+- **AND** every feature's geometry is the result of `ST_LineSubstring(reach_geom, start_fraction, end_fraction)` against the parent reach's `core.river_segment.geom`, where `start_fraction` and `end_fraction` are cumulative `sp.rivseg.Length` proportions within the parent reach (computed in `segment_order` order)
+- **AND** each slice is by construction a subset of the reach polyline; no slice introduces vertices not present on the reach polyline; the no-fabricated-bridge invariant on the underlying reach geometry transitively holds for every slice
+- **AND** the last segment's `end_fraction` is saturated to `1.0` to compensate for floating-point accumulation drift between `sum(sp.rivseg.Length)` and the parent reach `Length`
+- **AND** if `sp.rivseg` segment order disagrees with the reach polyline direction (rare; SHUD model normally guarantees flow-ordered), the API SHALL fail with `BASINS_REGISTRY_SEGMENT_ORDER_MISMATCH` rather than emitting silently-reversed slices
+- **AND** the OpenAPI schema name (`GeoJsonMultiLineString`) and response structure are unchanged; description text updated to reflect Path C semantics (segment-level features sliced from reach polyline)
 
 ### Requirement: Imported river segment IDs follow the reach-level naming convention
 
