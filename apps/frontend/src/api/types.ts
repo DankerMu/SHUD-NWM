@@ -147,7 +147,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List river segments as GeoJSON */
+        /**
+         * List river segments as GeoJSON
+         * @description Segment-level features sliced from each parent reach polyline via PostGIS ST_LineSubstring (Path C). Reach geometry is stored in core.river_segment, derived from gis/river.shp (single-part, flow-ordered) per the PR-2 contract; segment slices are produced at request time using the (iRiv, iEle) crosswalk so the historical segment-level frontend contract is preserved without storing fabricated cross-gap bridge polylines.
+         */
         get: operations["listRiverSegments"];
         put?: never;
         post?: never;
@@ -1475,6 +1478,7 @@ export interface components {
             type: "LineString";
             coordinates: number[][];
         };
+        /** @description GeoJSON MultiLineString. The underlying core.river_segment.geom column type is MultiLineString(4490); since the PR-2 contract, every reach row currently stored holds exactly one part (the single-part flow-ordered polyline derived from gis/river.shp). The wrapper type is retained to allow a basin's input to express a genuine multi-part reach in the future without a schema change. */
         GeoJsonMultiLineString: {
             /** @enum {string} */
             type: "MultiLineString";

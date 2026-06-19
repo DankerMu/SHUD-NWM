@@ -157,13 +157,15 @@ CREATE TABLE core.river_segment (
   segment_order INT,
   downstream_segment_id TEXT,
   length_m DOUBLE PRECISION,
-  geom geometry(LineString, 4490),
+  geom geometry(MultiLineString, 4490),
   properties_json JSONB NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (river_segment_id, river_network_version_id)
 );
 CREATE INDEX river_segment_geom_gix ON core.river_segment USING gist (geom);
 ```
+
+> `geom` 列在 migration 000037 升为 `MultiLineString(4490)`；PR-2 (issue #561) 之后所有写入的 reach 行 holds exactly one part（来源于 `gis/river.shp` 的单 part flow-ordered polyline），wrapper 类型保留是为了将来某 basin 的源数据若真正需要 multi-part reach 时不必再做 schema 变更。
 
 ### 5.5 `core.model_instance`
 

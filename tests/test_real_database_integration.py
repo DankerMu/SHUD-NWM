@@ -605,3 +605,87 @@ def test_real_reserve_candidate_reclaims_dead_reservation(
     assert state is not None
     assert state["status"] == "reserved"
     assert state["slurm_job_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# PR 6 (issue #566): post-ingest no-cross-gap invariant on real PostGIS.
+# Covers tasks.md 6.2: every reach polyline is single-part, non-trivial, and
+# its ST_Length(geog) is within 5% of the river.shp dbf-declared Length.
+# ---------------------------------------------------------------------------
+
+
+def test_no_cross_gap_invariant_holds_after_ingest(
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR 2 contract on real DB: after a full reingest of the qhh-sample
+    fixture, every reach row in ``core.river_segment`` is (a) single-part,
+    (b) non-trivial (≥ 2 vertices), and (c) within 5% of its dbf-declared
+    Length when measured by ``ST_Length(geom::geography)``. Proves no
+    cross-gap inflation and no truncation."""
+
+    import psycopg2
+
+    from tests.test_basins_reingest import _stage_qhh_sample_basin
+    from workers.model_registry.basins_reingest import reingest_basin
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    apply_migrations_from_zero(integration_database_url)
+    basins_root, basin_slug, model_id = _stage_qhh_sample_basin(tmp_path)
+    receipt = reingest_basin(
+        basin_slug=basin_slug,
+        model_id=model_id,
+        package_version=f"v-cross-gap-{tmp_path.name}",
+        basins_root=basins_root,
+        database_url=integration_database_url,
+        work_dir=tmp_path / "work",
+        output_path=tmp_path / "receipt.json",
+        auth_actor_id="cli-model-admin",
+        auth_roles=["model_admin"],
+    )
+    assert receipt["imported_reach_count"] > 0
+    assert receipt["multi_part_violation_count"] == 0
+
+    connection = psycopg2.connect(integration_database_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT rs.river_segment_id,
+                       ST_NumGeometries(rs.geom) AS num_parts,
+                       ST_NPoints(rs.geom)       AS n_points,
+                       ST_Length(rs.geom::geography) AS measured_m,
+                       rs.length_m AS declared_m
+                FROM core.river_segment rs
+                WHERE rs.river_segment_id LIKE %s
+                  AND COALESCE(rs.properties_json->>'shud_output_river', 'false') = 'false'
+                """,
+                (f"{model_id}_reach_%",),
+            )
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    assert rows, "no reach rows imported"
+    for row in rows:
+        # Single-part: PR-2 contract; the column allows multi-part for
+        # future-proofing but every row written today is single-part.
+        assert row[1] == 1, f"reach {row[0]} has {row[1]} parts (expected 1)"
+        # Non-trivial polyline: at least one edge.
+        assert row[2] > 1, f"reach {row[0]} has {row[2]} vertices (expected ≥ 2)"
+        # Cross-gap inflation / truncation check: measured length within 5%
+        # of the dbf-declared length. river.shp's Length is in metres at
+        # source; the qhh-sample fixture's sample reaches use very short
+        # polylines so an absolute floor (1m) keeps short reaches from
+        # tripping the ratio check below.
+        declared = float(row[4]) if row[4] is not None else 0.0
+        measured = float(row[3])
+        if declared > 1.0:
+            ratio = abs(measured - declared) / declared
+            assert ratio < 0.05, (
+                f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m "
+                f"drift={ratio:.3%} exceeds 5% bound"
+            )
