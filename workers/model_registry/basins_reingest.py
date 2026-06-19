@@ -342,19 +342,30 @@ def _query_post_import_metrics(
             basin_row = cursor.fetchone()
             basin_id = basin_row["basin_id"] if basin_row else None
 
-            # No LIKE filter on river_segment_id: PR #569's
-            # _delete_legacy_seg_rows purges any pre-PR-2 ``<model>_seg_*``
-            # rows in the same transaction as the reach-row insert, so after
-            # a successful reingest every row under this model's rnv is a
-            # reach row. Counting by rnv_id alone avoids SQL-wildcard pitfalls
-            # in an ``f"{model_id}_reach_%"`` pattern (``_`` is a LIKE wildcard).
+            # ``core.river_segment`` holds two row classes under one rnv:
+            #   * reach rows (from gis/river.shp) — id = "<model>_reach_<iRiv:06d>",
+            #     geom always populated, no ``shud_output_river`` property.
+            #   * output rows (from .sp.riv, seeded by _ensure_output_river_segments)
+            #     — id = "<model>_shud_riv_<N:06d>", ``shud_output_river=true``,
+            #     geom backfilled from the matching reach row's iRiv only when
+            #     ``shud_riv_index`` (1..N) appears in the reach iRiv set;
+            #     production .sp.riv is 1..N contiguous so all match, but the
+            #     qhh-sample fixture uses non-contiguous Indices (1,2,3,9,180)
+            #     and 2 output rows legitimately keep NULL geom.
+            # The receipt counters below all gate on the reach-row predicate so
+            # they reflect river.shp ingestion quality, not the seg-output
+            # backfill mismatch (which is a known fixture quirk, not a bug).
+            reach_predicate = (
+                "COALESCE(properties_json->>'shud_output_river', 'false') = 'false'"
+            )
             cursor.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS reach_count
                 FROM core.river_segment rs
                 JOIN core.model_instance mi
                   ON mi.river_network_version_id = rs.river_network_version_id
                 WHERE mi.model_id = %s
+                  AND {reach_predicate}
                 """,
                 (model_id,),
             )
@@ -375,7 +386,7 @@ def _query_post_import_metrics(
             crosswalk_row_count = int((cursor.fetchone() or {}).get("row_count") or 0)
 
             cursor.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS null_count
                 FROM core.river_segment
                 WHERE river_network_version_id IN (
@@ -384,6 +395,7 @@ def _query_post_import_metrics(
                     WHERE model_id = %s
                 )
                   AND geom IS NULL
+                  AND {reach_predicate}
                 """,
                 (model_id,),
             )
@@ -392,9 +404,10 @@ def _query_post_import_metrics(
             # Always 0 by construction: PR #569's
             # _validate_river_shp_single_part_invariant rejects multi-part
             # river.shp at parse time. This counter is a downstream-facing
-            # belt-and-suspenders check, not a primary defense.
+            # belt-and-suspenders check, not a primary defense. Filtered to
+            # reach rows (output rows inherit reach geom via backfill).
             cursor.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS violation_count
                 FROM core.river_segment
                 WHERE river_network_version_id IN (
@@ -404,6 +417,7 @@ def _query_post_import_metrics(
                 )
                   AND geom IS NOT NULL
                   AND ST_NumGeometries(geom) > 1
+                  AND {reach_predicate}
                 """,
                 (model_id,),
             )
