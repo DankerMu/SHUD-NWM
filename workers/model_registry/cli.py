@@ -11,6 +11,7 @@ from packages.common.auth_policy import PolicyDecision, cli_policy_decision_from
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
 from .basins_registry_import import BasinsRegistryImportError, import_basins_registry
+from .basins_reingest import BasinsReingestError, reingest_basin
 from .qhh_production_bootstrap import QhhProductionBootstrapError, bootstrap_qhh_production
 from .validator import ModelPackageValidationError, validate_model_package_path
 
@@ -282,6 +283,55 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(1) from error
         click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
+    @cli.command("reingest-basin")
+    @click.option("--basin-slug", required=True, help="Basin slug under --basins-root (e.g. qhh).")
+    @click.option("--model-id", required=True, help="Registry model_id (e.g. basins_qhh_shud).")
+    @click.option("--package-version", required=True, help="Immutable package version for this reingest.")
+    @click.option("--basins-root", default=None, help="Basins root path. Overrides NHMS_BASINS_ROOT.")
+    @click.option("--database-url", default=None, help="PostgreSQL/PostGIS URL. Defaults to DATABASE_URL.")
+    @click.option("--work-dir", required=True, help="Staging dir for generated inventory + manifest.")
+    @click.option("--output", required=True, help="Path to write per-basin receipt JSON.")
+    @click.option("--auth-actor-id", default=None, help="Dev/test CLI auth actor id.")
+    @click.option("--auth-role", multiple=True, help="Dev/test CLI auth role. May be repeated.")
+    def reingest_basin_command(
+        basin_slug: str,
+        model_id: str,
+        package_version: str,
+        basins_root: str | None,
+        database_url: str | None,
+        work_dir: str,
+        output: str,
+        auth_actor_id: str | None,
+        auth_role: tuple[str, ...],
+    ) -> None:
+        try:
+            receipt = reingest_basin(
+                basin_slug=basin_slug,
+                model_id=model_id,
+                package_version=package_version,
+                basins_root=basins_root,
+                database_url=database_url,
+                work_dir=work_dir,
+                output_path=output,
+                auth_actor_id=auth_actor_id,
+                auth_roles=list(auth_role),
+            )
+        except BasinsReingestError as error:
+            click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            raise SystemExit(1) from error
+        click.echo(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "basin_slug": receipt["basin_slug"],
+                    "receipt": output,
+                    "imported_reach_count": receipt["imported_reach_count"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -323,6 +373,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     qhh_parser.add_argument("--evidence-dir", default=None)
     qhh_parser.add_argument("--evidence-path", default=None)
     qhh_parser.add_argument("--shud-code-version", default="basins-shud")
+    reingest_parser = subparsers.add_parser("reingest-basin")
+    reingest_parser.add_argument("--basin-slug", required=True)
+    reingest_parser.add_argument("--model-id", required=True)
+    reingest_parser.add_argument("--package-version", required=True)
+    reingest_parser.add_argument("--basins-root", default=None)
+    reingest_parser.add_argument("--database-url", default=None)
+    reingest_parser.add_argument("--work-dir", required=True)
+    reingest_parser.add_argument("--output", required=True)
+    _add_argparse_auth_options(reingest_parser)
     args = parser.parse_args(argv)
 
     if args.command == "validate-package":
@@ -433,6 +492,35 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "reingest-basin":
+        try:
+            receipt = reingest_basin(
+                basin_slug=args.basin_slug,
+                model_id=args.model_id,
+                package_version=args.package_version,
+                basins_root=args.basins_root,
+                database_url=args.database_url,
+                work_dir=args.work_dir,
+                output_path=args.output,
+                auth_actor_id=args.auth_actor_id,
+                auth_roles=args.auth_role,
+            )
+        except BasinsReingestError as error:
+            print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            return 1
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "basin_slug": receipt["basin_slug"],
+                    "receipt": args.output,
+                    "imported_reach_count": receipt["imported_reach_count"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
