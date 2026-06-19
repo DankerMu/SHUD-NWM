@@ -35,7 +35,13 @@ qhh-sample/
 
 15 dbf fields preserved: `Index, Down, Type, Slope, Length, BC, Index_1, Depth, BankSlope, Width, Sinuosity, Manning, Cwr, KsatH, BedThick`.
 
-Note: `Index_1` is an artefact of the original SHUD pre-processing pipeline (rSHUD R scripts left a duplicate `Index` field with `_1` suffix); it is preserved verbatim from the source. Tests that validate the dbf field invariant should treat it as ignorable, OR codify it as a known extra field. The required field set per spec is `{Index, Down, Type, Slope, Length, BC, Depth, BankSlope, Width, Sinuosity, Manning, Cwr, KsatH, BedThick}` (14 fields, excluding `Index_1`).
+Note: `Index_1` is an artefact of the original SHUD pre-processing pipeline
+(rSHUD R scripts left a duplicate `Index` field with `_1` suffix); it is
+preserved verbatim from the source. Tests that validate the dbf field
+invariant should treat it as ignorable, OR codify it as a known extra field.
+The required field set per spec is
+`{Index, Down, Type, Slope, Length, BC, Depth, BankSlope, Width, Sinuosity,
+Manning, Cwr, KsatH, BedThick}` (14 fields, excluding `Index_1`).
 
 ### `seg.shp` schema
 
