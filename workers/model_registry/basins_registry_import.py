@@ -1283,12 +1283,29 @@ def _build_river_segment_crosswalk_rows(
     ]
 
 
+_OUTPUT_BACKFILL_INJECTED_KEYS = frozenset(
+    {"geometry_source", "geometry_source_segment_count", "geometry_source_length_m"}
+)
+
+
 def _output_river_segment_digest(rows: list[dict[str, Any]]) -> str:
+    """Hash output-river rows for idempotency checking.
+
+    Filters out fields injected by ``_backfill_output_segment_geometry`` after
+    the initial write (``geometry_source``, ``geometry_source_segment_count``,
+    ``geometry_source_length_m``). Incoming rows (from
+    ``_output_river_segment_rows``) lack these provenance keys; existing rows
+    (re-read from DB after a prior bootstrap + backfill) carry them. Without
+    this filter, every re-ingest after a successful bootstrap would trigger
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``output_river_segment``.
+    """
     payload = [
         {
             "river_segment_id": str(row["river_segment_id"]),
             "segment_order": None if row["segment_order"] is None else int(row["segment_order"]),
-            "properties": _normalize_properties_for_digest(row["properties"] or {}),
+            "properties": _normalize_properties_for_digest(
+                {k: v for k, v in (row["properties"] or {}).items() if k not in _OUTPUT_BACKFILL_INJECTED_KEYS}
+            ),
         }
         for row in sorted(rows, key=lambda item: str(item["river_segment_id"]))
     ]
