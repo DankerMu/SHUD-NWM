@@ -44,6 +44,30 @@ ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "services/orchestrator/scheduler.py",
 )
 
+DIRECT_GRID_E2E_TESTS: tuple[str, ...] = (
+    "tests/test_direct_grid_e2e.py",
+)
+
+DIRECT_GRID_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_forcing_producer.py::test_direct_grid_contract_valid_nested_manifest_still_parses",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_rejects_explicit_root_direct_grid_when_root_authority_disabled",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_missing_manifest_field_raises_structured_error",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_missing_station_field_raises_structured_error",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_duplicate_shud_forcing_index_is_rejected",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_duplicate_forcing_filename_is_rejected",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_source_scope_must_be_nonempty_and_apply_to_current_source",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_station_coordinates_must_be_in_wgs84_bounds",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_station_longitude_is_normalized_for_shud_output",
+    "tests/test_forcing_producer.py::test_direct_grid_contract_unsupported_top_level_mode_fails_before_nested_direct_grid",
+)
+
+DIRECT_GRID_SURFACE_TESTS: tuple[str, ...] = DIRECT_GRID_E2E_TESTS + DIRECT_GRID_CONTRACT_TESTS
+
+DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
+    "workers/forcing_producer/direct_grid_contract.py",
+    "openspec/changes/direct-grid-forcing/**",
+)
+
 
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
@@ -80,6 +104,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[3],
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
+        DIRECT_GRID_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        DIRECT_GRID_SURFACE_PATH_PATTERNS[1],
+        DIRECT_GRID_SURFACE_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(

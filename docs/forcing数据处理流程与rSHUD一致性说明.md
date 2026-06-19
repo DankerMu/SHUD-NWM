@@ -59,7 +59,13 @@ IFS/GFS GRIB2 ──①获取──▶ 规范化 NetCDF ──②解码映射─
 
 ![本项目 forcing 处理流程示意图](images/forcing-pipeline.png)
 
-图注：本项目以 IFS/GFS GRIB2 为输入，经 `cfgrib`/`xarray` 解码规范化、单位换算、去累积与按源湿度反演后，按流域资产声明的 `forcing_mapping_mode` 映射到 forcing 站点：legacy `idw` 插值到原模型固定站点，`direct_grid` 按 binding 的 `grid_cell_id` 精确取值。随后写出 SHUD 包（`.tsd.forc` + 每站 CSV）并入库 PostGIS/TimescaleDB。图内仅表达六阶段结构；精确字段与契约以正文为准，包括 IFS 字段 `2t`/`ssr`/`tp`、风速公式 `√(u²+v²)`、单位 `mm·day⁻¹`/`°C`/`W·m⁻²`，以及 `.tsd.forc` 表头 `ID Lon Lat X Y Z Filename`。
+图注：本项目以 IFS/GFS GRIB2 为输入，经 `cfgrib`/`xarray` 解码规范化、单位换算、
+去累积与按源湿度反演后，按流域资产声明的 `forcing_mapping_mode` 映射到 forcing 站点。
+legacy `idw` 插值到原模型固定站点，`direct_grid` 按 binding 的 `grid_cell_id` 精确取值。
+随后写出 SHUD 包（`.tsd.forc` + 每站 CSV）并入库 PostGIS/TimescaleDB。
+图内仅表达六阶段结构；精确字段与契约以正文为准，包括 IFS 字段 `2t`/`ssr`/`tp`、
+风速公式 `√(u²+v²)`、单位 `mm·day⁻¹`/`°C`/`W·m⁻²`，
+以及 `.tsd.forc` 表头 `ID Lon Lat X Y Z Filename`。
 
 ### ① 数据获取（data adapters）
 
@@ -137,6 +143,12 @@ SHUD 模型侧统一对 `Rn` 做 `rn<0→0` 再 `nearbyint` 取整 W/m²（`conv
 - `.sp.att` 的 `FORC` 已重算到这些 `shud_forcing_index`，且所有 `FORC` 引用都在 `.tsd.forc` `ID` 范围内。
 
 运行期校验上述身份与 checksum 后，按 station binding 的 `grid_cell_id` 精确读取 canonical 值，不计算 IDW 权重、不回退 IDW。物理转换仍然来自 canonical converter，不能直接把原始 GRIB 值写入 SHUD。
+
+`applicable_source_ids` 是 source scope，不是注释字段：GFS 与 IFS 只有在 canonical 产品的 `source_id` 位于该集合内、`grid_id` 与 `grid_signature` 同时匹配时，才允许复用同一 direct-grid binding。`grid_signature` 覆盖有序格点定义；同名 `grid_id` 但经纬度顺序、单元数量或坐标内容改变时，必须视为新网格，旧 binding 失效。
+
+direct-grid 迁移和回滚都通过**模型/input 资产版本**表达。迁移时发布带 `forcing_mapping_mode="direct_grid"`、binding checksum、模型 input package identity、`.sp.att` path/checksum 与 source scope 的新模型资产版本；回滚时重新选择上一版 `idw` 或上一版 direct-grid 资产。不得通过全局 runtime 开关、就地改历史 ready forcing version、或运行期重写 `.sp.att` 来切换模式。
+
+canonical conversion 仍是强制前置步骤，原因是 `grid_cell_id` lookup 只解决“取哪个格点”，不解决“格点值是否已经是 SHUD 所需物理量”。IFS/GFS 原始场仍必须先完成降水/辐射去累积、温度单位换算、湿度反演或归一化、U/V 风速派生、质量标记和 lineage 记录；direct-grid 只能读取这些 canonical 后的格点值。
 
 ### ⑤ 写出 SHUD forcing 包
 
@@ -262,7 +274,13 @@ legacy `idw` 通过 `workers/model_registry/qhh_production_bootstrap.py:328-473`
 
 ![rSHUD/AutoSHUD 与本项目 forcing 流程差异及收敛示意图](images/rshud-vs-nwm.png)
 
-图注：上泳道表示 rSHUD/AutoSHUD 的 LDAS 再分析离线流程：逐步速率/均值经一次乘法换算，在建模时计算 Thiessen 覆盖并由 `write_forc` 写出；下泳道表示本项目的 IFS/GFS 业务预报流程：累积场先去累积，湿度按源使用原生 RH 或露点反演，再按 `forcing_mapping_mode` 映射到 forcing 站点。legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid` 使用已迁移 `.sp.att FORC` 和 `grid_cell_id` exact lookup。两条流程最终收敛到同一 SHUD 契约：5 个变量 `Precip`/`Temp`/`RH`/`Wind`/`RN`，单位 `mm·day⁻¹`/`°C`/`[0,1]`/`m·s⁻¹`/`W·m⁻²`，索引文件为 `.tsd.forc`。
+图注：上泳道表示 rSHUD/AutoSHUD 的 LDAS 再分析离线流程：逐步速率/均值经一次乘法换算，
+在建模时计算 Thiessen 覆盖并由 `write_forc` 写出。下泳道表示本项目的 IFS/GFS 业务预报流程：
+累积场先去累积，湿度按源使用原生 RH 或露点反演，再按 `forcing_mapping_mode` 映射到 forcing 站点。
+legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid` 使用已迁移 `.sp.att FORC`
+和 `grid_cell_id` exact lookup。两条流程最终收敛到同一 SHUD 契约：5 个变量
+`Precip`/`Temp`/`RH`/`Wind`/`RN`，单位 `mm·day⁻¹`/`°C`/`[0,1]`/`m·s⁻¹`/`W·m⁻²`，
+索引文件为 `.tsd.forc`。
 
 | # | 差异 | rSHUD/AutoSHUD | 本项目 | 为什么仍然正确 |
 |---|---|---|---|---|

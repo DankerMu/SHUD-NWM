@@ -465,7 +465,7 @@ Must preserve:
 Must add/change:
 - After direct-grid mappings are materialized, the producer builds direct-grid station objects from the validated contract and generates `ForcingTimeseriesRow` values from canonical products.
 - For every station/variable/valid time, each value equals the canonical value from the station's bound `grid_cell_id` after the same canonical-to-forcing conversion path used by IDW.
-- Canonical product reads are limited to required direct-grid `grid_cell_id`s through the existing required-cell retention path where supported.
+- Canonical product reads use/retain required direct-grid `grid_cell_id`s through the existing required-cell retention path where supported; deeper lazy/indexed NetCDF reads are not claimed unless task 2.5 is implemented.
 - Missing bound `grid_cell_id` in any required canonical product fails closed before package/version/timeseries/ready outputs and does not fall back to IDW.
 - Non-finite canonical values at a bound cell fail through the existing non-finite interpolated-value guard before package/version/timeseries/ready outputs.
 - Direct-grid generation stops at the #546 package/lineage boundary after rows/components are generated, until package persistence is implemented.
@@ -482,7 +482,7 @@ Selected risk packs:
 - Schema / columns / units / field names: selected - generated rows must use existing `ForcingTimeseriesRow` variable/unit/source fields and not add SHUD CSV `Press`.
 - Auth / permissions / secrets: not selected - no credential or permission boundary changes.
 - Concurrency / shared state / ordering: selected - direct-grid rows must be generated only after validated mapping snapshot and before any ready-output side effects.
-- Resource limits / large input / discovery: selected - canonical reads must retain only required bound cells where supported; no global grid search or IDW neighbor discovery.
+- Resource limits / large input / discovery: selected - canonical reads must use/retain required bound cells where supported by the current reader; no global grid search or IDW neighbor discovery.
 - Legacy compatibility / examples: selected - IDW row generation and output behavior remain unchanged.
 - Error handling / rollback / partial outputs: selected - missing cells or non-finite values fail with no package/version/timeseries/ready state.
 - Release / packaging / dependency compatibility: not selected - no new dependency/package change.
@@ -499,7 +499,7 @@ Selected risk packs:
 Boundary-surface checklist:
 - Shared helper roots: direct-grid branch, `_generate_timeseries_streaming`, `_read_canonical_field`, and direct-grid station conversion helper.
 - Public entrypoints: `ForcingProducer.produce` returns a stable #546 package/lineage boundary failure after row generation.
-- Read surfaces: canonical products selected by source/cycle and required direct-grid cells only.
+- Read surfaces: canonical products selected by source/cycle, with required direct-grid cell retention where supported by the current field-read path.
 - Write/delete/overwrite surfaces: no direct-grid package/version/timeseries writes in #545; `met.interp_weight` materialization remains #544 behavior.
 - Producer/consumer evidence boundaries: generated rows/components are in-memory evidence for #546, not ready artifacts.
 - Stale-state/idempotency boundaries: existing-ready reuse still cannot mask invalid or changed direct-grid bindings.
@@ -522,7 +522,7 @@ Regression rows:
 - direct-grid valid-time plan with the same GFS cycle/products as IDW -> generated row valid times match `_expected_forcing_valid_times` and component set matches selected canonical products.
 - direct-grid product lacks a bound `grid_cell_id` -> production fails before package/version/timeseries writes and no IDW fallback occurs.
 - direct-grid bound cell has non-finite canonical value -> production fails before package/version/timeseries writes and no IDW fallback occurs.
-- direct-grid required-cell set contains only bound cells -> `_read_canonical_field` receives the direct-grid required cells and retains only those values.
+- direct-grid required-cell set contains only bound cells -> `_read_canonical_field` receives the direct-grid required cells and retains those values where supported; deeper lazy/indexed NetCDF reads remain task 2.5.
 - direct-grid wind rows -> wind speed is derived from bound U/V canonical cells using existing `wind_speed` logic.
 - legacy absent/explicit `idw` asset -> existing IDW generation and package output remain unchanged.
 
@@ -678,3 +678,75 @@ Regression rows:
 - direct-grid package whose staged `.sp.att FORC` references an ID absent from `.tsd.forc` -> fails closed before SHUD execution.
 - legacy package without direct-grid lineage and without standard SHUD package -> existing fallback single-station rewrite behavior remains unchanged.
 - package with absent/explicit `idw` lineage and standard SHUD package -> existing standard staging remains unchanged.
+
+## Issue #548 Fixture Addendum
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+- Compact end-to-end pytest fixture spanning direct-grid mode resolution, validation, exact value generation, package publication, lineage/idempotency, and SHUD runtime staging.
+- Documentation under the forcing/model-asset source-of-truth docs for migration, rollback, source scope, grid signature, `Press`, and canonical conversion requirements.
+- CI targeted-test selection only if needed to keep the compact fixture in the PR merge gate without selecting slow whole-suite runs.
+
+Must preserve:
+- No new direct-grid runtime or producer semantics beyond the behavior already implemented by #540-#547.
+- Legacy absent/explicit `idw` forcing behavior, package shape, and runtime fallback compatibility remain unchanged.
+- The compact fixture must not rely on live GFS/IFS downloads, Slurm, external object stores, a full national basin, or wall-clock-heavy integration setup.
+- Documentation must not imply that direct-grid can skip canonical conversion or raw IFS/GFS physical normalization.
+
+Must add/change:
+- A compact fixture that uses a minimal two-station direct-grid asset and canonical product values to prove the full implemented path: mode resolution, binding validation, direct-grid weight/value mapping, SHUD package files, lineage/manifest metadata, runtime staging validation, and idempotency.
+- The fixture verifies exact values for the two-station canonical-cell example used in #545: station `qhh_forc_001` bound to cell `0` and station `qhh_forc_002` bound to cell `1`, including wind speed from U/V and SHUD CSV exclusion of `Press`.
+- The fixture verifies the runtime consumes the standard multi-station package and validates `.sp.att FORC` references against `.tsd.forc` IDs without legacy fallback rewrite.
+- Documentation clarifies dual-mode operation, migration workflow, rollback by model/input asset version, direct-grid source scope and grid signature applicability, `Press` handling, and why canonical conversion remains mandatory.
+- Targeted test commands and evidence are recorded in PR evidence.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - the fixture spans producer and runtime entrypoints used by orchestration.
+- Config / project setup: not selected - no deployment config or global mode toggle is introduced.
+- File IO / path safety / overwrite: selected - compact fixture writes package files and stages runtime workspace files; docs must preserve safe package/source-of-truth boundaries.
+- Schema / columns / units / field names: selected - SHUD CSV columns, manifest/lineage fields, `Press` exclusion, and `.sp.att FORC` / `.tsd.forc ID` contracts are verified.
+- Auth / permissions / secrets: not selected - no credential or permission surface changes.
+- Concurrency / shared state / ordering: selected - fixture must prove idempotency/rerun behavior without duplicate ready outputs.
+- Resource limits / large input / discovery: selected - the fixture must remain compact and must not reintroduce broad CI runtime.
+- Legacy compatibility / examples: selected - docs and fixture must keep IDW/direct-grid separation explicit.
+- Error handling / rollback / partial outputs: selected - docs describe rollback by asset version; fixture covers fail-closed runtime ownership validation through the already-implemented runtime gate.
+- Release / packaging / dependency compatibility: not selected - no new dependency should be required.
+- Documentation / migration notes: selected - #548 is the documentation closure issue.
+- Geospatial / CRS / basin geometry: selected - direct-grid station ownership and `grid_cell_id`/`grid_signature` applicability are documented and fixture-bound.
+- Hydro-met time series / forcing windows: selected - fixture verifies valid-time/package timeseries shape at compact scale.
+- SHUD numerical runtime / conservation / NaN: selected - fixture verifies exact canonical-converted values and avoids wrong station ownership.
+- PostGIS / TimescaleDB domain behavior: selected only through existing fake/repository test surfaces; no new schema migration.
+- Slurm production lifecycle / mock-vs-real parity: selected - runtime staging is tested before solver execution without submitting real Slurm jobs.
+- External hydro-met providers / snapshot reproducibility: selected - docs must explain GFS/IFS source scope, grid signature, and canonical conversion.
+- Run manifest / QC provenance: selected - fixture verifies lineage/manifest identity.
+- Published NHMS artifacts / display identity: selected - the direct-grid forcing package is the artifact consumed by runtime.
+
+Boundary-surface checklist:
+- Shared helper roots: direct-grid producer fixture helpers, compact object-store/repository fakes, runtime staging fixture helpers, and CI test selector if changed.
+- Public entrypoints: `ForcingProducer.produce` and `SHUDRuntime.prepare_workspace` / `execute` staging path.
+- Read surfaces: direct-grid binding contract, compact canonical products, model input package files, forcing package manifest, and runtime manifest.
+- Write/delete/overwrite surfaces: compact object-store package outputs, forcing version records in fakes, station timeseries records, runtime workspace staging files.
+- Staging/publish/rollback surfaces: producer package publication/idempotency and runtime pre-execution staging.
+- Producer/consumer evidence boundaries: producer manifest/lineage identity must be the same identity consumed by runtime direct-grid detection.
+- Stale-state/idempotency boundaries: unchanged direct-grid rerun must not duplicate ready forcing versions or mutate station/package identity unexpectedly.
+- Unchanged downstream consumers: legacy IDW docs and tests remain valid; #548 does not change frontend/API payloads.
+
+Invariant Matrix - #548 E2E/docs closure
+Governing invariant: The documented migrated direct-grid flow and the compact E2E fixture must describe and prove the same implemented contract: explicit per-asset direct-grid selection, exact canonical grid-cell values, standard SHUD package output, lineage-bound runtime staging, and asset-version rollback without IDW fallback.
+Source-of-truth identity/contract: selected model/input asset manifest, direct-grid binding URI/checksum, model input package id, `.sp.att` checksum/path, `applicable_source_ids`, `grid_id`, `grid_signature`, station `shud_forcing_index`/`grid_cell_id`, package manifest lineage, and runtime-staged `.tsd.forc` IDs.
+Surfaces:
+- Producers: compact direct-grid production fixture from mode resolution through ready package/idempotency.
+- Validators/preflight: direct-grid contract, grid/source scope, `.sp.att FORC`, and runtime package staging checks.
+- Storage/cache/query: fake repository/object-store records for interpolation weights, forcing version, components, and station timeseries.
+- Public routes/entrypoints: no API changes; worker/runtime entrypoints are exercised directly.
+- Frontend/downstream consumers: no frontend behavior change; SHUD runtime package contract remains the downstream consumer boundary.
+- Failure paths/rollback/stale state: docs define rollback by asset version; fixture covers no fallback rewrite and unchanged rerun idempotency.
+- Evidence/audit/readiness: PR evidence records targeted pytest commands, docs touched, and CI status.
+Regression rows:
+- compact direct-grid asset with two stations and canonical cells `0`/`1` -> producer resolves `direct_grid`, validates binding/source/grid/model identity, writes exact SHUD values, lineage, package manifest, and station timeseries.
+- compact rerun with unchanged direct-grid identity -> returns existing-ready/already-done behavior without duplicate ready forcing versions or duplicate station timeseries.
+- runtime staging of the produced package with `.sp.att FORC` values `1` and `2` -> stages multi-station `.tsd.forc` and station CSVs, validates ownership, and does not call the legacy single-station fallback rewrite.
+- documentation describes migration/rollback by asset version, source scope and grid signature checks, `Press` persistence-but-not-SHUD-CSV behavior, and canonical conversion as mandatory before direct-grid lookup.

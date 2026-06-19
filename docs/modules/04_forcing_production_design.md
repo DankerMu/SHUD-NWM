@@ -18,7 +18,7 @@
 ## 3. 职责边界
 
 - 读取模型气象代站定义。
-- 预计算或加载格点到代站权重。
+- 按模型/input 资产的 `forcing_mapping_mode` 选择空间映射：缺省或显式 `idw` 使用 legacy IDW；显式 `direct_grid` 使用模型资产预计算 binding。
 - 生成 PRCP、TEMP、RH、wind、Rn、Press。
 - 输出 SHUD forcing 文件包。
 - 写入 forcing_station_timeseries。
@@ -43,6 +43,34 @@
 ### 5.3 质量标识
 
 模块输出必须包含 `quality_flag` 或同等字段。严重质量问题阻断发布；可接受问题保留标记供前端和分析人员识别。
+
+### 5.4 双模式空间映射契约
+
+`forcing_mapping_mode` 是模型/input 资产级契约，不是全局运行配置：
+
+- 缺省或显式 `idw`：保持 legacy 行为，读取 `met.met_station` 中的固定 SHUD forcing station，按 canonical 网格计算或复用 IDW 权重，写入标准 SHUD 包。
+- 显式 `direct_grid`：只接受模型资产 manifest 中的 direct-grid binding。每个 station 必须有
+  `station_id`、`shud_forcing_index`、`forcing_filename`、`grid_id`、`grid_cell_id` 和坐标；
+  producer 校验 `applicable_source_ids`、binding checksum、模型 input package identity、
+  `.sp.att` path/checksum、canonical `grid_id` 与 `grid_signature` 后，按 `grid_cell_id` 精确取值。
+
+direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicable_source_ids`、grid signature 漂移、`.sp.att FORC` 引用不在 `.tsd.forc ID` 范围内，或模型 input identity 不匹配时，不得回退 IDW，也不得发布 ready forcing version。
+
+### 5.5 输出与 lineage
+
+两种模式都输出标准 SHUD 包：`shud/qhh.tsd.forc` 与每站 CSV。站点 CSV 只包含 `Time_Day/Precip/Temp/RH/Wind/RN`；`Press` 可保留在 `met.forcing_station_timeseries`、package manifest `units` 或 lineage 元数据中，但不得写入 SHUD CSV。
+
+direct-grid lineage/package manifest 必须记录 `forcing_mapping_mode`、`spatial_mapping_method`、
+binding URI/checksum、`model_input_package_id`、`.sp.att` path/checksum、`applicable_source_ids`、
+`grid_id`、`grid_signature`、station identity 和 package file checksum。
+Runtime 以 checksum 校验后的 `forcing_package.json` 为 direct-grid staging 权威，使用标准多站 package，
+不执行 legacy 单站 `.sp.att` fallback rewrite。
+
+### 5.6 迁移与回滚
+
+迁移 direct-grid 的流程是发布新的模型/input 资产版本：先生成并校验 direct-grid binding 与 `.sp.att FORC`，再激活该资产版本供 forcing producer 使用。回滚同样通过选择上一版模型/input 资产完成，例如从 direct-grid 资产回到上一版 `idw` 资产，或回到上一版 binding/checksum 未漂移的 direct-grid 资产。不得修改历史 ready forcing version，也不得用 runtime 全局开关覆盖资产 manifest。
+
+canonical conversion 对 IDW 和 direct-grid 都是必需前置步骤。IFS/GFS 原始 GRIB 中的降水和辐射累积量、温度单位、湿度来源、U/V 风分量、QC 与 lineage 必须先转成 canonical 产品；direct-grid 只改变空间查找方式，不绕过物理转换。
 
 ## 6. 主要接口
 

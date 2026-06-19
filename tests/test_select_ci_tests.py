@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.select_ci_tests import CORE_SMOKE_TESTS, ORCHESTRATOR_MANIFEST_SURFACE_TESTS, main, select_tests
+from scripts.select_ci_tests import (
+    CORE_SMOKE_TESTS,
+    DIRECT_GRID_CONTRACT_TESTS,
+    DIRECT_GRID_E2E_TESTS,
+    DIRECT_GRID_SURFACE_TESTS,
+    ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+    main,
+    select_tests,
+)
 
 
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
@@ -33,6 +41,44 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
         "tests/test_runtime_mode.py",
         "tests/test_shud_runtime.py",
     ]
+
+
+def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture() -> None:
+    selected = select_tests(["workers/forcing_producer/direct_grid_contract.py"], repo_root=Path("."))
+
+    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
+    assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
+    assert all(
+        target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
+        for target in DIRECT_GRID_CONTRACT_TESTS
+    )
+    assert "tests/test_forcing_producer.py" not in selected
+
+
+def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:
+    selected = select_tests(
+        ["openspec/changes/direct-grid-forcing/specs/direct-grid-forcing-production/spec.md"],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
+
+
+def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
+    selected = select_tests(
+        [
+            "workers/forcing_producer/direct_grid_contract.py",
+            "openspec/changes/direct-grid-forcing/proposal.md",
+            "openspec/changes/direct-grid-forcing/design.md",
+            "openspec/changes/direct-grid-forcing/specs/direct-grid-forcing-production/spec.md",
+        ],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS)
+    assert "tests/test_forcing_producer.py" not in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
 def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:
