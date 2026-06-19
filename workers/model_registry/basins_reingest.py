@@ -17,7 +17,12 @@ from .basins_discovery import (
     write_inventory,
 )
 from .basins_package import BasinsPackageError, publish_basins_package
-from .basins_registry_import import BasinsRegistryImportError, _transaction, import_basins_registry
+from .basins_registry_import import (
+    PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
+    BasinsRegistryImportError,
+    _transaction,
+    import_basins_registry,
+)
 
 REINGEST_RECEIPT_SCHEMA_VERSION = "basins.reingest.v1"
 _REINGEST_ACTOR_ID = "cli-model-admin"
@@ -118,15 +123,29 @@ def reingest_basin(
         ) from error
 
     import_receipt_path = work_dir_path / f"{basin_slug}-import.json"
-    policy_decision = _allow_policy_decision(model_id, auth_actor_id=auth_actor_id, auth_roles=auth_roles)
+    # Two decisions: preflight uses the ``unknown`` target_id (the
+    # _require_public_import_preflight_policy gate matches on that
+    # sentinel before the manifest is read), main pass uses the real
+    # model_id. Reusing a single decision fails require_policy_evidence's
+    # target_id equality check with "Policy evidence does not authorize".
+    preflight_decision = _allow_policy_decision(
+        PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    manifest_decision = _allow_policy_decision(
+        model_id,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
     try:
         import_basins_registry(
             inventory_path=inventory_path,
             package_manifest_path=manifest_path,
             database_url=database_url,
             output_path=import_receipt_path,
-            policy_decision=policy_decision,
-            preflight_policy_decision=policy_decision,
+            policy_decision=manifest_decision,
+            preflight_policy_decision=preflight_decision,
         )
     except BasinsRegistryImportError as error:
         raise BasinsReingestError(
@@ -220,7 +239,7 @@ def _filter_inventory_to_basin(
 
 
 def _allow_policy_decision(
-    model_id: str,
+    target_id: str,
     *,
     auth_actor_id: str | None,
     auth_roles: Sequence[str] | None,
@@ -230,7 +249,7 @@ def _allow_policy_decision(
     return cli_policy_decision_from_evidence(
         "models.switch_version",
         target_type="model_registry",
-        target_id=model_id,
+        target_id=target_id,
         actor_id=actor,
         roles=roles,
     )
