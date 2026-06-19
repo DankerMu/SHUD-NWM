@@ -66,19 +66,21 @@ def test_reingest_basin_is_idempotent(
     integration_database_url: str,
     tmp_path: Path,
 ) -> None:
-    """Second reingest with a fresh package_version still succeeds and
-    returns the same reach count (river.shp is deterministic; PR 569's
-    legacy purge + parent refresh keeps the upsert idempotent)."""
+    """Re-running reingest with the *same* package_version is the real
+    operator-recovery scenario (SSH dropped mid-run, operator re-runs the
+    same command). Verify identical inputs produce identical DB-derived
+    counts; only the wall-clock receipt timestamps advance."""
 
     apply_migrations_from_zero(integration_database_url)
     basins_root, basin_slug, model_id = _stage_qhh_sample_basin(tmp_path)
+    package_version = f"vbasins-reingest-{tmp_path.name}"
 
     work_dir_a = tmp_path / "work-a"
     receipt_path_a = tmp_path / "receipt-a.json"
     first = reingest_basin(
         basin_slug=basin_slug,
         model_id=model_id,
-        package_version=f"vbasins-reingest-{tmp_path.name}-a",
+        package_version=package_version,
         basins_root=basins_root,
         database_url=integration_database_url,
         work_dir=work_dir_a,
@@ -90,7 +92,7 @@ def test_reingest_basin_is_idempotent(
     second = reingest_basin(
         basin_slug=basin_slug,
         model_id=model_id,
-        package_version=f"vbasins-reingest-{tmp_path.name}-b",
+        package_version=package_version,
         basins_root=basins_root,
         database_url=integration_database_url,
         work_dir=work_dir_b,
@@ -98,8 +100,13 @@ def test_reingest_basin_is_idempotent(
     )
     assert first["imported_reach_count"] == second["imported_reach_count"]
     assert first["crosswalk_row_count"] == second["crosswalk_row_count"]
+    assert first["geom_null_count"] == 0
     assert second["geom_null_count"] == 0
+    assert first["multi_part_violation_count"] == 0
     assert second["multi_part_violation_count"] == 0
+    # Timestamps strictly advance even when DB-derived counts stay identical.
+    assert second["started_at"] > first["started_at"]
+    assert second["finished_at"] > first["finished_at"]
 
 
 @pytest.mark.integration

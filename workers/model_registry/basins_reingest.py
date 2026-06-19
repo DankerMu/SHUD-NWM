@@ -323,18 +323,21 @@ def _query_post_import_metrics(
             basin_row = cursor.fetchone()
             basin_id = basin_row["basin_id"] if basin_row else None
 
+            # No LIKE filter on river_segment_id: PR #569's
+            # _delete_legacy_seg_rows purges any pre-PR-2 ``<model>_seg_*``
+            # rows in the same transaction as the reach-row insert, so after
+            # a successful reingest every row under this model's rnv is a
+            # reach row. Counting by rnv_id alone avoids SQL-wildcard pitfalls
+            # in an ``f"{model_id}_reach_%"`` pattern (``_`` is a LIKE wildcard).
             cursor.execute(
                 """
                 SELECT COUNT(*) AS reach_count
                 FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
                 JOIN core.model_instance mi
-                  ON mi.river_network_version_id = rnv.river_network_version_id
+                  ON mi.river_network_version_id = rs.river_network_version_id
                 WHERE mi.model_id = %s
-                  AND rs.river_segment_id LIKE %s
                 """,
-                (model_id, f"{model_id}_reach_%"),
+                (model_id,),
             )
             imported_reach_count = int((cursor.fetchone() or {}).get("reach_count") or 0)
 
@@ -367,6 +370,10 @@ def _query_post_import_metrics(
             )
             geom_null_count = int((cursor.fetchone() or {}).get("null_count") or 0)
 
+            # Always 0 by construction: PR #569's
+            # _validate_river_shp_single_part_invariant rejects multi-part
+            # river.shp at parse time. This counter is a downstream-facing
+            # belt-and-suspenders check, not a primary defense.
             cursor.execute(
                 """
                 SELECT COUNT(*) AS violation_count
