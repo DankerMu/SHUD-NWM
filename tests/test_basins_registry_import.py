@@ -16,10 +16,16 @@ from packages.common.auth_policy import cli_policy_decision_from_evidence
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
-from workers.model_registry.basins_geometry import parse_basins_geometry
+from workers.model_registry.basins_geometry import (
+    BasinsGeometryError,
+    CrosswalkRow,
+    parse_basins_geometry,
+    parse_seg_shp_crosswalk,
+)
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
     _backfill_output_segment_geometry,
+    _build_river_segment_crosswalk_rows,
     _ensure_output_river_segments,
     _output_river_segment_rows,
     _resource_profile,
@@ -2306,3 +2312,95 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
     # reach 3: a lone single segment is a valid one-part MultiLineString.
     assert rows[3]["gtype"] == "MULTILINESTRING"
     assert rows[3]["length_m"] == 300.0
+
+
+# ---------------------------------------------------------------------------
+# PR 1 (issue #560): crosswalk pure-function unit tests (no production wiring)
+# ---------------------------------------------------------------------------
+
+_QHH_SAMPLE_SEG_SHP = (
+    Path(__file__).parent / "fixtures" / "basins" / "qhh-sample" / "gis" / "seg.shp"
+)
+
+
+def test_parse_seg_shp_crosswalk_extracts_all_records() -> None:
+    """qhh-sample fixture seg.shp has 18 records over iRiv ∈ {1, 2, 3, 9, 180}."""
+    import shapefile
+
+    reader = shapefile.Reader(str(_QHH_SAMPLE_SEG_SHP))
+    try:
+        rows = parse_seg_shp_crosswalk(reader)
+    finally:
+        reader.close()
+
+    assert len(rows) == 18
+    assert all(isinstance(row, CrosswalkRow) for row in rows)
+    # Every iRiv in the fixture comes from the documented sampled reach set.
+    assert {row.iRiv for row in rows} == {1, 2, 3, 9, 180}
+    # segment_order is the natural row-offset enumeration -> monotonically
+    # increasing 0..N-1 sequence.
+    assert [row.segment_order for row in rows] == list(range(18))
+    # The qhh seg.shp dbf only carries iRiv + iEle (no Length field), so
+    # length_m must be None on every row.
+    assert all(row.length_m is None for row in rows)
+    # iEle is an integer mesh-element index pulled verbatim from the dbf.
+    assert all(isinstance(row.iEle, int) and row.iEle > 0 for row in rows)
+
+
+def test_build_crosswalk_rows_format() -> None:
+    """Constructor builds dict rows shaped for core.river_segment_crosswalk insert."""
+    segments = [
+        CrosswalkRow(iRiv=1, iEle=3099, segment_order=0, length_m=349.02),
+        CrosswalkRow(iRiv=2, iEle=2597, segment_order=6, length_m=391.40),
+    ]
+    model_id = "basins_qhh_shud"
+    rnv_id = "rnv_basins_qhh_shud_v1"
+    reach_indices = {1, 2, 3, 9, 180}
+
+    rows = _build_river_segment_crosswalk_rows(model_id, rnv_id, segments, reach_indices)
+
+    assert len(rows) == 2
+    assert rows[0] == {
+        "river_network_version_id": rnv_id,
+        "river_segment_id": "basins_qhh_shud_reach_000001",
+        "source": "basins_seg_shp",
+        "external_id": "1:3099",
+        "properties_json": {
+            "iRiv": 1,
+            "iEle": 3099,
+            "segment_order": 0,
+            "length_m": 349.02,
+        },
+    }
+    assert rows[1] == {
+        "river_network_version_id": rnv_id,
+        "river_segment_id": "basins_qhh_shud_reach_000002",
+        "source": "basins_seg_shp",
+        "external_id": "2:2597",
+        "properties_json": {
+            "iRiv": 2,
+            "iEle": 2597,
+            "segment_order": 6,
+            "length_m": 391.40,
+        },
+    }
+
+
+def test_build_crosswalk_rows_reach_missing_reports_set() -> None:
+    """A segment whose iRiv is not in reach_indices raises a structured error."""
+    segments = [
+        CrosswalkRow(iRiv=1, iEle=3099, segment_order=0, length_m=None),
+        CrosswalkRow(iRiv=999, iEle=4242, segment_order=1, length_m=None),
+    ]
+    with pytest.raises(BasinsGeometryError) as excinfo:
+        _build_river_segment_crosswalk_rows(
+            model_id="basins_qhh_shud",
+            river_network_version_id="rnv_test",
+            segments=segments,
+            reach_indices={1, 2, 3},
+        )
+    assert excinfo.value.error_code == "BASINS_REGISTRY_CROSSWALK_REACH_MISSING"
+    payload = excinfo.value.to_payload()
+    assert payload["missing_iRiv"] == [999]
+    # Sanity: a happy iRiv not declared missing must not appear in the payload.
+    assert 1 not in payload["missing_iRiv"]

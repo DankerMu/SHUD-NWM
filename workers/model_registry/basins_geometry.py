@@ -79,6 +79,23 @@ class RiverSegmentGeometry:
 
 
 @dataclass(frozen=True)
+class CrosswalkRow:
+    """Single segment record extracted from ``gis/seg.shp`` for the crosswalk.
+
+    Pure attribute carrier; no geometry. ``segment_order`` is the 0-indexed row
+    offset within the source shapefile (matches ``pyshp.Reader``'s natural
+    record iteration order). ``length_m`` is read from the ``Length`` dbf field
+    when present and is ``None`` otherwise (qhh's ``seg.shp`` has only
+    ``iRiv`` / ``iEle`` fields and therefore yields ``None``).
+    """
+
+    iRiv: int
+    iEle: int
+    segment_order: int
+    length_m: float | None
+
+
+@dataclass(frozen=True)
 class ParsedBasinsGeometry:
     domain_wkt: str
     domain_checksum: str
@@ -625,6 +642,68 @@ def _river_segments_from_layer(
             )
         )
     return segments
+
+
+def parse_seg_shp_crosswalk(layer: Any) -> list[CrosswalkRow]:
+    """Extract segment-to-reach mapping records from ``gis/seg.shp``.
+
+    Pure attribute extraction; no geometry, no transformation, no IO beyond
+    iterating the supplied shapefile reader. Each record contributes one
+    :class:`CrosswalkRow` carrying the SHUD-internal ``(iRiv, iEle)`` pair
+    plus a 0-indexed ``segment_order`` (the record's position in the source
+    shapefile's natural enumeration order, matching ``pyshp``'s
+    ``iterShapeRecords`` traversal). ``length_m`` is read from the ``Length``
+    dbf field when present; for the qhh basin's ``seg.shp`` (fields are only
+    ``iRiv`` / ``iEle``) it is always ``None``.
+
+    Args:
+        layer: A ``pyshp.shapefile.Reader``-compatible object exposing
+            ``iterShapeRecords()``. In production this comes from
+            :func:`_shape_reader` against an in-memory ``_LayerSnapshot``; in
+            tests it is acceptable to pass a directly-opened
+            ``shapefile.Reader(path)``.
+
+    Returns:
+        Records in source-file order. ``segment_order`` values form a
+        monotonically increasing 0-indexed sequence ``0, 1, ..., N-1``.
+    """
+
+    rows: list[CrosswalkRow] = []
+    for segment_order, shape_record in enumerate(layer.iterShapeRecords()):
+        attrs = _record_dict(shape_record)
+        iriv_value = _pick_attr(attrs, ("iRiv",))
+        iele_value = _pick_attr(attrs, ("iEle",))
+        if iriv_value is None or iele_value is None:
+            # iRiv / iEle are the two mandatory attributes for a SHUD seg.shp
+            # record (the file is by design the segment -> mesh-element index).
+            # A missing value indicates the source file is malformed; surface
+            # it through the same structured-error pathway used by the parser.
+            raise BasinsGeometryError(
+                "BASINS_REGISTRY_SEG_SHP_INVARIANT_VIOLATED",
+                "Basins seg.shp record is missing required iRiv/iEle attribute.",
+                details={
+                    "segment_order": segment_order,
+                    "attrs": {str(k): _jsonable(v) for k, v in attrs.items()},
+                },
+            )
+        length_value = _pick_attr(attrs, ("Length", "length_m", "length"))
+        length_m: float | None
+        if length_value is None:
+            length_m = None
+        else:
+            try:
+                length_m = float(length_value)
+            except (TypeError, ValueError):
+                length_m = None
+        rows.append(
+            CrosswalkRow(
+                iRiv=int(iriv_value),
+                iEle=int(iele_value),
+                segment_order=segment_order,
+                length_m=length_m,
+            )
+        )
+    return rows
 
 
 def _shape_reader(layer: _LayerSnapshot) -> Any:
