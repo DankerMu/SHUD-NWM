@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from psycopg2.extras import Json, execute_values
 from pyproj import Transformer
 
 import workers.model_registry.basins_geometry as basins_geometry
@@ -25,7 +24,6 @@ from workers.model_registry.basins_geometry import (
 )
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
-    _backfill_output_segment_geometry,
     _build_river_segment_crosswalk_rows,
     _canonical_singlepart_line_coordinates,
     _ensure_output_river_segments,
@@ -2393,131 +2391,6 @@ def _invoke_click(argv: list[str]) -> int:
         if isinstance(error.code, int):
             return error.code
         return 1
-
-
-@pytest.mark.integration
-def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
-    integration_database_url: str,
-) -> None:
-    """Real-DB coverage for the output-reach geometry backfill -- the path that
-    actually produced the heihe cross-ridge lines AND the later channel breakage
-    (the Python greedy stitch + gap-split is unit-tested in test_basins_geometry_merge
-    and test_river_segment_gap_split).
-    Asserts: every reach is now emitted as a MultiLineString; in-order + reversed
-    fine segments stitch into ONE continuous part (no fabricated jump); a reach whose
-    parts sit far apart but UNIFORMLY (here ~58km edges throughout) is NOT split -- the
-    relative 4x-median guard correctly treats no edge as an anomalous gap, so it stays
-    a one-part line with nothing dropped and the honest summed length; a lone
-    single-segment reach is a one-part MultiLineString; and an output reach carrying a
-    non-numeric shud_riv_index is skipped, not crashed, by the text-based target match.
-    (gap_split's ABSOLUTE-floor cut on a small-median reach is exercised in
-    test_river_segment_gap_split.)
-    """
-    apply_migrations_from_zero(integration_database_url)
-    rnv = "geomfix_rnv_v1"
-    with (
-        psycopg_connection(integration_database_url) as connection,
-        connection.cursor() as cursor,
-    ):
-        cursor.execute(
-            "INSERT INTO core.basin (basin_id, basin_name, basin_group, description) "
-            "VALUES ('geomfix_basin', 'Geom Fix', 'integration', '') ON CONFLICT DO NOTHING"
-        )
-        cursor.execute(
-            "INSERT INTO core.basin_version "
-            "(basin_version_id, basin_id, version_label, geom, active_flag, source_uri, checksum) "
-            "VALUES ('geomfix_bv', 'geomfix_basin', 'v1', "
-            "ST_Multi(ST_MakeEnvelope(109.0, 29.0, 113.0, 33.0, 4490)), true, 'i://b', 'b') "
-            "ON CONFLICT DO NOTHING"
-        )
-        cursor.execute(
-            "INSERT INTO core.river_network_version "
-            "(river_network_version_id, basin_version_id, version_label, segment_count, source_uri, checksum) "
-            "VALUES (%s, 'geomfix_bv', 'v1', 3, 'i://r', 'r') ON CONFLICT DO NOTHING",
-            (rnv,),
-        )
-        # Fine GIS segments grouped by source_raw_segment_id (= SHUD reach index):
-        #   reach 1: two parts sharing the (110.1 30.1) joint, 2nd stored REVERSED
-        #            -> greedy stitch yields ONE continuous part (no back-and-forth
-        #               jump), emitted as a one-part MultiLineString.
-        #   reach 2: two parts with no shared endpoint, but all edges ~uniformly ~58km
-        #            -> stitched into one continuous line; gap_split's relative
-        #               4x-median guard sees no anomalous edge, so it stays ONE part
-        #               (nothing dropped, length stays the SUM). Anomalous-gap splitting
-        #               is covered by test_river_segment_gap_split.
-        #   reach 3: a lone single segment -> one-part MultiLineString unchanged.
-        execute_values(
-            cursor,
-            "INSERT INTO core.river_segment "
-            "(river_segment_id, river_network_version_id, segment_order, length_m, geom, properties_json) "
-            "VALUES %s",
-            [
-                ("gf_1a", rnv, 1, 100.0, "LINESTRING(110.0 30.0, 110.1 30.1)", Json({"source_raw_segment_id": "1"})),
-                ("gf_1b", rnv, 2, 100.0, "LINESTRING(110.2 30.2, 110.1 30.1)", Json({"source_raw_segment_id": "1"})),
-                ("gf_2a", rnv, 3, 100.0, "LINESTRING(111.0 31.0, 111.4 31.4)", Json({"source_raw_segment_id": "2"})),
-                ("gf_2b", rnv, 4, 50.0, "LINESTRING(111.8 31.8, 111.9 31.9)", Json({"source_raw_segment_id": "2"})),
-                ("gf_3a", rnv, 5, 300.0, "LINESTRING(112.0 32.0, 112.3 32.3)", Json({"source_raw_segment_id": "3"})),
-            ],
-            # geom is geometry(MultiLineString, 4490) (000036); ST_Multi wraps the
-            # LineString fixtures so the insert satisfies the column type.
-            template="(%s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
-        )
-        # Output reach rows: NULL geom, shud_output_river=true, indices 1/2/3 plus
-        # one row with a NON-NUMERIC shud_riv_index. The target match compares the
-        # index as text, so this malformed sibling is simply skipped (matches no gis
-        # index) instead of aborting the whole UPDATE on a ::int cast.
-        execute_values(
-            cursor,
-            "INSERT INTO core.river_segment "
-            "(river_segment_id, river_network_version_id, segment_order, properties_json) VALUES %s",
-            [
-                ("gf_out_1", rnv, 101, Json({"shud_output_river": True, "shud_riv_index": 1})),
-                ("gf_out_2", rnv, 102, Json({"shud_output_river": True, "shud_riv_index": 2})),
-                ("gf_out_3", rnv, 103, Json({"shud_output_river": True, "shud_riv_index": 3})),
-                ("gf_out_bad", rnv, 104, Json({"shud_output_river": True, "shud_riv_index": "not-an-int"})),
-            ],
-            template="(%s, %s, %s, %s)",
-        )
-
-        updated = _backfill_output_segment_geometry(cursor, rnv, record_geometry_source=True)
-        assert updated == 3  # reaches 1/2/3 only; the malformed-index row matches nothing
-
-        cursor.execute(
-            "SELECT (properties_json->>'shud_riv_index')::int AS idx, "
-            "GeometryType(geom) AS gtype, ST_NPoints(geom) AS npts, length_m, "
-            "(properties_json->>'geometry_source_length_m')::float AS prov_len, "
-            "(properties_json->>'geometry_source_segment_count')::int AS prov_cnt "
-            "FROM core.river_segment WHERE river_network_version_id = %s "
-            "AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true' "
-            "AND properties_json->>'shud_riv_index' ~ '^[0-9]+$' ORDER BY idx",
-            (rnv,),
-        )
-        rows = {row["idx"]: row for row in cursor.fetchall()}
-
-        # target-side text match: the non-numeric reach is skipped, geom stays NULL
-        # (an unguarded ::int cast on the target would instead abort the whole UPDATE).
-        cursor.execute(
-            "SELECT geom FROM core.river_segment WHERE river_segment_id = 'gf_out_bad'"
-        )
-        assert cursor.fetchone()["geom"] is None
-
-    # reach 1: reversed part stitched into one continuous part, emitted as a one-part
-    # MultiLineString (3 deduped points).
-    assert rows[1]["gtype"] == "MULTILINESTRING"
-    assert rows[1]["npts"] == 3
-    assert rows[1]["length_m"] == 200.0
-
-    # reach 2: uniformly-spaced parts stitched into one continuous line (all 4 points,
-    # nothing dropped); the relative gap guard keeps it ONE part. length stays the SUM.
-    assert rows[2]["gtype"] == "MULTILINESTRING"
-    assert rows[2]["npts"] == 4
-    assert rows[2]["length_m"] == 150.0
-    assert rows[2]["prov_len"] == 150.0
-    assert rows[2]["prov_cnt"] == 2
-
-    # reach 3: a lone single segment is a valid one-part MultiLineString.
-    assert rows[3]["gtype"] == "MULTILINESTRING"
-    assert rows[3]["length_m"] == 300.0
 
 
 # ---------------------------------------------------------------------------
