@@ -28,7 +28,7 @@ BEGIN
     FROM pg_constraint
     WHERE conrelid = 'core.river_segment_crosswalk'::regclass
       AND contype = 'u'
-      AND (SELECT array_agg(attname ORDER BY attname)
+      AND (SELECT array_agg(attname::text ORDER BY attname::text)
            FROM pg_attribute
            WHERE attrelid = conrelid AND attnum = ANY(conkey))
           = ARRAY['river_network_version_id', 'river_segment_id', 'source']::text[]
