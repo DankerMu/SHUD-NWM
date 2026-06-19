@@ -21,6 +21,7 @@ from .basins_geometry import (
     SHAPEFILE_REQUIRED_SUFFIXES,
     SHUD_CANONICAL_SUFFIXES,
     BasinsGeometryError,
+    CrosswalkRow,
     ParsedBasinsGeometry,
     TrustedBasinsRoot,
     _merge_polyline_parts,
@@ -794,6 +795,59 @@ def _output_river_segment_rows(sources: ImportSources) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _build_river_segment_crosswalk_rows(
+    model_id: str,
+    river_network_version_id: str,
+    segments: list[CrosswalkRow],
+    reach_indices: set[int],
+) -> list[dict[str, Any]]:
+    """Construct ``core.river_segment_crosswalk`` insert rows from seg.shp data.
+
+    Pure constructor: no DB calls, no IO. The output dict shape matches the
+    columns of ``core.river_segment_crosswalk`` plus the embedded
+    ``river_network_version_id`` (which the writer in PR 2 will lift into the
+    outer ``create_crosswalk_entries`` payload). Each row references the
+    parent reach via ``river_segment_id = f"{model_id}_reach_{iRiv:06d}"``,
+    matching the new reach-level naming convention (see D5 in the
+    ``feat-reach-geom-from-river-shp`` design doc).
+
+    ``reach_indices`` is the set of valid reach ``Index`` values produced from
+    the basin's ``gis/river.shp``. Any segment whose ``iRiv`` is not in that
+    set is a referential-integrity violation between ``seg.shp`` and
+    ``river.shp`` and triggers a fail-fast error before any DB write.
+
+    Raises:
+        BasinsGeometryError: with code
+            ``BASINS_REGISTRY_CROSSWALK_REACH_MISSING`` when any segment's
+            ``iRiv`` is not present in ``reach_indices``. The error payload
+            includes ``missing_iRiv`` (sorted list of all offending iRiv
+            values) so the operator can correlate to the source seg.shp.
+    """
+
+    missing_iriv = sorted({segment.iRiv for segment in segments if segment.iRiv not in reach_indices})
+    if missing_iriv:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_CROSSWALK_REACH_MISSING",
+            "Basins seg.shp references reach Index values not present in river.shp.",
+            details={"missing_iRiv": missing_iriv, "model_id": model_id},
+        )
+    return [
+        {
+            "river_network_version_id": river_network_version_id,
+            "river_segment_id": f"{model_id}_reach_{segment.iRiv:06d}",
+            "source": "basins_seg_shp",
+            "external_id": f"{segment.iRiv}:{segment.iEle}",
+            "properties_json": {
+                "iRiv": int(segment.iRiv),
+                "iEle": int(segment.iEle),
+                "segment_order": int(segment.segment_order),
+                "length_m": (None if segment.length_m is None else float(segment.length_m)),
+            },
+        }
+        for segment in segments
+    ]
 
 
 def _output_river_segment_digest(rows: list[dict[str, Any]]) -> str:
