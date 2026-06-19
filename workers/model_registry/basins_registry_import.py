@@ -1288,7 +1288,7 @@ def _output_river_segment_digest(rows: list[dict[str, Any]]) -> str:
         {
             "river_segment_id": str(row["river_segment_id"]),
             "segment_order": None if row["segment_order"] is None else int(row["segment_order"]),
-            "properties": row["properties"],
+            "properties": _normalize_properties_for_digest(row["properties"] or {}),
         }
         for row in sorted(rows, key=lambda item: str(item["river_segment_id"]))
     ]

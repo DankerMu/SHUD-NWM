@@ -2625,9 +2625,15 @@ def _stage_qhh_sample_fixture(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     so the regular ``parse_basins_geometry`` entry point can read it.
 
     Returns ``(input_dir, inventory_path, manifest_path, model_id)``.
+
+    The basin_slug is derived from tmp_path.name so every test invocation
+    yields a unique model_id under the session-scoped integration DB,
+    avoiding cross-test CHECKSUM_CONFLICT pollution. apply_migrations_from_zero
+    only re-applies missing migrations; it does NOT truncate existing rows.
     """
 
-    basin_slug = "qhh-sample"
+    # pytest tmp_path.name shape: test_<name>0 / test_<name>1 / etc — unique per test
+    basin_slug = f"qhh-sample-{tmp_path.name}".replace("_", "-").lower()
     input_name = "alias-qhh-sample"
     root = tmp_path / "basins"
     input_dir = root / basin_slug / "input" / input_name
