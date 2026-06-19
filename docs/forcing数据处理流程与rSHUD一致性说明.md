@@ -138,6 +138,12 @@ SHUD 模型侧统一对 `Rn` 做 `rn<0→0` 再 `nearbyint` 取整 W/m²（`conv
 
 运行期校验上述身份与 checksum 后，按 station binding 的 `grid_cell_id` 精确读取 canonical 值，不计算 IDW 权重、不回退 IDW。物理转换仍然来自 canonical converter，不能直接把原始 GRIB 值写入 SHUD。
 
+`applicable_source_ids` 是 source scope，不是注释字段：GFS 与 IFS 只有在 canonical 产品的 `source_id` 位于该集合内、`grid_id` 与 `grid_signature` 同时匹配时，才允许复用同一 direct-grid binding。`grid_signature` 覆盖有序格点定义；同名 `grid_id` 但经纬度顺序、单元数量或坐标内容改变时，必须视为新网格，旧 binding 失效。
+
+direct-grid 迁移和回滚都通过**模型/input 资产版本**表达。迁移时发布带 `forcing_mapping_mode="direct_grid"`、binding checksum、模型 input package identity、`.sp.att` path/checksum 与 source scope 的新模型资产版本；回滚时重新选择上一版 `idw` 或上一版 direct-grid 资产。不得通过全局 runtime 开关、就地改历史 ready forcing version、或运行期重写 `.sp.att` 来切换模式。
+
+canonical conversion 仍是强制前置步骤，原因是 `grid_cell_id` lookup 只解决“取哪个格点”，不解决“格点值是否已经是 SHUD 所需物理量”。IFS/GFS 原始场仍必须先完成降水/辐射去累积、温度单位换算、湿度反演或归一化、U/V 风速派生、质量标记和 lineage 记录；direct-grid 只能读取这些 canonical 后的格点值。
+
 ### ⑤ 写出 SHUD forcing 包
 
 `workers/forcing_producer/producer.py:1689-1751` `format_shud_forcing_package()`：

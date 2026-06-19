@@ -44,6 +44,15 @@ ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "services/orchestrator/scheduler.py",
 )
 
+DIRECT_GRID_E2E_TESTS: tuple[str, ...] = (
+    "tests/test_direct_grid_e2e.py",
+)
+
+DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
+    "workers/forcing_producer/direct_grid_contract.py",
+    "openspec/changes/direct-grid-forcing/**",
+)
+
 
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
@@ -80,6 +89,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[3],
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
+        DIRECT_GRID_E2E_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        DIRECT_GRID_SURFACE_PATH_PATTERNS[1],
+        DIRECT_GRID_E2E_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(

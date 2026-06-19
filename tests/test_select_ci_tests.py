@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.select_ci_tests import CORE_SMOKE_TESTS, ORCHESTRATOR_MANIFEST_SURFACE_TESTS, main, select_tests
+from scripts.select_ci_tests import (
+    CORE_SMOKE_TESTS,
+    DIRECT_GRID_E2E_TESTS,
+    ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+    main,
+    select_tests,
+)
 
 
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
@@ -33,6 +39,21 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
         "tests/test_runtime_mode.py",
         "tests/test_shud_runtime.py",
     ]
+
+
+def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture() -> None:
+    selected = select_tests(["workers/forcing_producer/direct_grid_contract.py"], repo_root=Path("."))
+
+    assert selected == list(DIRECT_GRID_E2E_TESTS)
+
+
+def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:
+    selected = select_tests(
+        ["openspec/changes/direct-grid-forcing/specs/direct-grid-forcing-production/spec.md"],
+        repo_root=Path("."),
+    )
+
+    assert selected == list(DIRECT_GRID_E2E_TESTS)
 
 
 def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:

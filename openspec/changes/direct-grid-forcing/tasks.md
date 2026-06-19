@@ -87,5 +87,14 @@
 
 ## 5. End-to-End Evidence and Documentation
 
-- [ ] 5.1 Add a compact end-to-end direct-grid fixture covering mode resolution, binding validation, exact value generation, SHUD package formatting, lineage, runtime staging validation, and idempotency.
-- [ ] 5.2 Update forcing production and model asset documentation with migration workflow, rollback by asset version, source scope, grid signature rules, Press handling, and the reason canonical conversion remains mandatory.
+- [x] 5.1 (#548) Add a compact end-to-end direct-grid fixture covering mode resolution, binding validation, exact value generation, SHUD package formatting, lineage, runtime staging validation, and idempotency.
+  - Required evidence: a targeted pytest fixture exercises a valid direct-grid model asset from mode resolution through producer package publication and runtime staging using compact in-memory/object-store inputs, without requiring real GFS/IFS files, Slurm, or a full basin.
+  - Required evidence: fixture verifies exact bound-cell values for at least two stations, standard SHUD `.tsd.forc` and station CSV output, direct-grid lineage/manifest identity, `.sp.att FORC` validation against `.tsd.forc` IDs, and unchanged rerun/idempotency behavior.
+  - Required evidence: fixture proves explicit `direct_grid` does not call IDW station loading, IDW neighbor search, or legacy runtime fallback `.sp.att` rewrite.
+  - Required evidence: the fixture is included in the PR targeted pytest command and remains bounded enough for CI targeted runs.
+- [x] 5.2 (#548) Update forcing production and model asset documentation with migration workflow, rollback by asset version, source scope, grid signature rules, Press handling, and the reason canonical conversion remains mandatory.
+  - Required evidence: docs explain the dual-mode contract: absent/explicit `idw` keeps legacy interpolation, while explicit `direct_grid` reuses precomputed basin grid ownership and fails closed on stale/incomplete assets.
+  - Required evidence: docs describe migration and rollback by publishing/selecting model/input asset versions, not by toggling global runtime config or mutating historical ready forcing versions.
+  - Required evidence: docs state that `applicable_source_ids`, `grid_id`, `grid_signature`, binding checksum, model input identity, and `.sp.att` checksum define direct-grid applicability.
+  - Required evidence: docs state that canonical conversion remains mandatory for IFS/GFS before direct-grid lookup, including precipitation/radiation de-accumulation, humidity/wind derivation, unit normalization, QC, and lineage.
+  - Required evidence: docs state that `Press` may remain persisted metadata/timeseries but is not emitted in SHUD station CSV files.
