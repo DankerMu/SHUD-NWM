@@ -660,6 +660,13 @@ class SHUDRuntime:
                 return True
             if _mapping_metadata_declares_non_direct_grid(package_manifest):
                 return False
+            if forcing_declares_direct:
+                raise SHUDRuntimeError(
+                    "FORCING_PACKAGE_MAPPING_MODE_MISSING",
+                    "A checksum-verified forcing_package.json is authoritative for mapping mode; "
+                    "outer direct-grid metadata cannot activate direct-grid for a neutral package manifest.",
+                )
+            return False
         if forcing_declares_direct:
             return True
         if forcing_declares_non_direct:
@@ -682,9 +689,10 @@ class SHUDRuntime:
                 forcing_uri=str(forcing.get("forcing_uri") or ""),
                 object_store_prefix=self.config.object_store_prefix,
             )
+            self._validate_direct_grid_package_station_filenames(checksum_entries)
         else:
             checksum_entries = _forcing_checksum_entries(manifest)
-        self._verify_forcing_object_checksums(checksum_entries)
+        self._verify_forcing_object_checksums(checksum_entries, is_direct_grid=is_direct_grid)
         return _ForcingPackageContext(
             package_manifest=package_manifest,
             checksum_entries=tuple(checksum_entries),
@@ -1094,18 +1102,52 @@ class SHUDRuntime:
         *,
         forcing_context: _ForcingPackageContext | None = None,
     ) -> None:
+        if forcing_context is not None and forcing_context.is_direct_grid:
+            self._stage_direct_grid_directory_artifact(source, destination, forcing_context=forcing_context)
+            return
         object_root = Path(self.config.object_store_root)
         for source_file in _iter_regular_descendant_files_no_follow(source, containment_root=object_root):
             relative = source_file.relative_to(source)
-            relative_posix = PurePosixPath(*relative.parts).as_posix()
-            if forcing_context is not None and forcing_context.is_direct_grid:
-                _assert_direct_grid_sensitive_member_is_manifest_bound(
-                    relative_posix,
-                    forcing_context.checksum_entries,
+            content = self._read_object_artifact_bytes(source_file, str(source_file))
+            _write_staged_bytes(destination / relative, content, root=destination)
+
+    def _stage_direct_grid_directory_artifact(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        forcing_context: _ForcingPackageContext,
+    ) -> None:
+        object_root = Path(self.config.object_store_root)
+        staged_relative_paths: set[str] = set()
+        for file_entry in forcing_context.checksum_entries:
+            relative_posix = str(file_entry["relative_path"])
+            if relative_posix in staged_relative_paths:
+                raise SHUDRuntimeError(
+                    "FORCING_CHECKSUM_INVALID",
+                    f"Duplicate direct-grid forcing package manifest relative_path: {relative_posix}",
                 )
-                content = self._read_direct_grid_forcing_member_bytes(source_file, relative_posix)
-            else:
-                content = self._read_object_artifact_bytes(source_file, str(source_file))
+            staged_relative_paths.add(relative_posix)
+            relative = Path(*PurePosixPath(relative_posix).parts)
+            source_file = source / relative
+            try:
+                source_stat = stat_no_follow(source_file, containment_root=object_root)
+            except FileNotFoundError:
+                raise SHUDRuntimeError(
+                    "ARTIFACT_NOT_FOUND",
+                    f"Direct-grid forcing package manifest member was not found: {relative_posix}",
+                )
+            except SafeFilesystemError as error:
+                raise SHUDRuntimeError(
+                    "ARTIFACT_UNSAFE",
+                    f"Unsafe direct-grid forcing package manifest member {relative_posix}: {error}",
+                ) from error
+            if not stat_module.S_ISREG(source_stat.st_mode):
+                raise SHUDRuntimeError(
+                    "ARTIFACT_UNSAFE",
+                    f"Direct-grid forcing package manifest member must be a regular file: {relative_posix}",
+                )
+            content = self._read_direct_grid_forcing_member_bytes(source_file, relative_posix)
             _write_staged_bytes(destination / relative, content, root=destination)
 
     def _read_object_artifact_bytes(self, source: Path, label: str) -> bytes:
@@ -1165,16 +1207,68 @@ class SHUDRuntime:
             return package_manifest
         return None
 
-    def _verify_forcing_object_checksums(self, checksum_entries: list[dict[str, str]]) -> None:
+    def _verify_forcing_object_checksums(
+        self,
+        checksum_entries: list[dict[str, str]],
+        *,
+        is_direct_grid: bool = False,
+    ) -> None:
         for file_entry in checksum_entries:
             uri = str(file_entry["uri"])
             expected_checksum = str(file_entry["checksum"])
-            actual_checksum = self._object_checksum(uri)
+            relative_path = str(file_entry.get("relative_path") or "").strip()
+            limit = _direct_grid_sensitive_member_limit(relative_path) if is_direct_grid else None
+            actual_checksum = (
+                self._object_checksum_limited(uri, limit=limit)
+                if limit is not None
+                else self._object_checksum(uri)
+            )
             if actual_checksum != expected_checksum:
                 raise SHUDRuntimeError(
                     "FORCING_FILE_CHECKSUM_MISMATCH",
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
+
+    def _validate_direct_grid_package_station_filenames(self, checksum_entries: list[dict[str, str]]) -> None:
+        tsd_entries = [entry for entry in checksum_entries if entry["relative_path"] == "shud/qhh.tsd.forc"]
+        if not tsd_entries:
+            return
+        tsd_entry = tsd_entries[0]
+        tsd_uri = str(tsd_entry["uri"])
+        limit = _direct_grid_sensitive_member_limit("shud/qhh.tsd.forc")
+        if limit is None:
+            return
+        try:
+            content = self.object_store.read_bytes_limited(tsd_uri, max_bytes=limit.max_bytes)
+        except Exception as error:
+            raise SHUDRuntimeError(
+                limit.error_code,
+                f"{limit.message}: {tsd_uri}",
+            ) from error
+        if len(content) > limit.max_bytes:
+            raise SHUDRuntimeError(
+                limit.error_code,
+                f"{limit.message}: {tsd_uri}",
+            )
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SHUDRuntimeError(
+                "SHUD_FORCING_STATIONS_INVALID",
+                f"Direct-grid SHUD forcing station file is not valid UTF-8: {tsd_uri}",
+            ) from error
+        lines = _bounded_nonempty_lines(
+            text,
+            path=Path(tsd_uri),
+            max_lines=MAX_DIRECT_GRID_TSD_FORC_LINES,
+            max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+            too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
+            line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
+        )
+        for line in lines[3:]:
+            parts = line.split()
+            if len(parts) >= 7:
+                _direct_grid_station_filename(parts[6])
 
     def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
         """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
@@ -1304,6 +1398,15 @@ class SHUDRuntime:
             raise SHUDRuntimeError(
                 "FORCING_CHECKSUM_READ_FAILED",
                 f"Failed to read forcing artifact checksum for {uri_or_key}: {error}",
+            ) from error
+
+    def _object_checksum_limited(self, uri_or_key: str, *, limit: _DirectGridSensitiveMemberLimit) -> str:
+        try:
+            return self.object_store.checksum_limited(uri_or_key, max_bytes=limit.max_bytes)
+        except Exception as error:
+            raise SHUDRuntimeError(
+                limit.error_code,
+                f"{limit.message}: {uri_or_key}",
             ) from error
 
     def _upload_directory(self, directory: Path, key_prefix: str) -> None:
@@ -1953,10 +2056,11 @@ def _direct_grid_station_filename(raw_token: str) -> str:
         or candidate.is_absolute()
         or token in {".", ".."}
         or any(part in {"", ".", ".."} for part in candidate.parts)
+        or not token.endswith(".csv")
     ):
         raise SHUDRuntimeError(
             "DIRECT_GRID_STATION_FILENAME_INVALID",
-            f"Direct-grid SHUD forcing station Filename must be a safe single filename: {raw_token}",
+            f"Direct-grid SHUD forcing station Filename must be a safe single .csv filename: {raw_token}",
         )
     return token
 
@@ -2598,20 +2702,6 @@ def _derive_package_manifest_file_relative_path(
     return file_key[len(forcing_root) + 1 :]
 
 
-def _assert_direct_grid_sensitive_member_is_manifest_bound(
-    relative_path: str,
-    checksum_entries: tuple[dict[str, str], ...],
-) -> None:
-    if not _is_direct_grid_sensitive_forcing_member(relative_path):
-        return
-    if any(entry["relative_path"] == relative_path for entry in checksum_entries):
-        return
-    raise SHUDRuntimeError(
-        "FORCING_CHECKSUM_MISSING",
-        f"Direct-grid sensitive forcing package member is not bound by forcing_package.json files: {relative_path}",
-    )
-
-
 def _direct_grid_sensitive_member_limit(relative_path: str) -> _DirectGridSensitiveMemberLimit | None:
     if relative_path == "shud/qhh.tsd.forc":
         return _DirectGridSensitiveMemberLimit(
@@ -2626,10 +2716,6 @@ def _direct_grid_sensitive_member_limit(relative_path: str) -> _DirectGridSensit
             message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
         )
     return None
-
-
-def _is_direct_grid_sensitive_forcing_member(relative_path: str) -> bool:
-    return relative_path == "shud/qhh.tsd.forc" or _is_direct_grid_station_csv_relative_path(relative_path)
 
 
 def _resolve_staged_forcing_path(model_input_dir: Path, relative_path: str) -> Path:

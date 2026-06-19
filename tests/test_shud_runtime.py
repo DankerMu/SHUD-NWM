@@ -572,6 +572,152 @@ def test_runtime_direct_grid_package_manifest_ignores_stale_outer_forcing_files(
     assert (model_input_dir / "forcing_003.csv").exists()
 
 
+def test_runtime_direct_grid_stages_only_package_manifest_allowlist_and_ignores_sidecar(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    forcing_sidecar = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "alias-a.sp.att"
+    )
+    forcing_sidecar.write_text(
+        "1\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t1\n",
+        encoding="utf-8",
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    staged_sp_att = (model_input_dir / "alias-a.sp.att").read_text(encoding="utf-8")
+    assert "1\t0\t0\t0\t2" in staged_sp_att
+    assert "2\t0\t0\t0\t3" in staged_sp_att
+    assert not staged_sp_att.startswith("1\n")
+
+
+def test_runtime_direct_grid_oversized_manifest_tsd_uses_bounded_object_path_before_checksum(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    tsd_path = forcing_dir / "shud" / "qhh.tsd.forc"
+    oversized_tsd = (
+        b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
+        + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    )
+    tsd_path.write_bytes(oversized_tsd)
+    package_manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"][0]["checksum"] = sha256_bytes(oversized_tsd)
+    manifest_content = json_bytes(package_manifest)
+    package_manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        shud_executable=str(Path("tests/mock_shud_omp.py").resolve()),
+        output_interval_minutes=1440,
+        timeout_seconds=30,
+    )
+    tracking_store = _ChecksumTrackingObjectStore(
+        LocalObjectStore(config.object_store_root, config.object_store_prefix)
+    )
+    runtime = SHUDRuntime(config=config, repository=repository, object_store=tracking_store)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    tsd_uri = "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc"
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+    assert tsd_uri not in tracking_store.checksum_calls
+    assert tracking_store.read_bytes_limited_calls[-1] == (tsd_uri, 8 * 1024 * 1024)
+    assert not (input_dir / "alias-a" / "shud" / "qhh.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_manifest_station_csv_uses_limited_checksum_not_full_checksum(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    repository = FakeHydroRunRepository()
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        shud_executable=str(Path("tests/mock_shud_omp.py").resolve()),
+        output_interval_minutes=1440,
+        timeout_seconds=30,
+    )
+    tracking_store = _ChecksumTrackingObjectStore(
+        LocalObjectStore(config.object_store_root, config.object_store_prefix)
+    )
+    runtime = SHUDRuntime(config=config, repository=repository, object_store=tracking_store)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    csv_uri = "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing_002.csv"
+    assert csv_uri not in tracking_store.checksum_calls
+    assert (csv_uri, 8 * 1024 * 1024) in tracking_store.checksum_limited_calls
+
+
+def test_runtime_neutral_package_manifest_with_outer_direct_grid_fails_before_forcing_staging(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["forcing_mapping_mode"] = "direct_grid"
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_PACKAGE_MAPPING_MODE_MISSING"
+    model_input_dir = input_dir / "alias-a"
+    assert not (model_input_dir / "shud" / "qhh.tsd.forc").exists()
+    assert not (model_input_dir / "alias-a.tsd.forc").exists()
+
+
 def test_runtime_direct_grid_accepts_producer_manifest_top_level_files_without_relative_path(
     tmp_path: Path,
 ) -> None:
@@ -1454,10 +1600,67 @@ def test_runtime_direct_grid_station_filename_collision_fails_without_overwritin
         / "alias-a"
         / "alias-a.sp.att"
     )
-    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_INVALID"
     assert repository.statuses == ["created", "failed"]
-    assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_INVALID"
     assert "2\t0\t0\t0\t3" in model_sp_att.read_text(encoding="utf-8")
+
+
+def test_runtime_direct_grid_rejects_non_csv_station_filename_before_unbounded_member_read(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing_dir / "shud"
+    (shud_dir / "qhh.tsd.forc").write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\tforcing.dat\n",
+        encoding="utf-8",
+    )
+    (shud_dir / "forcing.dat").write_bytes(
+        b"2\t6\t20260501\t20260501\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        + b"0\t1\t2\t3\t4\t5\n" * 700_000
+    )
+    manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"] = [
+        {
+            "role": "shud_forcing",
+            "relative_path": "shud/qhh.tsd.forc",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
+            "checksum": sha256_bytes((shud_dir / "qhh.tsd.forc").read_bytes()),
+        },
+        {
+            "role": "shud_forcing_csv",
+            "relative_path": "shud/forcing.dat",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing.dat",
+            "checksum": sha256_bytes((shud_dir / "forcing.dat").read_bytes()),
+        },
+    ]
+    manifest_content = json_bytes(package_manifest)
+    manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    model_input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input" / "alias-a"
+    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_INVALID"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_INVALID"
+    assert not (model_input_dir / "forcing.dat").exists()
 
 
 def test_runtime_direct_grid_rejects_directoried_station_filename_before_basename_copy(
@@ -1528,7 +1731,7 @@ def test_runtime_direct_grid_rejects_directoried_station_filename_before_basenam
     assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_INVALID"
     assert repository.statuses == ["created", "failed"]
     assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_INVALID"
-    assert (model_input_dir / "shud" / "forcing.csv").exists()
+    assert not (model_input_dir / "shud" / "forcing.csv").exists()
     assert not (model_input_dir / "forcing.csv").exists()
 
 
@@ -1698,6 +1901,29 @@ class _ReadLimitFailingObjectStore:
     def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
         if key_or_uri == self._failing_uri:
             raise ObjectStoreError(f"Object {key_or_uri} exceeds read limit")
+        return self._inner.read_bytes_limited(key_or_uri, max_bytes=max_bytes)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _ChecksumTrackingObjectStore:
+    def __init__(self, inner: LocalObjectStore) -> None:
+        self._inner = inner
+        self.checksum_calls: list[str] = []
+        self.checksum_limited_calls: list[tuple[str, int]] = []
+        self.read_bytes_limited_calls: list[tuple[str, int]] = []
+
+    def checksum(self, key_or_uri: str) -> str:
+        self.checksum_calls.append(key_or_uri)
+        return self._inner.checksum(key_or_uri)
+
+    def checksum_limited(self, key_or_uri: str, *, max_bytes: int) -> str:
+        self.checksum_limited_calls.append((key_or_uri, max_bytes))
+        return self._inner.checksum_limited(key_or_uri, max_bytes=max_bytes)
+
+    def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
+        self.read_bytes_limited_calls.append((key_or_uri, max_bytes))
         return self._inner.read_bytes_limited(key_or_uri, max_bytes=max_bytes)
 
     def __getattr__(self, name: str) -> Any:
