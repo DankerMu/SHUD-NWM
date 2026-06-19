@@ -6,7 +6,7 @@ National-scale multi-basin forcing production currently spends runtime on IDW in
 
 - Add a per-basin/model forcing mapping mode resolver with explicit `direct_grid` and legacy `idw` behavior.
 - Add a direct-grid station binding JSON contract for migrated basin assets: each SHUD forcing station is bound to an exact canonical `grid_id` and `grid_cell_id`, with binding identity, model input identity, source scope, and grid signature validation.
-- Extend forcing production so `direct_grid` basins read only required canonical grid cells and write SHUD forcing values with no runtime spatial interpolation.
+- Extend forcing production so `direct_grid` basins use required bound canonical grid cells where supported by the current field-read path and write SHUD forcing values with no runtime spatial interpolation. Deeper lazy/indexed NetCDF reads remain tracked as task 2.5 unless implemented separately.
 - Preserve current IDW behavior for basin assets that do not explicitly declare `direct_grid`.
 - Add fail-closed validation so incomplete, stale, or mismatched direct-grid assets do not silently fall back to IDW.
 

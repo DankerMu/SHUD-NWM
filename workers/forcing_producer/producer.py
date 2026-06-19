@@ -2075,13 +2075,28 @@ class ForcingProducer:
             variable_count=len(self.config.output_variables),
             time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
             units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
-            file_uris={
-                "package_manifest": _package_manifest_uri(
-                    str(existing["forcing_package_uri"]),
-                    self.config.package_manifest_filename,
-                ),
-            },
+            file_uris=self._existing_ready_file_uris(str(existing["forcing_package_uri"])),
         )
+
+    def _existing_ready_file_uris(self, package_uri: str) -> dict[str, str]:
+        manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
+        file_uris = {"package_manifest": manifest_uri}
+        try:
+            manifest = json.loads(self.object_store.read_bytes(manifest_uri).decode("utf-8"))
+            files = manifest.get("files")
+        except (OSError, ObjectStoreError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            files = None
+        if isinstance(files, Sequence) and not isinstance(files, (str, bytes)):
+            for entry in files:
+                if not isinstance(entry, Mapping):
+                    continue
+                role = str(entry.get("role") or "")
+                uri = str(entry.get("uri") or "")
+                if role in {"tsd_forc", "csv_debug"} and uri:
+                    file_uris[role] = uri
+        file_uris.setdefault("tsd_forc", f"{package_uri.rstrip('/')}/{self.config.forcing_filename}")
+        file_uris.setdefault("csv_debug", f"{package_uri.rstrip('/')}/{self.config.csv_filename}")
+        return file_uris
 
     def _forcing_children_are_complete(
         self,
