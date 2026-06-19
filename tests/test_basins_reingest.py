@@ -15,6 +15,16 @@ from workers.model_registry.cli import _argparse_main
 _QHH_SAMPLE_DIR = Path(__file__).parent / "fixtures" / "basins" / "qhh-sample"
 
 
+@pytest.fixture(autouse=True)
+def _publish_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``publish_basins_package`` requires OBJECT_STORE_ROOT/PREFIX even when
+    # PR 3's reingest path doesn't materialize artifacts (copy_forcing=False) —
+    # the env vars gate the publication preflight. Point at tmp_path so each
+    # test is self-contained and doesn't leak into the real object store.
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+
 # ---------------------------------------------------------------------------
 # Reingest happy-path / idempotency / missing-basin coverage (real DB).
 # ---------------------------------------------------------------------------
