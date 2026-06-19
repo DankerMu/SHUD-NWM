@@ -49,7 +49,10 @@
 `forcing_mapping_mode` 是模型/input 资产级契约，不是全局运行配置：
 
 - 缺省或显式 `idw`：保持 legacy 行为，读取 `met.met_station` 中的固定 SHUD forcing station，按 canonical 网格计算或复用 IDW 权重，写入标准 SHUD 包。
-- 显式 `direct_grid`：只接受模型资产 manifest 中的 direct-grid binding。每个 station 必须有 `station_id`、`shud_forcing_index`、`forcing_filename`、`grid_id`、`grid_cell_id` 和坐标；producer 校验 `applicable_source_ids`、binding checksum、模型 input package identity、`.sp.att` path/checksum、canonical `grid_id` 与 `grid_signature` 后，按 `grid_cell_id` 精确取值。
+- 显式 `direct_grid`：只接受模型资产 manifest 中的 direct-grid binding。每个 station 必须有
+  `station_id`、`shud_forcing_index`、`forcing_filename`、`grid_id`、`grid_cell_id` 和坐标；
+  producer 校验 `applicable_source_ids`、binding checksum、模型 input package identity、
+  `.sp.att` path/checksum、canonical `grid_id` 与 `grid_signature` 后，按 `grid_cell_id` 精确取值。
 
 direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicable_source_ids`、grid signature 漂移、`.sp.att FORC` 引用不在 `.tsd.forc ID` 范围内，或模型 input identity 不匹配时，不得回退 IDW，也不得发布 ready forcing version。
 
@@ -57,7 +60,11 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
 
 两种模式都输出标准 SHUD 包：`shud/qhh.tsd.forc` 与每站 CSV。站点 CSV 只包含 `Time_Day/Precip/Temp/RH/Wind/RN`；`Press` 可保留在 `met.forcing_station_timeseries`、package manifest `units` 或 lineage 元数据中，但不得写入 SHUD CSV。
 
-direct-grid lineage/package manifest 必须记录 `forcing_mapping_mode`、`spatial_mapping_method`、binding URI/checksum、`model_input_package_id`、`.sp.att` path/checksum、`applicable_source_ids`、`grid_id`、`grid_signature`、station identity 和 package file checksum。Runtime 以 checksum 校验后的 `forcing_package.json` 为 direct-grid staging 权威，使用标准多站 package，不执行 legacy 单站 `.sp.att` fallback rewrite。
+direct-grid lineage/package manifest 必须记录 `forcing_mapping_mode`、`spatial_mapping_method`、
+binding URI/checksum、`model_input_package_id`、`.sp.att` path/checksum、`applicable_source_ids`、
+`grid_id`、`grid_signature`、station identity 和 package file checksum。
+Runtime 以 checksum 校验后的 `forcing_package.json` 为 direct-grid staging 权威，使用标准多站 package，
+不执行 legacy 单站 `.sp.att` fallback rewrite。
 
 ### 5.6 迁移与回滚
 
