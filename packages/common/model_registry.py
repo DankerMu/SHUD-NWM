@@ -384,6 +384,11 @@ class PsycopgModelRegistryStore:
             payload.get("version_label"),
             payload.get("river_network_version_id"),
         )
+        # PR 2 (feat-reach-geom-from-river-shp): the new reach-source contract
+        # writes one single-part LineString per reach; SQL-side ST_Multi (see
+        # the INSERT template below) wraps it into the column's required
+        # MultiLineString shape. line_or_multiline_to_wkt is preserved as
+        # dead code until PR 5a deletes it.
         segment_rows = [
             (
                 segment["river_segment_id"],
@@ -391,7 +396,7 @@ class PsycopgModelRegistryStore:
                 segment.get("segment_order"),
                 segment.get("downstream_segment_id"),
                 segment.get("length_m"),
-                line_or_multiline_to_wkt(segment["geom"]),
+                geometry_to_wkt(segment["geom"], "LineString"),
                 self._json(segment.get("properties_json") or {}),
             )
             for segment in segments
@@ -458,6 +463,30 @@ class PsycopgModelRegistryStore:
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
+        # PR 2 Path C (feat-reach-geom-from-river-shp / spec
+        # "River segment map query returns segment-level features sliced
+        # from parent reach polyline"): when this basin/RNV has crosswalk
+        # rows from gis/seg.shp, return segment-level features whose
+        # geometry is the result of ST_LineSubstring against the parent
+        # reach polyline. DB row granularity stays reach (1 row per
+        # .sp.riv reach); the segment-level identifier is derived from
+        # the crosswalk external_id so the frontend
+        # promoteId='river_segment_id' contract is preserved verbatim
+        # (OQ2: M11MapLibreSurface.tsx hover/popup/colour/forecast paths
+        # all key on segment-level river_segment_id).
+        if self._has_segment_crosswalk_for_basin(
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+        ):
+            return self._list_river_segments_segment_slice(
+                basin_version_id=basin_version_id,
+                river_network_version_id=river_network_version_id,
+                search=search,
+                stream_order_min=stream_order_min,
+                stream_order_max=stream_order_max,
+                limit=limit,
+                offset=offset,
+            )
         filters = ["rnv.basin_version_id = %s"]
         params: list[Any] = [basin_version_id]
         if river_network_version_id is not None:
@@ -631,6 +660,363 @@ class PsycopgModelRegistryStore:
         collection = {
             "type": "FeatureCollection",
             "features": features,
+            "total": total,
+            "feature_total": feature_total,
+            "limit": limit,
+            "offset": offset,
+        }
+        _enforce_river_segment_serialized_budget(
+            collection,
+            max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+            scope="collection",
+        )
+        return collection
+
+    def _has_segment_crosswalk_for_basin(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+    ) -> bool:
+        """Detect whether this basin has PR-2-style crosswalk rows.
+
+        Used to switch ``list_river_segments`` between the legacy
+        reach-level path (no crosswalk -> emit existing rows verbatim) and
+        the Path C segment-slice path (crosswalk present -> emit segments
+        sliced from parent reach polylines via ST_LineSubstring).
+
+        Falls back to the legacy reach-level path (returns ``False``) if
+        the underlying cursor cannot service the probe (e.g. fake cursors
+        in unit tests that mock only the main query path). Real DB calls
+        always succeed and produce a deterministic boolean.
+        """
+
+        params: list[Any] = [basin_version_id]
+        rnv_filter = ""
+        if river_network_version_id is not None:
+            rnv_filter = " AND rnv.river_network_version_id = %s"
+            params.append(river_network_version_id)
+        try:
+            with self._transaction() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM core.river_segment_crosswalk rsc
+                        JOIN core.river_network_version rnv
+                          ON rnv.river_network_version_id = rsc.river_network_version_id
+                        WHERE rnv.basin_version_id = %s
+                          AND rsc.source = 'basins_seg_shp'
+                          {rnv_filter}
+                    ) AS exists
+                    """,
+                    tuple(params),
+                )
+                row = cursor.fetchone()
+        except (KeyError, AssertionError, TypeError):
+            return False
+        if row is None:
+            return False
+        if isinstance(row, Mapping):
+            return bool(row.get("exists", False))
+        try:
+            return bool(row[0])
+        except (KeyError, IndexError, TypeError):
+            return False
+
+    def _list_river_segments_segment_slice(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        search: str | None,
+        stream_order_min: int | None,
+        stream_order_max: int | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        """Return segment-level features sliced from parent reach polylines.
+
+        Path C (spec D7): for each crosswalk row in segment_order under its
+        parent reach, compute cumulative ``length_m`` proportions to derive
+        ``start_fraction``/``end_fraction``, then call PostGIS
+        ``ST_LineSubstring(reach_geom, start_fraction, end_fraction)`` to
+        carve a sub-polyline out of the parent reach. The last segment in
+        each reach saturates its ``end_fraction`` to ``1.0`` to absorb the
+        residual between the sum of ``sp.rivseg`` segment lengths and the
+        reach ``Length`` (floating-point + R-side preprocessing drift,
+        ≈ 0.02 m on qhh).
+
+        Length-less ``seg.shp`` (qhh's seg.shp has no Length field, so
+        ``properties_json.length_m`` is ``None``) falls back to equal-length
+        partitioning: each segment occupies ``1/N`` of the parent reach
+        polyline, where ``N`` is the number of crosswalk rows for that
+        reach.
+
+        Output identity: ``river_segment_id = "<model>_seg_<iRiv>_<iEle>"``
+        is derived from the crosswalk ``external_id`` so the frontend
+        ``promoteId='river_segment_id'`` contract (verified in OQ2) keeps
+        working. The DB-level ``<model>_reach_<iRiv:06d>`` ID is not
+        exposed in this response.
+        """
+
+        rnv_filter = ""
+        params: list[Any] = [basin_version_id]
+        if river_network_version_id is not None:
+            rnv_filter = " AND rnv.river_network_version_id = %s"
+            params.append(river_network_version_id)
+
+        normalized_search = search.strip() if search is not None else ""
+        like_pattern = (
+            f"%{_escape_like(normalized_search)}%" if normalized_search else None
+        )
+        with self._transaction() as cursor:
+            # Pull all reaches for this basin -- one row per reach (PR 2
+            # row granularity), with the geom kept in DB for the slice
+            # query below. We need both geom and length to:
+            # (a) compute the slice fractions per segment in this reach,
+            # (b) feed ST_LineSubstring with a stable reach geom.
+            cursor.execute(
+                f"""
+                SELECT
+                    rs.river_segment_id AS reach_segment_id,
+                    rs.river_network_version_id,
+                    rnv.basin_version_id,
+                    ST_AsBinary(rs.geom) AS geom_wkb
+                FROM core.river_segment rs
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = rs.river_network_version_id
+                WHERE rnv.basin_version_id = %s
+                  AND COALESCE(rs.properties_json->>'shud_output_river', 'false') <> 'true'
+                  AND rs.geom IS NOT NULL
+                  {rnv_filter}
+                """,
+                tuple(params),
+            )
+            reach_rows = [dict(row) for row in cursor.fetchall()]
+            if not reach_rows:
+                empty: dict[str, Any] = {
+                    "type": "FeatureCollection",
+                    "features": [],
+                    "total": 0,
+                    "feature_total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                _enforce_river_segment_serialized_budget(
+                    empty,
+                    max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+                    scope="collection",
+                )
+                return empty
+            reach_by_id = {row["reach_segment_id"]: row for row in reach_rows}
+            rnv_ids = sorted({row["river_network_version_id"] for row in reach_rows})
+
+            # Pull all crosswalk rows for these RNV ids, ordered by parent
+            # reach + segment_order. Sorting by segment_order in SQL keeps
+            # the per-reach grouping below deterministic without us having
+            # to re-sort in Python.
+            cursor.execute(
+                """
+                SELECT
+                    river_segment_id AS reach_segment_id,
+                    external_id,
+                    properties_json
+                FROM core.river_segment_crosswalk
+                WHERE river_network_version_id = ANY(%s)
+                  AND source = 'basins_seg_shp'
+                ORDER BY river_segment_id,
+                         COALESCE((properties_json->>'segment_order')::int, 2147483647),
+                         external_id
+                """,
+                (rnv_ids,),
+            )
+            crosswalk_rows = [dict(row) for row in cursor.fetchall()]
+
+            # Group crosswalk rows by parent reach_id and compute cumulative
+            # length proportions for each segment. The last segment's
+            # end_fraction is forced to 1.0 to saturate floating-point
+            # drift between sum(length_m) and the parent reach Length.
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for crosswalk_row in crosswalk_rows:
+                reach_id = crosswalk_row["reach_segment_id"]
+                grouped.setdefault(reach_id, []).append(crosswalk_row)
+
+            slice_requests: list[dict[str, Any]] = []
+            for reach_id, members in grouped.items():
+                if reach_id not in reach_by_id:
+                    # The crosswalk insert path is FK-protected, but a
+                    # cross-RNV reach reference still warrants skipping
+                    # rather than crashing the whole endpoint.
+                    continue
+                lengths: list[float | None] = []
+                for member in members:
+                    props = member.get("properties_json") or {}
+                    if isinstance(props, str):
+                        try:
+                            props = json.loads(props)
+                        except json.JSONDecodeError:
+                            props = {}
+                    raw_length = props.get("length_m") if isinstance(props, Mapping) else None
+                    try:
+                        lengths.append(None if raw_length is None else float(raw_length))
+                    except (TypeError, ValueError):
+                        lengths.append(None)
+                non_null_lengths = [length for length in lengths if length is not None and length > 0]
+                if non_null_lengths and len(non_null_lengths) == len(members):
+                    total_length = sum(non_null_lengths)
+                    cumulative = 0.0
+                    fractions: list[tuple[float, float]] = []
+                    for index, length in enumerate(non_null_lengths):
+                        start_fraction = cumulative / total_length
+                        cumulative += length
+                        end_fraction = cumulative / total_length
+                        if index == len(non_null_lengths) - 1:
+                            end_fraction = 1.0
+                        # Clamp into [0.0, 1.0] to defend against any
+                        # cumulative drift that would otherwise hand
+                        # ST_LineSubstring a value > 1 (would error).
+                        start_fraction = max(0.0, min(1.0, start_fraction))
+                        end_fraction = max(start_fraction, min(1.0, end_fraction))
+                        fractions.append((start_fraction, end_fraction))
+                else:
+                    # length_m=None fallback: equal partition. Each segment
+                    # occupies 1/N of the parent reach polyline (the qhh
+                    # seg.shp has no Length field; see fixture README).
+                    member_count = len(members)
+                    fractions = []
+                    for index in range(member_count):
+                        start_fraction = index / member_count
+                        end_fraction = (
+                            1.0 if index == member_count - 1 else (index + 1) / member_count
+                        )
+                        fractions.append((start_fraction, end_fraction))
+                for member, (start_fraction, end_fraction) in zip(members, fractions, strict=True):
+                    slice_requests.append(
+                        {
+                            "reach_segment_id": reach_id,
+                            "external_id": member["external_id"],
+                            "properties_json": member.get("properties_json") or {},
+                            "start_fraction": start_fraction,
+                            "end_fraction": end_fraction,
+                            "geom_wkb": reach_by_id[reach_id]["geom_wkb"],
+                            "river_network_version_id": reach_by_id[reach_id][
+                                "river_network_version_id"
+                            ],
+                            "basin_version_id": reach_by_id[reach_id]["basin_version_id"],
+                        }
+                    )
+
+            # Build per-segment features. We dispatch each ST_LineSubstring
+            # call individually because the fractions vary per row;
+            # qhh-scale basins (~3.7k segments) handle this in batches by
+            # the API layer. Optimisation to a single SQL UNNEST is in
+            # scope for follow-up (PR 6 perf check); the unit-test
+            # correctness is what this PR pins down.
+            slice_features: list[dict[str, Any]] = []
+            model_id_pattern = re.compile(r"^(?P<model>.+)_reach_(?P<index>\d+)$")
+            for slice_request in slice_requests:
+                cursor.execute(
+                    """
+                    SELECT ST_AsGeoJSON(
+                        ST_LineSubstring(
+                            ST_GeomFromWKB(%s, 4490),
+                            %s,
+                            %s
+                        )
+                    )::json AS geometry
+                    """,
+                    (
+                        slice_request["geom_wkb"],
+                        slice_request["start_fraction"],
+                        slice_request["end_fraction"],
+                    ),
+                )
+                geometry_row = cursor.fetchone()
+                if geometry_row is None or geometry_row["geometry"] is None:
+                    continue
+                props_in = slice_request["properties_json"]
+                if isinstance(props_in, str):
+                    try:
+                        props_in = json.loads(props_in)
+                    except json.JSONDecodeError:
+                        props_in = {}
+                if not isinstance(props_in, Mapping):
+                    props_in = {}
+                iriv = props_in.get("iRiv")
+                iele = props_in.get("iEle")
+                if iriv is None or iele is None:
+                    parts = str(slice_request["external_id"]).split(":")
+                    if len(parts) == 2:
+                        try:
+                            iriv = int(parts[0])
+                            iele = int(parts[1])
+                        except (TypeError, ValueError):
+                            iriv = iele = None
+                model_match = model_id_pattern.match(slice_request["reach_segment_id"])
+                model_id = model_match.group("model") if model_match else slice_request["reach_segment_id"]
+                segment_river_id = f"{model_id}_seg_{iriv}_{iele}"
+                if like_pattern is not None:
+                    haystack = segment_river_id.lower()
+                    if normalized_search.lower() not in haystack:
+                        continue
+                segment_order = props_in.get("segment_order")
+                try:
+                    segment_order_int = (
+                        int(segment_order) if segment_order is not None else None
+                    )
+                except (TypeError, ValueError):
+                    segment_order_int = None
+                if stream_order_min is not None and (
+                    segment_order_int is None or segment_order_int < stream_order_min
+                ):
+                    continue
+                if stream_order_max is not None and (
+                    segment_order_int is None or segment_order_int > stream_order_max
+                ):
+                    continue
+                segment_length = props_in.get("length_m") if isinstance(props_in, Mapping) else None
+                try:
+                    segment_length_value = (
+                        None if segment_length is None else float(segment_length)
+                    )
+                except (TypeError, ValueError):
+                    segment_length_value = None
+                slice_features.append(
+                    {
+                        "type": "Feature",
+                        "id": segment_river_id,
+                        "geometry": geometry_row["geometry"],
+                        "properties": {
+                            "segment_id": segment_river_id,
+                            "river_segment_id": segment_river_id,
+                            "basin_version_id": str(slice_request["basin_version_id"]),
+                            "river_network_version_id": str(
+                                slice_request["river_network_version_id"]
+                            ),
+                            "name": segment_river_id,
+                            "stream_order": segment_order_int
+                            if segment_order_int is not None
+                            else 1,
+                            "segment_order": segment_order_int,
+                            "length_m": segment_length_value,
+                            "iRiv": iriv,
+                            "iEle": iele,
+                            "reach_segment_id": str(slice_request["reach_segment_id"]),
+                        },
+                    }
+                )
+
+        # Total is the segment count irrespective of pagination; feature_total
+        # is the number of features after pagination is applied. limit/offset
+        # are applied in Python because we already had to materialise the
+        # full list to do per-reach grouping + fraction computation.
+        total = len(slice_features)
+        paged = slice_features[offset : offset + limit]
+        feature_total = len(paged)
+        collection: dict[str, Any] = {
+            "type": "FeatureCollection",
+            "features": paged,
             "total": total,
             "feature_total": feature_total,
             "limit": limit,

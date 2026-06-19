@@ -27,6 +27,7 @@ from .basins_geometry import (
     _merge_polyline_parts,
     gap_split_multilinestring_wkt,
     parse_basins_geometry,
+    parse_seg_shp_crosswalk,
     safe_basins_file_sha256,
     trusted_basins_root,
 )
@@ -262,6 +263,13 @@ def _import_prepared_sources(
                 "river_network_version": _ensure_river_network(cursor, sources),
                 "river_segment": _ensure_river_segments(cursor, sources),
                 "output_river_segment": _ensure_output_river_segments(cursor, sources),
+                # FK-order critical: crosswalk rows reference river_segment_id;
+                # this call MUST come after _ensure_river_segments inside the
+                # same per-basin transaction so the FK at
+                # db/migrations/000004_core.sql:64-65 is satisfied at every
+                # statement boundary (spec "river_segment is written before
+                # river_segment_crosswalk within the same transaction").
+                "river_segment_crosswalk": _ensure_river_segment_crosswalk(cursor, sources),
                 "mesh_version": _ensure_mesh(cursor, sources),
                 "model_instance": _ensure_model_instance(cursor, sources),
             }
@@ -458,6 +466,15 @@ def _ensure_river_network(cursor: Any, sources: ImportSources) -> int:
 
 def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     ids = sources.ids
+    # Legacy seg-level rows from the pre-PR-2 ingestion contract (IDs of
+    # the form ``<model>_seg_*``) must be removed inside the same per-basin
+    # transaction before the new ``_reach_*`` rows insert (spec "Legacy
+    # seg-level rows are removed before reach-level rows are written").
+    # crosswalk rows referencing those legacy IDs are deleted first to
+    # respect the FK at db/migrations/000004_core.sql:64-65. If no legacy
+    # rows exist (the common case for freshly-imported basins) this is a
+    # no-op pair of statements.
+    _delete_legacy_seg_rows(cursor, ids)
     existing = _fetch_optional(
         cursor,
         """
@@ -516,14 +533,196 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
             VALUES %s
             """,
             rows,
-            # The parser emits gap-split MULTILINESTRING WKT; ST_Multi is a no-op on a
-            # MultiLineString and a safety wrap for any LineString that reaches here, so
-            # the insert always satisfies the geometry(MultiLineString, 4490) column.
+            # PR 2: the parser now emits single-part LINESTRING WKT
+            # (one row per reach from gis/river.shp). ST_Multi wraps it
+            # into a single-part MultiLineString so the
+            # geometry(MultiLineString, 4490) column type is preserved
+            # without a schema change.
             template="(%s, %s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
             page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
         )
         inserted += len(rows)
     return inserted
+
+
+def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
+    """Remove pre-PR-2 ``<model>_seg_*`` rows for this basin before reach insert.
+
+    The crosswalk table has a FOREIGN KEY on
+    ``(river_segment_id, river_network_version_id)`` referencing
+    ``core.river_segment`` (db/migrations/000004_core.sql:64-65), so the
+    delete order is strict: crosswalk children first, then the
+    ``river_segment`` parents. Both are scoped by the per-basin
+    ``river_network_version_id`` so other basins' rows stay untouched.
+    """
+
+    rnv_id = ids["river_network_version_id"]
+    model_id = ids["model_id"]
+    legacy_pattern = f"{model_id}_seg_%"
+    cursor.execute(
+        """
+        DELETE FROM core.river_segment_crosswalk
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        """,
+        (rnv_id, legacy_pattern),
+    )
+    cursor.execute(
+        """
+        DELETE FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        """,
+        (rnv_id, legacy_pattern),
+    )
+
+
+def _ensure_river_segment_crosswalk(cursor: Any, sources: ImportSources) -> int:
+    """Write ``core.river_segment_crosswalk`` rows from ``gis/seg.shp``.
+
+    Spec "Segment-to-reach crosswalk is preserved from gis/seg.shp": one
+    crosswalk row per ``seg.shp`` record, keyed by
+    ``(river_network_version_id, river_segment_id, source='basins_seg_shp')``
+    with ``external_id = "<iRiv>:<iEle>"`` and ``properties_json`` carrying
+    ``iRiv``/``iEle``/``segment_order``/``length_m``.
+
+    Idempotent re-ingest is supplied by the unique-constraint upsert
+    (``ON CONFLICT ... DO UPDATE``), matching the existing
+    ``PsycopgModelRegistryStore.create_crosswalk_entries`` behaviour. Pure
+    function up-front: the parsed crosswalk rows are built without DB I/O
+    via ``parse_seg_shp_crosswalk`` + ``_build_river_segment_crosswalk_rows``,
+    and the FK against ``core.river_segment`` is satisfied because this
+    helper always runs AFTER ``_ensure_river_segments`` inside the same
+    transaction.
+    """
+
+    try:
+        from psycopg2.extras import Json, execute_values
+    except ImportError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PSYCOPG_MISSING",
+            "psycopg2 is required for Basins registry import.",
+            model_id=sources.ids["model_id"],
+        ) from error
+    ids = sources.ids
+    crosswalk_rows = _crosswalk_rows_for_sources(sources)
+    if not crosswalk_rows:
+        return 0
+    # Idempotency: if the basin already has the exact crosswalk row count
+    # under source='basins_seg_shp', re-ingest is a no-op (matches the
+    # other _ensure_* helpers in this module and avoids inflating the
+    # already_imported row_counts response). The ON CONFLICT upsert path
+    # below would otherwise UPDATE existing rows and report a positive
+    # row_count even when nothing changed.
+    existing = _fetch_optional(
+        cursor,
+        """
+        SELECT COUNT(*) AS count
+        FROM core.river_segment_crosswalk
+        WHERE river_network_version_id = %s
+          AND source = 'basins_seg_shp'
+        """,
+        (ids["river_network_version_id"],),
+    )
+    existing_count = int(existing["count"]) if existing is not None else 0
+    if existing_count == len(crosswalk_rows):
+        return 0
+    db_rows = [
+        (
+            row["river_network_version_id"],
+            row["river_segment_id"],
+            row["source"],
+            row["external_id"],
+            Json(row["properties_json"]),
+        )
+        for row in crosswalk_rows
+    ]
+    inserted = 0
+    for chunk in _chunks(db_rows, RIVER_SEGMENT_INSERT_PAGE_SIZE):
+        execute_values(
+            cursor,
+            """
+            INSERT INTO core.river_segment_crosswalk (
+                river_network_version_id,
+                river_segment_id,
+                source,
+                external_id,
+                properties_json
+            )
+            VALUES %s
+            ON CONFLICT (river_network_version_id, river_segment_id, source)
+            DO UPDATE SET
+                external_id = EXCLUDED.external_id,
+                properties_json = EXCLUDED.properties_json
+            """,
+            chunk,
+            page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
+        )
+        inserted += len(chunk)
+    return inserted
+
+
+def _crosswalk_rows_for_sources(sources: ImportSources) -> list[dict[str, Any]]:
+    """Parse ``gis/seg.shp`` and build crosswalk rows for this basin's reaches.
+
+    Failures are raised as :class:`BasinsRegistryImportError` so the caller's
+    per-basin transaction rolls back atomically (spec "Per-basin ingest is
+    transactional"). ``BASINS_REGISTRY_CROSSWALK_REACH_MISSING`` surfaces
+    when ``seg.shp`` references a reach Index that ``river.shp`` does not
+    list -- typically a stale model package.
+    """
+
+    ids = sources.ids
+    input_dir = sources.input_dir
+    seg_shp = input_dir.path / "gis" / "seg.shp"
+    if not seg_shp.is_file():
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SEG_SHP_MISSING",
+            "Basins seg.shp is missing; crosswalk rows cannot be written.",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        )
+    try:
+        import shapefile
+    except ImportError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SHAPEFILE_DEPENDENCY_MISSING",
+            "pyshp is required for Basins seg.shp crosswalk parsing.",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        ) from error
+    try:
+        reader = shapefile.Reader(str(seg_shp))
+    except Exception as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_GIS_PARSE_FAILED",
+            f"Basins seg.shp could not be opened: {error.__class__.__name__}",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        ) from error
+    try:
+        try:
+            segments = parse_seg_shp_crosswalk(reader)
+        except BasinsGeometryError as error:
+            _raise_geometry_import_error(error, ids["model_id"])
+            raise AssertionError("unreachable") from error
+    finally:
+        reader.close()
+    reach_indices = {
+        int(segment.properties.get("iRiv"))
+        for segment in sources.geometry.river_segments
+        if segment.properties.get("iRiv") is not None
+    }
+    try:
+        return _build_river_segment_crosswalk_rows(
+            ids["model_id"],
+            ids["river_network_version_id"],
+            segments,
+            reach_indices,
+        )
+    except BasinsGeometryError as error:
+        _raise_geometry_import_error(error, ids["model_id"])
+        raise AssertionError("unreachable") from error
 
 
 def _ensure_output_river_segments(cursor: Any, sources: ImportSources) -> int:

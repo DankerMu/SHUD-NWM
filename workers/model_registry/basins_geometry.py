@@ -14,6 +14,26 @@ from pathlib import Path
 from typing import Any
 
 SHAPEFILE_REQUIRED_SUFFIXES = ("shp", "shx", "dbf", "prj")
+# PR 2 (feat-reach-geom-from-river-shp / spec D1): gis/river.shp must carry
+# the full SHUD reach attribute table verbatim. Index_1 is a known artefact
+# of rSHUD pre-processing (duplicate Index column with `_1` suffix); the
+# qhh-sample fixture README documents this and the invariant excludes it.
+RIVER_SHP_REQUIRED_DBF_FIELDS: tuple[str, ...] = (
+    "Index",
+    "Down",
+    "Type",
+    "Slope",
+    "Length",
+    "BC",
+    "Depth",
+    "BankSlope",
+    "Width",
+    "Sinuosity",
+    "Manning",
+    "Cwr",
+    "KsatH",
+    "BedThick",
+)
 SHUD_CANONICAL_SUFFIXES = {
     "cfg_para": ".cfg.para",
     "cfg_ic": ".cfg.ic",
@@ -176,6 +196,13 @@ def parse_basins_geometry(
     input_root = _coerce_trusted_root(input_dir, role="shud_input_name")
     _run_safe_open_test_hook(input_root.path, "shud_input_name", "before_parse")
     _validate_required_files_canonical(required_files, shud_input_name, input_root.path)
+    # The dedicated river.shp / seg.shp missing-file checks
+    # (BASINS_REGISTRY_RIVER_SHP_MISSING / BASINS_REGISTRY_SEG_SHP_MISSING)
+    # are surfaced inside `_crosswalk_rows_for_sources` and the river.shp
+    # parser's single-part invariant. Layer sidecar absence is still caught
+    # below by `_validated_layer_base` with the existing
+    # BASINS_REGISTRY_GIS_SIDECAR_MISSING code so canonical-path tests
+    # remain stable.
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
@@ -187,7 +214,10 @@ def parse_basins_geometry(
     seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums, gis_budget)
     domain_transform = _coordinate_transform(domain_layer)
     river_transform = _coordinate_transform(river_layer)
-    seg_transform = _coordinate_transform(seg_layer)
+    # PR 2: seg.shp is no longer a geometry source; we still validate its
+    # CRS via _coordinate_transform up-front so an unsupported projection
+    # surfaces before any DB write (the crosswalk path reads it later).
+    _coordinate_transform(seg_layer)
 
     sp_riv = _required_input_file(input_root, required_files, "sp_riv", shud_input_name)
     sp_rivseg = _required_input_file(input_root, required_files, "sp_rivseg", shud_input_name)
@@ -195,20 +225,26 @@ def parse_basins_geometry(
     sp_rivseg_header, sp_rivseg_digest = _shud_count_header(sp_rivseg, expected_checksums)
     domain_wkt = _domain_multipolygon_wkt(domain_layer, domain_transform)
 
-    river_segments = _river_segments_from_layer(seg_layer, model_id=model_id, coordinate_transform=seg_transform)
-    selected_layer = seg_layer
-    if not river_segments:
-        river_segments = _river_segments_from_layer(
-            river_layer,
-            model_id=model_id,
-            coordinate_transform=river_transform,
-        )
-        selected_layer = river_layer
+    # PR 2 (feat-reach-geom-from-river-shp): geometry source is always
+    # gis/river.shp -- one record per .sp.riv reach. The seg.shp fallback
+    # is removed; seg.shp survives only as the crosswalk source.
+    sp_riv_count = int(sp_riv_header["count"] or 0)
+    _validate_river_shp_single_part_invariant(
+        river_layer,
+        sp_riv_count=sp_riv_count,
+        required_fields=RIVER_SHP_REQUIRED_DBF_FIELDS,
+    )
+    river_segments = _river_segments_from_layer(
+        river_layer,
+        model_id=model_id,
+        coordinate_transform=river_transform,
+    )
+    selected_layer = river_layer
     if not river_segments:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_GIS_PARSE_FAILED",
-            "Basins river/seg shapefile did not contain any LineString features.",
-            path=str(seg_base.with_suffix(".shp")),
+            "Basins river shapefile did not contain any LineString features.",
+            path=str(river_base.with_suffix(".shp")),
         )
 
     evidence_counts = {
@@ -217,16 +253,18 @@ def parse_basins_geometry(
         "rivseg_segment_count": sp_rivseg_header["count"],
         "rivseg_columns": sp_rivseg_header["columns"],
     }
-    if sp_rivseg_header["count"] != len(river_segments):
+    # Reach count now drives row granularity: core.river_segment row count
+    # equals the .sp.riv reach count, not the .sp.rivseg segment count.
+    if sp_riv_count != len(river_segments):
         raise BasinsGeometryError(
-            "BASINS_REGISTRY_SEGMENT_COUNT_MISMATCH",
-            "Basins GIS segment count does not match SHUD rivseg segment evidence.",
-            path=str(sp_rivseg),
+            "BASINS_REGISTRY_REACH_COUNT_MISMATCH",
+            "Basins GIS reach count does not match SHUD .sp.riv evidence.",
+            path=str(sp_riv),
             details={
                 "model_id": model_id,
-                "gis_segment_count": len(river_segments),
-                "evidence_count": sp_rivseg_header["count"],
-                "evidence": "rivseg_segment_count",
+                "gis_reach_count": len(river_segments),
+                "evidence_count": sp_riv_count,
+                "evidence": "sp_riv_reach_count",
             },
         )
 
@@ -242,7 +280,7 @@ def parse_basins_geometry(
         ),
         river_network_source_uri=str(selected_layer.base.with_suffix(".shp")),
         segment_count=len(river_segments),
-        output_segment_count=int(sp_riv_header["count"] or 0),
+        output_segment_count=sp_riv_count,
         evidence_counts=evidence_counts,
     )
 
@@ -537,9 +575,29 @@ def _river_segments_from_layer(
     model_id: str,
     coordinate_transform: _CoordinateTransform,
 ) -> list[RiverSegmentGeometry]:
+    """Build reach-level river segments from ``gis/river.shp``.
+
+    PR 2 (feat-reach-geom-from-river-shp / spec D1): each record in
+    ``river.shp`` is one SHUD ``.sp.riv`` reach -- flow-ordered, single-part
+    by design. The parser emits one ``RiverSegmentGeometry`` per record with
+    ``river_segment_id = f"{model_id}_reach_{Index:06d}"`` and downstream
+    resolved from the ``Down`` reach Index via the same zero-padded format
+    (terminal reaches with ``Down ∈ {0, -1}`` get ``None`` plus a
+    ``terminal_reach=True`` flag on ``properties_json``).
+
+    Invariants enforced upstream by
+    :func:`_validate_river_shp_single_part_invariant`: single part per
+    record, ≥ 2 vertices per part, record count == ``.sp.riv`` reach count,
+    full set of required dbf fields present. The merging / gap-splitting
+    helpers (``_merge_polyline_parts`` / ``gap_split_multilinestring_wkt``)
+    are no longer in the river.shp path; they stay as dead code until PR 5a
+    deletes them per the change's "Deprecated cross-gap fallback paths"
+    requirement.
+    """
+
     reader = _shape_reader(layer)
+    segments: list[RiverSegmentGeometry] = []
     try:
-        pending: list[dict[str, Any]] = []
         feature_count = 0
         point_count = 0
         for record_index, shape_record in enumerate(reader.iterShapeRecords(), start=1):
@@ -553,95 +611,185 @@ def _river_segments_from_layer(
             attrs = _record_dict(shape_record)
             source_parts = [points for points in _shape_parts(shape_record.shape) if len(points) >= 2]
             point_count += sum(len(points) for points in source_parts)
-            _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
-            merged_points = _merge_polyline_parts(source_parts)
-            if len(merged_points) < 2:
-                continue
+            _check_resource_limit(
+                point_count,
+                MAX_BASINS_GIS_POINTS,
+                "points",
+                str(layer.base.with_suffix(".shp")),
+            )
+            # The single-part invariant is enforced by
+            # _validate_river_shp_single_part_invariant before this loop runs.
+            # The defensive check below would only trip if a foreign caller
+            # bypassed parse_basins_geometry; we keep it for safety.
+            if len(source_parts) != 1:
+                raise BasinsGeometryError(
+                    "BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED",
+                    "Basins river.shp record is not single-part.",
+                    path=str(layer.base.with_suffix(".shp")),
+                    details={"offending_index": record_index, "part_count": len(source_parts)},
+                )
             transformed_points = _transform_points(
-                merged_points,
+                source_parts[0],
                 coordinate_transform,
                 path=layer.base.with_suffix(".shp"),
             )
-            order = _optional_int(_pick_attr(attrs, ("segment_order", "stream_order", "order", "ord", "seg_order")))
-            segment_order = order if order is not None else len(pending) + 1
-            raw_id = _pick_attr(
-                attrs,
-                ("river_segment_id", "segment_id", "seg_id", "segid", "comid", "linkno", "id", "iriv", "iele"),
-            )
-            segment_id_base = _stable_segment_id(model_id, raw_id, segment_order)
-            downstream = _optional_text(
-                _pick_attr(
-                    attrs,
-                    ("downstream_segment_id", "downstream", "down_id", "to_segment", "toid", "dslinkno"),
+            iriv_raw = _pick_attr(attrs, ("Index",))
+            iriv = _optional_int(iriv_raw)
+            if iriv is None:
+                raise BasinsGeometryError(
+                    "BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED",
+                    "Basins river.shp record is missing a numeric Index.",
+                    path=str(layer.base.with_suffix(".shp")),
+                    details={
+                        "offending_index": record_index,
+                        "attrs": {str(k): _jsonable(v) for k, v in attrs.items()},
+                    },
                 )
+            river_segment_id = f"{model_id}_reach_{iriv:06d}"
+            down_raw = _pick_attr(attrs, ("Down",))
+            down_int = _optional_int(down_raw)
+            terminal_reach = down_int in (0, -1, None)
+            downstream_segment_id = (
+                None if terminal_reach else f"{model_id}_reach_{down_int:06d}"
             )
-            length_m = _optional_float(
-                _pick_attr(attrs, ("length_m", "length", "len_m", "shape_leng", "shapeleng"))
-            )
+            length_m = _optional_float(_pick_attr(attrs, ("Length", "length_m", "length")))
             if length_m is None:
                 length_m = _approximate_length_m(transformed_points)
-            properties = {str(key): _jsonable(value) for key, value in attrs.items()}
+            # Preserve every dbf attribute verbatim under properties_json so
+            # the SHUD reach physical parameters (Slope/Depth/BankSlope/...)
+            # round-trip through the registry for downstream consumers.
+            properties: dict[str, Any] = {str(key): _jsonable(value) for key, value in attrs.items()}
             properties.update(
                 {
                     "source_layer": layer.base.name,
                     "source_record_index": record_index,
                     "source_part_count": len(source_parts),
-                    "source_raw_segment_id": _jsonable(raw_id),
-                    "source_stable_segment_id_base": segment_id_base,
-                    "source_downstream_segment_id": _jsonable(downstream),
+                    "iRiv": iriv,
+                    "source_down_index": down_int,
+                    "terminal_reach": terminal_reach,
                     "source_crs": coordinate_transform.source_name,
                     "source_crs_projected": coordinate_transform.source_is_projected,
                     "source_projection_method": coordinate_transform.projection_method,
                 }
             )
-            pending.append(
-                {
-                    "river_segment_id_base": segment_id_base,
-                    "river_segment_id": segment_id_base,
-                    "segment_order": segment_order,
-                    "record_index": record_index,
-                    "raw_id": raw_id,
-                    "raw_downstream": downstream,
-                    "length_m": length_m,
-                    # Emit gap-split MultiLineString so a record whose source parts
-                    # are genuinely far apart renders as separate channels instead of
-                    # one line carrying a fabricated cross-gap straight bridge. A
-                    # single continuous reach is a one-part MultiLineString.
-                    "geom_wkt": gap_split_multilinestring_wkt(transformed_points),
-                    "properties": properties,
-                }
+            geom_wkt = (
+                "LINESTRING("
+                + ", ".join(_point_wkt(point) for point in transformed_points)
+                + ")"
+            )
+            segments.append(
+                RiverSegmentGeometry(
+                    river_segment_id=river_segment_id,
+                    segment_order=iriv,
+                    downstream_segment_id=downstream_segment_id,
+                    length_m=length_m,
+                    geom_wkt=geom_wkt,
+                    properties=properties,
+                )
             )
     finally:
         reader.close()
-    _deduplicate_pending_segment_ids(pending)
-    raw_to_segment_ids: dict[str, set[str]] = {}
-    for item in pending:
-        key = _raw_segment_key(item["raw_id"])
-        if key is None:
-            continue
-        raw_to_segment_ids.setdefault(key, set()).add(item["river_segment_id"])
-    raw_to_segment_id = {key: next(iter(ids)) for key, ids in raw_to_segment_ids.items() if len(ids) == 1}
-    segment_ids = {item["river_segment_id"] for item in pending}
-    segments: list[RiverSegmentGeometry] = []
-    for item in pending:
-        downstream_segment_id = _mapped_downstream_segment_id(
-            item["raw_downstream"],
-            raw_id=item["raw_id"],
-            river_segment_id=item["river_segment_id"],
-            raw_to_segment_id=raw_to_segment_id,
-            segment_ids=segment_ids,
-        )
-        segments.append(
-            RiverSegmentGeometry(
-                river_segment_id=item["river_segment_id"],
-                segment_order=item["segment_order"],
-                downstream_segment_id=downstream_segment_id,
-                length_m=item["length_m"],
-                geom_wkt=item["geom_wkt"],
-                properties=item["properties"],
-            )
-        )
     return segments
+
+
+def _validate_required_files_present(input_dir: Path | TrustedBasinsRoot) -> None:
+    """Verify river.shp + seg.shp (with sidecars) exist before any registry write.
+
+    PR 2 (spec "Required input files are validated for presence"). Missing
+    files surface as ``BASINS_REGISTRY_RIVER_SHP_MISSING`` or
+    ``BASINS_REGISTRY_SEG_SHP_MISSING`` with the basin path payload, before
+    the geometry parser opens any layer. Sidecars (.dbf/.shx) are checked
+    alongside the .shp so a half-installed package fails fast.
+    """
+
+    root = _coerce_trusted_root(input_dir, role="required_files_present").path
+    for layer_name, error_code in (
+        ("river", "BASINS_REGISTRY_RIVER_SHP_MISSING"),
+        ("seg", "BASINS_REGISTRY_SEG_SHP_MISSING"),
+    ):
+        for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
+            candidate = root / "gis" / f"{layer_name}.{suffix}"
+            if not candidate.is_file():
+                raise BasinsGeometryError(
+                    error_code,
+                    f"Basins {layer_name}.shp package file is missing: {candidate.name}",
+                    path=str(candidate),
+                    details={
+                        "layer": layer_name,
+                        "missing_sidecar": f"gis/{layer_name}.{suffix}",
+                    },
+                )
+
+
+def _validate_river_shp_single_part_invariant(
+    layer: _LayerSnapshot,
+    *,
+    sp_riv_count: int,
+    required_fields: tuple[str, ...],
+) -> None:
+    """Fail-fast invariant for the new river.shp geometry contract.
+
+    PR 2 (spec "river.shp single-part invariant is enforced"). The qhh
+    sample has 0 multi-part records by construction, and the import path
+    refuses to silently fall back to seg.shp if a future basin breaks the
+    contract. We check four things on the whole layer in one pass:
+
+    - every record is a single ``LINESTRING`` part with ≥ 2 vertices;
+    - record count equals the SHUD ``.sp.riv`` reach count (one row per reach);
+    - the dbf carries every required SHUD reach attribute
+      (``Index/Down/Type/Slope/Length/BC/Depth/BankSlope/Width/Sinuosity/Manning/Cwr/KsatH/BedThick``).
+
+    Raises ``BasinsGeometryError`` with code
+    ``BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED`` so the caller can
+    convert it to a structured per-basin failure without aborting other
+    basins in the queue.
+    """
+
+    reader = _shape_reader(layer)
+    try:
+        # Use raw field names from the reader so the missing-field check
+        # surfaces the exact dbf header the source GIS exposes. Field 0 is
+        # the pyshp deletion-flag pseudo-field; skip it.
+        actual_fields = {str(field[0]) for field in reader.fields[1:]}
+        missing_fields = [name for name in required_fields if name not in actual_fields]
+        if missing_fields:
+            raise BasinsGeometryError(
+                "BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED",
+                "Basins river.shp is missing one or more required dbf fields.",
+                path=str(layer.base.with_suffix(".shp")),
+                details={
+                    "missing_fields": missing_fields,
+                    "actual_fields": sorted(actual_fields),
+                },
+            )
+        record_count = 0
+        for record_index, shape_record in enumerate(reader.iterShapeRecords(), start=1):
+            record_count += 1
+            shape = shape_record.shape
+            parts = _shape_parts(shape)
+            valid_parts = [points for points in parts if len(points) >= 2]
+            if len(parts) != 1 or len(valid_parts) != 1:
+                raise BasinsGeometryError(
+                    "BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED",
+                    "Basins river.shp record is not a single-part LineString.",
+                    path=str(layer.base.with_suffix(".shp")),
+                    details={
+                        "offending_index": record_index,
+                        "part_count": len(parts),
+                    },
+                )
+    finally:
+        reader.close()
+    if record_count != sp_riv_count:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED",
+            "Basins river.shp record count does not match .sp.riv reach count.",
+            path=str(layer.base.with_suffix(".shp")),
+            details={
+                "river_shp_record_count": record_count,
+                "sp_riv_count": sp_riv_count,
+            },
+        )
 
 
 def parse_seg_shp_crosswalk(layer: Any) -> list[CrosswalkRow]:
