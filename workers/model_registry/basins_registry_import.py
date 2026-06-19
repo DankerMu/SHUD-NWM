@@ -257,6 +257,17 @@ def _import_prepared_sources(
         )
     try:
         with _transaction(database_url) as cursor:
+            # Legacy purge MUST run before _ensure_basin_version /
+            # _ensure_river_network. Pre-PR-2 imports left
+            # ``<model>_seg_*`` rows under a basin_version + RNV whose
+            # ``segment_count`` + ``checksum`` were derived from seg.shp;
+            # PR 2 derives both from river.shp and the values diverge,
+            # so leaving the legacy parent rows in place would trip
+            # ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version``
+            # before the seg-row delete even runs. When no legacy rows
+            # exist (the common path: fresh import or PR 2 → PR 2
+            # re-ingest) this is a no-op probe.
+            _delete_legacy_seg_rows(cursor, sources.ids)
             row_counts = {
                 "basin": _ensure_basin(cursor, sources),
                 "basin_version": _ensure_basin_version(cursor, sources),
@@ -467,14 +478,11 @@ def _ensure_river_network(cursor: Any, sources: ImportSources) -> int:
 def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     ids = sources.ids
     # Legacy seg-level rows from the pre-PR-2 ingestion contract (IDs of
-    # the form ``<model>_seg_*``) must be removed inside the same per-basin
-    # transaction before the new ``_reach_*`` rows insert (spec "Legacy
-    # seg-level rows are removed before reach-level rows are written").
-    # crosswalk rows referencing those legacy IDs are deleted first to
-    # respect the FK at db/migrations/000004_core.sql:64-65. If no legacy
-    # rows exist (the common case for freshly-imported basins) this is a
-    # no-op pair of statements.
-    _delete_legacy_seg_rows(cursor, ids)
+    # the form ``<model>_seg_*``) are removed by ``_delete_legacy_seg_rows``
+    # at the top of the per-basin transaction (see ``_import_prepared_sources``).
+    # The purge MUST run before ``_ensure_basin_version`` /
+    # ``_ensure_river_network`` so the new PR-2 checksums can be written
+    # via the INSERT path; running it here would be too late.
     existing = _fetch_optional(
         cursor,
         """
@@ -554,11 +562,37 @@ def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
     delete order is strict: crosswalk children first, then the
     ``river_segment`` parents. Both are scoped by the per-basin
     ``river_network_version_id`` so other basins' rows stay untouched.
+
+    When legacy rows are actually present we also drop the sibling
+    ``river_network_version`` (and its ``basin_version`` parent, when no
+    other RNV references it) so the subsequent ``_ensure_river_network`` /
+    ``_ensure_basin_version`` calls take the INSERT path and write the new
+    PR-2 reach-level ``segment_count`` + ``river_network_checksum``. Pre-PR-2
+    state had ``segment_count = seg.shp record count`` and a checksum derived
+    from seg.shp; PR 2 derives both from ``river.shp`` and the counts/digests
+    no longer match, so leaving the legacy parent rows in place would trigger
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version`` /
+    ``river_network_version``. Freshly-imported basins with no legacy rows
+    short-circuit out of this branch and idempotent re-ingest (PR 2 → PR 2)
+    keeps its existing ``_ensure_*`` no-op path.
     """
 
     rnv_id = ids["river_network_version_id"]
     model_id = ids["model_id"]
     legacy_pattern = f"{model_id}_seg_%"
+    legacy_present = _fetch_optional(
+        cursor,
+        """
+        SELECT 1 AS present
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        LIMIT 1
+        """,
+        (rnv_id, legacy_pattern),
+    )
+    if legacy_present is None:
+        return
     cursor.execute(
         """
         DELETE FROM core.river_segment_crosswalk
@@ -575,6 +609,30 @@ def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
         """,
         (rnv_id, legacy_pattern),
     )
+    # Capture the basin_version parent before we drop the RNV row -- the
+    # follow-up basin_version DELETE needs it.
+    rnv_row = _fetch_optional(
+        cursor,
+        "SELECT basin_version_id FROM core.river_network_version WHERE river_network_version_id = %s",
+        (rnv_id,),
+    )
+    basin_version_id = rnv_row["basin_version_id"] if rnv_row is not None else None
+    cursor.execute(
+        "DELETE FROM core.river_network_version WHERE river_network_version_id = %s",
+        (rnv_id,),
+    )
+    if basin_version_id is not None:
+        cursor.execute(
+            """
+            DELETE FROM core.basin_version
+            WHERE basin_version_id = %s
+              AND NOT EXISTS (
+                SELECT 1 FROM core.river_network_version
+                WHERE basin_version_id = %s
+              )
+            """,
+            (basin_version_id, basin_version_id),
+        )
 
 
 def _ensure_river_segment_crosswalk(cursor: Any, sources: ImportSources) -> int:
@@ -1367,8 +1425,38 @@ def _river_segment_digest_row(
         "downstream_segment_id": None if downstream_segment_id is None else str(downstream_segment_id),
         "length_m": None if length_m is None else float(length_m),
         "geom_wkt": _normalize_wkt(str(geom_wkt or "")),
-        "properties": properties,
+        "properties": _normalize_properties_for_digest(properties),
     }
+
+
+def _normalize_properties_for_digest(properties: dict[str, Any]) -> dict[str, Any]:
+    """Stabilise properties for digest hashing across PG JSONB round-trips.
+
+    PR 2 carries SHUD reach physical parameters from ``gis/river.shp`` (Slope,
+    Length, BankSlope, Width, ...) into ``properties_json``. PostgreSQL JSONB
+    stores numbers as ``numeric`` and re-emits them in canonical form, which
+    psycopg2 then decodes with ``json.loads``. The result is that a Python
+    ``float(5550.0)`` written into JSONB may come back as ``int(5550)``
+    (PG strips trailing zeros from the JSON text representation). Without
+    normalisation the SHA-256 of the incoming dict vs the re-read dict
+    diverges, breaking idempotent re-import (``BASINS_REGISTRY_CHECKSUM_CONFLICT``
+    on ``river_segment``). We coerce every numeric leaf to ``float`` so both
+    sides hash identically; booleans are preserved (``bool`` is a subclass of
+    ``int`` in Python so we filter them first).
+    """
+
+    def _coerce(value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, dict):
+            return {str(k): _coerce(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_coerce(item) for item in value]
+        return value
+
+    return {str(key): _coerce(value) for key, value in properties.items()}
 
 
 def _normalize_wkt(value: str) -> str:

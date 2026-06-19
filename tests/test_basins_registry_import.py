@@ -28,8 +28,10 @@ from workers.model_registry.basins_registry_import import (
     _backfill_output_segment_geometry,
     _build_river_segment_crosswalk_rows,
     _ensure_output_river_segments,
+    _normalize_properties_for_digest,
     _output_river_segment_rows,
     _resource_profile,
+    _river_segment_digest_row,
     import_basins_registry,
     prepare_basins_import_sources,
 )
@@ -3420,6 +3422,77 @@ def test_segment_slice_river_segment_id_preserves_frontend_contract(
         # MapLibre's promoteId path also reads feature.id; the store
         # populates that for the slice path.
         assert feature.get("id") == rid
+
+
+def test_normalize_properties_for_digest_collapses_pg_numeric_roundtrip() -> None:
+    """PG JSONB stores numbers as ``numeric`` and emits canonical text; a
+    Python ``float(5550.0)`` written into JSONB may come back as
+    ``int(5550)`` once psycopg2 ``json.loads`` decodes the text. The digest
+    normaliser must produce equal output for both forms so the SHA-256 of
+    incoming vs re-read ``properties_json`` stays stable across re-ingest."""
+
+    incoming = {
+        "Index": 1,
+        "Down": 2,
+        "Length": 5550.0,
+        "KsatH": 1e-05,
+        "Slope": 0.01,
+        "BedThick": 1.0,
+        "terminal_reach": False,
+        "source_layer": "river",
+    }
+    # Simulated post-PG-JSONB read: psycopg2 -> json.loads -> ints where the
+    # original Python had floats and an integer where JSON text dropped the
+    # trailing zero (e.g. ``5550`` instead of ``5550.0``).
+    after_pg = {
+        "Index": 1,
+        "Down": 2,
+        "Length": 5550,
+        "KsatH": 1e-05,
+        "Slope": 0.01,
+        "BedThick": 1,
+        "terminal_reach": False,
+        "source_layer": "river",
+    }
+    incoming_norm = _normalize_properties_for_digest(incoming)
+    after_pg_norm = _normalize_properties_for_digest(after_pg)
+    assert incoming_norm == after_pg_norm
+    # Booleans must survive as ``bool`` rather than be collapsed to 0.0/1.0.
+    assert isinstance(incoming_norm["terminal_reach"], bool)
+    # Strings round-trip untouched.
+    assert incoming_norm["source_layer"] == "river"
+    # Stable JSON serialisation -> same SHA-256.
+    incoming_json = json.dumps(incoming_norm, sort_keys=True, separators=(",", ":"))
+    after_pg_json = json.dumps(after_pg_norm, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(incoming_json.encode("utf-8")).hexdigest() == hashlib.sha256(
+        after_pg_json.encode("utf-8")
+    ).hexdigest()
+
+
+def test_river_segment_digest_row_stable_across_pg_numeric_roundtrip() -> None:
+    """End-to-end digest row stability: building the digest row from the
+    incoming Python form and from the simulated PG-roundtrip form must
+    produce identical dicts (and therefore identical hashes)."""
+
+    incoming_props = {"Length": 5550.0, "Slope": 0.01, "iRiv": 1, "terminal_reach": False}
+    pg_props = {"Length": 5550, "Slope": 0.01, "iRiv": 1, "terminal_reach": False}
+    row_a = _river_segment_digest_row(
+        river_segment_id="m_reach_000001",
+        segment_order=1,
+        downstream_segment_id="m_reach_000002",
+        length_m=5550.0,
+        geom_wkt="LINESTRING(0 0, 1 1)",
+        properties=incoming_props,
+    )
+    row_b = _river_segment_digest_row(
+        river_segment_id="m_reach_000001",
+        segment_order=1,
+        downstream_segment_id="m_reach_000002",
+        length_m=5550.0,
+        geom_wkt="LINESTRING(0 0, 1 1)",
+        properties=pg_props,
+    )
+    assert row_a == row_b
 
 
 def test_segment_slice_length_m_none_uses_equal_partition(tmp_path: Path) -> None:
