@@ -91,7 +91,7 @@ def reingest_basin(
             basin_slug=basin_slug,
             model_id=model_id,
             path=error.path,
-            details=error.details,
+            details=getattr(error, "details", None),
         ) from error
 
     filtered_inventory = _filter_inventory_to_basin(inventory, basin_slug, model_id)
@@ -114,7 +114,7 @@ def reingest_basin(
             basin_slug=basin_slug,
             model_id=model_id,
             path=error.path,
-            details=error.details,
+            details=getattr(error, "details", None),
         ) from error
 
     import_receipt_path = work_dir_path / f"{basin_slug}-import.json"
