@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -257,38 +258,14 @@ def _import_prepared_sources(
         )
     try:
         with _transaction(database_url) as cursor:
-            # Legacy purge MUST run before _ensure_basin_version /
-            # _ensure_river_network. Pre-PR-2 imports left
-            # ``<model>_seg_*`` rows under a basin_version + RNV whose
-            # ``segment_count`` + ``checksum`` were derived from seg.shp;
-            # PR 2 derives both from river.shp and the values diverge,
-            # so leaving the legacy parent rows in place would trip
-            # ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version``
-            # before the seg-row delete even runs. When no legacy rows
-            # exist (the common path: fresh import or PR 2 → PR 2
-            # re-ingest) this is a no-op probe.
-            _delete_legacy_seg_rows(cursor, sources.ids)
-            row_counts = {
-                "basin": _ensure_basin(cursor, sources),
-                "basin_version": _ensure_basin_version(cursor, sources),
-                "river_network_version": _ensure_river_network(cursor, sources),
-                "river_segment": _ensure_river_segments(cursor, sources),
-                "output_river_segment": _ensure_output_river_segments(cursor, sources),
-                # FK-order critical: crosswalk rows reference river_segment_id;
-                # this call MUST come after _ensure_river_segments inside the
-                # same per-basin transaction so the FK at
-                # db/migrations/000004_core.sql:64-65 is satisfied at every
-                # statement boundary (spec "river_segment is written before
-                # river_segment_crosswalk within the same transaction").
-                "river_segment_crosswalk": _ensure_river_segment_crosswalk(cursor, sources),
-                "mesh_version": _ensure_mesh(cursor, sources),
-                "model_instance": _ensure_model_instance(cursor, sources),
-            }
-            # NOTE: output-river reach rows are left NULL-geom here on purpose --
-            # display geometry is a separate concern (see _ensure_output_river_segments).
-            # The seeding orchestrators stitch it on after import:
-            # qhh -> qhh_production_bootstrap, generic -> node27 autopipe
-            # (_backfill_output_segment_geometry, the single shared SQL).
+            row_counts = import_basin_into_registry_core(cursor, sources)
+            # NOTE: output-river reach rows are left NULL-geom by
+            # ``_ensure_output_river_segments`` on purpose -- display geometry
+            # is a separate concern from the row identities the verifier/parser
+            # need. The seeding orchestrators stitch it on after import:
+            # qhh -> qhh_production_bootstrap (inside this same transaction
+            # via _backfill_output_segment_geometry), generic -> node27
+            # autopipe (same shared SQL helper).
     except BasinsRegistryImportError:
         raise
     except Exception as error:
@@ -318,6 +295,92 @@ def _import_prepared_sources(
         "package_checksum": sources.manifest["package_checksum"],
         "auth_policy_decision": decision.to_dict(),
     }
+
+
+def import_basin_into_registry_core(
+    cursor: Any,
+    sources: ImportSources,
+    *,
+    seed_output_river_segments: bool = True,
+    backfill_output_segment_geometry: bool = True,
+) -> dict[str, int]:
+    """Single source of truth for the PR 2 per-basin write sequence.
+
+    The order is fixed to satisfy ``core`` foreign keys and to keep Path C's
+    ``core.river_segment_crosswalk`` populated for every importer that touches
+    the registry core (generic registry CLI, QHH production bootstrap, future
+    basins). It must run inside an already-opened transaction so the per-basin
+    atomicity guarantee is preserved by the caller (the existing
+    ``with _transaction(database_url) as cursor`` block in
+    ``_import_prepared_sources`` and the equivalent
+    ``with _transaction(database_url) as cursor`` block in
+    ``_bootstrap_database`` for QHH).
+
+    Sequence rationale:
+
+    * ``_delete_legacy_seg_rows`` MUST run first: pre-PR-2 imports left
+      ``<model>_seg_*`` rows under ``basin_version`` + ``river_network_version``
+      parents whose ``segment_count`` / ``checksum`` were derived from
+      ``gis/seg.shp``. PR 2 derives both from ``gis/river.shp`` and the values
+      diverge, so leaving the legacy parent metadata in place would trip
+      ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version`` /
+      ``river_network_version`` before any segment-level work could run.
+      Freshly bootstrapped basins (no legacy rows) short-circuit out of the
+      helper, and idempotent PR 2 -> PR 2 re-ingest still takes the existing
+      ``_ensure_*`` no-op path.
+    * ``_ensure_river_segment_crosswalk`` MUST run after
+      ``_ensure_river_segments``: crosswalk rows reference
+      ``(river_segment_id, river_network_version_id)`` via a FK declared at
+      ``db/migrations/000004_core.sql:64-65``.
+    * ``_backfill_output_segment_geometry`` runs last so the
+      ``shud_output_river='true'`` rows seeded by
+      ``_ensure_output_river_segments`` with NULL geom get their display
+      LineString copied off the PR 2 reach-level
+      ``core.river_segment.geom`` (matched on ``iRiv`` -> ``shud_riv_index``).
+
+    The QHH production bootstrap owns its own per-row seeding for the SHUD
+    output river layer (``_seed_output_segment_rows`` writes QHH-specific
+    ``properties_json`` keys not present in the generic registry payload, then
+    its own ``_backfill_output_segment_geometry`` call records provenance) and
+    cannot share the generic ``_ensure_output_river_segments`` digest contract
+    -- the two write the same ``shud_riv_*`` row identities with divergent
+    properties_json, so a second QHH bootstrap would otherwise trip
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``output_river_segment``. The
+    ``seed_output_river_segments`` / ``backfill_output_segment_geometry``
+    toggles let the QHH path delegate the registry-core write while keeping
+    its bespoke output seeding intact.
+    """
+
+    legacy_purged = _delete_legacy_seg_rows(cursor, sources.ids)
+    if legacy_purged:
+        # See ``_refresh_parent_version_materialization`` for the FK-safety
+        # rationale: pre-PR-2 ``basin_version`` / ``river_network_version``
+        # metadata is stale (counts + checksums derived from seg.shp), so the
+        # follow-up ``_ensure_*`` idempotency checks would raise
+        # CHECKSUM_CONFLICT. We refresh in place because DELETE on those
+        # parents would violate the FK from ``core.model_instance`` /
+        # ``core.mesh_version``.
+        _refresh_parent_version_materialization(cursor, sources)
+    row_counts: dict[str, int] = {
+        "basin": _ensure_basin(cursor, sources),
+        "basin_version": _ensure_basin_version(cursor, sources),
+        "river_network_version": _ensure_river_network(cursor, sources),
+        "river_segment": _ensure_river_segments(cursor, sources),
+    }
+    if seed_output_river_segments:
+        row_counts["output_river_segment"] = _ensure_output_river_segments(cursor, sources)
+    # FK-order critical: see helper docstring.
+    row_counts["river_segment_crosswalk"] = _ensure_river_segment_crosswalk(cursor, sources)
+    row_counts["mesh_version"] = _ensure_mesh(cursor, sources)
+    row_counts["model_instance"] = _ensure_model_instance(cursor, sources)
+    if backfill_output_segment_geometry:
+        _backfill_output_segment_geometry(
+            cursor,
+            sources.ids["river_network_version_id"],
+            only_missing=True,
+            record_geometry_source=True,
+        )
+    return row_counts
 
 
 def _require_import_policy(
@@ -553,7 +616,7 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     return inserted
 
 
-def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
+def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> bool:
     """Remove pre-PR-2 ``<model>_seg_*`` rows for this basin before reach insert.
 
     The crosswalk table has a FOREIGN KEY on
@@ -563,18 +626,24 @@ def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
     ``river_segment`` parents. Both are scoped by the per-basin
     ``river_network_version_id`` so other basins' rows stay untouched.
 
-    When legacy rows are actually present we also drop the sibling
-    ``river_network_version`` (and its ``basin_version`` parent, when no
-    other RNV references it) so the subsequent ``_ensure_river_network`` /
-    ``_ensure_basin_version`` calls take the INSERT path and write the new
-    PR-2 reach-level ``segment_count`` + ``river_network_checksum``. Pre-PR-2
-    state had ``segment_count = seg.shp record count`` and a checksum derived
-    from seg.shp; PR 2 derives both from ``river.shp`` and the counts/digests
-    no longer match, so leaving the legacy parent rows in place would trigger
-    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version`` /
-    ``river_network_version``. Freshly-imported basins with no legacy rows
-    short-circuit out of this branch and idempotent re-ingest (PR 2 → PR 2)
-    keeps its existing ``_ensure_*`` no-op path.
+    When legacy rows are actually present we also refresh the sibling
+    ``river_network_version`` / ``basin_version`` metadata
+    (``segment_count`` / ``source_uri`` / ``checksum``) in place so the
+    subsequent ``_ensure_river_network`` / ``_ensure_basin_version`` calls see
+    the new PR-2 reach-level values and take their idempotent no-op path
+    instead of raising ``BASINS_REGISTRY_CHECKSUM_CONFLICT``. Pre-PR-2 state
+    had ``segment_count = seg.shp record count`` and a checksum derived from
+    seg.shp; PR 2 derives both from ``river.shp`` and the counts/digests no
+    longer match.
+
+    We refresh rather than DELETE the parent rows because in production
+    ``core.model_instance`` and ``core.mesh_version`` FK-reference
+    ``core.basin_version`` / ``core.river_network_version`` without
+    ``ON DELETE CASCADE`` (see ``db/migrations/000004_core.sql``): a DELETE
+    would violate those FKs as soon as the basin has any registered models.
+    Freshly-imported basins with no legacy rows short-circuit out of this
+    branch and idempotent re-ingest (PR 2 -> PR 2) keeps its existing
+    ``_ensure_*`` no-op path.
     """
 
     rnv_id = ids["river_network_version_id"]
@@ -592,7 +661,7 @@ def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
         (rnv_id, legacy_pattern),
     )
     if legacy_present is None:
-        return
+        return False
     cursor.execute(
         """
         DELETE FROM core.river_segment_crosswalk
@@ -609,29 +678,61 @@ def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> None:
         """,
         (rnv_id, legacy_pattern),
     )
-    # Capture the basin_version parent before we drop the RNV row -- the
-    # follow-up basin_version DELETE needs it.
-    rnv_row = _fetch_optional(
+    return True
+
+
+def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources) -> None:
+    """Refresh ``basin_version`` / ``river_network_version`` metadata in place
+    so the subsequent ``_ensure_*`` idempotency checks see the PR 2 reach-level
+    counts/checksums and take their no-op path instead of raising
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` against stale seg.shp-derived values.
+
+    Called only when ``_delete_legacy_seg_rows`` actually purged rows (i.e.
+    this basin is on the pre-PR-2 contract). Fresh basins never reach this
+    branch; idempotent PR 2 -> PR 2 re-ingest is unaffected because the
+    legacy probe returns no rows.
+    """
+
+    ids = sources.ids
+    rnv_present = _fetch_optional(
         cursor,
-        "SELECT basin_version_id FROM core.river_network_version WHERE river_network_version_id = %s",
-        (rnv_id,),
+        "SELECT 1 AS present FROM core.river_network_version WHERE river_network_version_id = %s",
+        (ids["river_network_version_id"],),
     )
-    basin_version_id = rnv_row["basin_version_id"] if rnv_row is not None else None
-    cursor.execute(
-        "DELETE FROM core.river_network_version WHERE river_network_version_id = %s",
-        (rnv_id,),
-    )
-    if basin_version_id is not None:
+    if rnv_present is not None:
         cursor.execute(
             """
-            DELETE FROM core.basin_version
-            WHERE basin_version_id = %s
-              AND NOT EXISTS (
-                SELECT 1 FROM core.river_network_version
-                WHERE basin_version_id = %s
-              )
+            UPDATE core.river_network_version
+            SET segment_count = %s,
+                source_uri = %s,
+                checksum = %s
+            WHERE river_network_version_id = %s
             """,
-            (basin_version_id, basin_version_id),
+            (
+                sources.geometry.segment_count,
+                sources.geometry.river_network_source_uri,
+                sources.geometry.river_network_checksum,
+                ids["river_network_version_id"],
+            ),
+        )
+    basin_version_present = _fetch_optional(
+        cursor,
+        "SELECT 1 AS present FROM core.basin_version WHERE basin_version_id = %s",
+        (ids["basin_version_id"],),
+    )
+    if basin_version_present is not None:
+        cursor.execute(
+            """
+            UPDATE core.basin_version
+            SET source_uri = %s,
+                checksum = %s
+            WHERE basin_version_id = %s
+            """,
+            (
+                sources.geometry.domain_source_uri,
+                sources.geometry.domain_checksum,
+                ids["basin_version_id"],
+            ),
         )
 
 
@@ -708,9 +809,9 @@ def _ensure_river_segment_crosswalk(cursor: Any, sources: ImportSources) -> int:
                 properties_json
             )
             VALUES %s
-            ON CONFLICT (river_network_version_id, river_segment_id, source)
+            ON CONFLICT (river_network_version_id, source, external_id)
             DO UPDATE SET
-                external_id = EXCLUDED.external_id,
+                river_segment_id = EXCLUDED.river_segment_id,
                 properties_json = EXCLUDED.properties_json
             """,
             chunk,
@@ -1419,12 +1520,24 @@ def _river_segment_digest_row(
     geom_wkt: Any,
     properties: dict[str, Any],
 ) -> dict[str, Any]:
+    # PR 2 (feat-reach-geom-from-river-shp) writes each reach as a
+    # single-part LineString WKT, but
+    # ``INSERT ... ST_Multi(ST_GeomFromText(...))`` (see ``_ensure_river_segments``)
+    # wraps it into a single-part MultiLineString to satisfy the
+    # ``geometry(MultiLineString, 4490)`` column type. The DB round-trip therefore
+    # returns ``MULTILINESTRING((...))`` while the incoming side still carries
+    # ``LINESTRING(...)``. Hashing the raw WKT verbatim would make the two sides
+    # diverge and break the ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` idempotency
+    # guard on every re-ingest. Canonicalising to the bare coordinate sequence
+    # (numerics normalised via ``format(x, ".12g")``, ``-0`` collapsed to ``0``)
+    # makes both shapes hash identically while still flagging genuine geometry
+    # drift.
     return {
         "river_segment_id": str(river_segment_id),
         "segment_order": None if segment_order is None else int(segment_order),
         "downstream_segment_id": None if downstream_segment_id is None else str(downstream_segment_id),
         "length_m": None if length_m is None else float(length_m),
-        "geom_wkt": _normalize_wkt(str(geom_wkt or "")),
+        "geometry": _canonical_singlepart_line_coordinates(str(geom_wkt or "")),
         "properties": _normalize_properties_for_digest(properties),
     }
 
@@ -1462,6 +1575,54 @@ def _normalize_properties_for_digest(properties: dict[str, Any]) -> dict[str, An
 def _normalize_wkt(value: str) -> str:
     compact_commas = re.sub(r"\s*,\s*", ",", value.strip())
     return re.sub(r"\s+", " ", compact_commas)
+
+
+def _canonical_singlepart_line_coordinates(value: str) -> list[list[str]]:
+    """Normalize a single-part linestring WKT into a canonical coordinate list.
+
+    Both ``LINESTRING(...)`` and single-part ``MULTILINESTRING((...))`` collapse
+    to the same coordinate sequence so the incoming parser form (LineString)
+    and the PostgreSQL/PostGIS round-tripped storage form (MultiLineString,
+    written via ``ST_Multi(ST_GeomFromText(...))``) hash to the same digest.
+
+    Numeric tokens are normalised via ``format(x, ".12g")`` so equivalent text
+    representations (``100`` / ``100.0`` / ``1e2``) produce identical output.
+    Negative zero is collapsed to positive zero.
+
+    Raises ``ValueError`` on a multi-part ``MULTILINESTRING``: the PR 2
+    ``gis/river.shp`` parser contract guarantees a single-part reach geometry,
+    so multi-part inputs are an invariant violation and must NOT be silently
+    folded into one canonical key.
+    """
+
+    text = _normalize_wkt(value)
+    line_match = re.fullmatch(r"LINESTRING\s*\((.*)\)", text, flags=re.IGNORECASE)
+    multi_match = re.fullmatch(r"MULTILINESTRING\s*\(\s*\((.*)\)\s*\)", text, flags=re.IGNORECASE)
+    if line_match is not None:
+        body = line_match.group(1)
+    elif multi_match is not None:
+        body = multi_match.group(1)
+        if re.search(r"\)\s*,\s*\(", body):
+            raise ValueError("expected a single-part MultiLineString")
+    else:
+        raise ValueError(f"unsupported river geometry WKT: {text[:64]}")
+    coordinates: list[list[str]] = []
+    for raw_point in body.split(","):
+        ordinates = raw_point.split()
+        if len(ordinates) != 2:
+            raise ValueError("expected a two-dimensional coordinate")
+        point: list[str] = []
+        for token in ordinates:
+            number = float(token)
+            if not math.isfinite(number):
+                raise ValueError("non-finite coordinate")
+            if number == 0:
+                number = 0.0  # collapse -0 to +0
+            point.append(format(number, ".12g"))
+        coordinates.append(point)
+    if len(coordinates) < 2:
+        raise ValueError("river geometry must contain at least two points")
+    return coordinates
 
 
 def _find_inventory_model(inventory: dict[str, Any], model_id: str) -> dict[str, Any]:

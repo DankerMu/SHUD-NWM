@@ -1788,8 +1788,9 @@ class PsycopgModelRegistryStore:
                     properties_json
                 )
                 VALUES %s
-                ON CONFLICT (river_network_version_id, river_segment_id, source)
-                DO UPDATE SET external_id = EXCLUDED.external_id, properties_json = EXCLUDED.properties_json
+                ON CONFLICT (river_network_version_id, source, external_id)
+                DO UPDATE SET river_segment_id = EXCLUDED.river_segment_id,
+                              properties_json = EXCLUDED.properties_json
                 RETURNING river_network_version_id, river_segment_id, source, external_id, properties_json
                 """,
                 rows,

@@ -42,6 +42,7 @@ EXPECTED_MIGRATIONS = [
     "000036_run_product_quality_explicit_source.sql",
     "000037_river_segment_multilinestring.sql",
     "000038_direct_grid_interp_weight_constraints.sql",
+    "000039_crosswalk_external_identity.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

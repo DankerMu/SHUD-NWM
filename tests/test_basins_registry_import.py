@@ -27,6 +27,7 @@ from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
     _backfill_output_segment_geometry,
     _build_river_segment_crosswalk_rows,
+    _canonical_singlepart_line_coordinates,
     _ensure_output_river_segments,
     _normalize_properties_for_digest,
     _output_river_segment_rows,
@@ -3493,6 +3494,57 @@ def test_river_segment_digest_row_stable_across_pg_numeric_roundtrip() -> None:
         properties=pg_props,
     )
     assert row_a == row_b
+
+
+def test_river_segment_digest_collapses_postgis_storage_shape() -> None:
+    """``LINESTRING(...)`` (parser emit) and single-part ``MULTILINESTRING((...))``
+    (PostGIS round-trip after ``ST_Multi(ST_GeomFromText(...))``) must produce
+    identical digest rows. This is the direct fix for the
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` storm that PR 2 hit on re-ingest."""
+
+    common: dict[str, Any] = dict(
+        river_segment_id="m_reach_000001",
+        segment_order=1,
+        downstream_segment_id=None,
+        length_m=100.0,
+        properties={"Index": 1, "Length": 100.0},
+    )
+    incoming = _river_segment_digest_row(
+        **common,
+        geom_wkt="LINESTRING(100 30,100.05 30.05)",
+    )
+    stored = _river_segment_digest_row(
+        **common,
+        geom_wkt="MULTILINESTRING((100 30,100.05 30.05))",
+    )
+    assert incoming == stored
+
+
+def test_canonical_geometry_collapses_numeric_text_variants() -> None:
+    """``100`` / ``100.0`` / ``1e2`` all canonicalize to the same coordinate
+    string so a serialiser quirk on either side cannot drift the digest."""
+
+    assert _canonical_singlepart_line_coordinates(
+        "LINESTRING(100 30,200 40)"
+    ) == _canonical_singlepart_line_coordinates("LINESTRING(100.0 30.0,2e2 40.0)")
+
+
+def test_canonical_geometry_rejects_real_multipart() -> None:
+    """Genuine multi-part ``MULTILINESTRING`` MUST NOT be silently folded.
+    PR 2's ``gis/river.shp`` parser guarantees a single-part reach geometry;
+    a multi-part input is an invariant violation that needs to surface."""
+
+    with pytest.raises(ValueError, match="single-part"):
+        _canonical_singlepart_line_coordinates("MULTILINESTRING((0 0,1 1),(2 2,3 3))")
+
+
+def test_canonical_geometry_collapses_negative_zero() -> None:
+    """``-0`` collapses to ``+0`` so an IEEE-754 sign quirk cannot drift the
+    digest between Python and PostGIS round-trips."""
+
+    assert _canonical_singlepart_line_coordinates(
+        "LINESTRING(-0 0,1 1)"
+    ) == _canonical_singlepart_line_coordinates("LINESTRING(0 0,1 1)")
 
 
 def test_segment_slice_length_m_none_uses_equal_partition(tmp_path: Path) -> None:
