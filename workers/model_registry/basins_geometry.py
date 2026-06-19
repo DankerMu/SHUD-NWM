@@ -196,13 +196,15 @@ def parse_basins_geometry(
     input_root = _coerce_trusted_root(input_dir, role="shud_input_name")
     _run_safe_open_test_hook(input_root.path, "shud_input_name", "before_parse")
     _validate_required_files_canonical(required_files, shud_input_name, input_root.path)
-    # The dedicated river.shp / seg.shp missing-file checks
+    # PR 2 (spec "Required input files are validated for presence"):
+    # fail fast with payload-precise codes
     # (BASINS_REGISTRY_RIVER_SHP_MISSING / BASINS_REGISTRY_SEG_SHP_MISSING)
-    # are surfaced inside `_crosswalk_rows_for_sources` and the river.shp
-    # parser's single-part invariant. Layer sidecar absence is still caught
-    # below by `_validated_layer_base` with the existing
-    # BASINS_REGISTRY_GIS_SIDECAR_MISSING code so canonical-path tests
-    # remain stable.
+    # before any layer is opened. The check no-ops when the whole gis/
+    # directory is absent so the downstream canonical-sidecar guard
+    # (BASINS_REGISTRY_GIS_SIDECAR_MISSING) still owns that structural
+    # failure case. Domain sidecar absence remains the responsibility of
+    # `_validated_layer_base`.
+    _validate_required_files_present(input_root)
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
@@ -700,9 +702,24 @@ def _validate_required_files_present(input_dir: Path | TrustedBasinsRoot) -> Non
     ``BASINS_REGISTRY_SEG_SHP_MISSING`` with the basin path payload, before
     the geometry parser opens any layer. Sidecars (.dbf/.shx) are checked
     alongside the .shp so a half-installed package fails fast.
+
+    If the ``gis/`` directory itself is absent, this check defers to the
+    downstream canonical-sidecar guard (``BASINS_REGISTRY_GIS_SIDECAR_MISSING``
+    with ``missing_sidecar="gis/domain.shp"``) so callers that destroy the
+    whole GIS tree still get the structural-failure code rather than a
+    layer-specific one.
+
+    The caller is expected to have already validated the trusted root; we
+    only need the path here, so we avoid re-running ``_validate_trusted_root``
+    (and the role-tagged unsafe-path error it would emit).
     """
 
-    root = _coerce_trusted_root(input_dir, role="required_files_present").path
+    if isinstance(input_dir, TrustedBasinsRoot):
+        root = input_dir.path
+    else:
+        root = _coerce_trusted_root(input_dir, role="required_files_present").path
+    if not (root / "gis").is_dir():
+        return
     for layer_name, error_code in (
         ("river", "BASINS_REGISTRY_RIVER_SHP_MISSING"),
         ("seg", "BASINS_REGISTRY_SEG_SHP_MISSING"),

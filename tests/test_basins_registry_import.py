@@ -2895,11 +2895,8 @@ def test_river_shp_missing_fails_fast(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Removing river.shp must fail before any DB write. The current
-    failure code (``BASINS_REGISTRY_GIS_SIDECAR_MISSING``) is emitted by
-    the canonical-sidecar guard; the spec also documents a more specific
-    ``BASINS_REGISTRY_RIVER_SHP_MISSING`` and either is acceptable -- the
-    important contract here is that the import refuses to proceed."""
+    """Removing river.shp must fail before any DB write with the
+    payload-precise ``BASINS_REGISTRY_RIVER_SHP_MISSING`` code."""
 
     _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
     (input_dir / "gis" / "river.shp").unlink()
@@ -2920,10 +2917,7 @@ def test_river_shp_missing_fails_fast(
     assert exit_code == 1
     captured = capsys.readouterr()
     error = json.loads(captured.err)
-    assert error["error_code"] in {
-        "BASINS_REGISTRY_GIS_SIDECAR_MISSING",
-        "BASINS_REGISTRY_RIVER_SHP_MISSING",
-    }
+    assert error["error_code"] == "BASINS_REGISTRY_RIVER_SHP_MISSING"
     assert model_id
 
 
@@ -2931,8 +2925,8 @@ def test_seg_shp_missing_fails_fast(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Removing seg.shp must fail before any DB write. Same rationale as
-    ``test_river_shp_missing_fails_fast``."""
+    """Removing seg.shp must fail before any DB write with the
+    payload-precise ``BASINS_REGISTRY_SEG_SHP_MISSING`` code."""
 
     _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
     (input_dir / "gis" / "seg.shp").unlink()
@@ -2953,10 +2947,7 @@ def test_seg_shp_missing_fails_fast(
     assert exit_code == 1
     captured = capsys.readouterr()
     error = json.loads(captured.err)
-    assert error["error_code"] in {
-        "BASINS_REGISTRY_GIS_SIDECAR_MISSING",
-        "BASINS_REGISTRY_SEG_SHP_MISSING",
-    }
+    assert error["error_code"] == "BASINS_REGISTRY_SEG_SHP_MISSING"
     assert model_id
 
 

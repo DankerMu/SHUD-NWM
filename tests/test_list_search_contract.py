@@ -18,15 +18,39 @@ from packages.common.model_registry import PsycopgModelRegistryStore
 
 
 class _RecordingCursor:
-    """Captures every executed statement/params pair; returns scripted rows."""
+    """Captures every executed statement/params pair; returns scripted rows.
+
+    PR 2: ``list_river_segments`` now runs a per-RNV crosswalk probe
+    before its main reach query (RNV-id collect + per-RNV EXISTS probe).
+    Those queries are absorbed as no-ops so the scripted results still
+    map 1:1 with the legacy reach query path that these contract tests
+    pin down. ``statements`` / ``parameters`` only capture the queries
+    that consume scripted results, preserving the original index-based
+    assertions.
+    """
 
     def __init__(self, results: list[Any]) -> None:
         self._results = list(results)
         self.statements: list[str] = []
         self.parameters: list[Any] = []
         self._last: Any = None
+        self._absorbed_rnv_ids = False
 
     def execute(self, statement: str, parameters: Any = None) -> None:
+        if (
+            "SELECT DISTINCT rs.river_network_version_id" in statement
+            and "core.river_segment" in statement
+        ):
+            # Hand back a single RNV so the per-RNV probe runs exactly once.
+            self._last = [{"river_network_version_id": "rivnet_v01"}]
+            self._absorbed_rnv_ids = True
+            return
+        if "river_segment_crosswalk" in statement and "EXISTS" in statement:
+            # Force the legacy reach-level dispatch path.
+            self._last = {"exists": False}
+            self._absorbed_rnv_ids = False
+            return
+        self._absorbed_rnv_ids = False
         self.statements.append(statement)
         self.parameters.append(parameters)
         self._last = self._results.pop(0) if self._results else None
@@ -35,6 +59,8 @@ class _RecordingCursor:
         return self._last
 
     def fetchall(self) -> Any:
+        if self._absorbed_rnv_ids and isinstance(self._last, list):
+            return self._last
         return self._last if isinstance(self._last, list) else []
 
 
