@@ -3304,6 +3304,68 @@ def test_segment_slice_river_segment_id_preserves_frontend_contract(
         assert feature.get("id") == rid
 
 
+# ---------------------------------------------------------------------------
+# PR 6 (issue #566): post-import DB contract — single-part reach rows +
+# crosswalk row count matches seg.shp record count. Covers tasks.md 6.1.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_pr2_contract_reach_rows_single_part_and_crosswalk_count(
+    integration_database_url: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After importing the qhh-sample fixture, the PR-2 contract holds:
+
+    (a) ``core.river_segment`` has exactly 5 reach rows for the basin's rnv
+        (excluding the ``shud_output_river='true'`` output sibling rows).
+    (b) Every reach row's geom is single-part (``ST_NumGeometries = 1``).
+    (c) ``core.river_segment_crosswalk`` row count equals seg.shp record
+        count (18 for qhh-sample).
+    """
+
+    apply_migrations_from_zero(integration_database_url)
+    _, inventory_path, manifest_path, model_id = _stage_qhh_sample_fixture(tmp_path)
+    assert _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            integration_database_url,
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    rnv_id = report["river_network_version_id"]
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS reach_count,
+                       COUNT(*) FILTER (WHERE ST_NumGeometries(geom) = 1) AS singlepart_count
+                FROM core.river_segment
+                WHERE river_network_version_id = %s
+                  AND COALESCE(properties_json->>'shud_output_river', 'false') = 'false'
+                """,
+                (rnv_id,),
+            )
+            row = cursor.fetchone()
+            cursor.execute(
+                "SELECT COUNT(*) AS crosswalk_count FROM core.river_segment_crosswalk "
+                "WHERE river_network_version_id = %s",
+                (rnv_id,),
+            )
+            crosswalk = cursor.fetchone()
+    assert row["reach_count"] == 5
+    assert row["singlepart_count"] == 5
+    assert crosswalk["crosswalk_count"] == 18
+    del model_id
+
+
 def test_normalize_properties_for_digest_collapses_pg_numeric_roundtrip() -> None:
     """PG JSONB stores numbers as ``numeric`` and emits canonical text; a
     Python ``float(5550.0)`` written into JSONB may come back as

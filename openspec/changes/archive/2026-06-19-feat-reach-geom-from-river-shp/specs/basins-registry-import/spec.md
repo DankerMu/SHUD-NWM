@@ -46,6 +46,8 @@ Each imported reach geometry SHALL be a single-part `MULTILINESTRING` (a `LINEST
 - **AND** if `sp.rivseg` segment order disagrees with the reach polyline direction (rare; SHUD model normally guarantees flow-ordered), the API SHALL fail with `BASINS_REGISTRY_SEGMENT_ORDER_MISMATCH` rather than emitting silently-reversed slices
 - **AND** the OpenAPI schema name (`GeoJsonMultiLineString`) and response structure are unchanged; description text updated to reflect Path C semantics (segment-level features sliced from reach polyline)
 
+## ADDED Requirements
+
 ### Requirement: Imported river segment IDs follow the reach-level naming convention
 
 The system SHALL generate `core.river_segment.river_segment_id` values of the form `<model_id>_reach_<iRiv:06d>` where `iRiv` is the reach `Index` from `gis/river.shp` / `.sp.riv`, zero-padded to 6 digits, replacing the legacy `<model_id>_seg_<segment_order>_ord_<iRiv>_rec_<iEle>` segment-level convention. This is a **BREAKING** semantic change: ID strings change from segment granularity to reach granularity. The `crosswalk_id` ↔ `(iRiv, iEle)` mapping in `core.river_segment_crosswalk.external_id` stores the un-padded `"<iRiv>:<iEle>"` form to preserve fidelity with the raw `seg.shp` attribute values.
@@ -65,8 +67,6 @@ The system SHALL generate `core.river_segment.river_segment_id` values of the fo
 - **WHEN** a downstream consumer joins `core.river_segment.river_segment_id = core.river_segment_crosswalk.river_segment_id`
 - **THEN** every imported reach row matches at least one crosswalk row (assuming `gis/seg.shp` is present)
 - **AND** the join uses the existing PRIMARY KEY composite index on `(river_segment_id, river_network_version_id)` plus the existing `river_segment_crosswalk_lookup_idx (river_network_version_id, source, river_segment_id)`
-
-## ADDED Requirements
 
 ### Requirement: Segment-to-reach crosswalk is preserved from gis/seg.shp
 
@@ -189,10 +189,10 @@ The system SHALL re-ingest all 10 currently-tracked SHUD basin packages (`qhh`, 
 - **AND** each screenshot's metadata (zoom level, centre lng/lat) is recorded alongside the file
 - **AND** segment-level hover/popup interactions still resolve to a non-empty payload via the crosswalk table
 
-## REMOVED Requirements
-
-### Requirement: River segment geometry may come from seg.shp as a fallback to river.shp
-
-**Reason**: `gis/seg.shp` is the SHUD segment-to-mesh-element index table, not a polyline source for reach display. Its multi-part record structure (qhh: 330/3738 records, storage-order ≠ flow-order, parts up to 1721 m apart) forces ingestion to fabricate cross-gap "bridge" straight lines that show up in the frontend as visible jumps. The empirical fix (`gap_split_multilinestring_wkt` + MultiLineString column + frontend `splitPositionsAtGaps`) treats the symptom; using `gis/river.shp` (which is by construction single-part, flow-ordered, and one-to-one with `.sp.riv` reaches) eliminates the bridge at the source. Keeping `seg.shp` as a fallback would let the same defect re-appear silently in any basin where `river.shp` parsing fails.
-
-**Migration**: All ingestion paths SHALL use `gis/river.shp` as the authoritative geometry source per the new "River segments are imported with geometry and topology metadata" requirement above. If `gis/river.shp` is malformed (multi-part records, reach count mismatch with `.sp.riv`, missing dbf fields), ingestion SHALL fail with `BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED` rather than silently fall back to `seg.shp`. SHUD package producers are responsible for delivering well-formed `gis/river.shp`; the project does not provide an in-process repair path. The deleted helpers (`_merge_polyline_parts`, `gap_split_*`, `_backfill_output_segment_geometry`) are not retained as private utilities.
+<!-- Note: the seg.shp-as-fallback behaviour was a scenario nested inside the
+"River segments are imported with geometry and topology metadata" requirement
+in the live spec (`openspec/specs/basins-registry-import/spec.md`), not a
+standalone requirement. The MODIFIED block above already supersedes that
+scenario by mandating `gis/river.shp` as the sole authoritative geometry
+source and forbidding `seg.shp` for geometry. No standalone REMOVED entry is
+needed (and would not match any live requirement header). -->

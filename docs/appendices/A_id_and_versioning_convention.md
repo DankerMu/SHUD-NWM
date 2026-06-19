@@ -29,6 +29,28 @@
 {river_network_version_id}_riv_{zero_padded_index}
 ```
 
+### 3.1 PR-2 reach-level convention（现行 basins-registry-import）
+
+PR-2 (issue #561) 以来，basins-registry-import 写入 `core.river_segment` 的 reach
+行使用 reach-level 命名，对应 `gis/river.shp` 的 `Index` 字段（zero-padded 6 位）：
+
+```text
+{model_id}_reach_{iRiv:06d}
+```
+
+示例：`basins_qhh_shud_reach_000001`。`core.river_segment_crosswalk.external_id`
+保留 segment 粒度，按 `gis/seg.shp` 的 `(iRiv, iEle)` 写为：
+
+```text
+{iRiv}:{iEle}
+```
+
+> 旧 `{model_id}_seg_{segment_order}_ord_{iRiv}_rec_{iEle}` 命名（PR #534 时代）
+> 已被 PR-2 取代；`_delete_legacy_seg_rows` 在 reingest 时同事务内清除残余旧行，
+> 避免 FK 孤儿。前端 segment 级 hover/popup 通过 Path C
+> (`ST_LineSubstring`) 的 API 切片返回 `{model_id}_seg_{iRiv}_{iEle}` 形式衍生
+> ID，与 reach 行 ID 解耦。
+
 ## 4. Crosswalk
 
 流域或河网变化时，不重用旧河段 ID。建立 crosswalk：
