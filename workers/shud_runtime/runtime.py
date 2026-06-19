@@ -667,11 +667,24 @@ class SHUDRuntime:
         return False
 
     def _prepare_forcing_package_context(self, manifest: dict[str, Any]) -> _ForcingPackageContext:
-        package_manifest = self._verify_forcing_manifest_checksums(manifest)
-        checksum_entries = _forcing_checksum_entries(manifest)
+        forcing = manifest.get("forcing") or {}
+        package_manifest = self._verify_forcing_package_manifest(manifest)
         is_direct_grid = self._forcing_declares_direct_grid(manifest, package_manifest=package_manifest)
-        if is_direct_grid and package_manifest is not None:
-            checksum_entries = _authoritative_package_manifest_checksum_entries(package_manifest)
+        if is_direct_grid:
+            if package_manifest is None:
+                raise SHUDRuntimeError(
+                    "FORCING_PACKAGE_MANIFEST_REQUIRED",
+                    "Direct-grid forcing requires a checksum-verified forcing_package.json; "
+                    "runtime forcing.files metadata is not authoritative for direct-grid staging.",
+                )
+            checksum_entries = _authoritative_package_manifest_checksum_entries(
+                package_manifest,
+                forcing_uri=str(forcing.get("forcing_uri") or ""),
+                object_store_prefix=self.config.object_store_prefix,
+            )
+        else:
+            checksum_entries = _forcing_checksum_entries(manifest)
+        self._verify_forcing_object_checksums(checksum_entries)
         return _ForcingPackageContext(
             package_manifest=package_manifest,
             checksum_entries=tuple(checksum_entries),
@@ -1130,11 +1143,10 @@ class SHUDRuntime:
             )
         return content
 
-    def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    def _verify_forcing_package_manifest(self, manifest: dict[str, Any]) -> dict[str, Any] | None:
         forcing = manifest.get("forcing") or {}
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
         expected_package_checksum = _forcing_package_manifest_checksum(forcing)
-        package_manifest: dict[str, Any] | None = None
         if package_manifest_uri or expected_package_checksum:
             if not package_manifest_uri or not expected_package_checksum:
                 raise SHUDRuntimeError(
@@ -1150,8 +1162,11 @@ class SHUDRuntime:
                 )
             package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
             self._assert_forcing_prcp_unit(package_manifest_uri)
+            return package_manifest
+        return None
 
-        for file_entry in _forcing_checksum_entries(manifest):
+    def _verify_forcing_object_checksums(self, checksum_entries: list[dict[str, str]]) -> None:
+        for file_entry in checksum_entries:
             uri = str(file_entry["uri"])
             expected_checksum = str(file_entry["checksum"])
             actual_checksum = self._object_checksum(uri)
@@ -1160,7 +1175,6 @@ class SHUDRuntime:
                     "FORCING_FILE_CHECKSUM_MISMATCH",
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
-        return package_manifest
 
     def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
         """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
@@ -2498,7 +2512,12 @@ def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
     return entries
 
 
-def _authoritative_package_manifest_checksum_entries(package_manifest: Mapping[str, Any]) -> list[dict[str, str]]:
+def _authoritative_package_manifest_checksum_entries(
+    package_manifest: Mapping[str, Any],
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
+) -> list[dict[str, str]]:
     files = package_manifest.get("files") or []
     if not isinstance(files, list):
         raise SHUDRuntimeError(
@@ -2512,7 +2531,11 @@ def _authoritative_package_manifest_checksum_entries(package_manifest: Mapping[s
                 "FORCING_CHECKSUM_INVALID",
                 "Direct-grid forcing package manifest file entries must be objects.",
             )
-        relative_path = _normalize_package_manifest_file_relative_path(file_entry)
+        relative_path = _normalize_package_manifest_file_relative_path(
+            file_entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
+        )
         checksum = str(file_entry.get("checksum") or "").strip()
         if not checksum:
             raise SHUDRuntimeError(
@@ -2530,12 +2553,18 @@ def _authoritative_package_manifest_checksum_entries(package_manifest: Mapping[s
     return entries
 
 
-def _normalize_package_manifest_file_relative_path(file_entry: Mapping[str, Any]) -> str:
+def _normalize_package_manifest_file_relative_path(
+    file_entry: Mapping[str, Any],
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
+) -> str:
     relative_path = str(file_entry.get("relative_path") or "").strip()
     if not relative_path:
-        raise SHUDRuntimeError(
-            "FORCING_CHECKSUM_MISSING",
-            "Direct-grid forcing package manifest file entry is missing relative_path.",
+        relative_path = _derive_package_manifest_file_relative_path(
+            file_entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
         )
     candidate = PurePosixPath(relative_path)
     if not relative_path or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
@@ -2544,6 +2573,29 @@ def _normalize_package_manifest_file_relative_path(file_entry: Mapping[str, Any]
             f"Direct-grid forcing package manifest relative_path is unsafe: {relative_path}",
         )
     return candidate.as_posix()
+
+
+def _derive_package_manifest_file_relative_path(
+    file_entry: Mapping[str, Any],
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
+) -> str:
+    uri = str(file_entry.get("uri") or "").strip()
+    if not uri:
+        raise SHUDRuntimeError(
+            "FORCING_CHECKSUM_MISSING",
+            "Direct-grid forcing package manifest file entry is missing relative_path and uri.",
+        )
+    forcing_root = _object_key(forcing_uri, object_store_prefix).rstrip("/")
+    file_key = _object_key(uri, object_store_prefix)
+    if not forcing_root or file_key == forcing_root or not file_key.startswith(f"{forcing_root}/"):
+        raise SHUDRuntimeError(
+            "FORCING_FILE_PATH_INVALID",
+            "Direct-grid forcing package manifest entry without relative_path must have a uri under forcing_uri: "
+            f"{uri}",
+        )
+    return file_key[len(forcing_root) + 1 :]
 
 
 def _assert_direct_grid_sensitive_member_is_manifest_bound(

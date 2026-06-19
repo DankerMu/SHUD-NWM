@@ -512,6 +512,119 @@ def test_runtime_direct_grid_uses_package_manifest_file_checksums_without_runtim
     assert (model_input_dir / "forcing_003.csv").exists()
 
 
+def test_runtime_direct_grid_requires_verified_package_manifest_before_forcing_staging(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"].pop("package_manifest_uri")
+    manifest["forcing"].pop("package_manifest_checksum")
+    manifest["forcing"]["forcing_mapping_mode"] = "direct_grid"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    model_input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input" / "alias-a"
+    assert exc_info.value.error_code == "FORCING_PACKAGE_MANIFEST_REQUIRED"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "FORCING_PACKAGE_MANIFEST_REQUIRED"
+    assert not (model_input_dir / "shud" / "qhh.tsd.forc").exists()
+    assert not (model_input_dir / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_package_manifest_ignores_stale_outer_forcing_files(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["files"][0]["checksum"] = "stale-outer-tsd-checksum"
+    manifest["forcing"]["files"][0]["uri"] = (
+        "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/stale/qhh.tsd.forc"
+    )
+    manifest["forcing"]["files"][1]["checksum"] = "stale-outer-csv-checksum"
+    manifest["forcing"]["files"][1]["uri"] = (
+        "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/stale/forcing.csv"
+    )
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    assert (model_input_dir / "alias-a.tsd.forc").exists()
+    assert (model_input_dir / "forcing_002.csv").exists()
+    assert (model_input_dir / "forcing_003.csv").exists()
+
+
+def test_runtime_direct_grid_accepts_producer_manifest_top_level_files_without_relative_path(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    tsd_forc = forcing_dir / "forcing.tsd.forc"
+    csv_debug = forcing_dir / "forcing_debug.csv"
+    tsd_forc.write_text("forcing\n", encoding="utf-8")
+    csv_debug.write_text(
+        "valid_time,variable,value\n"
+        "2026-05-01T00:00:00Z,PRCP,1\n",
+        encoding="utf-8",
+    )
+    package_manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"] = [
+        {
+            "role": "tsd_forc",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing.tsd.forc",
+            "checksum": sha256_bytes(tsd_forc.read_bytes()),
+        },
+        {
+            "role": "csv_debug",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_debug.csv",
+            "checksum": sha256_bytes(csv_debug.read_bytes()),
+        },
+        *package_manifest["files"],
+    ]
+    manifest_content = json_bytes(package_manifest)
+    package_manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    assert (model_input_dir / "forcing.tsd.forc").read_text(encoding="utf-8") == "forcing\n"
+    assert (model_input_dir / "forcing_debug.csv").exists()
+    assert (model_input_dir / "alias-a.tsd.forc").exists()
+    assert (model_input_dir / "forcing_002.csv").exists()
+    assert (model_input_dir / "forcing_003.csv").exists()
+
+
 def test_runtime_direct_grid_package_manifest_tsd_checksum_mismatch_fails_before_staged_status(
     tmp_path: Path,
 ) -> None:
