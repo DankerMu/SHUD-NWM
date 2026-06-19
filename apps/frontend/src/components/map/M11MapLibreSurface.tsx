@@ -39,7 +39,6 @@ import {
   type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
-import { gapAwareLineGeometry } from '@/lib/m11/gapAwareGeometry'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
@@ -162,7 +161,6 @@ interface BasinRiverFeatureProperties {
 
 interface BasinRiverFeature {
   type: 'Feature'
-  // gap-aware 渲染可把含跨缝直线的 LineString 拆成 MultiLineString（见 gapAwareLineGeometry）。
   geometry: components['schemas']['GeoJsonLineString'] | components['schemas']['GeoJsonMultiLineString']
   properties: BasinRiverFeatureProperties
 }
@@ -1205,7 +1203,7 @@ export function buildSelectedSegmentFeatureCollection(
         ? [
             {
               type: 'Feature',
-              geometry: gapAwareLineGeometry(geometryStatus.sanitizedGeometry),
+              geometry: geometryStatus.sanitizedGeometry,
               properties: { segment_id: selectedSegmentId },
             },
           ]
@@ -1270,7 +1268,7 @@ export function buildBasinRiverFeatureCollection(
 
     const candidate: BasinRiverFeature = {
       type: 'Feature',
-      geometry: gapAwareLineGeometry(geometryStatus.sanitizedGeometry),
+      geometry: geometryStatus.sanitizedGeometry,
       properties: {
         segment_id: row.segmentId,
         river_segment_id: row.riverSegmentId,
