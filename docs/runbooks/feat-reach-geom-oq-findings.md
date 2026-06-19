@@ -51,9 +51,9 @@ State held in `hoveredRiverSegmentId` (line 238).
 from each `BasinSegmentRow`'s `currentQ` / `returnPeriod` / `warningLevel`.
 
 **Store grouping:**
-[`apps/frontend/src/api/overviewDataContracts.ts:679`](../../apps/frontend/src/api/overviewDataContracts.ts#L679)
+[`apps/frontend/src/lib/m11/overviewDataContracts.ts:679`](../../apps/frontend/src/lib/m11/overviewDataContracts.ts#L679)
 `normalizeBasinSegmentRows` →
-[`line 1437`](../../apps/frontend/src/api/overviewDataContracts.ts#L1437)
+[`line 1437`](../../apps/frontend/src/lib/m11/overviewDataContracts.ts#L1437)
 `segmentRowFromFeature` — **no grouping; passes through API rows**.
 Each `ApiRiverFeature` from `GET /api/v1/basin-versions/{id}/river-segments`
 produces exactly one `BasinSegmentRow`, keyed by `props.river_segment_id`
