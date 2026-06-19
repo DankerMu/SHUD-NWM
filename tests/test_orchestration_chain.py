@@ -940,6 +940,8 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("end_time", None),
                 ("source_id", None),
                 ("max_lead_hours", None),
+                ("forcing_package_manifest_uri", None),
+                ("forcing_package_manifest_checksum", None),
             ],
         ),
         "InitialStateSelection": (
@@ -982,6 +984,8 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("run_manifest_uri", "required"),
                 ("output_uri", "required"),
                 ("log_uri", "required"),
+                ("forcing_package_manifest_uri", None),
+                ("forcing_package_manifest_checksum", None),
                 ("init_state_id", None),
                 ("init_state_uri", None),
                 ("init_state_valid_time", None),
@@ -1012,6 +1016,8 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("run_manifest_uri", "required"),
                 ("output_uri", "required"),
                 ("log_uri", "required"),
+                ("forcing_package_manifest_uri", None),
+                ("forcing_package_manifest_checksum", None),
                 ("init_state_id", None),
                 ("init_state_uri", None),
                 ("init_state_valid_time", None),
@@ -2128,6 +2134,64 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"
     assert publish_submission["metadata"]["residual_blockers"]
     assert publish_submission["metadata"]["quality_states"][0]["run_id"] == basin["run_id"]
+
+
+def test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "forcing_version_id": "forc_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "segment_count": 3,
+        "forcing_package_uri": "s3://nhms/forcing/gfs/2026050100/basin_v0/model_0/",
+        "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v0/model_0/forcing_package.json",
+        "forcing_manifest_checksum": "sha256:forcing-package-manifest",
+    }
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert runtime_manifest["forcing"]["package_manifest_uri"] == basin["forcing_package_manifest_uri"]
+    assert runtime_manifest["forcing"]["package_manifest_checksum"] == basin["forcing_manifest_checksum"]
+    assert "forcing_package_manifest_uri" not in runtime_manifest["forcing"]
+    assert "forcing_manifest_checksum" not in runtime_manifest["forcing"]
+
+
+def test_psycopg_find_forcing_context_populates_package_manifest_metadata() -> None:
+    cycle_time = datetime(2026, 5, 1, tzinfo=UTC)
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any]:
+            assert "lineage_json" in statement
+            assert parameters == ("GFS", cycle_time, "model-1")
+            return {
+                "forcing_version_id": "forc-gfs",
+                "forcing_package_uri": "s3://nhms/forcing/gfs/model-1/",
+                "start_time": cycle_time,
+                "end_time": cycle_time + timedelta(hours=72),
+                "source_id": "GFS",
+                "lineage_json": {
+                    "max_lead_hours": 72,
+                    "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/model-1/forcing_package.json",
+                    "forcing_package_manifest_checksum": "sha256:forcing-package",
+                },
+            }
+
+    context = CapturingRepository("postgresql://example").find_forcing_context(
+        source_id="GFS",
+        cycle_time=cycle_time,
+        model_id="model-1",
+    )
+
+    assert context.max_lead_hours == 72
+    assert context.forcing_package_manifest_uri == "s3://nhms/forcing/gfs/model-1/forcing_package.json"
+    assert context.forcing_package_manifest_checksum == "sha256:forcing-package"
 
 
 def test_nested_forcing_station_metadata_reaches_runtime_manifest(tmp_path: Path) -> None:
@@ -7744,9 +7808,13 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
         run_manifest_uri="s3://runs/run-1/input/manifest.json",
         output_uri="s3://runs/run-1/output/",
         log_uri="s3://runs/run-1/logs/",
+        forcing_package_manifest_uri="s3://forcing/gfs/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:forcing-package",
     )
     forecast_orchestrator = object.__new__(ForecastOrchestrator)
     run_manifest = forecast_orchestrator._build_run_manifest(run_context)
+    assert run_manifest["forcing"]["package_manifest_uri"] == "s3://forcing/gfs/forcing_package.json"
+    assert run_manifest["forcing"]["package_manifest_checksum"] == "sha256:forcing-package"
     assert run_manifest["runtime"]["state_checkpoint_hours"] == [77]
     assert run_manifest["runtime"]["update_ic_step_minutes"] == 77 * 60
 
@@ -7805,6 +7873,8 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -
         model_package_uri="object://models/shud-v1",
         forcing_version_id="era5-202401",
         forcing_package_uri="object://forcing/era5-202401",
+        forcing_package_manifest_uri="object://forcing/era5-202401/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:analysis-forcing-package",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),
         run_manifest_uri="object://runs/analysis-run-1/input/manifest.json",
@@ -7839,6 +7909,9 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -
         "forcing": {
             "forcing_version_id": "era5-202401",
             "forcing_uri": "object://forcing/era5-202401",
+            "forcing_package_uri": "object://forcing/era5-202401",
+            "package_manifest_uri": "object://forcing/era5-202401/forcing_package.json",
+            "package_manifest_checksum": "sha256:analysis-forcing-package",
         },
         "forcing_causality": {
             "mode": "delayed_reanalysis",

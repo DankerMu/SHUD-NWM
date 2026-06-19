@@ -79,8 +79,11 @@
 
 ## 4. SHUD Runtime Integration
 
-- [ ] 4.1 Validate that direct-grid forcing packages use standard multi-station SHUD staging and reject fallback single-station `.sp.att` rewrites when lineage declares `forcing_mapping_mode="direct_grid"`.
-- [ ] 4.2 Add runtime checks that staged `.sp.att` `FORC` values are within the `.tsd.forc` `ID` column values for direct-grid packages.
+- [x] 4.1 Validate that direct-grid forcing packages use standard multi-station SHUD staging and reject fallback single-station `.sp.att` rewrites when lineage declares `forcing_mapping_mode="direct_grid"`.
+  - Required evidence: runtime tests prove direct-grid packages with standard `shud/qhh.tsd.forc` stage multi-station forcing files and do not rewrite `.sp.att` to `FORC=1`.
+  - Required evidence: runtime tests prove direct-grid packages missing standard SHUD forcing files fail closed even when legacy fallback files exist, and legacy non-direct-grid packages still retain fallback behavior.
+- [x] 4.2 Add runtime checks that staged `.sp.att` `FORC` values are within the `.tsd.forc` `ID` column values for direct-grid packages.
+  - Required evidence: runtime tests prove out-of-range direct-grid `.sp.att FORC` values fail before SHUD execution/status transition, while valid multi-station ownership stages successfully.
 
 ## 5. End-to-End Evidence and Documentation
 
