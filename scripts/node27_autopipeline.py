@@ -182,14 +182,12 @@ def _activate_model(database_url: str, model_id: str) -> int:
 
 
 def _backfill_output_geometry(database_url: str, river_network_version_id: str) -> int:
-    """Stitch display geometry onto the NULL-geom ``.sp.riv`` output reaches the
+    """Copy reach geometry onto the NULL-geom ``.sp.riv`` output reaches the
     generic import seeds. The import deliberately leaves those reaches NULL
     (display geometry is a separate concern), so without this the national /
     per-run MVT JOINs the reach rows but renders nothing -- the basin's river
     segments are invisible and unclickable on the live map (the heihe
-    regression). Reuses the single shared SQL; only_missing keeps it idempotent
-    and record_geometry_source=False leaves properties_json untouched so a
-    re-seed's import digest stays stable."""
+    regression). ``only_missing`` keeps it idempotent."""
     from workers.model_registry.basins_registry_import import (
         _backfill_output_segment_geometry,
     )
@@ -202,7 +200,6 @@ def _backfill_output_geometry(database_url: str, river_network_version_id: str) 
                     cur,
                     river_network_version_id,
                     only_missing=True,
-                    record_geometry_source=False,
                 )
     finally:
         conn.close()

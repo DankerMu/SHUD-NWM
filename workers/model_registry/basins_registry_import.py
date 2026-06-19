@@ -25,8 +25,6 @@ from .basins_geometry import (
     CrosswalkRow,
     ParsedBasinsGeometry,
     TrustedBasinsRoot,
-    _merge_polyline_parts,
-    gap_split_multilinestring_wkt,
     parse_basins_geometry,
     parse_seg_shp_crosswalk,
     safe_basins_file_sha256,
@@ -378,7 +376,6 @@ def import_basin_into_registry_core(
             cursor,
             sources.ids["river_network_version_id"],
             only_missing=True,
-            record_geometry_source=True,
         )
     return row_counts
 
@@ -962,55 +959,27 @@ def _backfill_output_segment_geometry(
     river_network_version_id: str,
     *,
     only_missing: bool = False,
-    record_geometry_source: bool = True,
 ) -> int:
     """Backfill SHUD output-river (`.sp.riv`) display geometry onto the
     ``shud_output_river='true'`` reach rows that ``_ensure_output_river_segments``
     deliberately seeds with NULL geom (display geometry is a separate concern from
     the row identities the verifier/parser need).
 
-    Two source paths in priority order, gated by which shape this basin's GIS rows
-    actually have in the registry:
+    PR 2 reach-level source: ``core.river_segment`` holds one row per ``.sp.riv``
+    reach (from ``gis/river.shp``) with the reach's single-part LineString in
+    ``geom`` and ``iRiv`` recorded in properties. The output reach row keyed
+    ``{model_id}_shud_riv_{N:06d}`` carries ``shud_riv_index=N`` and lines up
+    1:1 with the parser-loaded reach row keyed ``{model_id}_reach_{N:06d}``
+    whose properties carry ``iRiv=N``. We copy ``geom`` + ``length_m`` from
+    the parent reach onto the output row in a single SQL UPDATE.
 
-    1. PR 2 reach-level path (new default since feat-reach-geom-from-river-shp):
-       ``core.river_segment`` now holds one row per ``.sp.riv`` reach (from
-       ``gis/river.shp``) with the reach's single-part LineString already in
-       ``geom`` and ``iRiv`` recorded in properties. The output reach row keyed
-       ``{model_id}_shud_riv_{N:06d}`` carries ``shud_riv_index=N`` and lines
-       up 1:1 with the parser-loaded reach row keyed ``{model_id}_reach_{N:06d}``
-       whose properties carry ``iRiv=N``. We copy ``geom`` + ``length_m`` from
-       the parent reach onto the output row in a single SQL UPDATE.
-
-    2. Legacy segment-level stitch path (pre-PR-2 / synthetic-fixture fallback):
-       finer GIS segments grouped by ``source_raw_segment_id`` (the SHUD reach
-       index) are greedy-stitched (``_merge_polyline_parts``) into one ordered
-       point list, then split into a gap-aware MultiLineString
-       (``gap_split_multilinestring_wkt``) so a genuine source gap is NOT drawn
-       as a straight bridge. Why greedy in Python, not ``ST_LineMerge`` in SQL:
-       a reach's finer segments routinely meet only at coincident vertices that
-       ST_LineMerge refuses to linearise (degree-3 nodes, an endpoint touching
-       another part's interior, retraced overlaps), so it returns a
-       MULTILINESTRING; keeping just the longest part then DROPS the rest of
-       the channel and the reach renders broken (the node-27 heihe/qhh breakage
-       observed before PR 2: ~8-12% of reaches, up to ~57% of length lost). The
-       even older ``ST_MakeLine(... ORDER BY segment_order)`` had the opposite
-       failure: it linked every point in storage order, drawing a cross-ridge
-       straight "jump" wherever record order != flow order.
-       ``_merge_polyline_parts`` chains parts by NEAREST endpoints (reversing
-       as needed): parts that touch join with a zero-length link (continuous,
-       no jump) and nothing is dropped; a genuine source gap is then cut by
-       ``gap_split_multilinestring_wkt`` into separate MultiLineString parts so
-       it is no longer drawn as a bridge.
-
-    The two paths share the same target invariant: ``length_m`` reflects the
-    reach's true channel length (the reach row's ``length_m`` from river.shp's
-    ``Length`` for path 1, or the sum of finer segments for path 2).
-    ``record_geometry_source`` stamps provenance into ``properties_json``; the
-    node-27 autopipe passes False so the output-river idempotency digest (which
-    digests properties_json) stays stable, while the qhh bootstrap keeps it
-    True. With ``only_missing`` only NULL-geom reaches are updated, so
-    re-importing an already-correct basin updates zero rows. New basins seed
-    with NULL geom and are backfilled normally.
+    ``length_m`` reflects the reach's true channel length (the reach row's
+    ``length_m`` from river.shp's ``Length``). Provenance is stamped into
+    ``properties_json`` under the historical ``gis_rivseg_iRiv`` label so the
+    qhh bootstrap idempotency comparison in
+    ``_output_segment_idempotency_properties`` keeps matching. With
+    ``only_missing`` only NULL-geom reaches are updated, so re-importing an
+    already-correct basin updates zero rows.
     """
     from psycopg2.extras import execute_values
 
@@ -1040,13 +1009,13 @@ def _backfill_output_segment_geometry(
     if not reaches_by_index:
         return 0
 
-    # Path 1 (PR 2 reach-level default): try to map each output row directly to
-    # the parser-loaded reach row whose ``iRiv`` matches the output's
-    # ``shud_riv_index``. The reach row carries the single-part LineString geom
-    # from gis/river.shp wrapped as MultiLineString at insert time. We match on
-    # the text form of iRiv so a non-numeric value never aborts the read. We
-    # explicitly exclude the output rows themselves (``shud_output_river=true``)
-    # so a NULL-geom output sibling can never spoof its own backfill source.
+    # Map each output row to the parser-loaded reach row whose ``iRiv`` matches
+    # the output's ``shud_riv_index``. The reach row carries the single-part
+    # LineString geom from gis/river.shp wrapped as MultiLineString at insert
+    # time. We match on the text form of iRiv so a non-numeric value never
+    # aborts the read. We explicitly exclude the output rows themselves
+    # (``shud_output_river=true``) so a NULL-geom output sibling can never spoof
+    # its own backfill source.
     cursor.execute(
         """
         SELECT
@@ -1075,99 +1044,20 @@ def _backfill_output_segment_geometry(
         )
 
     updates: list[tuple[str, str, float | None, str]] = []
-    indices_missing_reach: list[str] = []
     for index, reach_ids in reaches_by_index.items():
         reach_geom = reach_geom_by_index.get(index)
         if reach_geom is None:
-            indices_missing_reach.append(index)
             continue
         geom_wkt, total_length = reach_geom
-        if record_geometry_source:
-            # Reuse the historical "gis_rivseg_iRiv" provenance label here even
-            # though the source storage shape is now reach-level rather than
-            # finer segments: the semantic is the same (display geometry sourced
-            # from the GIS layer, matched onto the output row by SHUD reach index
-            # iRiv), and keeping the label stable preserves the qhh bootstrap
-            # idempotency comparison in `_output_segment_idempotency_properties`
-            # (the expected properties hard-code this value, so a different
-            # label would flip ``unchanged`` to ``updated`` on every re-run).
-            provenance = json.dumps(
-                {
-                    "geometry_source": "gis_rivseg_iRiv",
-                    "geometry_source_segment_count": 1,
-                    "geometry_source_length_m": total_length,
-                }
-            )
-        else:
-            provenance = "{}"
+        provenance = json.dumps(
+            {
+                "geometry_source": "gis_rivseg_iRiv",
+                "geometry_source_segment_count": 1,
+                "geometry_source_length_m": total_length,
+            }
+        )
         for reach_id in reach_ids:
             updates.append((reach_id, geom_wkt, total_length, provenance))
-
-    # Path 2 (legacy segment-level stitch): only consulted for output reaches
-    # that did NOT match a PR-2 reach row. Synthetic fixtures and any
-    # pre-PR-2 basin still rendering through this path stay green; PR 2 basins
-    # never reach this branch because every output row found its reach.
-    if indices_missing_reach:
-        cursor.execute(
-            """
-            SELECT
-                properties_json->>'source_raw_segment_id' AS shud_riv_index,
-                (SELECT array_agg(ARRAY[ST_X(dp.geom), ST_Y(dp.geom)] ORDER BY dp.path)
-                 FROM ST_DumpPoints(geom) AS dp) AS points,
-                length_m
-            FROM core.river_segment
-            WHERE river_network_version_id = %s
-              AND geom IS NOT NULL
-              AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
-              AND properties_json ? 'source_raw_segment_id'
-              AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
-            """,
-            (river_network_version_id,),
-        )
-        parts_by_index: dict[str, list[list[tuple[float, float]]]] = {}
-        length_by_index: dict[str, float] = {}
-        count_by_index: dict[str, int] = {}
-        for row in cursor.fetchall():
-            index = _cell(row, "shud_riv_index", 0)
-            if index not in indices_missing_reach:
-                continue
-            points = _cell(row, "points", 1)
-            length_m = _cell(row, "length_m", 2)
-            if not points:
-                continue
-            part = [(float(x), float(y)) for x, y in points if x is not None and y is not None]
-            if len(part) < 2:
-                continue
-            parts_by_index.setdefault(index, []).append(part)
-            length_by_index[index] = length_by_index.get(index, 0.0) + (
-                float(length_m) if length_m is not None else 0.0
-            )
-            count_by_index[index] = count_by_index.get(index, 0) + 1
-
-        for index in indices_missing_reach:
-            parts = parts_by_index.get(index)
-            if not parts:
-                continue
-            merged = _merge_polyline_parts(parts)
-            if len(merged) < 2:
-                continue
-            # Same shared renderer as the parser (basins_geometry): gap-split
-            # + %.12g WKT, so output-reach geometry is byte-identical in
-            # precision to the parser path.
-            wkt = gap_split_multilinestring_wkt(merged)
-            total_length = length_by_index.get(index)
-            if record_geometry_source:
-                provenance = json.dumps(
-                    {
-                        "geometry_source": "gis_rivseg_iRiv",
-                        "geometry_source_segment_count": count_by_index.get(index, len(parts)),
-                        "geometry_source_length_m": total_length,
-                    }
-                )
-            else:
-                provenance = "{}"
-            for reach_id in reaches_by_index[index]:
-                updates.append((reach_id, wkt, total_length, provenance))
 
     if not updates:
         return 0
