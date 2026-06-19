@@ -3051,13 +3051,36 @@ def test_list_river_segments_excludes_oversized_collection_geometry_before_seria
             self.calls = 0
             self.statement = ""
             self.parameters: tuple[Any, ...] | None = None
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
 
         def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            # PR 2: list_river_segments first collects distinct RNV ids
+            # for the basin scope, then runs a per-RNV crosswalk-existence
+            # probe before its main query path. Absorb both as no-ops so
+            # the original call-count assertions below still hold for the
+            # legacy reach-level path.
+            if (
+                "SELECT DISTINCT rs.river_network_version_id" in statement
+                and "core.river_segment" in statement
+            ):
+                self._last_was_rnv_collect = True
+                self._last_was_probe = False
+                return
+            if "river_segment_crosswalk" in statement and "EXISTS" in statement:
+                self._last_was_probe = True
+                self._last_was_rnv_collect = False
+                return
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
             self.calls += 1
             self.statement = statement
             self.parameters = parameters
 
         def fetchone(self) -> dict[str, Any]:
+            if self._last_was_probe:
+                return {"exists": False}
+            assert not self._last_was_rnv_collect
             assert self.calls == 1
             assert "ST_NPoints(geom) BETWEEN 2 AND %s" in self.statement
             assert "ST_NDims(geom) <= %s" in self.statement
@@ -3072,6 +3095,8 @@ def test_list_river_segments_excludes_oversized_collection_geometry_before_seria
             return {"total": 1, "feature_total": 0}
 
         def fetchall(self) -> list[dict[str, Any]]:
+            if self._last_was_rnv_collect:
+                return [{"river_network_version_id": "rivnet_v01"}]
             assert self.calls == 2
             assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
             assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
@@ -3128,13 +3153,31 @@ def test_list_river_segments_applies_aggregate_collection_budget_before_serializ
             self.calls = 0
             self.statement = ""
             self.parameters: tuple[Any, ...] | None = None
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
 
         def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            if (
+                "SELECT DISTINCT rs.river_network_version_id" in statement
+                and "core.river_segment" in statement
+            ):
+                self._last_was_rnv_collect = True
+                self._last_was_probe = False
+                return
+            if "river_segment_crosswalk" in statement and "EXISTS" in statement:
+                self._last_was_probe = True
+                self._last_was_rnv_collect = False
+                return
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
             self.calls += 1
             self.statement = statement
             self.parameters = parameters
 
         def fetchone(self) -> dict[str, Any]:
+            if self._last_was_probe:
+                return {"exists": False}
+            assert not self._last_was_rnv_collect
             assert self.calls == 1
             assert "SUM(ST_NPoints(geom)) OVER" in self.statement
             assert "running_coordinate_count <= %s" in self.statement
@@ -3148,6 +3191,8 @@ def test_list_river_segments_applies_aggregate_collection_budget_before_serializ
             return {"total": 6, "feature_total": 5}
 
         def fetchall(self) -> list[dict[str, Any]]:
+            if self._last_was_rnv_collect:
+                return [{"river_network_version_id": "rivnet_v01"}]
             assert self.calls == 2
             assert "SUM(ST_NPoints(rs.geom)) OVER" in self.statement
             assert "running_coordinate_count <= %s" in self.statement
@@ -3211,17 +3256,37 @@ def test_list_river_segments_rejects_serialized_payload_over_budget(
     class FakeCursor:
         def __init__(self) -> None:
             self.calls = 0
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
 
         def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            if (
+                "SELECT DISTINCT rs.river_network_version_id" in statement
+                and "core.river_segment" in statement
+            ):
+                self._last_was_rnv_collect = True
+                self._last_was_probe = False
+                return
+            if "river_segment_crosswalk" in statement and "EXISTS" in statement:
+                self._last_was_probe = True
+                self._last_was_rnv_collect = False
+                return
+            self._last_was_probe = False
+            self._last_was_rnv_collect = False
             self.calls += 1
             self.statement = statement
             self.parameters = parameters
 
         def fetchone(self) -> dict[str, Any]:
+            if self._last_was_probe:
+                return {"exists": False}
+            assert not self._last_was_rnv_collect
             assert self.calls == 1
             return {"total": 1, "feature_total": 1}
 
         def fetchall(self) -> list[dict[str, Any]]:
+            if self._last_was_rnv_collect:
+                return [{"river_network_version_id": "rivnet_v01"}]
             assert self.calls == 2
             assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
             return [

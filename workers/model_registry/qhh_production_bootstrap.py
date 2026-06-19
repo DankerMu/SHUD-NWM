@@ -29,12 +29,6 @@ from .basins_registry_import import (
     BasinsRegistryImportError,
     ImportSources,
     _backfill_output_segment_geometry,
-    _ensure_basin,
-    _ensure_basin_version,
-    _ensure_mesh,
-    _ensure_model_instance,
-    _ensure_river_network,
-    _ensure_river_segments,
     _fetch_optional,
     _find_inventory_model,
     _input_dir,
@@ -45,6 +39,7 @@ from .basins_registry_import import (
     _recorded_relative_inventory_root,
     _source_root,
     _transaction,
+    import_basin_into_registry_core,
 )
 
 QHH_BOOTSTRAP_SCHEMA_VERSION = "qhh.production_bootstrap.v1"
@@ -1020,14 +1015,22 @@ def _bootstrap_database(
             )
         forcing_before = _dynamic_forcing_counts(cursor, model_id)
         del database_url, trusted_internal
-        row_counts = {
-            "basin": _ensure_basin(cursor, sources),
-            "basin_version": _ensure_basin_version(cursor, sources),
-            "river_network_version": _ensure_river_network(cursor, sources),
-            "river_segment": _ensure_river_segments(cursor, sources),
-            "mesh_version": _ensure_mesh(cursor, sources),
-            "model_instance": _ensure_model_instance(cursor, sources),
-        }
+        # Delegate the per-basin registry-core write to the shared sequence
+        # owned by ``basins_registry_import.import_basin_into_registry_core``
+        # so QHH bootstrap and the generic registry CLI populate
+        # ``core.river_segment_crosswalk`` (PR 2 Path C contract) and run the
+        # legacy purge in lock-step. Output-river seeding + geometry backfill
+        # stay with the QHH-specific helpers below: they write QHH-specific
+        # ``properties_json`` keys that diverge from the generic
+        # ``_ensure_output_river_segments`` digest, so sharing that step would
+        # otherwise trip ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on a second
+        # bootstrap of the same QHH model.
+        row_counts = import_basin_into_registry_core(
+            cursor,
+            sources,
+            seed_output_river_segments=False,
+            backfill_output_segment_geometry=False,
+        )
         registry_report = _registry_report_from_row_counts(sources, row_counts)
         model_counts = _upsert_scheduler_ready_model(
             cursor,

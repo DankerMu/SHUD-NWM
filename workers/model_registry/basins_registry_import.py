@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -27,6 +28,7 @@ from .basins_geometry import (
     _merge_polyline_parts,
     gap_split_multilinestring_wkt,
     parse_basins_geometry,
+    parse_seg_shp_crosswalk,
     safe_basins_file_sha256,
     trusted_basins_root,
 )
@@ -256,20 +258,14 @@ def _import_prepared_sources(
         )
     try:
         with _transaction(database_url) as cursor:
-            row_counts = {
-                "basin": _ensure_basin(cursor, sources),
-                "basin_version": _ensure_basin_version(cursor, sources),
-                "river_network_version": _ensure_river_network(cursor, sources),
-                "river_segment": _ensure_river_segments(cursor, sources),
-                "output_river_segment": _ensure_output_river_segments(cursor, sources),
-                "mesh_version": _ensure_mesh(cursor, sources),
-                "model_instance": _ensure_model_instance(cursor, sources),
-            }
-            # NOTE: output-river reach rows are left NULL-geom here on purpose --
-            # display geometry is a separate concern (see _ensure_output_river_segments).
-            # The seeding orchestrators stitch it on after import:
-            # qhh -> qhh_production_bootstrap, generic -> node27 autopipe
-            # (_backfill_output_segment_geometry, the single shared SQL).
+            row_counts = import_basin_into_registry_core(cursor, sources)
+            # NOTE: output-river reach rows are left NULL-geom by
+            # ``_ensure_output_river_segments`` on purpose -- display geometry
+            # is a separate concern from the row identities the verifier/parser
+            # need. The seeding orchestrators stitch it on after import:
+            # qhh -> qhh_production_bootstrap (inside this same transaction
+            # via _backfill_output_segment_geometry), generic -> node27
+            # autopipe (same shared SQL helper).
     except BasinsRegistryImportError:
         raise
     except Exception as error:
@@ -299,6 +295,92 @@ def _import_prepared_sources(
         "package_checksum": sources.manifest["package_checksum"],
         "auth_policy_decision": decision.to_dict(),
     }
+
+
+def import_basin_into_registry_core(
+    cursor: Any,
+    sources: ImportSources,
+    *,
+    seed_output_river_segments: bool = True,
+    backfill_output_segment_geometry: bool = True,
+) -> dict[str, int]:
+    """Single source of truth for the PR 2 per-basin write sequence.
+
+    The order is fixed to satisfy ``core`` foreign keys and to keep Path C's
+    ``core.river_segment_crosswalk`` populated for every importer that touches
+    the registry core (generic registry CLI, QHH production bootstrap, future
+    basins). It must run inside an already-opened transaction so the per-basin
+    atomicity guarantee is preserved by the caller (the existing
+    ``with _transaction(database_url) as cursor`` block in
+    ``_import_prepared_sources`` and the equivalent
+    ``with _transaction(database_url) as cursor`` block in
+    ``_bootstrap_database`` for QHH).
+
+    Sequence rationale:
+
+    * ``_delete_legacy_seg_rows`` MUST run first: pre-PR-2 imports left
+      ``<model>_seg_*`` rows under ``basin_version`` + ``river_network_version``
+      parents whose ``segment_count`` / ``checksum`` were derived from
+      ``gis/seg.shp``. PR 2 derives both from ``gis/river.shp`` and the values
+      diverge, so leaving the legacy parent metadata in place would trip
+      ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``basin_version`` /
+      ``river_network_version`` before any segment-level work could run.
+      Freshly bootstrapped basins (no legacy rows) short-circuit out of the
+      helper, and idempotent PR 2 -> PR 2 re-ingest still takes the existing
+      ``_ensure_*`` no-op path.
+    * ``_ensure_river_segment_crosswalk`` MUST run after
+      ``_ensure_river_segments``: crosswalk rows reference
+      ``(river_segment_id, river_network_version_id)`` via a FK declared at
+      ``db/migrations/000004_core.sql:64-65``.
+    * ``_backfill_output_segment_geometry`` runs last so the
+      ``shud_output_river='true'`` rows seeded by
+      ``_ensure_output_river_segments`` with NULL geom get their display
+      LineString copied off the PR 2 reach-level
+      ``core.river_segment.geom`` (matched on ``iRiv`` -> ``shud_riv_index``).
+
+    The QHH production bootstrap owns its own per-row seeding for the SHUD
+    output river layer (``_seed_output_segment_rows`` writes QHH-specific
+    ``properties_json`` keys not present in the generic registry payload, then
+    its own ``_backfill_output_segment_geometry`` call records provenance) and
+    cannot share the generic ``_ensure_output_river_segments`` digest contract
+    -- the two write the same ``shud_riv_*`` row identities with divergent
+    properties_json, so a second QHH bootstrap would otherwise trip
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``output_river_segment``. The
+    ``seed_output_river_segments`` / ``backfill_output_segment_geometry``
+    toggles let the QHH path delegate the registry-core write while keeping
+    its bespoke output seeding intact.
+    """
+
+    legacy_purged = _delete_legacy_seg_rows(cursor, sources.ids)
+    if legacy_purged:
+        # See ``_refresh_parent_version_materialization`` for the FK-safety
+        # rationale: pre-PR-2 ``basin_version`` / ``river_network_version``
+        # metadata is stale (counts + checksums derived from seg.shp), so the
+        # follow-up ``_ensure_*`` idempotency checks would raise
+        # CHECKSUM_CONFLICT. We refresh in place because DELETE on those
+        # parents would violate the FK from ``core.model_instance`` /
+        # ``core.mesh_version``.
+        _refresh_parent_version_materialization(cursor, sources)
+    row_counts: dict[str, int] = {
+        "basin": _ensure_basin(cursor, sources),
+        "basin_version": _ensure_basin_version(cursor, sources),
+        "river_network_version": _ensure_river_network(cursor, sources),
+        "river_segment": _ensure_river_segments(cursor, sources),
+    }
+    if seed_output_river_segments:
+        row_counts["output_river_segment"] = _ensure_output_river_segments(cursor, sources)
+    # FK-order critical: see helper docstring.
+    row_counts["river_segment_crosswalk"] = _ensure_river_segment_crosswalk(cursor, sources)
+    row_counts["mesh_version"] = _ensure_mesh(cursor, sources)
+    row_counts["model_instance"] = _ensure_model_instance(cursor, sources)
+    if backfill_output_segment_geometry:
+        _backfill_output_segment_geometry(
+            cursor,
+            sources.ids["river_network_version_id"],
+            only_missing=True,
+            record_geometry_source=True,
+        )
+    return row_counts
 
 
 def _require_import_policy(
@@ -458,6 +540,12 @@ def _ensure_river_network(cursor: Any, sources: ImportSources) -> int:
 
 def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     ids = sources.ids
+    # Legacy seg-level rows from the pre-PR-2 ingestion contract (IDs of
+    # the form ``<model>_seg_*``) are removed by ``_delete_legacy_seg_rows``
+    # at the top of the per-basin transaction (see ``_import_prepared_sources``).
+    # The purge MUST run before ``_ensure_basin_version`` /
+    # ``_ensure_river_network`` so the new PR-2 checksums can be written
+    # via the INSERT path; running it here would be too late.
     existing = _fetch_optional(
         cursor,
         """
@@ -516,14 +604,284 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
             VALUES %s
             """,
             rows,
-            # The parser emits gap-split MULTILINESTRING WKT; ST_Multi is a no-op on a
-            # MultiLineString and a safety wrap for any LineString that reaches here, so
-            # the insert always satisfies the geometry(MultiLineString, 4490) column.
+            # PR 2: the parser now emits single-part LINESTRING WKT
+            # (one row per reach from gis/river.shp). ST_Multi wraps it
+            # into a single-part MultiLineString so the
+            # geometry(MultiLineString, 4490) column type is preserved
+            # without a schema change.
             template="(%s, %s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
             page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
         )
         inserted += len(rows)
     return inserted
+
+
+def _delete_legacy_seg_rows(cursor: Any, ids: dict[str, str]) -> bool:
+    """Remove pre-PR-2 ``<model>_seg_*`` rows for this basin before reach insert.
+
+    The crosswalk table has a FOREIGN KEY on
+    ``(river_segment_id, river_network_version_id)`` referencing
+    ``core.river_segment`` (db/migrations/000004_core.sql:64-65), so the
+    delete order is strict: crosswalk children first, then the
+    ``river_segment`` parents. Both are scoped by the per-basin
+    ``river_network_version_id`` so other basins' rows stay untouched.
+
+    When legacy rows are actually present we also refresh the sibling
+    ``river_network_version`` / ``basin_version`` metadata
+    (``segment_count`` / ``source_uri`` / ``checksum``) in place so the
+    subsequent ``_ensure_river_network`` / ``_ensure_basin_version`` calls see
+    the new PR-2 reach-level values and take their idempotent no-op path
+    instead of raising ``BASINS_REGISTRY_CHECKSUM_CONFLICT``. Pre-PR-2 state
+    had ``segment_count = seg.shp record count`` and a checksum derived from
+    seg.shp; PR 2 derives both from ``river.shp`` and the counts/digests no
+    longer match.
+
+    We refresh rather than DELETE the parent rows because in production
+    ``core.model_instance`` and ``core.mesh_version`` FK-reference
+    ``core.basin_version`` / ``core.river_network_version`` without
+    ``ON DELETE CASCADE`` (see ``db/migrations/000004_core.sql``): a DELETE
+    would violate those FKs as soon as the basin has any registered models.
+    Freshly-imported basins with no legacy rows short-circuit out of this
+    branch and idempotent re-ingest (PR 2 -> PR 2) keeps its existing
+    ``_ensure_*`` no-op path.
+    """
+
+    rnv_id = ids["river_network_version_id"]
+    model_id = ids["model_id"]
+    legacy_pattern = f"{model_id}_seg_%"
+    legacy_present = _fetch_optional(
+        cursor,
+        """
+        SELECT 1 AS present
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        LIMIT 1
+        """,
+        (rnv_id, legacy_pattern),
+    )
+    if legacy_present is None:
+        return False
+    cursor.execute(
+        """
+        DELETE FROM core.river_segment_crosswalk
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        """,
+        (rnv_id, legacy_pattern),
+    )
+    cursor.execute(
+        """
+        DELETE FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND river_segment_id LIKE %s
+        """,
+        (rnv_id, legacy_pattern),
+    )
+    return True
+
+
+def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources) -> None:
+    """Refresh ``basin_version`` / ``river_network_version`` metadata in place
+    so the subsequent ``_ensure_*`` idempotency checks see the PR 2 reach-level
+    counts/checksums and take their no-op path instead of raising
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` against stale seg.shp-derived values.
+
+    Called only when ``_delete_legacy_seg_rows`` actually purged rows (i.e.
+    this basin is on the pre-PR-2 contract). Fresh basins never reach this
+    branch; idempotent PR 2 -> PR 2 re-ingest is unaffected because the
+    legacy probe returns no rows.
+    """
+
+    ids = sources.ids
+    rnv_present = _fetch_optional(
+        cursor,
+        "SELECT 1 AS present FROM core.river_network_version WHERE river_network_version_id = %s",
+        (ids["river_network_version_id"],),
+    )
+    if rnv_present is not None:
+        cursor.execute(
+            """
+            UPDATE core.river_network_version
+            SET segment_count = %s,
+                source_uri = %s,
+                checksum = %s
+            WHERE river_network_version_id = %s
+            """,
+            (
+                sources.geometry.segment_count,
+                sources.geometry.river_network_source_uri,
+                sources.geometry.river_network_checksum,
+                ids["river_network_version_id"],
+            ),
+        )
+    basin_version_present = _fetch_optional(
+        cursor,
+        "SELECT 1 AS present FROM core.basin_version WHERE basin_version_id = %s",
+        (ids["basin_version_id"],),
+    )
+    if basin_version_present is not None:
+        cursor.execute(
+            """
+            UPDATE core.basin_version
+            SET source_uri = %s,
+                checksum = %s
+            WHERE basin_version_id = %s
+            """,
+            (
+                sources.geometry.domain_source_uri,
+                sources.geometry.domain_checksum,
+                ids["basin_version_id"],
+            ),
+        )
+
+
+def _ensure_river_segment_crosswalk(cursor: Any, sources: ImportSources) -> int:
+    """Write ``core.river_segment_crosswalk`` rows from ``gis/seg.shp``.
+
+    Spec "Segment-to-reach crosswalk is preserved from gis/seg.shp": one
+    crosswalk row per ``seg.shp`` record, keyed by
+    ``(river_network_version_id, river_segment_id, source='basins_seg_shp')``
+    with ``external_id = "<iRiv>:<iEle>"`` and ``properties_json`` carrying
+    ``iRiv``/``iEle``/``segment_order``/``length_m``.
+
+    Idempotent re-ingest is supplied by the unique-constraint upsert
+    (``ON CONFLICT ... DO UPDATE``), matching the existing
+    ``PsycopgModelRegistryStore.create_crosswalk_entries`` behaviour. Pure
+    function up-front: the parsed crosswalk rows are built without DB I/O
+    via ``parse_seg_shp_crosswalk`` + ``_build_river_segment_crosswalk_rows``,
+    and the FK against ``core.river_segment`` is satisfied because this
+    helper always runs AFTER ``_ensure_river_segments`` inside the same
+    transaction.
+    """
+
+    try:
+        from psycopg2.extras import Json, execute_values
+    except ImportError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PSYCOPG_MISSING",
+            "psycopg2 is required for Basins registry import.",
+            model_id=sources.ids["model_id"],
+        ) from error
+    ids = sources.ids
+    crosswalk_rows = _crosswalk_rows_for_sources(sources)
+    if not crosswalk_rows:
+        return 0
+    # Idempotency: if the basin already has the exact crosswalk row count
+    # under source='basins_seg_shp', re-ingest is a no-op (matches the
+    # other _ensure_* helpers in this module and avoids inflating the
+    # already_imported row_counts response). The ON CONFLICT upsert path
+    # below would otherwise UPDATE existing rows and report a positive
+    # row_count even when nothing changed.
+    existing = _fetch_optional(
+        cursor,
+        """
+        SELECT COUNT(*) AS count
+        FROM core.river_segment_crosswalk
+        WHERE river_network_version_id = %s
+          AND source = 'basins_seg_shp'
+        """,
+        (ids["river_network_version_id"],),
+    )
+    existing_count = int(existing["count"]) if existing is not None else 0
+    if existing_count == len(crosswalk_rows):
+        return 0
+    db_rows = [
+        (
+            row["river_network_version_id"],
+            row["river_segment_id"],
+            row["source"],
+            row["external_id"],
+            Json(row["properties_json"]),
+        )
+        for row in crosswalk_rows
+    ]
+    inserted = 0
+    for chunk in _chunks(db_rows, RIVER_SEGMENT_INSERT_PAGE_SIZE):
+        execute_values(
+            cursor,
+            """
+            INSERT INTO core.river_segment_crosswalk (
+                river_network_version_id,
+                river_segment_id,
+                source,
+                external_id,
+                properties_json
+            )
+            VALUES %s
+            ON CONFLICT (river_network_version_id, source, external_id)
+            DO UPDATE SET
+                river_segment_id = EXCLUDED.river_segment_id,
+                properties_json = EXCLUDED.properties_json
+            """,
+            chunk,
+            page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
+        )
+        inserted += len(chunk)
+    return inserted
+
+
+def _crosswalk_rows_for_sources(sources: ImportSources) -> list[dict[str, Any]]:
+    """Parse ``gis/seg.shp`` and build crosswalk rows for this basin's reaches.
+
+    Failures are raised as :class:`BasinsRegistryImportError` so the caller's
+    per-basin transaction rolls back atomically (spec "Per-basin ingest is
+    transactional"). ``BASINS_REGISTRY_CROSSWALK_REACH_MISSING`` surfaces
+    when ``seg.shp`` references a reach Index that ``river.shp`` does not
+    list -- typically a stale model package.
+    """
+
+    ids = sources.ids
+    input_dir = sources.input_dir
+    seg_shp = input_dir.path / "gis" / "seg.shp"
+    if not seg_shp.is_file():
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SEG_SHP_MISSING",
+            "Basins seg.shp is missing; crosswalk rows cannot be written.",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        )
+    try:
+        import shapefile
+    except ImportError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SHAPEFILE_DEPENDENCY_MISSING",
+            "pyshp is required for Basins seg.shp crosswalk parsing.",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        ) from error
+    try:
+        reader = shapefile.Reader(str(seg_shp))
+    except Exception as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_GIS_PARSE_FAILED",
+            f"Basins seg.shp could not be opened: {error.__class__.__name__}",
+            model_id=ids["model_id"],
+            path=str(seg_shp),
+        ) from error
+    try:
+        try:
+            segments = parse_seg_shp_crosswalk(reader)
+        except BasinsGeometryError as error:
+            _raise_geometry_import_error(error, ids["model_id"])
+            raise AssertionError("unreachable") from error
+    finally:
+        reader.close()
+    reach_indices = {
+        int(segment.properties.get("iRiv"))
+        for segment in sources.geometry.river_segments
+        if segment.properties.get("iRiv") is not None
+    }
+    try:
+        return _build_river_segment_crosswalk_rows(
+            ids["model_id"],
+            ids["river_network_version_id"],
+            segments,
+            reach_indices,
+        )
+    except BasinsGeometryError as error:
+        _raise_geometry_import_error(error, ids["model_id"])
+        raise AssertionError("unreachable") from error
 
 
 def _ensure_output_river_segments(cursor: Any, sources: ImportSources) -> int:
@@ -606,45 +964,53 @@ def _backfill_output_segment_geometry(
     only_missing: bool = False,
     record_geometry_source: bool = True,
 ) -> int:
-    """Stitch SHUD output-river (`.sp.riv`) display geometry from the finer GIS
-    river segments onto the ``shud_output_river='true'`` reach rows.
+    """Backfill SHUD output-river (`.sp.riv`) display geometry onto the
+    ``shud_output_river='true'`` reach rows that ``_ensure_output_river_segments``
+    deliberately seeds with NULL geom (display geometry is a separate concern from
+    the row identities the verifier/parser need).
 
-    ``_ensure_output_river_segments`` deliberately seeds those reach rows with a
-    NULL geom. Without this backfill the national / single-run MVT JOINs the
-    reach rows but renders nothing — the live display can neither draw nor click
-    those reaches (the heihe symptom). Every finer GIS segment is grouped by
-    ``source_raw_segment_id`` (the SHUD reach index) and the group's parts are
-    greedy-stitched (``_merge_polyline_parts``) into one ordered point list, then
-    split into a gap-aware MultiLineString (``gap_split_positions``) so a genuine
-    source gap is NOT drawn as a straight bridge, matched onto the reach row via
-    ``shud_riv_index``. A single continuous reach is a one-part MultiLineString.
+    Two source paths in priority order, gated by which shape this basin's GIS rows
+    actually have in the registry:
 
-    Why greedy in Python, not ``ST_LineMerge`` in SQL: a reach's finer segments
-    routinely meet only at coincident vertices that ST_LineMerge refuses to
-    linearise (degree-3 nodes, an endpoint touching another part's interior,
-    retraced overlaps), so it returns a MULTILINESTRING; keeping just the longest
-    part then DROPS the rest of the channel and the reach renders broken (the
-    node-27 heihe/qhh breakage: ~8-12% of reaches, up to ~57% of length lost).
-    The even older ``ST_MakeLine(... ORDER BY segment_order)`` had the opposite
-    failure: it linked every point in storage order, drawing a cross-ridge
-    straight "jump" wherever record order != flow order. ``_merge_polyline_parts``
-    chains parts by NEAREST endpoints (reversing as needed): parts that touch join
-    with a zero-length link (continuous, no jump) and nothing is dropped; a genuine
-    source gap is then cut by ``gap_split_positions`` into separate MultiLineString
-    parts so it is no longer drawn as a bridge. This is the SAME stitch + split the
-    parser uses (``basins_geometry``), so the two paths stay in lock-step by
-    construction.
+    1. PR 2 reach-level path (new default since feat-reach-geom-from-river-shp):
+       ``core.river_segment`` now holds one row per ``.sp.riv`` reach (from
+       ``gis/river.shp``) with the reach's single-part LineString already in
+       ``geom`` and ``iRiv`` recorded in properties. The output reach row keyed
+       ``{model_id}_shud_riv_{N:06d}`` carries ``shud_riv_index=N`` and lines
+       up 1:1 with the parser-loaded reach row keyed ``{model_id}_reach_{N:06d}``
+       whose properties carry ``iRiv=N``. We copy ``geom`` + ``length_m`` from
+       the parent reach onto the output row in a single SQL UPDATE.
 
-    ``length_m`` is the SUM of the reach's finer segments (its true channel
-    length). ``record_geometry_source`` additionally stamps provenance into
-    ``properties_json``; the node-27 autopipe passes False so the output-river
-    idempotency digest (which digests properties_json) stays stable, while the
-    qhh bootstrap keeps it True. With ``only_missing`` only NULL-geom reaches are
-    updated, so re-importing an already-correct basin updates zero rows -- and a
-    basin whose reaches already hold geometry from an EARLIER backfill is NOT
-    re-stitched without first resetting the affected reach geom to NULL (the
-    autopipe also short-circuits already-seeded basins). New basins seed with
-    NULL geom and are stitched normally.
+    2. Legacy segment-level stitch path (pre-PR-2 / synthetic-fixture fallback):
+       finer GIS segments grouped by ``source_raw_segment_id`` (the SHUD reach
+       index) are greedy-stitched (``_merge_polyline_parts``) into one ordered
+       point list, then split into a gap-aware MultiLineString
+       (``gap_split_multilinestring_wkt``) so a genuine source gap is NOT drawn
+       as a straight bridge. Why greedy in Python, not ``ST_LineMerge`` in SQL:
+       a reach's finer segments routinely meet only at coincident vertices that
+       ST_LineMerge refuses to linearise (degree-3 nodes, an endpoint touching
+       another part's interior, retraced overlaps), so it returns a
+       MULTILINESTRING; keeping just the longest part then DROPS the rest of
+       the channel and the reach renders broken (the node-27 heihe/qhh breakage
+       observed before PR 2: ~8-12% of reaches, up to ~57% of length lost). The
+       even older ``ST_MakeLine(... ORDER BY segment_order)`` had the opposite
+       failure: it linked every point in storage order, drawing a cross-ridge
+       straight "jump" wherever record order != flow order.
+       ``_merge_polyline_parts`` chains parts by NEAREST endpoints (reversing
+       as needed): parts that touch join with a zero-length link (continuous,
+       no jump) and nothing is dropped; a genuine source gap is then cut by
+       ``gap_split_multilinestring_wkt`` into separate MultiLineString parts so
+       it is no longer drawn as a bridge.
+
+    The two paths share the same target invariant: ``length_m`` reflects the
+    reach's true channel length (the reach row's ``length_m`` from river.shp's
+    ``Length`` for path 1, or the sum of finer segments for path 2).
+    ``record_geometry_source`` stamps provenance into ``properties_json``; the
+    node-27 autopipe passes False so the output-river idempotency digest (which
+    digests properties_json) stays stable, while the qhh bootstrap keeps it
+    True. With ``only_missing`` only NULL-geom reaches are updated, so
+    re-importing an already-correct basin updates zero rows. New basins seed
+    with NULL geom and are backfilled normally.
     """
     from psycopg2.extras import execute_values
 
@@ -674,68 +1040,135 @@ def _backfill_output_segment_geometry(
     if not reaches_by_index:
         return 0
 
-    # Finer GIS segments grouped by SHUD reach index, each as an ordered point list.
+    # Path 1 (PR 2 reach-level default): try to map each output row directly to
+    # the parser-loaded reach row whose ``iRiv`` matches the output's
+    # ``shud_riv_index``. The reach row carries the single-part LineString geom
+    # from gis/river.shp wrapped as MultiLineString at insert time. We match on
+    # the text form of iRiv so a non-numeric value never aborts the read. We
+    # explicitly exclude the output rows themselves (``shud_output_river=true``)
+    # so a NULL-geom output sibling can never spoof its own backfill source.
     cursor.execute(
         """
         SELECT
-            properties_json->>'source_raw_segment_id' AS shud_riv_index,
-            (SELECT array_agg(ARRAY[ST_X(dp.geom), ST_Y(dp.geom)] ORDER BY dp.path)
-             FROM ST_DumpPoints(geom) AS dp) AS points,
+            properties_json->>'iRiv' AS shud_riv_index,
+            ST_AsText(geom) AS geom_wkt,
             length_m
         FROM core.river_segment
         WHERE river_network_version_id = %s
           AND geom IS NOT NULL
           AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
-          AND properties_json ? 'source_raw_segment_id'
-          AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
+          AND properties_json ? 'iRiv'
+          AND (properties_json->>'iRiv') ~ '^[0-9]+$'
         """,
         (river_network_version_id,),
     )
-    parts_by_index: dict[str, list[list[tuple[float, float]]]] = {}
-    length_by_index: dict[str, float] = {}
-    count_by_index: dict[str, int] = {}
+    reach_geom_by_index: dict[str, tuple[str, float | None]] = {}
     for row in cursor.fetchall():
         index = _cell(row, "shud_riv_index", 0)
-        points = _cell(row, "points", 1)
+        geom_wkt = _cell(row, "geom_wkt", 1)
         length_m = _cell(row, "length_m", 2)
-        if not points:
+        if not geom_wkt:
             continue
-        part = [(float(x), float(y)) for x, y in points if x is not None and y is not None]
-        if len(part) < 2:
-            continue
-        parts_by_index.setdefault(index, []).append(part)
-        length_by_index[index] = length_by_index.get(index, 0.0) + (float(length_m) if length_m is not None else 0.0)
-        count_by_index[index] = count_by_index.get(index, 0) + 1
+        reach_geom_by_index[index] = (
+            str(geom_wkt),
+            float(length_m) if length_m is not None else None,
+        )
 
-    # Greedy-stitch each reach's parts into ONE ordered point list (no dropped part,
-    # no storage-order jump), then split it into a gap-aware MultiLineString at any
-    # fabricated cross-gap straight link (same threshold/metric as the parser and the
-    # frontend). length_m stays the SUM of the finer segments -- the split changes
-    # only part boundaries, never vertices or length.
     updates: list[tuple[str, str, float | None, str]] = []
+    indices_missing_reach: list[str] = []
     for index, reach_ids in reaches_by_index.items():
-        parts = parts_by_index.get(index)
-        if not parts:
+        reach_geom = reach_geom_by_index.get(index)
+        if reach_geom is None:
+            indices_missing_reach.append(index)
             continue
-        merged = _merge_polyline_parts(parts)
-        if len(merged) < 2:
-            continue
-        # Same shared renderer as the parser (basins_geometry): gap-split + %.12g WKT,
-        # so output-reach geometry is byte-identical in precision to the parser path.
-        wkt = gap_split_multilinestring_wkt(merged)
-        total_length = length_by_index.get(index)
+        geom_wkt, total_length = reach_geom
         if record_geometry_source:
+            # Reuse the historical "gis_rivseg_iRiv" provenance label here even
+            # though the source storage shape is now reach-level rather than
+            # finer segments: the semantic is the same (display geometry sourced
+            # from the GIS layer, matched onto the output row by SHUD reach index
+            # iRiv), and keeping the label stable preserves the qhh bootstrap
+            # idempotency comparison in `_output_segment_idempotency_properties`
+            # (the expected properties hard-code this value, so a different
+            # label would flip ``unchanged`` to ``updated`` on every re-run).
             provenance = json.dumps(
                 {
                     "geometry_source": "gis_rivseg_iRiv",
-                    "geometry_source_segment_count": count_by_index.get(index, len(parts)),
+                    "geometry_source_segment_count": 1,
                     "geometry_source_length_m": total_length,
                 }
             )
         else:
             provenance = "{}"
         for reach_id in reach_ids:
-            updates.append((reach_id, wkt, total_length, provenance))
+            updates.append((reach_id, geom_wkt, total_length, provenance))
+
+    # Path 2 (legacy segment-level stitch): only consulted for output reaches
+    # that did NOT match a PR-2 reach row. Synthetic fixtures and any
+    # pre-PR-2 basin still rendering through this path stay green; PR 2 basins
+    # never reach this branch because every output row found its reach.
+    if indices_missing_reach:
+        cursor.execute(
+            """
+            SELECT
+                properties_json->>'source_raw_segment_id' AS shud_riv_index,
+                (SELECT array_agg(ARRAY[ST_X(dp.geom), ST_Y(dp.geom)] ORDER BY dp.path)
+                 FROM ST_DumpPoints(geom) AS dp) AS points,
+                length_m
+            FROM core.river_segment
+            WHERE river_network_version_id = %s
+              AND geom IS NOT NULL
+              AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
+              AND properties_json ? 'source_raw_segment_id'
+              AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
+            """,
+            (river_network_version_id,),
+        )
+        parts_by_index: dict[str, list[list[tuple[float, float]]]] = {}
+        length_by_index: dict[str, float] = {}
+        count_by_index: dict[str, int] = {}
+        for row in cursor.fetchall():
+            index = _cell(row, "shud_riv_index", 0)
+            if index not in indices_missing_reach:
+                continue
+            points = _cell(row, "points", 1)
+            length_m = _cell(row, "length_m", 2)
+            if not points:
+                continue
+            part = [(float(x), float(y)) for x, y in points if x is not None and y is not None]
+            if len(part) < 2:
+                continue
+            parts_by_index.setdefault(index, []).append(part)
+            length_by_index[index] = length_by_index.get(index, 0.0) + (
+                float(length_m) if length_m is not None else 0.0
+            )
+            count_by_index[index] = count_by_index.get(index, 0) + 1
+
+        for index in indices_missing_reach:
+            parts = parts_by_index.get(index)
+            if not parts:
+                continue
+            merged = _merge_polyline_parts(parts)
+            if len(merged) < 2:
+                continue
+            # Same shared renderer as the parser (basins_geometry): gap-split
+            # + %.12g WKT, so output-reach geometry is byte-identical in
+            # precision to the parser path.
+            wkt = gap_split_multilinestring_wkt(merged)
+            total_length = length_by_index.get(index)
+            if record_geometry_source:
+                provenance = json.dumps(
+                    {
+                        "geometry_source": "gis_rivseg_iRiv",
+                        "geometry_source_segment_count": count_by_index.get(index, len(parts)),
+                        "geometry_source_length_m": total_length,
+                    }
+                )
+            else:
+                provenance = "{}"
+            for reach_id in reaches_by_index[index]:
+                updates.append((reach_id, wkt, total_length, provenance))
+
     if not updates:
         return 0
 
@@ -850,12 +1283,29 @@ def _build_river_segment_crosswalk_rows(
     ]
 
 
+_OUTPUT_BACKFILL_INJECTED_KEYS = frozenset(
+    {"geometry_source", "geometry_source_segment_count", "geometry_source_length_m"}
+)
+
+
 def _output_river_segment_digest(rows: list[dict[str, Any]]) -> str:
+    """Hash output-river rows for idempotency checking.
+
+    Filters out fields injected by ``_backfill_output_segment_geometry`` after
+    the initial write (``geometry_source``, ``geometry_source_segment_count``,
+    ``geometry_source_length_m``). Incoming rows (from
+    ``_output_river_segment_rows``) lack these provenance keys; existing rows
+    (re-read from DB after a prior bootstrap + backfill) carry them. Without
+    this filter, every re-ingest after a successful bootstrap would trigger
+    ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` on ``output_river_segment``.
+    """
     payload = [
         {
             "river_segment_id": str(row["river_segment_id"]),
             "segment_order": None if row["segment_order"] is None else int(row["segment_order"]),
-            "properties": row["properties"],
+            "properties": _normalize_properties_for_digest(
+                {k: v for k, v in (row["properties"] or {}).items() if k not in _OUTPUT_BACKFILL_INJECTED_KEYS}
+            ),
         }
         for row in sorted(rows, key=lambda item: str(item["river_segment_id"]))
     ]
@@ -1087,19 +1537,109 @@ def _river_segment_digest_row(
     geom_wkt: Any,
     properties: dict[str, Any],
 ) -> dict[str, Any]:
+    # PR 2 (feat-reach-geom-from-river-shp) writes each reach as a
+    # single-part LineString WKT, but
+    # ``INSERT ... ST_Multi(ST_GeomFromText(...))`` (see ``_ensure_river_segments``)
+    # wraps it into a single-part MultiLineString to satisfy the
+    # ``geometry(MultiLineString, 4490)`` column type. The DB round-trip therefore
+    # returns ``MULTILINESTRING((...))`` while the incoming side still carries
+    # ``LINESTRING(...)``. Hashing the raw WKT verbatim would make the two sides
+    # diverge and break the ``BASINS_REGISTRY_CHECKSUM_CONFLICT`` idempotency
+    # guard on every re-ingest. Canonicalising to the bare coordinate sequence
+    # (numerics normalised via ``format(x, ".12g")``, ``-0`` collapsed to ``0``)
+    # makes both shapes hash identically while still flagging genuine geometry
+    # drift.
     return {
         "river_segment_id": str(river_segment_id),
         "segment_order": None if segment_order is None else int(segment_order),
         "downstream_segment_id": None if downstream_segment_id is None else str(downstream_segment_id),
         "length_m": None if length_m is None else float(length_m),
-        "geom_wkt": _normalize_wkt(str(geom_wkt or "")),
-        "properties": properties,
+        "geometry": _canonical_singlepart_line_coordinates(str(geom_wkt or "")),
+        "properties": _normalize_properties_for_digest(properties),
     }
+
+
+def _normalize_properties_for_digest(properties: dict[str, Any]) -> dict[str, Any]:
+    """Stabilise properties for digest hashing across PG JSONB round-trips.
+
+    PR 2 carries SHUD reach physical parameters from ``gis/river.shp`` (Slope,
+    Length, BankSlope, Width, ...) into ``properties_json``. PostgreSQL JSONB
+    stores numbers as ``numeric`` and re-emits them in canonical form, which
+    psycopg2 then decodes with ``json.loads``. The result is that a Python
+    ``float(5550.0)`` written into JSONB may come back as ``int(5550)``
+    (PG strips trailing zeros from the JSON text representation). Without
+    normalisation the SHA-256 of the incoming dict vs the re-read dict
+    diverges, breaking idempotent re-import (``BASINS_REGISTRY_CHECKSUM_CONFLICT``
+    on ``river_segment``). We coerce every numeric leaf to ``float`` so both
+    sides hash identically; booleans are preserved (``bool`` is a subclass of
+    ``int`` in Python so we filter them first).
+    """
+
+    def _coerce(value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, dict):
+            return {str(k): _coerce(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_coerce(item) for item in value]
+        return value
+
+    return {str(key): _coerce(value) for key, value in properties.items()}
 
 
 def _normalize_wkt(value: str) -> str:
     compact_commas = re.sub(r"\s*,\s*", ",", value.strip())
     return re.sub(r"\s+", " ", compact_commas)
+
+
+def _canonical_singlepart_line_coordinates(value: str) -> list[list[str]]:
+    """Normalize a single-part linestring WKT into a canonical coordinate list.
+
+    Both ``LINESTRING(...)`` and single-part ``MULTILINESTRING((...))`` collapse
+    to the same coordinate sequence so the incoming parser form (LineString)
+    and the PostgreSQL/PostGIS round-tripped storage form (MultiLineString,
+    written via ``ST_Multi(ST_GeomFromText(...))``) hash to the same digest.
+
+    Numeric tokens are normalised via ``format(x, ".12g")`` so equivalent text
+    representations (``100`` / ``100.0`` / ``1e2``) produce identical output.
+    Negative zero is collapsed to positive zero.
+
+    Raises ``ValueError`` on a multi-part ``MULTILINESTRING``: the PR 2
+    ``gis/river.shp`` parser contract guarantees a single-part reach geometry,
+    so multi-part inputs are an invariant violation and must NOT be silently
+    folded into one canonical key.
+    """
+
+    text = _normalize_wkt(value)
+    line_match = re.fullmatch(r"LINESTRING\s*\((.*)\)", text, flags=re.IGNORECASE)
+    multi_match = re.fullmatch(r"MULTILINESTRING\s*\(\s*\((.*)\)\s*\)", text, flags=re.IGNORECASE)
+    if line_match is not None:
+        body = line_match.group(1)
+    elif multi_match is not None:
+        body = multi_match.group(1)
+        if re.search(r"\)\s*,\s*\(", body):
+            raise ValueError("expected a single-part MultiLineString")
+    else:
+        raise ValueError(f"unsupported river geometry WKT: {text[:64]}")
+    coordinates: list[list[str]] = []
+    for raw_point in body.split(","):
+        ordinates = raw_point.split()
+        if len(ordinates) != 2:
+            raise ValueError("expected a two-dimensional coordinate")
+        point: list[str] = []
+        for token in ordinates:
+            number = float(token)
+            if not math.isfinite(number):
+                raise ValueError("non-finite coordinate")
+            if number == 0:
+                number = 0.0  # collapse -0 to +0
+            point.append(format(number, ".12g"))
+        coordinates.append(point)
+    if len(coordinates) < 2:
+        raise ValueError("river geometry must contain at least two points")
+    return coordinates
 
 
 def _find_inventory_model(inventory: dict[str, Any], model_id: str) -> dict[str, Any]:
