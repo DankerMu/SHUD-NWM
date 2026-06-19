@@ -684,12 +684,12 @@ class SHUDRuntime:
                     "Direct-grid forcing requires a checksum-verified forcing_package.json; "
                     "runtime forcing.files metadata is not authoritative for direct-grid staging.",
                 )
-            checksum_entries = _authoritative_package_manifest_checksum_entries(
+            manifest_entries = _authoritative_package_manifest_checksum_entries(
                 package_manifest,
                 forcing_uri=str(forcing.get("forcing_uri") or ""),
                 object_store_prefix=self.config.object_store_prefix,
             )
-            self._validate_direct_grid_package_station_filenames(checksum_entries)
+            checksum_entries = self._direct_grid_runtime_checksum_entries(manifest_entries)
         else:
             checksum_entries = _forcing_checksum_entries(manifest)
         self._verify_forcing_object_checksums(checksum_entries, is_direct_grid=is_direct_grid)
@@ -703,8 +703,12 @@ class SHUDRuntime:
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
         if not package_manifest_uri:
             return None
+        content = self._read_authoritative_forcing_package_manifest_bytes(package_manifest_uri)
+        return _parse_authoritative_forcing_package_manifest(content, package_manifest_uri)
+
+    def _read_authoritative_forcing_package_manifest_bytes(self, package_manifest_uri: str) -> bytes:
         try:
-            content = self.object_store.read_bytes_limited(
+            return self.object_store.read_bytes_limited(
                 package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
             )
         except Exception as error:
@@ -713,21 +717,6 @@ class SHUDRuntime:
                 "Forcing package manifest could not be read for authoritative mapping-mode detection: "
                 f"{package_manifest_uri}",
             ) from error
-        try:
-            package_manifest = json.loads(content.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise SHUDRuntimeError(
-                "FORCING_PACKAGE_MANIFEST_INVALID",
-                "Forcing package manifest is not valid JSON for authoritative mapping-mode detection: "
-                f"{package_manifest_uri}",
-            ) from error
-        if not isinstance(package_manifest, dict):
-            raise SHUDRuntimeError(
-                "FORCING_PACKAGE_MANIFEST_INVALID",
-                "Forcing package manifest must be a JSON object for authoritative mapping-mode detection: "
-                f"{package_manifest_uri}",
-            )
-        return package_manifest
 
     def verify_output(self, manifest: dict[str, Any], output_dir: Path) -> Path:
         files = sorted(
@@ -1148,6 +1137,8 @@ class SHUDRuntime:
                     f"Direct-grid forcing package manifest member must be a regular file: {relative_posix}",
                 )
             content = self._read_direct_grid_forcing_member_bytes(source_file, relative_posix)
+            if _is_direct_grid_station_csv_relative_path(relative_posix):
+                _validate_direct_grid_station_csv_header(content, path=source_file)
             _write_staged_bytes(destination / relative, content, root=destination)
 
     def _read_object_artifact_bytes(self, source: Path, label: str) -> bytes:
@@ -1195,15 +1186,16 @@ class SHUDRuntime:
                     "FORCING_CHECKSUM_MISSING",
                     "Forcing package manifest URI and checksum must be provided together.",
                 )
-            actual_checksum = self._object_checksum(package_manifest_uri)
+            content = self._read_authoritative_forcing_package_manifest_bytes(package_manifest_uri)
+            actual_checksum = sha256_bytes(content)
             if actual_checksum != expected_package_checksum:
                 raise SHUDRuntimeError(
                     "FORCING_PACKAGE_CHECKSUM_MISMATCH",
                     "Forcing package manifest checksum mismatch: "
                     f"expected {expected_package_checksum}, got {actual_checksum}.",
                 )
-            package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
-            self._assert_forcing_prcp_unit(package_manifest_uri)
+            package_manifest = _parse_authoritative_forcing_package_manifest(content, package_manifest_uri)
+            self._assert_forcing_prcp_unit(package_manifest_uri, package_manifest=package_manifest)
             return package_manifest
         return None
 
@@ -1229,15 +1221,15 @@ class SHUDRuntime:
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
 
-    def _validate_direct_grid_package_station_filenames(self, checksum_entries: list[dict[str, str]]) -> None:
+    def _direct_grid_runtime_checksum_entries(self, checksum_entries: list[dict[str, str]]) -> list[dict[str, str]]:
         tsd_entries = [entry for entry in checksum_entries if entry["relative_path"] == "shud/qhh.tsd.forc"]
         if not tsd_entries:
-            return
+            return []
         tsd_entry = tsd_entries[0]
         tsd_uri = str(tsd_entry["uri"])
         limit = _direct_grid_sensitive_member_limit("shud/qhh.tsd.forc")
         if limit is None:
-            return
+            return [tsd_entry]
         try:
             content = self.object_store.read_bytes_limited(tsd_uri, max_bytes=limit.max_bytes)
         except Exception as error:
@@ -1265,12 +1257,35 @@ class SHUDRuntime:
             too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
             line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
         )
-        for line in lines[3:]:
-            parts = line.split()
-            if len(parts) >= 7:
-                _direct_grid_station_filename(parts[6])
+        required_relative_paths = {"shud/qhh.tsd.forc"}
+        for station_csv in _direct_grid_station_csv_filenames_from_tsd_lines(lines):
+            required_relative_paths.add(f"shud/{station_csv}")
+        entries_by_relative_path: dict[str, dict[str, str]] = {}
+        for entry in checksum_entries:
+            relative_path = str(entry["relative_path"])
+            if relative_path not in required_relative_paths:
+                continue
+            if relative_path in entries_by_relative_path:
+                raise SHUDRuntimeError(
+                    "FORCING_CHECKSUM_INVALID",
+                    f"Duplicate direct-grid forcing package manifest relative_path: {relative_path}",
+                )
+            entries_by_relative_path[relative_path] = entry
+        missing_relative_paths = sorted(required_relative_paths - set(entries_by_relative_path))
+        if missing_relative_paths:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_MISSING",
+                "Direct-grid forcing package manifest is missing required SHUD forcing members: "
+                f"{', '.join(missing_relative_paths)}",
+            )
+        return [entries_by_relative_path[path] for path in sorted(required_relative_paths)]
 
-    def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
+    def _assert_forcing_prcp_unit(
+        self,
+        package_manifest_uri: str,
+        *,
+        package_manifest: Mapping[str, Any] | None = None,
+    ) -> None:
         """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
 
         This is the SHUD staging terminus guard for #270: SHUD reads PRCP from
@@ -1287,21 +1302,22 @@ class SHUDRuntime:
         the checksum verification performed before this call, so skipping the unit
         peek here loses no safety guarantee.
         """
-        try:
-            content = self.object_store.read_bytes_limited(
-                package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
-            )
-        except Exception:
-            # Read failure / object missing / size-cap exceeded: tolerate-skip.
-            # A large multi-station manifest must not turn a runnable package into a
-            # hard failure just because the optional unit peek could not read it.
-            return
-        try:
-            package_manifest = json.loads(content.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            # Malformed manifest: tolerate-skip. Content integrity is the checksum's
-            # job; the unit peek stays best-effort and does not fail the run.
-            return
+        if package_manifest is None:
+            try:
+                content = self.object_store.read_bytes_limited(
+                    package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
+                )
+            except Exception:
+                # Read failure / object missing / size-cap exceeded: tolerate-skip.
+                # A large multi-station manifest must not turn a runnable package into a
+                # hard failure just because the optional unit peek could not read it.
+                return
+            try:
+                package_manifest = json.loads(content.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Malformed manifest: tolerate-skip. Content integrity is the checksum's
+                # job; the unit peek stays best-effort and does not fail the run.
+                return
 
         units = package_manifest.get("units")
         if not isinstance(units, Mapping):
@@ -1598,17 +1614,15 @@ def _copy_staged_file_no_follow(source: Path, target: Path, *, root: Path) -> No
 
 
 def _copy_direct_grid_station_csv_no_follow(source: Path, target: Path, *, root: Path) -> None:
-    _write_staged_bytes(
-        target,
-        _read_limited_staged_bytes(
-            source,
-            root=root,
-            max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
-            too_large_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
-            too_large_message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
-        ),
+    content = _read_limited_staged_bytes(
+        source,
         root=root,
+        max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
+        too_large_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+        too_large_message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
     )
+    _validate_direct_grid_station_csv_header(content, path=source)
+    _write_staged_bytes(target, content, root=root)
 
 
 def _regular_file_exists(path: Path, *, containment_root: Path) -> bool:
@@ -2046,6 +2060,15 @@ def _read_shud_forcing_station_rows(path: Path, *, is_direct_grid: bool) -> list
     return rows
 
 
+def _direct_grid_station_csv_filenames_from_tsd_lines(lines: list[str]) -> list[str]:
+    station_filenames: list[str] = []
+    for line in lines[3:]:
+        parts = line.split()
+        if len(parts) >= 7:
+            station_filenames.append(_direct_grid_station_filename(parts[6]))
+    return station_filenames
+
+
 def _direct_grid_station_filename(raw_token: str) -> str:
     token = raw_token.strip()
     candidate = PurePosixPath(token)
@@ -2100,6 +2123,24 @@ def _forcing_package_manifest_checksum(forcing: Mapping[str, Any]) -> str:
     return str(
         forcing.get("package_manifest_checksum") or forcing.get("forcing_manifest_checksum") or ""
     ).strip()
+
+
+def _parse_authoritative_forcing_package_manifest(content: bytes, package_manifest_uri: str) -> dict[str, Any]:
+    try:
+        package_manifest = json.loads(content.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise SHUDRuntimeError(
+            "FORCING_PACKAGE_MANIFEST_INVALID",
+            "Forcing package manifest is not valid JSON for authoritative mapping-mode detection: "
+            f"{package_manifest_uri}",
+        ) from error
+    if not isinstance(package_manifest, dict):
+        raise SHUDRuntimeError(
+            "FORCING_PACKAGE_MANIFEST_INVALID",
+            "Forcing package manifest must be a JSON object for authoritative mapping-mode detection: "
+            f"{package_manifest_uri}",
+        )
+    return package_manifest
 
 
 def _validate_direct_grid_station_filename_target(target: Path, *, model_input_dir: Path, project_name: str) -> None:
@@ -2234,6 +2275,39 @@ def _first_shud_forcing_time(path: Path, *, is_direct_grid: bool) -> datetime:
     if time_day > 10_000:
         return datetime.fromtimestamp(time_day * 86_400.0, tz=UTC)
     return start_date + timedelta(days=time_day)
+
+
+def _validate_direct_grid_station_csv_header(content: bytes, *, path: Path) -> None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SHUDRuntimeError("SHUD_FORCING_CSV_HEADER_INVALID", f"Invalid SHUD forcing CSV header: {path}") from error
+    lines = _bounded_nonempty_lines(
+        text,
+        path=path,
+        max_lines=MAX_DIRECT_GRID_FORCING_CSV_LINES,
+        max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+        too_many_lines_code="DIRECT_GRID_FORCING_CSV_TOO_MANY_LINES",
+        line_too_long_code="DIRECT_GRID_FORCING_CSV_LINE_TOO_LONG",
+    )
+    if len(lines) < 2:
+        raise SHUDRuntimeError("SHUD_FORCING_CSV_EMPTY", f"Invalid SHUD forcing CSV: {path}")
+    expected_header = ["Time_Day", "Precip", "Temp", "RH", "Wind", "RN"]
+    observed_header = lines[1].split()
+    if observed_header != expected_header:
+        missing = [name for name in expected_header if name not in observed_header]
+        extra = [name for name in observed_header if name not in expected_header]
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if extra:
+            details.append(f"extra {', '.join(extra)}")
+        detail_message = f" ({'; '.join(details)})" if details else ""
+        raise SHUDRuntimeError(
+            "SHUD_FORCING_CSV_HEADER_INVALID",
+            "Direct-grid SHUD forcing CSV header must be delimiter-equivalent to "
+            f"{' '.join(expected_header)}; observed {' '.join(observed_header)}{detail_message}: {path}",
+        )
 
 
 def _remap_sp_att_forcing(path: Path, *, forcing_index: int) -> None:
