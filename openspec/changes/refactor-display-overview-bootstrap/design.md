@@ -134,9 +134,71 @@ node-27 prod DB 实测：
 - **Post-merge node-27**：`git pull --ff-only` → `cd apps/frontend && pnpm install --frozen-lockfile && pnpm build` → `rsync dist/ to /home/nwm/NWM/apps/frontend/dist/` → `docker restart api-web-1 api-worker-1` → cold force-refresh 瀑布 receipt（diff against canonical 21.8s 基线，预期 < 200 ms p95）+ 浏览器 cold first-paint 截图 + Network panel TTFB + Performance panel "first interactive river segment click" 时间戳（screen recording 是 nice-to-have；time-stamp 表是必需，对齐 Scenario「Cold first-paint interactivity budget」< 1 s 阈值）。
 - **Rollback**：每 PR git revert + node-27 重 ff + 重 build + restart；最坏情况整 epic revert 后 cold 回到 22s（无数据丢失风险，纯前端 + dead variant 删除）。
 
+## Risk Pack Coverage
+
+显式 selected / not-selected 矩阵（核心 11 pack + NHMS 8 domain pack）：
+
+| 核心 risk pack | 状态 | 理由 |
+|---|---|---|
+| Public API / CLI / script entry | **selected** | OpenAPI `HydroMvtVariable` enum 收紧 + `/api/v1/layers` 路径 + `/api/v1/layers/{layer_id}/valid-times` 路径 + `/api/v1/runs` query；BREAKING note 见 R1；deny 测试 422 见 task 1.4 |
+| Config / project setup | not selected | 未触 .env / `infra/env/compute.env` / settings / pyproject |
+| File IO / path safety / overwrite | not selected | 无 disk / object store / temp file / publish/delete；不触 forcing / SHUD output / receipt 文件写入路径 |
+| Schema / columns / units / field names | **selected** | OpenAPI enum 单点收紧（不动 DB schema / migration / column）；`OverviewDataSnapshot.bootstrap` 形状 PR 3/7 固化；4 spec capability deltas 的 scenarios 即 schema 合同 |
+| Auth / permissions / secrets | not selected | 不触 display readonly role（`nhms_display_ro`）、token、secret、模型 admin auth |
+| Concurrency / shared state / ordering | **selected** | (a) ranking in-flight cache + cancel-on-unmount（PR 4/7）；(b) loadOverview 两阶段 settle 时序（PR 3/7）；(c) PR 3 → 4 → 5 同一文件接力顺序，preamble 显式声明 |
+| Resource limits / large input / discovery | **selected** | (a) `metadata.valid_times` 优先消费消除 N RTT fan-out；(b) cold path 不再扫 92M 行 hypertable；(c) latency budget Scenarios `/api/v1/layers ≤ 200ms` / `first-paint ≤ 1s` 作为回归契约 |
+| Legacy compatibility / examples | **selected** | (a) 自家前端唯一消费者（R1）；(b) URL `?layer=water-level` 旧分享链回退到 `discharge`（spec scenario）；(c) BasinDetailPanels `warningDistribution` 空态降级避免误导前 API 消费者 |
+| Error handling / rollback / partial outputs | **selected** | (a) backend 422 enum reject；(b) mapBootstrap 阶段 1 reject → scoped bootstrap error；(c) enrichment 阶段 2 单点 reject → scoped panel error 不传播；(d) ranking unmount cancel 不允许 setState |
+| Release / packaging / dependency compatibility | **selected** | (a) BREAKING OpenAPI enum；(b) 每 sub-PR 独立可 revert（migration plan）；(c) node-27 部署链 `pnpm build + rsync + restart api-web/worker` |
+| Documentation / migration notes | **selected** | (a) `docs/runbooks/api-latency.md` 新增段落（task 7.1）；(b) `docs/runbooks/display-readonly-live-mvt.md` layer 列表更新（task 7.2）；(c) `docs/bugs.md` ledger 加条目（task 6.4） |
+
+| NHMS domain pack | 状态 | 理由 |
+|---|---|---|
+| Geospatial / CRS / basin geometry | not selected | 不触 PostGIS geometry / projection / basin shapefile / pyproj |
+| Hydro-met time series / forcing windows | **selected** | `hydro.river_timeseries` 上 `water_level` variable 从 hot path 退出；删除路径自然失活；不动 ingestion（无 backfill 风险） |
+| SHUD numerical / conservation / NaN | not selected | 不触 SHUD runtime / IC / restart / forcing |
+| PostGIS / TimescaleDB domain behavior | **selected** | TimescaleDB SkipScan + chunk filter pattern 是 22s 真因，删除 dead variant 后该 hot path 不再触发；不加 index、不改 hypertable、不改 chunk policy |
+| Slurm production lifecycle / mock-vs-real parity | not selected | 不触 Slurm / sbatch / production_closure |
+| External hydro-met providers / snapshot reproducibility | not selected | 不触 GFS / ERA5 / IFS / CDS provider 接入 |
+| Run manifest / QC provenance | not selected | 不触 `run_manifest` / `qc_result` / provider snapshot |
+| Published NHMS artifacts / display identity | **selected** | display readonly API 是 published 表面；contract 收紧 + 前端消费方式重组属于 published-artifact identity 维度；node-27 live receipt（PR 6/7）是该 pack 的 evidence floor |
+
+## Invariant Matrix
+
+Governing invariant: water-level dead variant 在 backend (services/tiles/mvt.py + apps/api/routes/flood_alerts.py) / OpenAPI (HydroMvtVariable enum) / frontend (M11Layer union + UI + tests) 整链零残留；`useOverviewDataStore` 单 `loading` 闸门拆为 `mapBootstrapLoading`（地图可交互快路径）与 `enrichmentLoading`（背景），首次河段可点击不阻塞于 enrichment；`/flood-alerts/ranking` 仅在面板挂载或 flood/warning layer 时按需 fetch；`normalizeLayerStates` 优先消费 `apiLayer.metadata.valid_times` 三态分支；默认 discharge 不强制 `flood_product_ready=true`；`/api/v1/layers` cold path 不触 92M-row TimescaleDB SkipScan。
+
+Source-of-truth identity/contract:
+- `HydroMvtVariable` enum in `openapi/nhms.v1.yaml`（收紧为 `["q_down"]`）
+- `M11Layer` TS union in `apps/frontend/src/lib/m11/queryState.ts`（4-layer canonical）
+- `OverviewDataSnapshot.bootstrap` shape `{ basins, layers, layerStates, currentLayerValidTime }`（PR 3/7 固化）
+- 4 capability spec deltas（scenarios 即测试合同）
+
+Surfaces:
+- Producers: `services/tiles/mvt.py::valid_times_for_layer / tile encoders / popup builders`、`apps/api/routes/flood_alerts.py::_default_layer_catalog / list_layer_valid_times`
+- Validators/preflight: FastAPI enum 422、TypeScript `M11Layer` union narrow、`pnpm check:api-types` types regen 一致性、`pnpm tsc --noEmit`
+- Storage/cache/query: `hydro.river_timeseries` SkipScan 历史路径（删 water-level 后再也不触发；无 schema 改动）
+- Public routes/entrypoints: `GET /api/v1/layers`、`GET /api/v1/layers/{layer_id}/valid-times`、`GET /api/v1/runs`
+- Frontend/downstream consumers: `useOverviewDataStore.loadOverview`、`OverviewPage.surfaceSettling`、`M11MapLibreSurface.buildM11RegisteredOverlay`、`M11Controls`、`BasinDetailPanels.warningDistribution`、`normalizeLayerStates`
+- Failure paths/rollback/stale state: backend 422 on water_level 请求；frontend URL `?layer=water-level` 回退到 discharge 默认；mapBootstrap 阶段 1 reject → scoped bootstrap error；enrichment 阶段 2 单点 reject → scoped panel error 不传播；ranking 面板 unmount/layer 切回时 in-flight cache 清理
+- Evidence/audit/readiness: `docs/runbooks/receipts/display-bootstrap-decoupling-<date>.md`（PR 6/7 产出，含 21.8s 基线 diff + 浏览器 cold first-paint 时间戳）；`openspec validate refactor-display-overview-bootstrap --strict --no-interactive` 全程绿；CI path-scoped gates（backend pytest + frontend tsc + markdown lint + openapi validate）
+
+Regression rows:
+- `/api/v1/layers`（runless cold，force-refresh `x-nhms-cache-warm: refresh`）→ p95 ≤ 200 ms（基线 21.8s 21.07s）
+- 其他 bootstrap-critical 端点（/runs/pipeline/queue/summary/basin-versions）cold p95 ≤ 500 ms
+- `GET /api/v1/layers/water-level/valid-times` → HTTP 422（FastAPI enum validation）
+- `GET /api/v1/runs?source=best`（无 `flood_product_ready` filter）→ 返回 frequency-ready 但 flood-incomplete 的 run（如 QHH/Heihe）
+- URL `?layer=water-level` → frontend parser 回退到 `discharge`，无 MVT source 注册
+- 默认 best+discharge `loadOverview` → 不发 `fetchFloodRanking`、不发 `layerIdsForOverview.map(fetchLayerValidTimes)` fan-out
+- `mapBootstrapLoading=false` + `overview.bootstrap` ready → MVT hit layer 已注册 + 河段可点击；`enrichmentLoading=true` 不阻塞 `surfaceSettling`
+- `BasinDetailPanels.warningDistribution === undefined` → pending/「未加载」占位（不渲染「全 0 警告」误导态）
+- `query.layer` 切到 `flood-return-period`/`warning-level` → 下一次 `fetchRunsPageByStatus` 注入 `flood_product_ready=true`；切回 `discharge` → 不注入 + latest run 重选
+- Ranking 面板 unmount / layer 切回 discharge 时 in-flight cache 清理 + 无 setState-after-unmount 警告
+- 未变更 sibling consumer：`discharge` / `flood-return-period` / `warning-level` / `river-network` 4 个图层 + segment detail 面板 + basin drill-down 面板的非 water-level 字段渲染不发生回归
+
 ## Open Questions
 
 - **Q1 (resolved 2026-06-20)**：mapBootstrap 阶段是否需要等 `fetchModels` 完成？
   **决议**：`fetchModels` 放 **enrichment**（task 3.2b 内执行；非 mapBootstrap）。理由：MVT hit layer 注册（[M11MapLibreSurface::buildM11RegisteredOverlay](apps/frontend/src/components/map/M11MapLibreSurface.tsx)）仅需 layers + 当前 layer 的 valid_time + basin 身份；model→basin 映射用于 basin 详情面板而非首次可点击，归 enrichment 不影响 first-paint < 1 s 阈值。
 - **Q2 (resolved 2026-06-20)**：`river-network` layer 的 metadata.valid_times 是否真的可用？
   **决议**：在 #585 node-27 live receipt 阶段必须探测并记录其形状（`==[]` 或 `null` 或非空），并在 receipt markdown 中以表格固化。`normalizeLayerStates` 已设计三态分支（spec scenarios `Metadata.valid_times is intentionally empty (time-less layer)` 不发 fallback；`Metadata.valid_times is missing or null (schema gap)` 才 fallback），无论 node-27 实测哪种形态，前端行为都符合 spec。Receipt 用于固化历史事实，不会触发 spec 改动。
+  **反向校验注释**：如 node-27 receipt 探测到 river-network 返回 `undefined`/`null`（即 schema gap 而非 time-less），PR 7/7 docs sync 需在 `docs/runbooks/api-latency.md` 新增段落里追加一条 "fallback hit rate is bounded to 1 layer (river-network)" 说明 + 回链 receipt；如返回 `[]`（time-less），无需 docs 追加，只在 receipt 表内固化即可。任一形态均不构成 spec drift（三态分支已固化）。

@@ -1,14 +1,23 @@
 <!--
   Modification rationale (2026-06-20): MODIFIED requirement adds a `water-level
-  layer is rejected` scenario and pins the canonical supported hydrology layer
-  set (`discharge`, `flood-return-period`, `warning-level`, `river-network`)
-  into the requirement body. Pinning is deliberate: the product decision
-  withdraws `water-level` end-to-end, and the layer set is the source of truth
-  used by `normalizeLayerStates`, `requiredLayers`, and the `M11Layer` union.
-  Future additions (sediment, groundwater, etc.) MUST land via a new MODIFIED
-  edit to this requirement, not silent expansion. Met-stations and met-raster
-  belong to a separate raster overlay union (`M11RasterOverlay`) and are out of
-  scope for this hydrology layer set.
+  layer is rejected` scenario and pins the canonical supported MVT layer set
+  (`discharge`, `flood-return-period`, `warning-level`, `river-network`) into
+  the requirement body. Pinning is deliberate: the product decision withdraws
+  `water-level` end-to-end. These 4 are the backend MVT-emitting layers that
+  the frontend consumes via vector tile sources; `river-network` is
+  `layer_type: 'base'` (always-on geometry), the other 3 are
+  `layer_type: 'hydrology'`. Future MVT layer additions (sediment, groundwater,
+  etc.) MUST land via a new MODIFIED edit to this requirement, not silent
+  expansion.
+
+  Scope clarification: the `M11Layer` TypeScript union (the frontend user-
+  selector) continues to include `'met-stations'` and `'met-raster'` raster
+  overlays even after this change; those overlays are NOT MVT and are not
+  covered by this requirement. After removing `water-level`, `M11Layer` = 5
+  members (`discharge | flood-return-period | warning-level | met-stations |
+  met-raster`); `river-network` is rendered as base layer at the backend and
+  is not in `M11Layer`. Splitting `M11Layer` into `M11HydroLayer` +
+  `M11RasterOverlay` is a future refactor, NOT part of this change.
 -->
 
 ## MODIFIED Requirements
