@@ -603,6 +603,18 @@ async function fetchModel(modelId: string) {
   )
 }
 
+// PR 5/7（spec scenario "Default discharge run selection is independent of flood readiness"）：
+// 历史上 `/runs` 永远 append `flood_product_ready=true`，把 discharge 展示语义与洪频完整性强耦合
+// （m25 多流域改造副产品，design.md D6）。现在按 layer 三态门控：
+// - flood-return-period / warning-level → 强制 `true`（ranking / summary 需要洪频 ready 闸门）
+// - 其他（discharge / met-stations / met-raster）→ 不注入该 param，让后端 frequency-ready ordering
+//   选最新 run，避免洪频未跑完时 discharge 也选不到 run。
+// 注意：cache key 必须把 floodProductReady 纳入，否则 layer toggle 后命中前一个 layer 的缓存页，
+// 违反 spec scenario "Layer toggle re-evaluates flood_product_ready filter"。
+function floodProductReadyForLayer(layer: M11QueryState['layer']): boolean | undefined {
+  return layer === 'flood-return-period' || layer === 'warning-level' ? true : undefined
+}
+
 async function fetchRunsPageByStatus(
   query: M11QueryState,
   basinId: string | undefined,
@@ -611,8 +623,18 @@ async function fetchRunsPageByStatus(
   status: ReadyRunStatus,
 ) {
   const source = sourceForApi(query.source)
+  const floodProductReady = floodProductReadyForLayer(query.layer)
   return cached(
-    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status, limit, offset }),
+    cacheKey('/api/v1/runs', {
+      basinId,
+      source,
+      cycleTime: query.cycle ?? 'latest',
+      status,
+      limit,
+      offset,
+      // 关键：layer toggle（discharge ↔ flood-return-period/warning-level）必须重算请求 + 重选 latest run。
+      floodProductReady: floodProductReady ?? false,
+    }),
     () =>
       getApi<ApiHydroRunPage>(
         '/api/v1/runs',
@@ -623,7 +645,8 @@ async function fetchRunsPageByStatus(
               source,
               cycle_time: query.cycle ?? undefined,
               status,
-              flood_product_ready: true,
+              // undefined → openapi-fetch 不会 serialize 该 param；只有 flood-driven layer 才会出现 in query string。
+              flood_product_ready: floodProductReady,
               limit,
               offset,
             },

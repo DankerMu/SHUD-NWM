@@ -4193,4 +4193,110 @@ describe('useOverviewDataStore', () => {
       expect(calls.filter((p) => p === '/api/v1/flood-alerts/ranking')).toEqual([])
     })
   })
+
+  // PR 5/7（spec scenario "Default discharge run selection is independent of flood readiness" /
+  // "Layer toggle re-evaluates flood_product_ready filter"）：
+  // discharge layer 不应强制 `flood_product_ready=true`；切到 flood-return-period 时下一次
+  // `/runs` 必须带 `flood_product_ready=true` 并重选 latest run。
+  describe('flood_product_ready layer-gating (PR 5/7)', () => {
+    it('omits flood_product_ready on discharge, injects on flood layer, and re-resolves latestRun across the toggle', async () => {
+      const dischargeQuery = { ...query, layer: 'discharge' as const }
+      const floodQuery = { ...query, layer: 'flood-return-period' as const }
+
+      // 两个候选 run：run-A 是 frequency-ready 但 flood-incomplete；run-B 是 fully flood-ready。
+      // 关键：run-A 的 `updated_at` 显式比 run-B 新（00:00 cycle 平手 → updated_at tiebreaker）。
+      // - discharge layer 不强制 flood_product_ready → 后端返回 [run-A, run-B]，前端 latestPublishedRun
+      //   按 updated_at DESC 选到 run-A。
+      // - flood-return-period layer 强制 flood_product_ready=true → 后端只返回 [run-B]（run-A 因洪频
+      //   不完整被过滤），前端必须重选 run-B（而非沿用 cache 中的 run-A）。这是 spec scenario
+      //   "Layer toggle re-evaluates flood_product_ready filter" 的 latest-run-re-resolution 子句。
+      const runA = {
+        ...run,
+        run_id: 'run-A-flood-incomplete',
+        cycle_time: '2026-05-19T00:00:00Z',
+        updated_at: '2026-05-19T01:00:00Z',
+      }
+      const runB = {
+        ...run,
+        run_id: 'run-B-flood-ready',
+        cycle_time: '2026-05-19T00:00:00Z',
+        updated_at: '2026-05-19T00:30:00Z',
+      }
+
+      const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        const options = args[1] as { params?: { query?: Record<string, unknown> } }
+        const requestQuery = options?.params?.query
+        calls.push({ path, query: requestQuery })
+
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') {
+          // 仅 frequency_done status 才返回非空，其余空 page 保持 readyStatusPages 结构。
+          if (requestQuery?.status !== 'frequency_done') {
+            return success({ items: [], total: 0, limit: 20, offset: 0 }) as never
+          }
+          // 模拟后端：flood_product_ready=true 时只返回完整 flood-ready 的 run-B；
+          // 未传 flood_product_ready 时返回全部候选 [run-A, run-B]。
+          if (requestQuery?.flood_product_ready === true) {
+            return success({ items: [runB], total: 1, limit: 20, offset: 0 }) as never
+          }
+          return success({ items: [runA, runB], total: 2, limit: 20, offset: 0 }) as never
+        }
+        if (path === '/api/v1/layers') {
+          return success([
+            {
+              layer_id: 'discharge',
+              layer_name: 'River discharge',
+              layer_type: 'hydrology',
+              variables: ['q_down'],
+              metadata: { valid_times: ['2026-05-19T06:00:00Z'] },
+            },
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: ['return_period'],
+              metadata: { valid_times: ['2026-05-19T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          // 关键：echo 请求的 run_id 让 freshness.runId 真实反映上游 latestRun 选择。
+          const echoed = String(requestQuery?.run_id ?? '')
+          return success({ run_id: echoed, total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      // (1) discharge：请求不应携带 flood_product_ready；latestRun 来自 [run-A, run-B]
+      // （cycle_time 平手 → updated_at 较新者胜 = run-A）。
+      const dischargeSnapshot = await useOverviewDataStore.getState().loadOverview(dischargeQuery)
+      const dischargeRunCalls = calls.filter((call) => call.path === '/api/v1/runs')
+      expect(dischargeRunCalls.length).toBeGreaterThan(0)
+      // 关键 assertion 1：discharge 路径下任意 /runs 调用都不应包含 flood_product_ready。
+      expect(dischargeRunCalls.every((call) => call.query?.flood_product_ready === undefined)).toBe(true)
+      // discharge layer 选到的 latestRun = run-A（cycle_time 平手 → updated_at 较新者胜）。
+      expect(dischargeSnapshot.summary.freshness.runId).toBe(runA.run_id)
+
+      // (2) 切到 flood-return-period：下一次 /runs 必须带 flood_product_ready=true；
+      // latestRun 必须从新 run set [run-B] 重新选，不能复用上一轮 cached 的 run-A。
+      const callsBeforeToggle = calls.length
+      const floodSnapshot = await useOverviewDataStore.getState().loadOverview(floodQuery)
+      const floodRunCallsAfterToggle = calls
+        .slice(callsBeforeToggle)
+        .filter((call) => call.path === '/api/v1/runs')
+      // 关键 assertion 2：layer toggle 后下一轮 /runs 必须发，且每条都携带 flood_product_ready=true。
+      expect(floodRunCallsAfterToggle.length).toBeGreaterThan(0)
+      expect(floodRunCallsAfterToggle.every((call) => call.query?.flood_product_ready === true)).toBe(true)
+      // 关键 assertion 3：latestRun 重选 → flood-ready 路径下选到 run-B（discharge 阶段的 run-A 不能串味）。
+      expect(floodSnapshot.summary.freshness.runId).toBe(runB.run_id)
+      expect(floodSnapshot.summary.freshness.runId).not.toBe(runA.run_id)
+    })
+  })
 })
