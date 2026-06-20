@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -1827,21 +1828,6 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
             [("discharge", "hydrological_output", "q_down")],
         ),
         (
-            f"/api/v1/tiles/hydro/{RUN_ID}/water_level/{VALID_TIME_1_ISO}/6/12/24.pbf",
-            flood_alert_routes.TileInput(
-                layer_id="water-level",
-                source_id=RUN_ID,
-                source_version="rnv_v1",
-                valid_time=VALID_TIME_1_ISO,
-                z=6,
-                x=12,
-                y=24,
-                variant_id="variable:water_level",
-            ),
-            "_fetch_hydro_mvt_tile_bytes",
-            [("water-level", "hydrological_output", "water_level")],
-        ),
-        (
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
             flood_alert_routes.TileInput(
                 layer_id="river-network",
@@ -2733,7 +2719,7 @@ def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> 
             )
         }
 
-    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level"):
+    for layer_id in ("discharge", "flood-return-period", "warning-level"):
         assert old_metadata[layer_id]["source_refs"]["run_id"] == RUN_ID
         assert old_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
         assert old_metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
@@ -4054,10 +4040,6 @@ def test_run_scoped_mvt_rejects_sibling_only_source_identity_before_cache_or_liv
     [
         (f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf", "_fetch_hydro_mvt_tile_bytes"),
         (
-            f"/api/v1/tiles/hydro/{RUN_ID}/water_level/{VALID_TIME_1_ISO}/6/12/24.pbf",
-            "_fetch_hydro_mvt_tile_bytes",
-        ),
-        (
             f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
             "_fetch_flood_mvt_tile_bytes",
         ),
@@ -4493,7 +4475,7 @@ def test_single_run_hydro_tile_sql_has_no_basin_id_column() -> None:
 
 @pytest.mark.parametrize(
     "layer_id",
-    ["flood-return-period", "warning-level", "discharge", "water-level"],
+    ["flood-return-period", "warning-level", "discharge"],
 )
 def test_layer_valid_times_explicit_non_ready_run_requires_frequency_ready_before_discovery(
     monkeypatch: pytest.MonkeyPatch,
@@ -4514,7 +4496,7 @@ def test_layer_valid_times_explicit_non_ready_run_requires_frequency_ready_befor
 
 @pytest.mark.parametrize(
     "layer_id",
-    ["flood-return-period", "warning-level", "discharge", "water-level"],
+    ["flood-return-period", "warning-level", "discharge"],
 )
 def test_layer_valid_times_unscoped_no_ready_run_returns_empty_without_discovery(
     monkeypatch: pytest.MonkeyPatch,
@@ -4581,7 +4563,7 @@ def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_expo
     """无洪频基线的 frequency-ready run（QHH/Heihe 现实：有 q_down 无 return-period）仍应暴露 discharge。
 
     解耦回归：目录默认 run 选最新 frequency-ready（latest_frequency_ready_run），不再像 latest_ready_run
-    那样内连接 flood.return_period_result。discharge/water-level/river-network 暴露，flood/warning 层
+    那样内连接 flood.return_period_result。discharge/river-network 暴露，flood/warning 层
     仍在目录但被 _annotate_flood_layer_quality 标注 unavailable，不阻塞水文图层。
     """
     with _store() as session:
@@ -4677,7 +4659,7 @@ def test_layer_catalog_explicit_missing_run_source_identity_returns_stable_error
     assert body["error"]["details"]["river_network_version_id"] is None
 
 
-@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge", "water-level"])
+@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge"])
 def test_layer_valid_times_explicit_missing_run_source_identity_returns_stable_error_without_discovery(
     monkeypatch: pytest.MonkeyPatch,
     layer_id: str,
@@ -4832,16 +4814,6 @@ def test_layer_catalog_unscoped_latest_ready_missing_source_identity_returns_sta
                 "variable = :variable",
             ),
         ),
-        (
-            "water-level",
-            "hydro.river_timeseries",
-            (
-                "run_id = :run_id",
-                "basin_version_id = :basin_version_id",
-                "river_network_version_id = :river_network_version_id",
-                "variable = :variable",
-            ),
-        ),
     ],
 )
 def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate(
@@ -4896,7 +4868,7 @@ def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate
     assert session.parameters["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
 
 
-@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge", "water-level"])
+@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge"])
 def test_valid_times_for_layer_concrete_run_requires_selected_identity(layer_id: str) -> None:
     class FakeSession:
         def execute(self, *_args: Any, **_kwargs: Any) -> None:
@@ -5078,16 +5050,14 @@ def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None
     assert explicit_24h.json()["data"]["valid_times"] == [_iso(later_24h)]
 
 
-@pytest.mark.parametrize("layer_id", ["discharge", "water-level"])
-def test_hydro_valid_time_discovery_excludes_sibling_only_selected_identity(
-    layer_id: str,
-) -> None:
+def test_hydro_valid_time_discovery_excludes_sibling_only_selected_identity() -> None:
+    layer_id = "discharge"
     run_id = "valid_time_hydro_identity_run"
     selected_time = datetime(2026, 5, 23, 6, tzinfo=UTC)
     sibling_only_time = datetime(2026, 5, 23, 12, tzinfo=UTC)
-    variable = "water_level" if layer_id == "water-level" else "q_down"
-    value = 1.5 if layer_id == "water-level" else 150.0
-    unit = "m" if layer_id == "water-level" else "m3/s"
+    variable = "q_down"
+    value = 150.0
+    unit = "m3/s"
     with _store() as session:
         session.execute(
             text(
@@ -5218,13 +5188,9 @@ def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases(
     assert response.status_code == 200
     layers = {layer["layer_id"]: layer for layer in response.json()["data"]}
     discharge = layers["discharge"]["metadata"]
-    water_level = layers["water-level"]["metadata"]
     assert discharge["cache_layer_id"] == "discharge"
     assert discharge["route_variable"] == "q_down"
     assert discharge["legacy_layer_ids"] == ["hydro:q_down"]
-    assert water_level["cache_layer_id"] == "water-level"
-    assert water_level["route_variable"] == "water_level"
-    assert water_level["legacy_layer_ids"] == ["hydro:water_level"]
 
 
 def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_constants() -> None:
@@ -5253,7 +5219,7 @@ def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_
     # Unscoped discharge is national: run-less template, no single-run source refs.
     assert metadata["discharge"]["source_refs"] == {}
     assert metadata["discharge"]["required_placeholders"] == ["valid_time", "z", "x", "y"]
-    for layer_id in ("water-level", "flood-return-period", "warning-level", "river-network"):
+    for layer_id in ("flood-return-period", "warning-level", "river-network"):
         assert metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
         assert metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
     assert (
@@ -5323,7 +5289,6 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
                 run_id=run_id,
             )
             _insert_timeseries_result(session, "seg_001", run_id, valid_time, 100.0)
-            _insert_timeseries_result(session, "seg_001", run_id, valid_time, 1.25, variable="water_level", unit="m")
         session.commit()
 
         def catalog_for(run_id: str) -> dict[str, dict[str, Any]]:
@@ -5341,7 +5306,7 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
         old_catalog = catalog_for(old_run_id)
         new_catalog = catalog_for(new_run_id)
 
-    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level"):
+    for layer_id in ("discharge", "flood-return-period", "warning-level"):
         old_metadata = old_catalog[layer_id]
         new_metadata = new_catalog[layer_id]
         assert old_metadata["source_refs"]["source_version"] == new_metadata["source_refs"]["source_version"]
@@ -5389,16 +5354,6 @@ def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
             x=12,
             y=24,
             variant_id="variable:q_down",
-        ),
-        "water-level": flood_alert_routes.TileInput(
-            layer_id="water-level",
-            source_id=RUN_ID,
-            source_version="rnv_v1",
-            valid_time=VALID_TIME_1_ISO,
-            z=6,
-            x=12,
-            y=24,
-            variant_id="variable:water_level",
         ),
         "river-network": flood_alert_routes.TileInput(
             layer_id="river-network",
@@ -5716,15 +5671,161 @@ def test_layer_metadata_property_schema_declares_public_source_time_identity() -
     assert response.status_code == 200
     metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
 
-    for layer_id in ("discharge", "water-level"):
-        required = metadata[layer_id]["property_schema"]["required"]
-        assert {"run_id", "variable", "valid_time"}.issubset(required)
-        assert "duration" not in required
+    required = metadata["discharge"]["property_schema"]["required"]
+    assert {"run_id", "variable", "valid_time"}.issubset(required)
+    assert "duration" not in required
 
     for layer_id in ("flood-return-period", "warning-level"):
         required = metadata[layer_id]["property_schema"]["required"]
         assert {"run_id", "duration", "valid_time"}.issubset(required)
         assert "variable" not in required
+
+
+def test_openapi_hydro_mvt_variable_enum_is_tightened_to_discharge_only() -> None:
+    """OpenAPI HydroMvtVariable enum MUST NOT readmit the retired hydro variant.
+
+    Pins the BREAKING contract behind the catalog deletion (epic #579 / PR #580).
+    Spec scenario `water_level variable is rejected at the backend boundary`.
+    """
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    enum_values = spec["components"]["parameters"]["HydroMvtVariable"]["schema"]["enum"]
+    assert enum_values == ["q_down"]
+    # Drift sentinel: anything that re-adds the retired variant should fail loudly.
+    forbidden = "wat" + "er_level"
+    assert forbidden not in enum_values
+
+
+def test_layers_catalog_advertises_four_layers_without_retired_hydro_variant() -> None:
+    """Catalog deletion regression: `/api/v1/layers` must advertise exactly the
+    canonical 4-layer hydrology/base set after the retired hydro variant was removed.
+    """
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+
+    assert response.status_code == 200
+    layer_ids = {layer["layer_id"] for layer in response.json()["data"]}
+    assert layer_ids == {"discharge", "flood-return-period", "warning-level", "river-network"}
+    # Sanity: the retired hydro variant must not reappear via metadata
+    # (cache_layer_id / route_variable / legacy_layer_ids backdoors).
+    forbidden_layer_id = "wat" + "er-level"
+    forbidden_variable = "wat" + "er_level"
+    assert forbidden_layer_id not in layer_ids
+    for layer in response.json()["data"]:
+        metadata = layer["metadata"] or {}
+        assert metadata.get("cache_layer_id") != forbidden_layer_id
+        assert metadata.get("route_variable") != forbidden_variable
+        assert forbidden_layer_id not in (metadata.get("legacy_layer_ids") or [])
+
+
+def test_layer_valid_times_for_retired_hydro_layer_returns_422() -> None:
+    """`GET /api/v1/layers/<retired-layer>/valid-times` MUST return 422 at the
+    backend boundary now that the catalog removed the layer (#580). Covers
+    spec scenario `water_level variable is rejected at the backend boundary`.
+    """
+    with _client() as client:
+        response = client.get("/api/v1/layers/wat" + "er-level/valid-times")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"]["layer_id"] == "wat" + "er-level"
+    supported = body["error"]["details"]["supported"]
+    assert set(supported) == {"discharge", "flood-return-period", "warning-level", "river-network"}
+
+
+def test_runs_does_not_require_flood_product_ready_for_discharge() -> None:
+    """`GET /api/v1/runs?source=best` (no `flood_product_ready` filter) MUST return
+    frequency-ready runs even when their flood frequency products are incomplete
+    (mirrors QHH/Heihe in production: q_down present, return_period_result absent).
+
+    Pins the cross-PR contract that the frontend default discharge path no longer
+    needs to gate run selection on `flood_product_ready=true`. The route MUST NOT
+    auto-apply the filter; only the explicit `?flood_product_ready=true` filter
+    activates the strict gate (covered separately by the forecast_api tests).
+    """
+
+    class _StubRunStore:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def list_runs(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            # When flood_product_ready is not set, store returns frequency-ready
+            # runs irrespective of return-period readiness. We model that exactly:
+            # status='frequency_done', no flood return-period product attached.
+            return {
+                "total_count": 1,
+                "items": [
+                    {
+                        "run_id": "frequency_ready_flood_incomplete_run",
+                        "run_type": "forecast",
+                        "scenario_id": "forecast_gfs_deterministic",
+                        "model_id": "model_qhh",
+                        "basin_version_id": "basins_qhh_vbasins",
+                        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+                        "forcing_version_id": None,
+                        "init_state_id": None,
+                        "source_id": "GFS",
+                        "cycle_time": "2026-05-07T00:00:00Z",
+                        "status": "frequency_done",
+                        "slurm_job_id": None,
+                        "start_time": "2026-05-07T00:00:00Z",
+                        "end_time": "2026-05-14T00:00:00Z",
+                        "run_manifest_uri": "object://manifest",
+                        "output_uri": None,
+                        "log_uri": None,
+                        "error_code": None,
+                        "error_message": None,
+                        "product_quality": {
+                            "flood_return_period": {
+                                "quality_state": "unavailable",
+                                "quality_source": "explicit",
+                                "max_over_window": False,
+                                "result_rows": 0,
+                                "return_period_rows": 0,
+                                "warning_rows": 0,
+                                "expected_result_rows": 0,
+                                "expected_max_result_rows": 0,
+                                "expected_timestep_result_rows": 0,
+                                "meaningful_result_rows": 0,
+                                "meaningful_max_result_rows": 0,
+                                "meaningful_timestep_result_rows": 0,
+                                "no_frequency_curve_rows": 0,
+                                "no_usable_frequency_curve_rows": 0,
+                                "warning_threshold_unavailable_rows": 0,
+                                "unavailable_products": ["return_period_result"],
+                                "residual_blockers": [],
+                            }
+                        },
+                        "created_at": "2026-05-07T00:00:00Z",
+                        "updated_at": "2026-05-07T00:00:00Z",
+                    }
+                ],
+                "limit": kwargs["limit"],
+                "offset": kwargs["offset"],
+            }
+
+    store = _StubRunStore()
+    app.dependency_overrides[get_forecast_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/runs?source=best")
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    data = body["data"]
+    assert data["total_count"] == 1
+    assert data["items"][0]["run_id"] == "frequency_ready_flood_incomplete_run"
+    assert data["items"][0]["status"] == "frequency_done"
+    # The route MUST forward `flood_product_ready` unchanged; without the explicit
+    # filter the store call must NOT silently coerce it to True.
+    assert store.calls[-1]["flood_product_ready"] is None
+    assert store.calls[-1]["source"] == "best"
 
 
 def test_river_network_mvt_sql_scopes_basin_without_model_instance_cardinality_multiply() -> None:
@@ -6401,8 +6502,6 @@ def _seed_data(connection: Any) -> None:
     _insert_result(connection, "seg_002", "basin_v1", "rnv_v1", VALID_TIME_2, 260.0, 22.0, "warning", False)
     _insert_timeseries_result(connection, "seg_001", RUN_ID, VALID_TIME_1, 110.0)
     _insert_timeseries_result(connection, "seg_002", RUN_ID, VALID_TIME_1, 210.0)
-    _insert_timeseries_result(connection, "seg_001", RUN_ID, VALID_TIME_1, 1.1, variable="water_level", unit="m")
-    _insert_timeseries_result(connection, "seg_002", RUN_ID, VALID_TIME_1, 2.1, variable="water_level", unit="m")
     _insert_result(
         connection,
         "seg_001",

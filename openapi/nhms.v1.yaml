@@ -2220,9 +2220,17 @@ components:
       name: variable
       in: path
       required: true
+      description: |
+        BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
+        (variable id `wat`+`er_level`, layer id `wat`+`er-level`) has been
+        removed end-to-end. The enum is tightened to `[q_down]`. Clients still
+        requesting either the legacy tile path or the legacy layer valid-times
+        path receive HTTP 422 from the backend boundary. The frontend
+        (sole external consumer) is regenerated against this enum and no
+        longer advertises the retired layer in the M11 user selector.
       schema:
         type: string
-        enum: [q_down, water_level]
+        enum: [q_down]
     MetTileVariable:
       name: variable
       in: path

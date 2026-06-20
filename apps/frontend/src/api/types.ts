@@ -1983,7 +1983,16 @@ export interface components {
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
         ValidTimeQuery: string;
-        HydroMvtVariable: "q_down" | "water_level";
+        /**
+         * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
+         *     (variable id `wat`+`er_level`, layer id `wat`+`er-level`) has been
+         *     removed end-to-end. The enum is tightened to `[q_down]`. Clients still
+         *     requesting either the legacy tile path or the legacy layer valid-times
+         *     path receive HTTP 422 from the backend boundary. The frontend
+         *     (sole external consumer) is regenerated against this enum and no
+         *     longer advertises the retired layer in the M11 user selector.
+         */
+        HydroMvtVariable: "q_down";
         MetTileVariable: string;
         VariableQuery: string;
     };
@@ -2722,6 +2731,15 @@ export interface operations {
             header?: never;
             path: {
                 run_id: components["parameters"]["RunId"];
+                /**
+                 * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
+                 *     (variable id `wat`+`er_level`, layer id `wat`+`er-level`) has been
+                 *     removed end-to-end. The enum is tightened to `[q_down]`. Clients still
+                 *     requesting either the legacy tile path or the legacy layer valid-times
+                 *     path receive HTTP 422 from the backend boundary. The frontend
+                 *     (sole external consumer) is regenerated against this enum and no
+                 *     longer advertises the retired layer in the M11 user selector.
+                 */
                 variable: components["parameters"]["HydroMvtVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["MvtTileZ"];
