@@ -360,16 +360,16 @@ def import_basin_into_registry_core(
     its bespoke output seeding intact.
     """
 
-    legacy_purged = _delete_legacy_seg_rows(cursor, sources.ids)
-    if legacy_purged:
-        # See ``_refresh_parent_version_materialization`` for the FK-safety
-        # rationale: pre-PR-2 ``basin_version`` / ``river_network_version``
-        # metadata is stale (counts + checksums derived from seg.shp), so the
-        # follow-up ``_ensure_*`` idempotency checks would raise
-        # CHECKSUM_CONFLICT. We refresh in place because DELETE on those
-        # parents would violate the FK from ``core.model_instance`` /
-        # ``core.mesh_version``.
-        _refresh_parent_version_materialization(cursor, sources)
+    _delete_legacy_seg_rows(cursor, sources.ids)
+    # Unconditional: ``_refresh_parent_version_materialization`` does its own
+    # per-row probe and skips when a row is absent (fresh basin) or already
+    # matches (same-version re-ingest). Always running it covers three cases
+    # in one path: (a) pre-PR-2 -> PR-2 swap after seg-row purge,
+    # (b) re-ingest of a previously-bootstrapped basin under a new
+    # ``package_version`` (mesh_uri / model_package_uri / properties_json
+    # would otherwise diverge from existing rows and trip CHECKSUM_CONFLICT),
+    # (c) fresh basin first-time import (helper short-circuits).
+    _refresh_parent_version_materialization(cursor, sources)
     row_counts: dict[str, int] = {
         "basin": _ensure_basin(cursor, sources),
         "basin_version": _ensure_basin_version(cursor, sources),
@@ -696,22 +696,20 @@ def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources)
     have INSERTed and take their no-op path instead of raising
     ``BASINS_REGISTRY_CHECKSUM_CONFLICT``.
 
-    Two situations land here:
+    Called unconditionally on every import. Each per-row UPDATE is gated by a
+    presence probe so the helper is a no-op on first-time imports (rows
+    absent) and a safe re-stamp on same-version re-ingest (values identical).
+    The cases that actually need it:
 
     * Pre-PR-2 -> PR-2 swap: ``_delete_legacy_seg_rows`` purged ``<model>_seg_*``
       rows; parent ``segment_count`` / ``checksum`` derived from seg.shp now
       diverge from the river.shp-derived values the new import will write.
-    * Re-ingesting a basin originally bootstrapped under a different
-      ``package_version`` (e.g. ``qhh_production_bootstrap``):
-      ``mesh_version.mesh_uri`` and ``model_instance.model_package_uri``
-      still reference the old version, and the
-      ``properties_json.package_checksum`` digests diverge. Without the
-      mesh + model_instance refresh below, ``_ensure_mesh`` /
-      ``_ensure_model_instance`` would raise CHECKSUM_CONFLICT before any
-      reach-level work could land.
-
-    Fresh basins never reach this branch; idempotent same-version re-ingest
-    is unaffected because the legacy probe returns no rows.
+    * Re-ingesting any basin (bootstrapped or generic) under a different
+      ``package_version``: ``mesh_version.mesh_uri`` and
+      ``model_instance.model_package_uri`` still reference the old version,
+      and the ``properties_json.package_checksum`` digests diverge. Without
+      the in-place refresh below, ``_ensure_mesh`` / ``_ensure_model_instance``
+      would raise CHECKSUM_CONFLICT before any reach-level work could land.
     """
 
     ids = sources.ids
