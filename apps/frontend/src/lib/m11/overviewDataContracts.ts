@@ -167,7 +167,10 @@ export interface OverviewBasin {
   riverCount: number | null
   activeModelCount: number
   latestForecastTime: string | null
-  warningCounts: Record<M11WarningLevel, number>
+  // ranking 默认路径上不再 fetch（spec scenario "Default overview bootstrap omits ranking"）；
+  // `undefined` = ranking 尚未加载（panel pending 态，BasinDetailPanels 应渲染"未加载"占位而非
+  // 误导性的"全 0 警告"），与"加载后真实为全 0"明确区分。
+  warningCounts: Record<M11WarningLevel, number> | undefined
   basinVersions: BasinVersionOption[]
   selectedBasinVersionId: string | null
   unavailableReason: string | null
@@ -217,7 +220,8 @@ export interface BasinDetail {
   boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   segmentCount: number | null
-  warningDistribution: Record<M11WarningLevel, number>
+  // 同 OverviewBasin.warningCounts：`undefined` = ranking 尚未懒加载；UI 须渲染"未加载"占位而非全 0。
+  warningDistribution: Record<M11WarningLevel, number> | undefined
   activeModelCount: number
   latestRun: FreshnessMetadata
   sourceSelection: SourceScenarioSelectionState
@@ -406,7 +410,8 @@ export function createEmptyBasinDetail(
     boundary: null,
     bbox: null,
     segmentCount: null,
-    warningDistribution: { ...emptyWarningCounts },
+    // 空详情：ranking 尚未懒加载 → undefined（pending），与"加载后真实全 0"区分。
+    warningDistribution: undefined,
     activeModelCount: 0,
     latestRun: createFreshnessMetadata({ source: sourceSelection.resolvedSource, unavailableReason: 'No basin data loaded.' }),
     sourceSelection,
@@ -453,10 +458,13 @@ export function normalizeOverviewBasins(input: {
   basinVersionUnavailableReason?: string | null
   models?: ApiModelInstance[]
   runs?: ApiHydroRun[]
+  // `undefined` = caller 未传 ranking（默认 overview bootstrap 路径）→ warningCounts 输出 `undefined`
+  // 表示 pending；显式空数组 `[]` = ranking 已 fetch 但无项 → warningCounts 输出全 0 真实态。
   rankingItems?: ApiFloodAlertRankingItem[]
 }): OverviewBasin[] {
   const models = input.models ?? []
   const runs = input.runs ?? []
+  const rankingProvided = input.rankingItems !== undefined
   const rankingItems = input.rankingItems ?? []
 
   return input.basins.map((basin) => {
@@ -466,7 +474,7 @@ export function normalizeOverviewBasins(input: {
     const basinModels = models.filter((model) => model.basin_id === basin.basin_id || versionIds.has(model.basin_version_id))
     const basinRuns = runs.filter((run) => versionIds.has(run.basin_version_id))
     const basinRankingItems = rankingItems.filter((item) => versionIds.has(item.basin_version_id))
-    const warningCounts = warningCountsFromRanking(basinRankingItems)
+    const warningCounts = rankingProvided ? warningCountsFromRanking(basinRankingItems) : undefined
     const selectedVersion = versionOptions.find((version) => version.active) ?? versionOptions[0] ?? null
 
     return {
@@ -495,7 +503,8 @@ export function normalizeOverviewSummary(input: {
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
   basins?: OverviewBasin[]
   floodSummary?: ApiFloodAlertSummary | null
-  ranking?: ApiFloodAlertRanking | null
+  // ranking 已从默认 overview path 删除（spec scenario "Default overview bootstrap omits ranking"）：
+  // normalizeOverviewSummary 不再消费 ranking；保留 ranking 入参会让调用者误以为可以接力 → 类型上直接拒绝。
   pipeline?: ApiPipelineStatus | null
   queue?: ApiQueueDepth | null
   latestRun?: ApiHydroRun | null
@@ -550,10 +559,38 @@ export function normalizeOverviewSummary(input: {
   }
 }
 
+/**
+ * Metadata-first valid_times consumption（spec capability "frontend-mvt-layer-consumption"
+ * Requirement "Layer valid_times are consumed from metadata.valid_times first"）。
+ *
+ * 三态分支：
+ * - `apiLayer.metadata.valid_times` 为非空数组 → 直接消费，调用方 MUST NOT 发起
+ *   `/api/v1/layers/<id>/valid-times` fan-out（spec scenario "Metadata carries valid_times"）。
+ * - `apiLayer.metadata.valid_times === []` → time-less layer（如 river-network），调用方 MUST NOT
+ *   发起 fallback（spec scenario "Metadata.valid_times is intentionally empty (time-less layer)"）。
+ * - `apiLayer.metadata.valid_times === undefined || null` → schema gap，调用方 MAY 发起 fallback
+ *   并通过 `validTimesByLayerId` 传回（spec scenario "Metadata.valid_times is missing or null (schema gap)"）。
+ *
+ * 返回 `requiresFallback` 让调用方据此决定是否对该 layer 发起 fallback fetch（PR 4/7 删除
+ * `loadOverview` 默认 fan-out 后，此判定即「能否避免一次 RTT」的唯一开关）。
+ */
+export function resolveLayerValidTimesFromMetadata(metadata: ApiLayer['metadata'] | null | undefined): {
+  validTimes: string[]
+  requiresFallback: boolean
+} {
+  if (!metadata) return { validTimes: [], requiresFallback: true }
+  const raw = metadata.valid_times
+  if (raw === undefined || raw === null) return { validTimes: [], requiresFallback: true }
+  if (!Array.isArray(raw)) return { validTimes: [], requiresFallback: true }
+  return { validTimes: normalizeValidTimes(raw), requiresFallback: false }
+}
+
 export function normalizeLayerStates(input: {
   query: Pick<M11QueryState, 'layer' | 'validTime' | 'source' | 'cycle'>
   layers: ApiLayer[]
-  validTimesByLayerId: Record<string, string[] | undefined>
+  // Fallback override：仅当某 layer 的 metadata.valid_times 缺失（undefined/null）时使用；
+  // metadata 已为数组（含空数组）时此入参对应 layer 即被忽略，避免反向重写真实 time-less 语义。
+  validTimesByLayerId?: Record<string, string[] | undefined>
   derivedValidTimes?: Record<string, string[] | undefined>
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
@@ -563,7 +600,11 @@ export function normalizeLayerStates(input: {
 
   return layerIds.map((layerId) => {
     const apiLayer = apiLayersById.get(layerId)
-    const apiValidTimes = normalizeValidTimes(input.validTimesByLayerId[layerId])
+    const metadata = apiLayer?.metadata ?? null
+    const { validTimes: metadataValidTimes, requiresFallback } = resolveLayerValidTimesFromMetadata(metadata)
+    // metadata 已是数组（含空数组）→ 完全忽略 fallback 覆盖；metadata 缺失才用调用方注入的 fallback。
+    const fallbackValidTimes = requiresFallback ? normalizeValidTimes(input.validTimesByLayerId?.[layerId]) : []
+    const apiValidTimes = requiresFallback ? fallbackValidTimes : metadataValidTimes
     const derivedValidTimes = normalizeValidTimes(input.derivedValidTimes?.[layerId])
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
@@ -616,6 +657,8 @@ export function normalizeBasinDetail(input: {
   versions: ApiBasinVersion[]
   models?: ApiModelInstance[]
   segments?: ApiRiverFeatureCollection | null
+  // `undefined` = caller 未传 ranking（默认路径 ranking 尚未懒加载）→ warningDistribution 输出
+  // `undefined`（pending 占位）；`[]` = ranking 已 fetch 但无项 → 输出全 0 真实态。
   rankingItems?: ApiFloodAlertRankingItem[]
   latestRun?: ApiHydroRun | null
   runs?: ApiHydroRun[]
@@ -641,7 +684,7 @@ export function normalizeBasinDetail(input: {
     boundary: selectedVersion?.boundary ?? null,
     bbox: selectedVersion?.bbox ?? null,
     segmentCount: input.segments?.total ?? input.segments?.features.length ?? null,
-    warningDistribution: warningCountsFromRanking(input.rankingItems ?? []),
+    warningDistribution: input.rankingItems === undefined ? undefined : warningCountsFromRanking(input.rankingItems),
     activeModelCount: models.filter((model) => model.active_flag).length,
     latestRun: createFreshnessMetadata({
       updatedAt: input.latestRun?.updated_at ?? null,

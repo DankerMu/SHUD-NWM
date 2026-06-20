@@ -274,7 +274,9 @@ export function bboxToMapFit(bbox: M11Bbox | null | undefined) {
   }
 }
 
-function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
+// Export 出来供单元测试断言 warningDistribution 空态降级（spec scenario "Default overview bootstrap
+// omits ranking" 的第 4 条 AND clause：MUST tolerate empty / pending warningDistribution）。
+export function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
   return {
     basinId: detail.basinId,
     displayName: detail.displayName,

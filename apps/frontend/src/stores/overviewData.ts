@@ -214,6 +214,10 @@ const CACHE_MAX_ENTRIES = 64
 const OVERVIEW_INITIAL_REQUEST_THRESHOLD = 8
 const overviewLoads = new Map<string, Promise<OverviewDataSnapshot>>()
 const basinLoads = new Map<string, Promise<BasinDataSnapshot>>()
+// In-flight cache for on-demand flood ranking（spec scenario "Ranking panel mounted" + "Ranking fetch
+// is cancelled on unmount or layer change"）：同 key concurrent panel mount 复用同一 promise；
+// 调用方 unmount/layer-switch 时主动 release 让下一次挂载发起新 fetch。
+const floodRankingInFlight = new Map<string, Promise<ApiFloodAlertRanking>>()
 let overviewRequestNonce = 0
 let basinRequestNonce = 0
 let activeOverviewRequestKey: string | null = null
@@ -227,6 +231,7 @@ export function clearOverviewDataCache() {
   }
   overviewLoads.clear()
   basinLoads.clear()
+  floodRankingInFlight.clear()
   overviewRequestNonce += 1
   basinRequestNonce += 1
   activeOverviewRequestKey = null
@@ -512,9 +517,15 @@ function buildOverviewRequestPlan(
   hasLatestRun: boolean,
   hasPipelineRequest: boolean,
 ): OverviewRequestPlan {
-  const layerValidTimeRequestCount = layerIdsForOverview(query).length
+  // PR 4/7：ranking 与 `layerIdsForOverview.map(fetchLayerValidTimes)` 已从默认 loadOverview path
+  // 移除（spec scenarios "Default overview bootstrap omits ranking" / "Metadata carries valid_times"），
+  // 故默认 path 计入的请求数下调：
+  // - layerValidTimeRequestCount = 0（metadata-first；fallback 由 normalizeLayerStates 自动忽略）。
+  // - baseRequestCount: 5 个静态（basins + models + runs + queue + layers）+ hasLatestRun 时 1 个
+  //   floodSummary；不再加 1 ranking。
+  const layerValidTimeRequestCount = 0
   const pipelineRequestCount = hasPipelineRequest ? 1 : 0
-  const baseRequestCount = 5 + (hasLatestRun ? 2 : 0)
+  const baseRequestCount = 5 + (hasLatestRun ? 1 : 0)
   const initialWithoutVersions = baseRequestCount + pipelineRequestCount + layerValidTimeRequestCount
   const createsPerBasinNPlusOne = basinCount > 1
   const plannedVersionRequestCount = basinCount === 1 ? 1 : 0
@@ -1080,6 +1091,63 @@ async function fetchLineage(runId: string, riverNetworkVersionId: string, segmen
   )
 }
 
+/**
+ * On-demand flood ranking key（spec capability "overview-data-contracts" Requirement "Flood ranking is
+ * fetched on demand, not on overview bootstrap"）。runId + serialized query + basinId 构成稳定标识。
+ */
+function floodRankingKey(runId: string, query: M11QueryState, basinId?: string | null) {
+  return `${runId}|${serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
+}
+
+/**
+ * 面板挂载或 query.layer 切到 flood-return-period / warning-level 时按需 fetch ranking。
+ * 同 key 并发挂载 coalesce 到同一 promise（in-flight cache）；fetch 完成后清理 in-flight 条目（值
+ * 通过模块级 `cached()` 持久），下次同 key 再触发直接命中持久缓存。
+ */
+export async function loadFloodRankingOnDemand(
+  runId: string,
+  query: M11QueryState,
+  basinId?: string | null,
+): Promise<ApiFloodAlertRanking> {
+  const key = floodRankingKey(runId, query, basinId)
+  const existing = floodRankingInFlight.get(key)
+  if (existing) return existing
+  const promise = fetchFloodRanking(runId, query, basinId ?? undefined)
+    .finally(() => {
+      // 清理 in-flight 条目；resolve 后的值由 cached() 模块级 TTL 缓存兜底（同 key 复用）。
+      if (floodRankingInFlight.get(key) === promise) floodRankingInFlight.delete(key)
+    })
+  floodRankingInFlight.set(key, promise)
+  return promise
+}
+
+/**
+ * 面板 unmount 或 query.layer 切回 discharge 时调用：清掉对应 in-flight 条目，让下一次挂载/切换
+ * 触发新的 fetch（spec scenario "Ranking fetch is cancelled on unmount or layer change"）。
+ * 调用方仍需用 nonce / mounted ref 等模式拒绝向已卸载组件 setState（无 AbortController 抽象）。
+ * runId 缺失（latestRun 尚未 settle）时清掉与该 query/basinId 相关的所有 in-flight 条目。
+ */
+export function releaseFloodRankingOnDemand(
+  runIdOrNull: string | null | undefined,
+  query: M11QueryState,
+  basinId?: string | null,
+): void {
+  if (runIdOrNull) {
+    floodRankingInFlight.delete(floodRankingKey(runIdOrNull, query, basinId))
+    return
+  }
+  // runId 未知 → 按 query/basinId suffix 模糊清理（同 query 不同 run 都清掉）。
+  const suffix = `|${serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
+  for (const key of [...floodRankingInFlight.keys()]) {
+    if (key.endsWith(suffix)) floodRankingInFlight.delete(key)
+  }
+}
+
+/** Test-only：暴露 in-flight 大小供单测断言 cache 清理（spec scenario 第 3 句）。 */
+export function _floodRankingInFlightSize(): number {
+  return floodRankingInFlight.size
+}
+
 export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   overview: null,
   basinDetail: null,
@@ -1165,7 +1233,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
             basins.length > 1 ? 'Basin version and bbox require the M11 aggregation endpoint.' : null,
           models: [],
           runs: [],
-          rankingItems: [],
+          // 不传 rankingItems → warningCounts === undefined（pending），等按需 ranking 面板挂载再覆盖。
         })
         const currentOverview = get().overview
         const placeholderOverview: OverviewDataSnapshot = currentOverview && overviewSnapshotMetadataMatchesQuery(currentOverview, query)
@@ -1216,35 +1284,31 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
       if (!useSingleRunFloodSurfaces) {
         partialErrors.push(`flood summary: ${COMPARE_FLOOD_SUMMARY_UNAVAILABLE}`)
+        // ranking 已从默认 path 删除（PR 4/7；spec scenario "Default overview bootstrap omits ranking"），
+        // 但对比模式下 ranking on-demand 路径仍不可用：保留 partial error 让 panel-level UI 暴露
+        // 「对比模式下排名不可用」的诚实状态，无需先 fetch 再失败。
         partialErrors.push(`flood ranking: ${COMPARE_FLOOD_RANKING_UNAVAILABLE}`)
       }
 
       const concreteSurfaceQuery = concreteQueryForSurfaces(query, latestRun)
-      const [pipelineResult, summaryResult, rankingResult, ...versionAndValidTimeResults] = await Promise.allSettled([
+      // PR 4/7：默认 path 不再 fan-out ranking + per-layer valid-times 请求
+      // （spec scenarios "Default overview bootstrap omits ranking" / "Metadata carries valid_times"）。
+      // ranking 走 loadFloodRankingOnDemand；layer valid-times 由 normalizeLayerStates metadata-first 消费。
+      const [pipelineResult, summaryResult, ...versionResults] = await Promise.allSettled([
         fetchPipelineStatus(query, latestRun),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
-        latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery) : Promise.resolve(null),
         ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
-        ...layerIdsForOverview(query).map((layerId) =>
-          fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
-        ),
       ])
 
       const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline')
       const floodSummary = settledValue(summaryResult, partialErrors, 'flood summary')
-      const ranking = settledValue(rankingResult, partialErrors, 'flood ranking')
       const versionsByBasinId: Record<string, ApiBasinVersion[]> = {}
-      const validTimeResults = versionAndValidTimeResults.slice(requestPlan.versionRequestCount)
       if (requestPlan.shouldFetchVersions) {
         basins.forEach((basin, index) => {
           versionsByBasinId[basin.basin_id] =
-            settledValue(versionAndValidTimeResults[index] as PromiseSettledResult<ApiBasinVersion[]>, partialErrors, 'basin versions') ?? []
+            settledValue(versionResults[index] as PromiseSettledResult<ApiBasinVersion[]>, partialErrors, 'basin versions') ?? []
         })
       }
-      const validTimesByLayerId: Record<string, string[]> = {}
-      layerIdsForOverview(query).forEach((layerId, index) => {
-        validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
-      })
 
       const overviewBasins = normalizeOverviewBasins({
         basins,
@@ -1253,13 +1317,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
           basins.length > 0 && !requestPlan.shouldFetchVersions ? 'Basin version and bbox require the M11 aggregation endpoint.' : null,
         models: models as ApiModelInstance[],
         runs: runs?.items ?? [],
-        rankingItems: ranking?.items ?? [],
+        // ranking 默认不传 → warningCounts === undefined（pending），由按需 ranking 面板 settle 后覆盖。
       })
       const summary = normalizeOverviewSummary({
         query,
         basins: overviewBasins,
         floodSummary,
-        ranking,
         pipeline,
         queue,
         latestRun: useSingleRunFloodSurfaces ? latestRun : null,
@@ -1269,7 +1332,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       const layerStates = normalizeLayerStates({
         query: concreteSurfaceQuery,
         layers,
-        validTimesByLayerId,
+        // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
+        // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
         resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
       })
       const aggregationDecision = decideAggregationEndpoint(requestPlan)
