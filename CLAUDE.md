@@ -2,33 +2,33 @@
 
 ## 双端开发流程
 
-本项目采用 **本地开发 + 远端测试** 模式；远端含两个角色节点（实为三端协作）：
+本项目采用 **本地开发 + 远端测试** 模式；三端协作：
 
 - **本地 (macOS)**: 代码编辑、commit、push、ruff、openspec validate、前端 tsc/pnpm test
   - 仓库路径: `/Users/danker/Desktop/Hydro-SHUD/NWM`
-- **node-22 (210.77.77.22:32099, user=frd_muziyao)**: `compute_control` —— 调度/DB/Slurm/Docker/SHUD 完整环境，**后端代码 + 真实 DB pytest 的测试 oracle**
-  - 仓库路径: `/scratch/frd_muziyao/NWM`
-- **node-27 (210.77.77.27:32099, user=nwm)**: `display_readonly` —— 只读 DB 副本 + published 产物，**display API / 前端生产化 / 只读边界 live 验证 oracle**
+- **node-22 (210.77.77.22:32099, user=frd_muziyao)**: SHUD/Slurm 计算执行 —— SHUD 跑完的产物（forcing、模拟结果）会同步到 node-27 `/home/ghdc/nwm/`，**不承担测试 oracle 角色，验证一律在 27**
+  - 仓库路径: `/scratch/frd_muziyao/NWM`（唯一工作树，必须保留 ff-only 同步）
+- **node-27 (210.77.77.27:32099, user=nwm)**: 主 DB（primary，单库）+ basin 源数据 (`/home/ghdc/nwm/Basins`) + forcing + SHUD 产物 + display API + 前端生产化 —— **所有真实数据 oracle、后端真实 DB pytest oracle、display/前端 live 验证 oracle**
   - 仓库路径: `/home/nwm/NWM`
+  - readonly 是 role-level（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本
 - **同步方式**: GitHub (`DankerMu/SHUD-NWM`) 做中转，三端 push/pull
 
 ### 验证 oracle 路由（改了什么 → 在哪验）
 
 | 验证类型 | oracle 节点 |
 |---|---|
-| 后端单测/集成、真实 DB pytest、Slurm/SHUD 行为 | **node-22** |
-| `e2e`/`grib` marker 测试（已从纯 CI 排除，`NHMS_RUN_E2E=1 NHMS_RUN_GRIB=1`，见 `docs/runbooks/ci-test-routing.md`） | **node-22** |
-| display_readonly 部署 receipt、只读 DB denied-write、cross-plane identity live、`/`(单图展示，旧 `/hydro-met` 为 redirect alias)+`/ops` 浏览器 e2e | **node-27** |
+| 后端单测/集成、真实 DB pytest、`e2e`/`grib` marker、SHUD 产物校验、display 部署 receipt、display 边界 deny-write、cross-plane identity live、`/`(单图展示，旧 `/hydro-met` 为 redirect alias)+`/ops` 浏览器 e2e | **node-27** |
+| Slurm 调度行为本身的验证（罕见；改 sbatch / 计算资源时） | **node-22** |
 | ruff、openspec validate、前端 tsc / pnpm test / check:api-types | 本地 |
 
-涉及 display/前端生产化与只读边界的改动，**必须在 node-27 实机产出 live receipt**（见 `docs/runbooks/node-27-bringup-checklist.md` C1–C4），不得用 node-22 或本地 ruff 冒充 PASS。
+涉及 display/前端生产化与只读边界的改动，**必须在 node-27 实机产出 live receipt**（见 `docs/runbooks/node-27-bringup-checklist.md` C1–C4），不得用本地 ruff 冒充 PASS。
 
 ### 标准开发循环
 
 ```
 本地改代码 → commit → git push
-→ node-22 ssh: cd /scratch/frd_muziyao/NWM && git pull --ff-only → 跑后端验证命令
-→ (display/前端) node-27 ssh: cd /home/nwm/NWM && git pull --ff-only → 产 live receipt
+→ node-27 ssh: cd /home/nwm/NWM && git pull --ff-only → 跑后端验证 + 真实 DB pytest + display live receipt
+→ (仅当改了 Slurm/SHUD 调度) node-22 ssh: cd /scratch/frd_muziyao/NWM && git pull --ff-only → 触发计算
 → 失败则本地修复 → 重复
 ```
 
@@ -78,9 +78,7 @@ openspec validate <change-name> --strict --no-interactive
 
 ### 当前活跃 issue 验证
 
-当前 issue 的验证命令以其 GitHub issue body 的 `Verification:` 字段为准；
-完整双端动作流（派发 subagent 修/审 → 远端验证 → 有界评审循环 → merge）见
-项目 skill `dual-end-issue-workflow`（`.claude/skills/`，仅本机加载）。
+当前 issue 的验证命令以其 GitHub issue body 的 `Verification:` 字段为准。
 
 ## 文档更新要求
 
@@ -125,7 +123,7 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
   - lint 门：`markdown-lint`←`docs/**`、`openapi-validate`←`openapi/**`、`json-schema-validate`←`schemas/**`。
 - **draft = 快速定向通道，ready = 全量合并门**：
   - PR 标为 **draft** 时，后端只跑 `unit-test-fast`（仅本 PR 改动到的 test 文件 + collect-only 冒烟），
-    迭代快；真实快速反馈仍以 **node-22 真实 DB** 为准（CI 不是迭代 oracle）。
+    迭代快；真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。
   - PR 标为 **ready-for-review**（或 push 到 master）时，跑全量 `unit-test` + `real-db-integration` 作为
     合并门。**合并前务必把 PR 转 ready** 以触发全量。
   - **Fail-safe**：忘记标 draft → 默认走全量门，只会多跑、绝不漏测。
@@ -152,8 +150,8 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 
 | 节点 | 地址 | 角色 |
 |------|------|------|
-| Node-22 | 210.77.77.22:32099 | 计算控制：自动化调度、Slurm、SHUD 执行 |
-| Node-27 | 210.77.77.27:32099 | 只读展示：DB 只读副本 + 发布产物访问 |
+| Node-22 | 210.77.77.22:32099 | Slurm / SHUD 计算执行（产物同步到 27 ghdc/nwm） |
+| Node-27 | 210.77.77.27:32099 | 主 DB（primary）+ basin 源 + forcing + SHUD 产物 + display API + 前端 |
 | 本地 Mac | localhost | 开发编辑 |
 
 ## 隧穿配置
