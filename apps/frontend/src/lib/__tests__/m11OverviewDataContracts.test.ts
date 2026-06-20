@@ -380,6 +380,112 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  // PR 4/7 task 4.5 (d)：normalizeLayerStates 三态 metadata-first 消费（spec capability
+  // "frontend-mvt-layer-consumption" Requirement "Layer valid_times are consumed from
+  // metadata.valid_times first" 的 3 scenarios）。
+  describe('metadata-first valid_times consumption (PR 4/7)', () => {
+    // 第一态：metadata.valid_times 非空数组 → 直接消费，调用方不应发 fallback；fallback override
+    // 即使被传入也应该被 normalizeLayerStates 忽略，避免反向重写真实 metadata 语义。
+    it('consumes non-empty metadata.valid_times directly and ignores fallback override', () => {
+      const layers = normalizeLayerStates({
+        query: { ...query, validTime: null },
+        layers: [
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: ['return_period'],
+            metadata: {
+              layer_id: 'flood-return-period',
+              tile_format: 'mvt',
+              fallback_available: false,
+              release_blocking: false,
+              valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z'],
+            },
+          },
+        ],
+        // fallback 入参出现也应被忽略（metadata 已是数组 → metadata 优先；spec MUST NOT 子句）。
+        validTimesByLayerId: { 'flood-return-period': ['2026-05-19T00:00:00Z'] },
+      })
+
+      const target = layers.find((l) => l.layerId === 'flood-return-period')!
+      expect(target.validTimeSource).toBe('api')
+      expect(target.validTimes).toEqual(['2026-05-18T00:00:00.000Z', '2026-05-18T06:00:00.000Z'])
+      expect(target.currentValidTime).toBe('2026-05-18T06:00:00.000Z')
+      // fallback 数组完全被忽略 —— 没有 '2026-05-19T00:00:00.000Z'。
+      expect(target.validTimes).not.toContain('2026-05-19T00:00:00.000Z')
+    })
+
+    // 第二态：metadata.valid_times === [] → time-less layer（如 river-network）→ validTimes
+    // 输出空，调用方不发 fallback；fallback override 同样被忽略。
+    it('treats metadata.valid_times === [] as a time-less layer and does not honor fallback override', () => {
+      const layers = normalizeLayerStates({
+        query: { ...query, validTime: null, layer: 'discharge' },
+        layers: [
+          {
+            layer_id: 'discharge',
+            layer_name: 'Discharge',
+            layer_type: 'hydrology',
+            variables: ['q_down'],
+            metadata: {
+              layer_id: 'discharge',
+              tile_format: 'mvt',
+              fallback_available: false,
+              release_blocking: false,
+              // 显式空数组 = time-less（不是 schema gap）。
+              valid_times: [],
+            },
+          },
+        ],
+        validTimesByLayerId: { discharge: ['2026-06-01T00:00:00Z'] },
+      })
+
+      const target = layers.find((l) => l.layerId === 'discharge')!
+      // metadata 显式空 → 不从 fallback override 取（time-less 优先于 fallback）。
+      expect(target.validTimes).toEqual([])
+      expect(target.currentValidTime).toBeNull()
+      expect(target.validTimeSource).toBe('none')
+    })
+
+    // 第三态：metadata.valid_times === undefined / null → schema gap → 调用方 MAY fallback，
+    // normalizeLayerStates 接受 fallback override 并消费。
+    it('falls back to validTimesByLayerId only when metadata.valid_times is undefined or null', () => {
+      const layers = normalizeLayerStates({
+        query: { ...query, validTime: null },
+        layers: [
+          // case A: metadata 整体缺失 → 需要 fallback。
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: ['return_period'],
+            metadata: null,
+          },
+          // case B: metadata 存在但 valid_times 字段缺失 → 也需要 fallback。
+          {
+            layer_id: 'warning-level',
+            layer_name: 'Warning level',
+            layer_type: 'hydrology',
+            variables: ['warning_level'],
+            metadata: { layer_id: 'warning-level', tile_format: 'mvt' } as never,
+          },
+        ],
+        validTimesByLayerId: {
+          'flood-return-period': ['2026-05-18T06:00:00Z'],
+          'warning-level': ['2026-05-18T07:00:00Z'],
+        },
+      })
+
+      const floodReturn = layers.find((l) => l.layerId === 'flood-return-period')!
+      const warning = layers.find((l) => l.layerId === 'warning-level')!
+      expect(floodReturn.validTimes).toEqual(['2026-05-18T06:00:00.000Z'])
+      expect(floodReturn.currentValidTime).toBe('2026-05-18T06:00:00.000Z')
+      expect(floodReturn.validTimeSource).toBe('api')
+      expect(warning.validTimes).toEqual(['2026-05-18T07:00:00.000Z'])
+      expect(warning.validTimeSource).toBe('api')
+    })
+  })
+
   it('normalizes basin detail and segment rows with local filters and unavailable rows', () => {
     const detail = normalizeBasinDetail({
       query,

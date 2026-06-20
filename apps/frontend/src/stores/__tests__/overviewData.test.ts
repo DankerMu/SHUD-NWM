@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { basinSnapshotMatchesQuery, clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
+import {
+  _floodRankingInFlightSize,
+  basinSnapshotMatchesQuery,
+  clearOverviewDataCache,
+  loadFloodRankingOnDemand,
+  releaseFloodRankingOnDemand,
+  useOverviewDataStore,
+} from '@/stores/overviewData'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import { filterBasinSegmentRows, m11BasinRiverCollectionBudget, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
@@ -233,7 +240,9 @@ describe('useOverviewDataStore', () => {
     }
   })
 
-  it('does not fetch basin-version fields when the measured overview plan exceeds the request threshold', async () => {
+  // PR 4/7：跨 basin 时 missing-required-field 决策保留；默认 path 已不再 fan-out ranking 与
+  // per-layer valid-times，断言相应删除。Layer state 通过 metadata.valid_times 直接消费验证。
+  it('does not fetch basin-version fields when the basin set is larger than one (cross-basin requires aggregation)', async () => {
     const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
 
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
@@ -241,12 +250,22 @@ describe('useOverviewDataStore', () => {
       const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
       calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
 
-      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins') {
+        return success([basin, { ...basin, basin_id: 'yellow', basin_name: 'Yellow Basin', basin_group: 'major' }]) as never
+      }
       if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
       if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
       if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
       if (path === '/api/v1/layers') {
-        return success([{ layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] }]) as never
+        return success([
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: [],
+            metadata: { valid_times: ['2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z'] },
+          },
+        ]) as never
       }
       if (path === '/api/v1/queue/depth') return success({ running: 2, pending: 1, idle: 3 }) as never
       if (path === '/api/v1/flood-alerts/summary') {
@@ -259,11 +278,7 @@ describe('useOverviewDataStore', () => {
           levels: [{ level: 'warning', count: 1, color: '#FFB74D' }],
         }) as never
       }
-      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
       if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') {
-        return success(['2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z']) as never
-      }
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -276,9 +291,14 @@ describe('useOverviewDataStore', () => {
       unavailableReason: 'Basin version and bbox require the M11 aggregation endpoint.',
     })
     expect(snapshot.summary).toMatchObject({ completedCyclesToday: 3, runningJobs: 2, warningSegmentCount: 1 })
-    expect(snapshot.aggregationDecision).toMatchObject({ needsAggregationEndpoint: true, reason: 'too-many-initial-requests' })
+    expect(snapshot.aggregationDecision).toMatchObject({ needsAggregationEndpoint: true, reason: 'missing-required-field' })
     expect(calls.map((call) => call.path)).not.toContain('/api/v1/overview/summary')
     expect(calls.map((call) => call.path)).not.toContain('/api/v1/basins/{basin_id}/versions')
+    // PR 4/7 spec scenarios "Default overview bootstrap omits ranking" /
+    // "Metadata carries valid_times"：默认 path 既不 fetchFloodRanking 也不 fan-out
+    // per-layer valid-times。
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/ranking')
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/layers/{layer_id}/valid-times')
     expect(calls.find((call) => call.path === '/api/v1/runs')?.query).toMatchObject({
       source: 'GFS',
       cycle_time: '2026-05-18T00:00:00Z',
@@ -295,12 +315,10 @@ describe('useOverviewDataStore', () => {
       run_id: 'run-gfs-1',
       valid_time: '2026-05-18T06:00:00Z',
     })
-    expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.pathParams).toMatchObject({
-      layer_id: 'flood-return-period',
-    })
-    expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
-      run_id: 'run-gfs-1',
-      duration: '1h',
+    // PR 4/7：layer state 直接从 apiLayer.metadata.valid_times 解析，无需独立 fetchLayerValidTimes RTT。
+    expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({
+      validTimeSource: 'api',
+      currentValidTime: '2026-05-18T06:00:00.000Z',
     })
   })
 
@@ -336,34 +354,33 @@ describe('useOverviewDataStore', () => {
     expect(calls).toContain('/api/v1/basins/{basin_id}/versions')
   })
 
-  it('defaults no-query layer state to the newest item from a truncated latest-window valid-time envelope', async () => {
+  // PR 4/7：layer 的 metadata.valid_times 已是默认消费源；空 query.validTime 时仍按数组末尾解析。
+  it('defaults no-query layer state to the newest item carried by metadata.valid_times', async () => {
     const noValidTimeQuery = { ...query, validTime: null }
+    const calls: string[] = []
 
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
       const path = String(args[0])
+      calls.push(path)
       if (path === '/api/v1/basins') return success([basin]) as never
       if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
       if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
       if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
       if (path === '/api/v1/layers') {
         return success([
-          { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] },
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: [],
+            metadata: { valid_times: ['2026-05-21T00:00:00Z', '2026-05-21T06:00:00Z', '2026-05-21T12:00:00Z'] },
+          },
         ]) as never
       }
       if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
       if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
       if (path === '/api/v1/flood-alerts/summary') {
         return success({ run_id: run.run_id, total_segments: 1, usable_curves: 1, unavailable_count: 0, levels: [] }) as never
-      }
-      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') {
-        return success({
-          valid_times: ['2026-05-21T00:00:00Z', '2026-05-21T06:00:00Z', '2026-05-21T12:00:00Z'],
-          items: ['2026-05-21T00:00:00Z', '2026-05-21T06:00:00Z', '2026-05-21T12:00:00Z'],
-          limit: 3,
-          observed_count: 4,
-          truncated: true,
-        }) as never
       }
       throw new Error(`Unexpected GET ${path}`)
     })
@@ -379,9 +396,13 @@ describe('useOverviewDataStore', () => {
         validTime: '2026-05-21T12:00:00.000Z',
       },
     })
+    // metadata-first：默认 path 不发 fallback /layers/<id>/valid-times（spec scenario "Metadata carries valid_times"）。
+    expect(calls).not.toContain('/api/v1/layers/{layer_id}/valid-times')
   })
 
-  it('scopes overview layer valid-times to the resolved run and defaults to that run sample tail', async () => {
+  // PR 4/7：valid-times 解析改走 metadata-first；run-scope 仍由 fetchLayers(runId) 体现
+  // （后端按 run_id 返回不同 metadata.valid_times），不再依赖独立 fetchLayerValidTimes RTT。
+  it('scopes overview layer valid-times via run-scoped fetchLayers metadata, no separate per-layer fan-out', async () => {
     const noValidTimeQuery = { ...query, validTime: null }
     const olderRun = { ...run, run_id: 'run-gfs-old', end_time: '2026-05-19T00:00:00Z', updated_at: '2026-05-18T01:00:00Z' }
     const resolvedRun = { ...run, run_id: 'run-gfs-ready', end_time: '2026-05-25T00:00:00Z', updated_at: '2026-05-18T02:00:00Z' }
@@ -395,34 +416,37 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
       if (path === '/api/v1/runs') return success({ items: [olderRun, resolvedRun], total: 2, limit: 20, offset: 0 }) as never
       if (path === '/api/v1/layers') {
-        return success([{ layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] }]) as never
+        // runless 调用（phase 1 bootstrap）返回空 metadata，run-scoped 调用（enrichment phase）返回 resolvedRun 对应 valid_times。
+        const isRunScoped = options?.params?.query?.run_id !== undefined && options?.params?.query?.run_id !== null
+        if (isRunScoped && options?.params?.query?.run_id !== resolvedRun.run_id) {
+          throw new Error('layers not scoped to resolved run')
+        }
+        return success([
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: [],
+            metadata: isRunScoped
+              ? { valid_times: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'] }
+              : null,
+          },
+        ]) as never
       }
       if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
       if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
       if (path === '/api/v1/flood-alerts/summary') {
         return success({ run_id: resolvedRun.run_id, total_segments: 1, usable_curves: 1, unavailable_count: 0, levels: [] }) as never
       }
-      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') {
-        if (options?.params?.query?.run_id !== resolvedRun.run_id) throw new Error('valid-times not scoped to resolved run')
-        if (options?.params?.query?.duration !== '1h') throw new Error('flood valid-times not scoped to default duration')
-        return success({
-          valid_times: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
-          items: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
-          limit: 2,
-          observed_count: 3,
-          truncated: true,
-        }) as never
-      }
       throw new Error(`Unexpected GET ${path}`)
     })
 
     const snapshot = await useOverviewDataStore.getState().loadOverview(noValidTimeQuery)
 
-    expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
-      run_id: resolvedRun.run_id,
-      duration: '1h',
-    })
+    // run-scoped fetchLayers 携带 run_id 反映 resolvedRun；这一通道替代旧的独立 per-layer valid-times RTT。
+    expect(calls.find((call) => call.path === '/api/v1/layers' && call.query?.run_id === resolvedRun.run_id)).toBeTruthy()
+    // 默认 path 不再发 per-layer fan-out（spec scenario "Metadata carries valid_times"）。
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/layers/{layer_id}/valid-times')
     expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({
       currentValidTime: '2026-05-18T11:41:00.000Z',
       freshness: {
@@ -432,7 +456,7 @@ describe('useOverviewDataStore', () => {
     })
   })
 
-  it('selects published-only ready runs for overview flood surfaces', async () => {
+  it('selects published-only ready runs for overview flood surfaces (no ranking on default path)', async () => {
     const publishedRun = { ...run, run_id: 'run-gfs-published', status: 'published', updated_at: '2026-05-18T01:30:00Z' }
     const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
 
@@ -460,9 +484,7 @@ describe('useOverviewDataStore', () => {
           levels: [{ level: 'warning', count: 1, color: '#FFB74D' }],
         }) as never
       }
-      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
       if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -475,9 +497,8 @@ describe('useOverviewDataStore', () => {
     expect(calls.find((call) => call.path === '/api/v1/flood-alerts/summary')?.query).toMatchObject({
       run_id: publishedRun.run_id,
     })
-    expect(calls.find((call) => call.path === '/api/v1/flood-alerts/ranking')?.query).toMatchObject({
-      run_id: publishedRun.run_id,
-    })
+    // PR 4/7：默认 path 不发 ranking（spec scenario "Default overview bootstrap omits ranking"）。
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/ranking')
     expect(snapshot.summary.freshness.runId).toBe(publishedRun.run_id)
     expect(snapshot.summary.warningSegmentCount).toBe(1)
   })
@@ -537,16 +558,20 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
       if (path === '/api/v1/runs') return success({ items: [run, ifsRun], total: 2, limit: 20, offset: 0 }) as never
       if (path === '/api/v1/layers') {
-        return success([{ layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] }]) as never
+        return success([
+          {
+            layer_id: 'flood-return-period',
+            layer_name: 'Flood return period',
+            layer_type: 'hydrology',
+            variables: [],
+            metadata: { valid_times: ['2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z'] },
+          },
+        ]) as never
       }
       if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
       if (path === '/api/v1/pipeline/status') return success({ ...pipelineStatus, source: 'IFS' }) as never
       if (path === '/api/v1/flood-alerts/summary') {
         return success({ run_id: 'run-ifs-1', total_segments: 1, usable_curves: 1, unavailable_count: 0, levels: [] }) as never
-      }
-      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') {
-        return success(['2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z']) as never
       }
       throw new Error(`Unexpected GET ${path}`)
     })
@@ -788,7 +813,10 @@ describe('useOverviewDataStore', () => {
     expect(calls).not.toContain('/api/v1/basins/{basin_id}/versions')
   })
 
-  it('accounts for distinct non-flood layer valid-time requests in the aggregation decision', async () => {
+  // PR 4/7 regression：默认 path 已删除 layerIdsForOverview.map(fetchLayerValidTimes) fan-out
+  // （spec scenario "Metadata carries valid_times"）。本测试改为反向断言：discharge 路径不再
+  // 触发 per-layer valid-times 请求；aggregationDecision 反映新的最小请求计数（无 fan-out）。
+  it('does not fan out per-layer valid-times requests on the default discharge path (PR 4/7 regression)', async () => {
     const calls: Array<{ path: string; pathParams?: Record<string, unknown> }> = []
 
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
@@ -802,18 +830,20 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/layers') return success([]) as never
       if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
       if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
     const snapshot = await useOverviewDataStore.getState().loadOverview({ ...query, layer: 'discharge' })
 
-    expect(
-      calls
-        .filter((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')
-        .map((call) => call.pathParams?.layer_id),
-    ).toEqual(['discharge', 'flood-return-period'])
-    expect(snapshot.aggregationDecision.evidence).toContain('9 initial requests')
+    // 关键 regression：默认 discharge path 不发任何 per-layer /valid-times 请求。
+    expect(calls.filter((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')).toEqual([])
+    // 同时确认 ranking 也未被发起。
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/ranking')
+    // initialRequestCount = 5 base（无 latestRun）+ 1 pipeline + 1 version = 7 → reuse-existing。
+    expect(snapshot.aggregationDecision).toMatchObject({
+      needsAggregationEndpoint: false,
+      reason: 'reuse-existing',
+    })
   })
 
   it('uses safe scoped partial errors for pipeline failures without exposing backend paths', async () => {
@@ -861,8 +891,6 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/flood-alerts/summary') {
         return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
       }
-      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
-      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -873,7 +901,10 @@ describe('useOverviewDataStore', () => {
 
     expect(counts.get('/api/v1/basins')).toBe(1)
     expect(counts.get('/api/v1/models')).toBe(1)
-    expect(counts.get('/api/v1/layers/{layer_id}/valid-times')).toBe(1)
+    // PR 4/7：默认 path 不再 fan-out per-layer valid-times（spec scenario "Metadata carries valid_times"）。
+    expect(counts.get('/api/v1/layers/{layer_id}/valid-times')).toBeUndefined()
+    // PR 4/7：默认 path 不再 fetch ranking（spec scenario "Default overview bootstrap omits ranking"）。
+    expect(counts.get('/api/v1/flood-alerts/ranking')).toBeUndefined()
   })
 
   it('keeps stale overview responses from overwriting the latest request state', async () => {
@@ -1545,7 +1576,9 @@ describe('useOverviewDataStore', () => {
       resolvedSource: 'Unknown',
       scenarioIds: [],
     })
-    expect(snapshot.detail.warningDistribution.severe).toBe(0)
+    // ranking 在该 stale-version path 内被显式 settle（同 path 走 best 解析失败但仍 normalize），
+    // warningDistribution 当为定义后再断言；narrow 是 PR 4/7 把 warningDistribution 改成 `| undefined` 的兼容写法。
+    expect(snapshot.detail.warningDistribution).toEqual(expect.objectContaining({ severe: 0 }))
     expect(snapshot.segments[0]).toMatchObject({
       basinVersionId: oldVersion.basin_version_id,
       currentQ: null,
@@ -3649,7 +3682,8 @@ describe('useOverviewDataStore', () => {
       comparisonAvailable: true,
     })
     expect(snapshot.detail.latestRun.runId).toBeNull()
-    expect(snapshot.detail.warningDistribution.warning).toBe(0)
+    // PR 4/7 之后 warningDistribution 是 `| undefined`，用 objectContaining narrow 兼容空态。
+    expect(snapshot.detail.warningDistribution).toEqual(expect.objectContaining({ warning: 0 }))
     expect(snapshot.selectedSegment).toMatchObject({
       riverSegmentId: 'seg-123',
       lineageStatus: 'unavailable',
@@ -3986,5 +4020,177 @@ describe('useOverviewDataStore', () => {
         })
       },
     )
+  })
+
+  // PR 4/7：dead-call 删除 + 按需 ranking + metadata-first valid_times。
+  // 覆盖 spec capability "overview-data-contracts" 的两个 Requirement scenarios + spec capability
+  // "frontend-mvt-layer-consumption" 的 metadata-first regression。
+  describe('dead-call removal + on-demand ranking (PR 4/7)', () => {
+    // 4.5 (a)：默认 path 不发 ranking；调用 loadFloodRankingOnDemand 才触发；同 key 并发去重。
+    it('ranking is not fetched on default loadOverview and is issued on-demand when requested', async () => {
+      const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        const options = args[1] as { params?: { query?: Record<string, unknown> } }
+        calls.push({ path, query: options?.params?.query })
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') {
+          return success([
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: [],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: run.run_id, total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      await useOverviewDataStore.getState().loadOverview(query)
+
+      // 默认 path：ranking 缺席。
+      expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/ranking')
+      // ranking 数据未反映在 overview snapshot 上：basin warningCounts === undefined（pending），
+      // 等按需 fetch settle 才覆盖。
+      expect(useOverviewDataStore.getState().overview?.basins[0].warningCounts).toBeUndefined()
+
+      // 第一次按需调用：触发 fetch。
+      const firstResult = await loadFloodRankingOnDemand(run.run_id, query)
+      expect(firstResult.items).toHaveLength(1)
+      const firstCount = calls.filter((c) => c.path === '/api/v1/flood-alerts/ranking').length
+      expect(firstCount).toBe(1)
+
+      // 同 key 第二次调用：模块级 cached() 命中，不再发新 RTT。
+      const secondResult = await loadFloodRankingOnDemand(run.run_id, query)
+      expect(secondResult).toBe(firstResult)
+      expect(calls.filter((c) => c.path === '/api/v1/flood-alerts/ranking').length).toBe(firstCount)
+    })
+
+    // 4.5 (a)：concurrent 面板挂载 coalesce 到同一 in-flight promise（只发一次网络 RTT）。
+    it('coalesces concurrent on-demand ranking requests through the in-flight cache', async () => {
+      // Promise constructor 同步运行 callback → release 在下一句即被赋值；用 definite-assignment
+      // assertion 跳开 `null` 初值，避免 TS control-flow 把闭包内赋值的回写 narrow 成 `never`
+      // 后再触发 TS2349 "expression is not callable"（PR 内同 pattern 的旧测试也踩过该坑）。
+      let release!: (value: unknown) => void
+      const blockedRanking = new Promise<unknown>((resolve) => {
+        release = resolve
+      })
+      const calls: string[] = []
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        calls.push(path)
+        if (path === '/api/v1/flood-alerts/ranking') return (await blockedRanking) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      const p1 = loadFloodRankingOnDemand(run.run_id, query)
+      const p2 = loadFloodRankingOnDemand(run.run_id, query)
+      expect(_floodRankingInFlightSize()).toBe(1)
+      release(success(ranking))
+      const [r1, r2] = await Promise.all([p1, p2])
+      expect(r1).toBe(r2)
+      expect(calls.filter((p) => p === '/api/v1/flood-alerts/ranking').length).toBe(1)
+      // resolve 后 in-flight 条目被清掉（cached() 持久兜底）。
+      expect(_floodRankingInFlightSize()).toBe(0)
+    })
+
+    // 4.5 (c)：unmount / layer 切回 discharge → release 清掉 in-flight，下一次调用发新 fetch。
+    it('clears the in-flight ranking entry on release (unmount / layer switch back to discharge)', async () => {
+      // 同上：用 definite-assignment 跳开 TS narrowing 与 optional-call narrowing 问题。
+      let release!: (value: unknown) => void
+      const blockedRanking = new Promise<unknown>((resolve) => {
+        release = resolve
+      })
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') return (await blockedRanking) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      const inFlight = loadFloodRankingOnDemand(run.run_id, query)
+      expect(_floodRankingInFlightSize()).toBe(1)
+      // 模拟面板 unmount：调用方 release。
+      releaseFloodRankingOnDemand(run.run_id, query)
+      expect(_floodRankingInFlightSize()).toBe(0)
+      // 释放原 promise 不影响 in-flight 状态（已被清空，新调用要发新 fetch）。
+      release(success(ranking))
+      await inFlight
+      expect(_floodRankingInFlightSize()).toBe(0)
+    })
+
+    it('releases ranking in-flight entries by query when runId is unknown (latestRun pending)', async () => {
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') return new Promise(() => undefined) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      loadFloodRankingOnDemand('run-a', query).catch(() => undefined)
+      loadFloodRankingOnDemand('run-b', query).catch(() => undefined)
+      expect(_floodRankingInFlightSize()).toBe(2)
+      // 模拟 layer 切走但当时 latestRun 已变 / 未知：用 null runId 清掉同 query/basinId 全部 in-flight。
+      releaseFloodRankingOnDemand(null, query)
+      expect(_floodRankingInFlightSize()).toBe(0)
+    })
+
+    // 4.5 (e)：layerIdsForOverview.map(fetchLayerValidTimes) 不在默认 loadOverview 路径上的 regression
+    // 断言（与 "deduplicates" / "accounts for distinct..." 测试形成多层防护）。
+    it('does not call layerIdsForOverview.map(fetchLayerValidTimes) on the default overview path', async () => {
+      const calls: string[] = []
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        calls.push(path)
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') {
+          return success([
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: [],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+            // 同时验证：discharge layer 也不触发 fan-out（覆盖 layerIdsForOverview 多 layer set）。
+            {
+              layer_id: 'discharge',
+              layer_name: 'Discharge',
+              layer_type: 'hydrology',
+              variables: ['q_down'],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: run.run_id, total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      await useOverviewDataStore.getState().loadOverview({ ...query, layer: 'discharge' })
+
+      // 关键 regression：默认 path 上一个 per-layer valid-times 请求都不能有。
+      expect(calls.filter((p) => p === '/api/v1/layers/{layer_id}/valid-times')).toEqual([])
+      // 同时确认 ranking 也未被请求（防 PR 5/7 rebase 时回归）。
+      expect(calls.filter((p) => p === '/api/v1/flood-alerts/ranking')).toEqual([])
+    })
   })
 })

@@ -8,6 +8,7 @@ import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import {
   createEmptyBasinDetail,
   createEmptyOverviewSummary,
+  createFreshnessMetadata,
   decideAggregationEndpoint,
   normalizeLayerStates,
   type BasinSegmentRow,
@@ -37,6 +38,7 @@ import {
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { OverviewPage } from '@/pages/OverviewPage'
 import {
+  _floodRankingInFlightSize,
   useOverviewDataStore,
   type BasinDataSnapshot,
   type M11BasinRequestScope,
@@ -44,6 +46,13 @@ import {
   type OverviewDataSnapshot,
 } from '@/stores/overviewData'
 import { useStationLayerDataStore } from '@/stores/stationLayerData'
+import { client } from '@/api/client'
+
+// 让 PR 4/7 wire-up 的 loadFloodRankingOnDemand / releaseFloodRankingOnDemand 可观测：
+// store actions 已在 beforeEach 内 stub 不走 client；这里只有按需 ranking 测试会触发真实 client.GET。
+vi.mock('@/api/client', () => ({
+  client: { GET: vi.fn() },
+}))
 
 const mapSources: Array<Record<string, unknown>> = []
 const mapLayers: Array<Record<string, unknown>> = []
@@ -1507,6 +1516,125 @@ describe('M11 visual foundation shell', () => {
       'data-interactive-layer-ids',
       expect.stringContaining('m11-discharge-line-hit'),
     )
+  })
+
+  // PR #583 round-2 C1：OverviewPage 真接线 loadFloodRankingOnDemand / releaseFloodRankingOnDemand
+  // （spec capability "overview-data-contracts" Requirement "Flood ranking is fetched on demand,
+  // not on overview bootstrap" 的两个 scenarios：Ranking panel mounted + Ranking fetch is cancelled
+  // on unmount or layer change）。前一道测试仅校验 store 默认 path 不发 ranking；这里校验"按需触发 +
+  // 清理"在真实 React 渲染 cycle 中可被观测。
+  describe('on-demand ranking wire-up (PR #583 round-2 C1)', () => {
+    function snapshotWithRunId(query: M11QueryState, runId: string): OverviewDataSnapshot {
+      const summary: OverviewSummary = {
+        ...createEmptyOverviewSummary(query),
+        freshness: createFreshnessMetadata({ runId, source: 'GFS' }),
+      }
+      return {
+        requestScope: matchedOverviewScope(query),
+        // bootstrap 非空 ≡ phase-1 settle，OverviewPage 走 ranking effect 路径。
+        bootstrap: { basins: [], layers: [], layerStates: [], currentLayerValidTime: null },
+        basins: [],
+        summary,
+        layers: [],
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 1,
+          createsPerBasinNPlusOne: false,
+          missingRequiredFields: [],
+        }),
+        basinVersionToBasinId: {},
+      }
+    }
+
+    function setupRankingMock(): { rankingCalls: number } {
+      const state = { rankingCalls: 0 }
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') {
+          state.rankingCalls += 1
+          return { data: { items: [], total: 0, limit: 200, offset: 0 }, error: undefined } as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+      return state
+    }
+
+    it('fetches ranking exactly once on flood-return-period mount and releases on layer switch back to discharge', async () => {
+      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
+      const initialQuery = parseM11QueryState(window.location.search)
+      useOverviewDataStore.setState({
+        overview: snapshotWithRunId(initialQuery, 'run-gfs-1'),
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
+      const rankingState = setupRankingMock()
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      render(
+        <BrowserRouter>
+          <OverviewPage />
+        </BrowserRouter>,
+      )
+
+      // 挂载即触发 ranking 一次（spec scenario "Ranking panel mounted"）。
+      await waitFor(() => expect(rankingState.rankingCalls).toBe(1))
+
+      // 切回 discharge：BrowserRouter 监听 popstate，pushState + popstate 触发 OverviewPage 重新解析 query.layer。
+      // effect 旧 cleanup 调用 releaseFloodRankingOnDemand，新 effect 因 layer 不是 ranking-driven 不再 fetch。
+      const dischargeQuery = { ...initialQuery, layer: 'discharge' as const }
+      // 同步 store 内的 overview snapshot，确保 OverviewMode 仍能拿到 runId（layer 切换不影响 freshness.runId）。
+      useOverviewDataStore.setState({
+        overview: snapshotWithRunId(dischargeQuery, 'run-gfs-1'),
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
+      window.history.pushState({}, '', '/?source=gfs&layer=discharge')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+
+      // 等 React 跑完 effect cycle；ranking call count 不能再增（spec scenario 的"no setState MUST occur"语义
+      // 的间接断言：layer 切换 cleanup → release，不再发 fetch、in-flight 已清空，下一次切回 flood 再发新 fetch）。
+      await waitFor(() => expect(_floodRankingInFlightSize()).toBe(0))
+      expect(rankingState.rankingCalls).toBe(1)
+
+      // 无 act() / setState-after-unmount 警告。
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+      consoleErrorSpy.mockRestore()
+    })
+
+    it('clears the in-flight ranking entry on unmount mid-flight without setState-after-unmount warning', async () => {
+      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
+      const query = parseM11QueryState(window.location.search)
+      useOverviewDataStore.setState({
+        overview: snapshotWithRunId(query, 'run-gfs-2'),
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
+      // 阻塞 ranking：fetch 不 resolve，让 in-flight 条目保持存在，断言 unmount cleanup 路径真清掉。
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') return new Promise(() => undefined) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      const { unmount } = render(
+        <BrowserRouter>
+          <OverviewPage />
+        </BrowserRouter>,
+      )
+
+      // 挂载即触发 in-flight 条目。
+      await waitFor(() => expect(_floodRankingInFlightSize()).toBeGreaterThanOrEqual(1))
+
+      // unmount 时 effect cleanup 调用 releaseFloodRankingOnDemand。
+      unmount()
+
+      // release 路径必须把对应 in-flight 条目清掉（spec scenario "Ranking fetch is cancelled"
+      // 的"the in-flight cache entry MUST be cleared"子句）。
+      expect(_floodRankingInFlightSize()).toBe(0)
+      // unmount 后没有 React act() / setState-after-unmount 警告（spec "no setState MUST occur"）。
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+      consoleErrorSpy.mockRestore()
+    })
   })
 
   // Bug-1 合同：刷新/直达带 basinId 的 URL → 首挂载剥离 basinId，落在全国总览主页（不进流域详情），
