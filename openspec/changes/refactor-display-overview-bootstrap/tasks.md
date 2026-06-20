@@ -68,9 +68,9 @@
 
 ## 5. Frontend: default discharge decoupling from flood_product_ready
 
-- [ ] 5.1 `apps/frontend/src/stores/overviewData.ts::fetchRunsPageByStatus`（line 583）移除固定 `flood_product_ready: true` query；改为按 `query.layer` ∈ {`flood-return-period`, `warning-level`} 时才注入；`fetchRuns`/`fetchRunsPage`（line 594/599）作为 thin delegate 同步遵循
-- [ ] 5.2 同步 `fetchRunsForBasinVersion` 等相关函数遵循同一 layer-based gating；layer toggle 后调用必须重新计算 `flood_product_ready` query 串并重选 latest run（覆盖 spec scenario「Layer toggle re-evaluates flood_product_ready filter」）
-- [ ] 5.3 测试：
+- [x] 5.1 `apps/frontend/src/stores/overviewData.ts::fetchRunsPageByStatus`（line 583）移除固定 `flood_product_ready: true` query；改为按 `query.layer` ∈ {`flood-return-period`, `warning-level`} 时才注入；`fetchRuns`/`fetchRunsPage`（line 594/599）作为 thin delegate 同步遵循
+- [x] 5.2 同步 `fetchRunsForBasinVersion` 等相关函数遵循同一 layer-based gating；layer toggle 后调用必须重新计算 `flood_product_ready` query 串并重选 latest run（覆盖 spec scenario「Layer toggle re-evaluates flood_product_ready filter」）
+- [x] 5.3 测试：
   - (a) **修订现有断言** `apps/frontend/src/stores/__tests__/overviewData.test.ts:286/292/522/560/2508`：discharge 路径下原 `expect(...flood_product_ready === true).toBe(true)` 改为 `expect(...flood_product_ready).not.toBe(true)`（要么 undefined 要么不传该 param）；flood-return-period / warning-level 路径保留 `=== true` 断言
   - (b) 新增 layer toggle 测试：discharge → flood-return-period 切换后下一次 `fetchRunsPageByStatus` 请求参数变化 + latest run 重选
 

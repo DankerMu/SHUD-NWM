@@ -372,9 +372,19 @@ function settledValue<T>(result: PromiseSettledResult<T>, errors: string[], labe
   return null
 }
 
-function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState): ApiHydroRun | null {
+// PR 5/7（spec scenario "Default discharge run selection is independent of flood readiness"）：
+// 前端三处 run-selection filter（mergeRunPages / latestPublishedRun / latestPublishedRunForBasinVersion）
+// 必须与 backend SQL filter 同步 layer-gate，否则后端解耦后前端 post-filter 仍会把 discharge 候选
+// 中洪频未完成的 run 丢掉，让 spec 承诺的「discharge 独立于洪频 ready」名存实亡。
+// 唯一调用方就在本文件，requireFloodReady 由 callsite 通过 floodProductReadyForLayer(query.layer)
+// 推导：flood-return-period / warning-level → true，其余 layer → false。
+function latestPublishedRun(
+  runs: ApiHydroRunPage | null,
+  query: M11QueryState | undefined,
+  requireFloodReady: boolean,
+): ApiHydroRun | null {
   const items = runs?.items ?? []
-  const readyRuns = items.filter(isReadyFloodRun)
+  const readyRuns = requireFloodReady ? items.filter(isReadyFloodRun) : items
   const candidates = query?.source === 'best' ? readyRuns.filter((run) => concreteSourceFromRun(run)) : readyRuns
   return [...candidates].sort((a, b) => {
     const bCycleTime = Date.parse(b.cycle_time ?? '')
@@ -397,11 +407,15 @@ function isReadyFloodRun(run: ApiHydroRun) {
   return isRecord(quality) && quality.quality_state === 'ready'
 }
 
-function mergeRunPages(pages: ApiHydroRunPage[], statuses: readonly ReadyRunStatus[] = READY_RUN_STATUSES): ReadyRunPage {
+function mergeRunPages(
+  pages: ApiHydroRunPage[],
+  requireFloodReady: boolean,
+  statuses: readonly ReadyRunStatus[] = READY_RUN_STATUSES,
+): ReadyRunPage {
   const byRunId = new Map<string, ApiHydroRun>()
   pages.forEach((page) => {
     page.items.forEach((run) => {
-      if (!isReadyFloodRun(run)) return
+      if (requireFloodReady && !isReadyFloodRun(run)) return
       byRunId.set(run.run_id, run)
     })
   })
@@ -424,7 +438,8 @@ function mergeRunPages(pages: ApiHydroRunPage[], statuses: readonly ReadyRunStat
 function latestPublishedRunForBasinVersion(
   runs: ApiHydroRunPage | null,
   basinVersionId: string | null | undefined,
-  query?: M11QueryState,
+  query: M11QueryState | undefined,
+  requireFloodReady: boolean,
 ): ApiHydroRun | null {
   if (!basinVersionId) return null
   return latestPublishedRun(
@@ -435,6 +450,7 @@ function latestPublishedRunForBasinVersion(
       offset: runs?.offset ?? 0,
     },
     query,
+    requireFloodReady,
   )
 }
 
@@ -603,6 +619,32 @@ async function fetchModel(modelId: string) {
   )
 }
 
+// PR 5/7（spec scenario "Default discharge run selection is independent of flood readiness"）：
+// 历史上 `/runs` 永远 append `flood_product_ready=true`，把 discharge 展示语义与洪频完整性强耦合
+// （m25 多流域改造副产品，design.md D6）。现在按 layer 三态门控：
+// - flood-return-period / warning-level → 强制 `true`（ranking / summary 需要洪频 ready 闸门）
+// - 其他（discharge / met-stations / met-raster）→ 不注入该 param，让后端 frequency-ready ordering
+//   选最新 run，避免洪频未跑完时 discharge 也选不到 run。
+// 注意：cache key 必须把 floodProductReady 纳入，否则 layer toggle 后命中前一个 layer 的缓存页，
+// 违反 spec scenario "Layer toggle re-evaluates flood_product_ready filter"。
+function floodProductReadyForLayer(layer: M11QueryState['layer']): boolean | undefined {
+  // Exhaustive switch with `never` fallthrough: 当 M11Layer union 新增成员时编译器强制更新此处，
+  // 避免新 layer 默认走 discharge 语义而漏掉洪频 gating 决策。
+  switch (layer) {
+    case 'flood-return-period':
+    case 'warning-level':
+      return true
+    case 'discharge':
+    case 'met-stations':
+    case 'met-raster':
+      return undefined
+    default: {
+      const _exhaustive: never = layer
+      return _exhaustive
+    }
+  }
+}
+
 async function fetchRunsPageByStatus(
   query: M11QueryState,
   basinId: string | undefined,
@@ -611,8 +653,18 @@ async function fetchRunsPageByStatus(
   status: ReadyRunStatus,
 ) {
   const source = sourceForApi(query.source)
+  const floodProductReady = floodProductReadyForLayer(query.layer)
   return cached(
-    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status, limit, offset }),
+    cacheKey('/api/v1/runs', {
+      basinId,
+      source,
+      cycleTime: query.cycle ?? 'latest',
+      status,
+      limit,
+      offset,
+      // 关键：layer toggle（discharge ↔ flood-return-period/warning-level）必须重算请求 + 重选 latest run。
+      floodProductReady: floodProductReady ?? false,
+    }),
     () =>
       getApi<ApiHydroRunPage>(
         '/api/v1/runs',
@@ -623,7 +675,8 @@ async function fetchRunsPageByStatus(
               source,
               cycle_time: query.cycle ?? undefined,
               status,
-              flood_product_ready: true,
+              // undefined → openapi-fetch 不会 serialize 该 param；只有 flood-driven layer 才会出现 in query string。
+              flood_product_ready: floodProductReady,
               limit,
               offset,
             },
@@ -636,7 +689,9 @@ async function fetchRunsPageByStatus(
 
 async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
   const pages = await Promise.all(READY_RUN_STATUSES.map((status) => fetchRunsPageByStatus(query, basinId, limit, offset, status)))
-  return mergeRunPages(pages)
+  // discharge / met-* layer 下 backend 已不再注入 flood_product_ready=true，前端 post-filter 必须同步松手，
+  // 否则后端解耦失效（spec scenario "Default discharge run selection is independent of flood readiness"）。
+  return mergeRunPages(pages, floodProductReadyForLayer(query.layer) === true)
 }
 
 async function fetchRuns(query: M11QueryState, basinId?: string) {
@@ -651,6 +706,9 @@ async function fetchRunsForBasinVersion(
 ): Promise<BasinVersionRunFetchResult> {
   if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false, failed: false }
 
+  // Layer-gated 与 fetchRunsPage 保持对称：discharge / met-* 不强制洪频 ready，
+  // flood-return-period / warning-level 才强制 —— 否则 same-version run lookup 会把 discharge 候选刷光。
+  const requireFloodReady = floodProductReadyForLayer(query.layer) === true
   const initialStatusPages = initialPage.readyStatusPages ?? { frequency_done: initialPage }
   const byRunId = new Map<string, ApiHydroRun>()
   const addPageItems = (page: ApiHydroRunPage) => {
@@ -686,7 +744,7 @@ async function fetchRunsForBasinVersion(
   let page: ApiHydroRunPage = {
     ...pageFromItems(),
   }
-  if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
+  if (latestPublishedRunForBasinVersion(page, basinVersionId, query, requireFloodReady)) return { page, reachedCap: false, failed: false }
 
   let extraPages = 0
   let reachedCap = false
@@ -717,7 +775,7 @@ async function fetchRunsForBasinVersion(
       cursor.offset += fetched
     })
     page = pageFromItems()
-    if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
+    if (latestPublishedRunForBasinVersion(page, basinVersionId, query, requireFloodReady)) return { page, reachedCap: false, failed: false }
     if (nextPages.every(({ page: statusPage }) => (statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT) <= 0)) break
   }
 
@@ -1268,7 +1326,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
       const runs = settledValue(runsResult, partialErrors, 'runs')
-      const latestRun = latestPublishedRun(runs, query)
+      const latestRun = latestPublishedRun(runs, query, floodProductReadyForLayer(query.layer) === true)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
       const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
@@ -1292,9 +1350,15 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // PR 4/7：默认 path 不再 fan-out ranking + per-layer valid-times 请求
       // （spec scenarios "Default overview bootstrap omits ranking" / "Metadata carries valid_times"）。
       // ranking 走 loadFloodRankingOnDemand；layer valid-times 由 normalizeLayerStates metadata-first 消费。
+      // PR 5/7：discharge / met-* layer 下 latestRun 不再保证洪频 ready，对应的 flood summary 必须 skip
+      // —— 否则后端返回 FLOOD_PRODUCT_UNAVAILABLE 会塞进 partialErrors 让 BasinDetailPanels.qualityNote
+      // 出现「洪频不可用」的 UI 噪声，违反 spec scenario「discharge 独立于洪频 ready」的用户预期。
+      const floodLayerActive = floodProductReadyForLayer(query.layer) === true
       const [pipelineResult, summaryResult, ...versionResults] = await Promise.allSettled([
         fetchPipelineStatus(query, latestRun),
-        latestRun && useSingleRunFloodSurfaces ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
+        latestRun && useSingleRunFloodSurfaces && floodLayerActive
+          ? fetchFloodSummary(latestRun.run_id, query.validTime)
+          : Promise.resolve(null),
         ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
       ])
 
@@ -1430,9 +1494,20 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         null
       const versionRunsResult = await fetchRunsForBasinVersion(requestQuery, basinId, selectedVersion?.basin_version_id, runPage)
       const versionCompleteRunPage = versionRunsResult.page
-      const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, requestQuery)
+      const latestRun = latestPublishedRunForBasinVersion(
+        versionCompleteRunPage,
+        selectedVersion?.basin_version_id,
+        requestQuery,
+        floodProductReadyForLayer(requestQuery.layer) === true,
+      )
       const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(requestQuery)
+      // PR 5/7：与 loadOverview 对称的层级 gating —— discharge / met-* 下 latestRun 不再强制洪频 ready，
+      // 直接 fan-out flood ranking / timeline / lineage 会被后端 409 FLOOD_PRODUCT_UNAVAILABLE 兜底，
+      // 进而塞进 partialErrors，让 BasinDetailPanels.qualityNote 出现「洪频不可用」UI 噪声。
+      // floodLayerActive 把这些 eager call 与「当前 layer 实际依赖洪频」绑定，保证 spec scenario
+      // 「discharge 独立于洪频 ready」的用户预期：discharge 选了 flood-incomplete run 也不报噪。
+      const floodLayerActive = floodProductReadyForLayer(requestQuery.layer) === true
       const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const canFetchConcreteSurface =
@@ -1460,7 +1535,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         selectedVersion
           ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)
           : Promise.resolve(null),
-        latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId) : Promise.resolve(null),
+        latestRun && useSingleRunFloodSurfaces && floodLayerActive
+          ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId)
+          : Promise.resolve(null),
         ...layerIdsForOverview(requestQuery).map((layerId) =>
           fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
         ),
@@ -1548,7 +1625,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
                 concreteSurfaceQuery,
               )
             : Promise.resolve(null),
-          latestRun && useSingleRunFloodSurfaces
+          latestRun && useSingleRunFloodSurfaces && floodLayerActive
             ? fetchFloodTimeline(
                 latestRun.run_id,
                 selectedIdentifiers.timelineSegmentId,
@@ -1562,7 +1639,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         let lineage: ApiLineageResponse | null = null
         let lineageError: string | null = null
         const lineageUnavailableReason = useSingleRunFloodSurfaces ? null : COMPARE_LINEAGE_UNAVAILABLE
-        if (latestRun && useSingleRunFloodSurfaces) {
+        if (latestRun && useSingleRunFloodSurfaces && floodLayerActive) {
           try {
             lineage = await fetchLineage(
               latestRun.run_id,
