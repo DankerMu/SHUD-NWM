@@ -1,0 +1,48 @@
+{
+  "results": [
+    {
+      "ok": true,
+      "receipt": {
+        "basin_id": "basins_heihe",
+        "basin_slug": "heihe",
+        "crosswalk_row_count": 4759,
+        "finished_at": "2026-06-20T01:00:38.718186+00:00",
+        "geom_null_count": 0,
+        "imported_reach_count": 2352,
+        "max_edge_meters_observed": null,
+        "model_id": "basins_heihe_shud",
+        "multi_part_violation_count": 0,
+        "package_version": "vbasins-reingest-qhh-heihe-no-output-seed",
+        "river_shp_record_count": 2352,
+        "schema_version": "basins.reingest.v1",
+        "seg_shp_record_count": 4759,
+        "sp_riv_reach_count": 2352,
+        "started_at": "2026-06-20T00:59:46.321939+00:00",
+        "tile_cache_purged_count": 0
+      },
+      "slug": "heihe"
+    },
+    {
+      "ok": true,
+      "receipt": {
+        "basin_id": "basins_qhh",
+        "basin_slug": "qhh",
+        "crosswalk_row_count": 3738,
+        "finished_at": "2026-06-20T01:00:51.265622+00:00",
+        "geom_null_count": 0,
+        "imported_reach_count": 1633,
+        "max_edge_meters_observed": null,
+        "model_id": "basins_qhh_shud",
+        "multi_part_violation_count": 0,
+        "package_version": "vbasins-reingest-qhh-heihe-no-output-seed",
+        "river_shp_record_count": 1633,
+        "schema_version": "basins.reingest.v1",
+        "seg_shp_record_count": 3738,
+        "sp_riv_reach_count": 1633,
+        "started_at": "2026-06-20T01:00:38.718800+00:00",
+        "tile_cache_purged_count": 0
+      },
+      "slug": "qhh"
+    }
+  ]
+}
