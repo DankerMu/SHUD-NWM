@@ -26,7 +26,7 @@ MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
-SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down", "water_level")
+SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
 DEFAULT_FLOOD_RETURN_PERIOD_DURATION = "1h"
 FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
@@ -161,7 +161,7 @@ def stable_etag(data: bytes) -> str:
 
 
 def public_hydro_layer_id(variable: str) -> str:
-    return {"q_down": "discharge", "water_level": "water-level"}.get(variable, f"hydro:{variable}")
+    return {"q_down": "discharge"}.get(variable, f"hydro:{variable}")
 
 
 def simplification_tolerance_m(z: int) -> float:
@@ -804,24 +804,6 @@ def layer_metadata(
                 "valid_time",
             ],
         },
-        "water-level": {
-            "tile_url_template": "/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "hydro",
-            "required_placeholders": ["run_id", "valid_time", "z", "x", "y"],
-            "properties": [
-                "feature_id",
-                "segment_id",
-                "river_segment_id",
-                "basin_version_id",
-                "river_network_version_id",
-                "value",
-                "unit",
-                "quality_flag",
-                "run_id",
-                "variable",
-                "valid_time",
-            ],
-        },
         "flood-return-period": {
             "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "flood_return_period",
@@ -903,8 +885,6 @@ def layer_metadata(
     route_variable = (
         "q_down"
         if layer_id == "discharge"
-        else "water_level"
-        if layer_id == "water-level"
         else "return_period"
         if layer_id in {"flood-return-period", "warning-level"}
         else None
@@ -912,8 +892,8 @@ def layer_metadata(
     alias_of = "flood-return-period" if is_warning_alias else None
     alias_semantic = "style_layer" if is_warning_alias else None
     legacy_layer_ids = (
-        [f"hydro:{'q_down' if layer_id == 'discharge' else 'water_level'}"]
-        if layer_id in {"discharge", "water-level"}
+        ["hydro:q_down"]
+        if layer_id == "discharge"
         else ["flood_return_period_{run_id}"]
         if layer_id == "flood-return-period"
         else ["flood-return-period", "flood_return_period_{run_id}"]
@@ -1091,7 +1071,7 @@ def _flood_run_product_quality_columns(session: Session) -> set[str]:
 def latest_frequency_ready_run(session: Session) -> Mapping[str, Any] | None:
     """Latest frequency-ready run for the layer catalog, independent of flood return-period completeness.
 
-    `/api/v1/layers` exposes hydrology layers (discharge / water-level / river-network) that only need a
+    `/api/v1/layers` exposes hydrology layers (discharge / river-network) that only need a
     frequency-ready hydro run; flood return-period / warning-level availability is annotated separately
     (see `_annotate_flood_layer_quality`). Unlike `latest_ready_run`, this does NOT inner-join
     `flood.return_period_result`, so basins without a flood baseline (e.g. QHH/Heihe) still expose
@@ -1158,10 +1138,10 @@ def valid_times_for_layer(
                 LIMIT :limit
             """
         )
-    elif layer_id in {"discharge", "water-level"}:
+    elif layer_id == "discharge":
         if run_id is not None and (basin_version_id is None or river_network_version_id is None):
             raise ValueError("Concrete hydro valid-time discovery requires selected basin and river-network identity.")
-        variable = "q_down" if layer_id == "discharge" else "water_level"
+        variable = "q_down"
         sql = (
             """
                 SELECT DISTINCT valid_time
@@ -1486,8 +1466,8 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
             "variable": None,
             "fallback_available": False,
         }
-    if tile.layer_id in {"discharge", "water-level"}:
-        variable = "q_down" if tile.layer_id == "discharge" else "water_level"
+    if tile.layer_id == "discharge":
+        variable = "q_down"
         return {
             "layer_type": "hydrological_output",
             "tile_uri_template": f"/api/v1/tiles/hydro/{{run_id}}/{variable}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf",
@@ -1497,6 +1477,17 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
         }
     if tile.layer_id.startswith("hydro:"):
         variable = tile.layer_id.split(":", 1)[1]
+        # Defense-in-depth: route-level handlers already validate `variable`
+        # against `SUPPORTED_HYDRO_MVT_VARIABLES`, but non-route callers
+        # (CLI tools, workers, future debug constructors) could synthesize a
+        # `TileInput(layer_id="hydro:<retired>")` and silently materialize a
+        # legacy-shaped URI template / cache row. Reject any hydro variant
+        # outside the canonical allow-list before any URI/cache work.
+        if variable not in SUPPORTED_HYDRO_MVT_VARIABLES:
+            raise ValueError(
+                f"Unsupported hydro layer_id={tile.layer_id!r}; "
+                f"supported variables: {SUPPORTED_HYDRO_MVT_VARIABLES}"
+            )
         return {
             "layer_type": "hydrological_output",
             "tile_uri_template": f"/api/v1/tiles/hydro/{{run_id}}/{variable}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf",

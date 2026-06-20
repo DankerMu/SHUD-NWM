@@ -84,6 +84,23 @@ WARNING_COLORS = {
 WARNING_LEVELS = tuple(WARNING_COLORS)
 USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
 FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
+# Single source of truth for the public layer catalog advertised by
+# `/api/v1/layers` and accepted by `/api/v1/layers/{layer_id}/valid-times`.
+# `_default_layer_catalog` walks these definitions to build `Layer` rows;
+# `SUPPORTED_PUBLIC_LAYER_IDS` is derived from the same literal so the two
+# cannot drift when a 5th layer is added. Tuple shape:
+#   (layer_id, display_name, layer_type, variables)
+_PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
+    ("discharge", "Discharge", "hydrology", ["q_down"]),
+    ("flood-return-period", "Flood return period", "hydrology", ["return_period"]),
+    ("warning-level", "Warning level", "hydrology", ["warning_level"]),
+    ("river-network", "River network", "base", ["geometry"]),
+)
+# Public layer_ids advertised by `_default_layer_catalog`. Used by the
+# `/api/v1/layers/{layer_id}/valid-times` route to reject layer_ids that
+# are not part of the canonical hydrology/base catalog with a 422 before
+# any DB work, so retired/unknown ids fail loudly at the route boundary.
+SUPPORTED_PUBLIC_LAYER_IDS = frozenset(definition[0] for definition in _PUBLIC_LAYER_DEFINITIONS)
 FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
     {
         "quality_state",
@@ -412,7 +429,7 @@ def list_layers(
         if run_id is not None:
             run = _require_frequency_ready(session, run_id)
         else:
-            # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/water-level/river-network
+            # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/river-network
             # 仅需 frequency-ready 水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
             # 无洪频基线的流域（QHH/Heihe）因此仍能暴露 discharge，而非整目录空。
             run = latest_frequency_ready_run(session)
@@ -464,6 +481,13 @@ def list_layer_valid_times(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
+    if layer_id not in SUPPORTED_PUBLIC_LAYER_IDS:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Unsupported layer_id for valid-time discovery.",
+            details={"layer_id": layer_id, "supported": sorted(SUPPORTED_PUBLIC_LAYER_IDS)},
+        )
     requested_run_id = run_id
 
     def _load() -> dict[str, Any]:
@@ -484,7 +508,7 @@ def list_layer_valid_times(
             run = _require_frequency_ready(session, run_id)
         else:
             # 洪频/预警 valid-times 维持 latest_ready_run（要求洪频完整，无则空、不抛错）；
-            # discharge/water-level/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
+            # discharge/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
             if layer_id in {"flood-return-period", "warning-level"}:
                 run = latest_ready_run(session)
             else:
@@ -2273,15 +2297,8 @@ def _default_layer_catalog(
                 "river_network_version_id": river_network_version_id,
             },
         )
-    definitions = [
-        ("discharge", "Discharge", "hydrology", ["q_down"]),
-        ("water-level", "Water level", "hydrology", ["water_level"]),
-        ("flood-return-period", "Flood return period", "hydrology", ["return_period"]),
-        ("warning-level", "Warning level", "hydrology", ["warning_level"]),
-        ("river-network", "River network", "base", ["geometry"]),
-    ]
     layers = []
-    for layer_id, name, layer_type, variables in definitions:
+    for layer_id, name, layer_type, variables in _PUBLIC_LAYER_DEFINITIONS:
         national_discharge = national and layer_id == "discharge"
         if national_discharge:
             # No run_id: discharge becomes a national overview (union across every

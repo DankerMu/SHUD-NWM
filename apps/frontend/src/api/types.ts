@@ -762,7 +762,21 @@ export interface paths {
         };
         /**
          * List bounded valid times for a map layer
-         * @description Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. When run_id is supplied, discovery is scoped to that concrete hydro run/source identity. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+         * @description Returns the newest valid-time window up to the server configured sample
+         *     limit, sorted ascending for timeline controls. When run_id is supplied,
+         *     discovery is scoped to that concrete hydro run/source identity. A true
+         *     truncated flag means more distinct times were observed than are included
+         *     in valid_times/items.
+         *
+         *     BREAKING (2026-06-20): the route now returns HTTP 422 for any layer_id
+         *     outside the canonical supported set
+         *     `{discharge, flood-return-period, warning-level, river-network}`. The
+         *     prior behaviour silently fell through to an empty `ValidTimeDiscovery`
+         *     with HTTP 200 for unknown layer_ids; that fallback was removed together
+         *     with the retired hydrology variant. The 422 envelope is the standard
+         *     `ErrorResponse` shape with
+         *     `error.code = "VALIDATION_ERROR"` and
+         *     `error.details = { layer_id, supported }`.
          */
         get: operations["listLayerValidTimes"];
         put?: never;
@@ -1983,7 +1997,16 @@ export interface components {
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
         ValidTimeQuery: string;
-        HydroMvtVariable: "q_down" | "water_level";
+        /**
+         * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
+         *     (variable id `water_level`, layer id `water-level`) has been removed
+         *     end-to-end. The enum is tightened to `[q_down]`. Clients still
+         *     requesting either the legacy tile path or the legacy layer valid-times
+         *     path receive HTTP 422 from the backend boundary. The frontend
+         *     (sole external consumer) is regenerated against this enum and no
+         *     longer advertises the retired layer in the M11 user selector.
+         */
+        HydroMvtVariable: "q_down";
         MetTileVariable: string;
         VariableQuery: string;
     };
@@ -2722,6 +2745,15 @@ export interface operations {
             header?: never;
             path: {
                 run_id: components["parameters"]["RunId"];
+                /**
+                 * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
+                 *     (variable id `water_level`, layer id `water-level`) has been removed
+                 *     end-to-end. The enum is tightened to `[q_down]`. Clients still
+                 *     requesting either the legacy tile path or the legacy layer valid-times
+                 *     path receive HTTP 422 from the backend boundary. The frontend
+                 *     (sole external consumer) is regenerated against this enum and no
+                 *     longer advertises the retired layer in the M11 user selector.
+                 */
                 variable: components["parameters"]["HydroMvtVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["MvtTileZ"];
@@ -3355,6 +3387,21 @@ export interface operations {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["LayerValidTimes"];
                     };
+                };
+            };
+            /**
+             * @description Validation error. Returned when `layer_id` is not one of the
+             *     canonical supported set (`discharge`, `flood-return-period`,
+             *     `warning-level`, `river-network`), or when `duration` is supplied
+             *     for a layer that does not support it. `error.details` carries
+             *     `{ layer_id, supported }` for the unsupported-layer case.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             "4XX": components["responses"]["Error"];
