@@ -311,27 +311,10 @@ const dischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
   encoder_version: 'encoder-v1',
 }
 
-const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
-  layer_id: 'water-level',
-  tile_format: 'mvt',
-  url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
-  tile_url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
-  maplibre_source_layer: 'hydro',
-  source_layer: 'hydro',
-  fallback_available: false,
-  release_blocking: false,
-  required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
-  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1' },
-  valid_times: ['2026-05-18T00:00:00Z'],
-  cache_version: 'water-level-cache-v1',
-  cache_etag: 'water-level-etag-v1',
-  schema_version: 'schema-v1',
-  encoder_version: 'encoder-v1',
-}
+type HydroMvtLayerId = 'discharge' | 'flood-return-period' | 'warning-level'
 
 const m11MvtMetadataByLayer = {
   'discharge': dischargeMvtMetadata,
-  'water-level': waterLevelMvtMetadata,
   'flood-return-period': floodMvtMetadata,
   'warning-level': {
     ...floodMvtMetadata,
@@ -339,14 +322,13 @@ const m11MvtMetadataByLayer = {
     alias_of: 'flood-return-period',
     canonical_route_layer_id: 'flood-return-period',
   },
-} satisfies Record<M11QueryState['layer'], NonNullable<LayerState['metadata']>>
+} satisfies Record<HydroMvtLayerId, NonNullable<LayerState['metadata']>>
 
 const m11LayerValidTimeByLayer = {
   'discharge': '2026-05-18T00:00:00.000Z',
-  'water-level': '2026-05-18T00:00:00.000Z',
   'flood-return-period': '2026-05-18T06:00:00.000Z',
   'warning-level': '2026-05-18T06:00:00.000Z',
-} satisfies Record<M11QueryState['layer'], string>
+} satisfies Record<HydroMvtLayerId, string>
 
 const layers: LayerState[] = [
   {
@@ -378,9 +360,11 @@ const layers: LayerState[] = [
     freshness: { ...freshness, validTime: '2026-05-18T12:00:00.000Z' },
     legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
+  // 故意把 warning-level 留 unavailable，覆盖 LayerGroupControls 的"未注册水文图层占位"分支
+  // （旧的退役水文 fixture 删除后没人占这个位置；以 warning-level 接替，保留同语义 sanity check）。
   {
-    layerId: 'water-level',
-    displayName: 'Water level',
+    layerId: 'warning-level',
+    displayName: 'Warning level',
     group: 'hydrology',
     available: false,
     validTimes: [],
@@ -800,7 +784,7 @@ describe('M11 visual foundation shell', () => {
   })
 
   it('does not register M11 vector overlays when selected valid time is not advertised by metadata', () => {
-    for (const layerId of ['flood-return-period', 'warning-level', 'discharge', 'water-level'] as const) {
+    for (const layerId of ['flood-return-period', 'warning-level', 'discharge'] as const) {
       const selectedTime = m11LayerValidTimeByLayer[layerId]
       const baseMetadata = m11MvtMetadataByLayer[layerId]
       for (const validTimes of [[], ['2026-05-18T18:00:00.000Z']]) {
@@ -895,47 +879,6 @@ describe('M11 visual foundation shell', () => {
     expect(overlayA?.sourceKey).toContain('"run_id":null')
   })
 
-  it('registers water-level vector source from advertised hydrology MVT metadata', async () => {
-    const layersWithMvt = layers.map((layer) =>
-      layer.layerId === 'water-level'
-        ? {
-            ...layer,
-            available: true,
-            validTimes: ['2026-05-18T00:00:00.000Z'],
-            currentValidTime: '2026-05-18T00:00:00.000Z',
-            disabledReason: null,
-            metadata: waterLevelMvtMetadata,
-            freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
-          }
-        : layer,
-    )
-    render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layersWithMvt} onQueryChange={vi.fn()} />)
-
-    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'water-level'))
-    expect(mapSources.at(-1)).toMatchObject({
-      id: 'm11-water-level-source',
-      type: 'vector',
-      tiles: [
-        `${window.location.origin}/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1`,
-      ],
-    })
-    expect(mapLayers.find((layer) => layer.id === 'm11-water-level-line')).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
-    const paint = JSON.stringify(mapLayers.find((layer) => layer.id === 'm11-water-level-line')?.paint)
-    const dischargePaint = JSON.stringify(
-      buildM11RegisteredOverlay(
-        state,
-        layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
-      )?.layer.paint,
-    )
-    expect(paint).toContain('value')
-    expect(paint).toContain('0.5')
-    expect(paint).toContain('8')
-    expect(paint).not.toContain('50000')
-    expect(paint).not.toEqual(dischargePaint)
-    expect(paint).not.toContain('warning_level')
-    expect(paint).not.toContain('return_period')
-  })
-
   it('changes M11 vector source identity across tile-defining metadata and route inputs', () => {
     const floodOverlay = buildM11RegisteredOverlay(
       { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
@@ -944,44 +887,32 @@ describe('M11 visual foundation shell', () => {
       ),
     )
     expect(floodOverlay?.source.tiles[0]).toContain('2026-05-18T06%3A00%3A00.000Z')
+    // 用 map() 而非 [...layers, override] —— layers 数组里已有 warning-level=unavailable
+    // 占位（供 LayerGroupControls 占位分支用），append 会让 `layers.find(...)` 抓到那条
+    // unavailable 的、返回 null overlay；这里以 metadata-bearing entry 覆盖即可。
     const warningOverlay = buildM11RegisteredOverlay(
       { ...state, layer: 'warning-level', validTime: '2026-05-18T06:00:00.000Z' },
-      [
-        ...layers,
-        {
-          ...layers[1],
-          layerId: 'warning-level',
-          displayName: 'Warning level',
-          validTimes: ['2026-05-18T06:00:00.000Z'],
-          currentValidTime: '2026-05-18T06:00:00.000Z',
-          metadata: {
-            ...floodMvtMetadata,
-            layer_id: 'warning-level',
-            alias_of: 'flood-return-period',
-            canonical_route_layer_id: 'flood-return-period',
-          },
-        },
-      ],
+      layers.map((layer) =>
+        layer.layerId === 'warning-level'
+          ? {
+              ...layer,
+              available: true,
+              validTimes: ['2026-05-18T06:00:00.000Z'],
+              currentValidTime: '2026-05-18T06:00:00.000Z',
+              disabledReason: null,
+              metadata: {
+                ...floodMvtMetadata,
+                layer_id: 'warning-level',
+                alias_of: 'flood-return-period',
+                canonical_route_layer_id: 'flood-return-period',
+              },
+            }
+          : layer,
+      ),
     )
     const dischargeOverlay = buildM11RegisteredOverlay(
       state,
       layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
-    )
-    const waterLevelOverlay = buildM11RegisteredOverlay(
-      { ...state, layer: 'water-level' },
-      layers.map((layer) =>
-        layer.layerId === 'water-level'
-          ? {
-              ...layer,
-              available: true,
-              validTimes: ['2026-05-18T00:00:00.000Z'],
-              currentValidTime: '2026-05-18T00:00:00.000Z',
-              disabledReason: null,
-              metadata: waterLevelMvtMetadata,
-              freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
-            }
-          : layer,
-      ),
     )
     const floodRunChanged = buildM11RegisteredOverlay(
       { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
@@ -1002,7 +933,6 @@ describe('M11 visual foundation shell', () => {
 
     expect(floodOverlay?.sourceKey).toContain('flood-cache-v1')
     expect(floodOverlay?.sourceKey).not.toEqual(dischargeOverlay?.sourceKey)
-    expect(dischargeOverlay?.sourceKey).not.toEqual(waterLevelOverlay?.sourceKey)
     expect(floodOverlay?.sourceKey).not.toEqual(floodRunChanged?.sourceKey)
     expect(floodOverlay?.sourceKey).not.toEqual(floodCacheChanged?.sourceKey)
     expect(floodOverlay?.source.tiles[0]).toContain('_mvt_cache_version=flood-cache-v1')
@@ -1122,20 +1052,14 @@ describe('M11 visual foundation shell', () => {
       geometry: { type: 'LineString', coordinates: [[100 + index * 0.01, 30], [100.005 + index * 0.01, 30.005]] },
     }))
 
-    for (const layerId of ['discharge', 'water-level', 'flood-return-period', 'warning-level'] as const) {
+    for (const layerId of ['discharge', 'flood-return-period', 'warning-level'] as const) {
       const legendColors = normalizedLayers.find((layer) => layer.layerId === layerId)?.legend.map((entry) => entry.color)
       const fallbackLegendColors = m11FallbackLegends[layerId].map((entry) => entry.color)
       const featureColors = buildBasinRiverFeatureCollection(representativeRows, layerId).features.map(
         (feature) => feature.properties.layer_color,
       )
-      if (layerId === 'water-level') {
-        expect(legendColors).toEqual(expect.arrayContaining(['#8FDCE8', '#D81B60']))
-        expect(fallbackLegendColors).toEqual(expect.arrayContaining(['#8FDCE8', '#D81B60']))
-        expect(legendColors).not.toEqual(m11FallbackLegends.discharge.map((entry) => entry.color))
-      } else {
-        expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
-        expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
-      }
+      expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
     }
   })
 
@@ -1332,18 +1256,6 @@ describe('M11 visual foundation shell', () => {
     )
 
     expect(fitBoundsCalls).toHaveLength(1)
-  })
-
-  it('does not advertise or register unavailable selected overlays', () => {
-    render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layers} />)
-
-    const surface = screen.getByTestId('m11-map-surface')
-    expect(surface).not.toHaveAttribute('data-registered-overlays')
-    expect(surface).not.toHaveAttribute('data-active-overlays')
-    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('Layer has no valid times.')
-    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
-    expect(mapSources).toHaveLength(0)
-    expect(mapLayers).toHaveLength(0)
   })
 
   it('shows a scoped map source error while keeping other controls usable', async () => {
@@ -1626,15 +1538,10 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByText('Comparison requires both GFS and IFS series.')).toBeInTheDocument()
   })
 
-  it('selects legends for discharge, water level, flood return period, and warning level semantics', () => {
+  it('selects legends for discharge, flood return period, and warning level semantics', () => {
     const { rerender } = render(<LayerLegendPanel state={state} layers={layers} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
-
-    rerender(<LayerLegendPanel state={{ ...state, layer: 'water-level' }} layers={[]} />)
-    expect(screen.getByText('水位图例')).toBeInTheDocument()
-    expect(screen.getByText('0.5-1 m')).toBeInTheDocument()
-    expect(screen.queryByText('500-1000 m3/s')).not.toBeInTheDocument()
 
     rerender(<LayerLegendPanel state={{ ...state, layer: 'flood-return-period' }} layers={layers} />)
     expect(screen.getByText('重现期图例')).toBeInTheDocument()
@@ -1662,7 +1569,6 @@ describe('M11 visual foundation shell', () => {
         layers,
       ),
     ).toBeUndefined()
-    expect(resolveM11ValidTimeCorrection({ ...state, layer: 'water-level' }, layers)).toBeNull()
   })
 
   it('uses payload-derived valid times only when no layer contract applies', () => {

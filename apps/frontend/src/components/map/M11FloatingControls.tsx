@@ -134,7 +134,6 @@ export function resolveM11FloatingLegend(layer: M11Layer, layers: LayerState[]):
 function legendTitle(layer: M11Layer) {
   if (layer === 'warning-level') return '预警等级图例'
   if (layer === 'flood-return-period') return '重现期图例'
-  if (layer === 'water-level') return '水位图例'
   if (layer === 'met-stations') return '气象代站图例'
   if (layer === 'met-raster') return '气象栅格图例'
   return '径流量图例'

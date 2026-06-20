@@ -390,7 +390,7 @@ export function M11MapLibreSurface({
           return
         }
       }
-      // 河段（流量/水位 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
+      // 河段（流量 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
       // 否则总览（无 basinSegments）点河段会被底下的 basin-fill 抢走、永远到不了河段分支。
       const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
       if (renderableOverlay && overlayFeature) {
@@ -598,7 +598,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
 
   const sourceId = `m11-${state.layer}-source`
   const layerId = `m11-${state.layer}-line`
-  const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
+  const variable = 'q_down'
   const replacements: Record<string, string> = national
     ? { valid_time: validTime, variable }
     : { run_id: runId as string, duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION, valid_time: validTime, variable }
@@ -663,7 +663,6 @@ function m11VectorSourceKey({
 
 function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
   if (layerId === 'flood-return-period' || layerId === 'warning-level') return floodTileLayerPaint()
-  if (layerId === 'water-level') return waterLevelTileLayerPaint()
   return dischargeTileLayerPaint()
 }
 
@@ -711,31 +710,6 @@ function dischargeTileLayerPaint(): LayerProps['paint'] {
     ],
     // 线宽同走 log 域：小溪细、干流粗，视觉层级与流量量级一致。
     'line-width': zoomScaledValueWidth([-2, 1.8, 0, 2.4, 2, 3.4, 4, 5, 4.7, 7], 0.4, true),
-    'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
-  }
-}
-
-function waterLevelTileLayerPaint(): LayerProps['paint'] {
-  return {
-    // 颜色下限改可见浅青（原 #E0F7FA 近白）；与 m11WaterLevelColor/图例同步。
-    'line-color': [
-      'interpolate',
-      ['linear'],
-      ['coalesce', ['get', 'value'], 0],
-      0,
-      '#8FDCE8',
-      0.5,
-      '#80DEEA',
-      1,
-      '#26C6DA',
-      2,
-      '#00897B',
-      4,
-      '#FDD835',
-      8,
-      '#D81B60',
-    ],
-    'line-width': zoomScaledValueWidth([0, 2.2, 1, 3, 2, 3.8, 4, 5, 8, 6.2], 0.4),
     'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
@@ -801,15 +775,14 @@ function M11OverlayPrimitive({
 
 // 光晕底衬 paint：白色、比主线宽约 2px、半透明，给彩色河段一圈干净的描边光晕（类似标注 halo），
 // 浅底图上清晰可辨且不像深色道路（弃用早期深色 casing）。
-function m11OverlayCasingPaint(layerId: string): LayerProps['paint'] {
-  const isWaterLevel = layerId === 'water-level'
-  // discharge 主线走 log 域：casing 必须同域贴主线（约 +1.2px），线性域下白晕恒比
-  // 低流量主线宽一倍，会把彩色稀释成淡白。
-  const valueStops = isWaterLevel ? [0, 3.4, 1, 4, 2, 5, 4, 6.2, 8, 7.4] : [-2, 3, 0, 3.6, 2, 4.6, 4, 6.2, 4.7, 8.2]
+// discharge 主线走 log 域：casing 必须同域贴主线（约 +1.2px），线性域下白晕恒比
+// 低流量主线宽一倍，会把彩色稀释成淡白。
+function m11OverlayCasingPaint(_layerId: string): LayerProps['paint'] {
+  const valueStops = [-2, 3, 0, 3.6, 2, 4.6, 4, 6.2, 4.7, 8.2]
   return {
     'line-color': '#FFFFFF',
     'line-opacity': 0.85,
-    'line-width': zoomScaledValueWidth(valueStops, 0.4, !isWaterLevel),
+    'line-width': zoomScaledValueWidth(valueStops, 0.4, true),
   }
 }
 
@@ -1372,7 +1345,7 @@ function m11SelectedLayerUnavailableReason(
     return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
   }
   if (!selectedLayer.currentValidTime) return '当前图层缺少有效时间，地图不会注册叠加层。'
-  if (state.layer === 'discharge' || state.layer === 'water-level' || state.layer === 'flood-return-period' || state.layer === 'warning-level') {
+  if (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level') {
     return '当前水文图层缺少可用 MVT 元数据或处于 release-blocked 状态，地图不会请求无边界 GeoJSON 兼容源。'
   }
   return '当前图层缺少可用地图源，地图不会注册叠加层。'

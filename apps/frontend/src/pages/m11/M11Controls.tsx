@@ -77,7 +77,6 @@ const basemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof Map
 
 const hydrologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
   { value: 'discharge', label: '河段径流', description: 'q_down / m3/s' },
-  { value: 'water-level', label: '河段水位', description: 'stage，需图层 API 注册' },
   { value: 'flood-return-period', label: '洪水重现期', description: 'Return period' },
   { value: 'warning-level', label: '预警等级', description: 'Flood warning semantics' },
 ]
@@ -102,7 +101,6 @@ const basePlaceholders = [
 
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   discharge: getM11LayerLegend('discharge'),
-  'water-level': getM11LayerLegend('water-level'),
   'flood-return-period': getM11LayerLegend('flood-return-period'),
   'warning-level': getM11LayerLegend('warning-level'),
   'met-stations': [],
@@ -309,13 +307,15 @@ export function LayerLegendPanel({ state, layers = [] }: SharedControlProps) {
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
   const entries = activeLayer?.legend.length ? activeLayer.legend : fallbackLegends[state.layer]
   const title =
-    state.layer === 'discharge'
-      ? '径流量图例'
-      : state.layer === 'warning-level'
-        ? '预警等级图例'
-        : state.layer === 'flood-return-period'
-          ? '重现期图例'
-          : '水位图例'
+    state.layer === 'warning-level'
+      ? '预警等级图例'
+      : state.layer === 'flood-return-period'
+        ? '重现期图例'
+        : state.layer === 'met-stations'
+          ? '气象代站图例'
+          : state.layer === 'met-raster'
+            ? '气象栅格图例'
+            : '径流量图例'
 
   return (
     <section className="space-y-2" aria-label="M11 图例">
