@@ -340,6 +340,14 @@ function overviewSnapshot(layers: LayerState[], queryKey = '', dataKey = queryKe
       warningLevel: null,
       q: null,
     },
+    // bootstrap 字段：PR 3/7 起 OverviewPage.surfaceSettling 检查 `overview?.bootstrap`；
+    // 非空表示 mapBootstrap 已 settle，map 可注册 hit layer。
+    bootstrap: {
+      basins: [],
+      layers: [],
+      layerStates: layers,
+      currentLayerValidTime: null,
+    },
     basins: [],
     layers,
     aggregationDecision: {
@@ -1009,8 +1017,10 @@ beforeEach(() => {
   useOverviewDataStore.setState({
     overview: null,
     basinDetail: null,
-    loading: false,
+    mapBootstrapLoading: false,
+    enrichmentLoading: false,
     basinLoading: false,
+    bootstrapError: null,
     error: null,
     basinError: null,
     loadOverview: overviewAsync,
@@ -1110,10 +1120,10 @@ describe('App route state', () => {
   it('preserves river network version in overview load state and renders the matching snapshot', async () => {
     const loadOverview = vi.fn().mockImplementation(async (query: M11QueryState) => {
       const snapshot = overviewSnapshotForQuery(query)
-      useOverviewDataStore.setState({ overview: snapshot, loading: false })
+      useOverviewDataStore.setState({ overview: snapshot, mapBootstrapLoading: false, enrichmentLoading: false })
       return snapshot
     })
-    useOverviewDataStore.setState({ loadOverview, loading: false })
+    useOverviewDataStore.setState({ loadOverview, mapBootstrapLoading: false, enrichmentLoading: false })
     window.history.pushState(
       {},
       '',
@@ -1144,7 +1154,8 @@ describe('App route state', () => {
     const loadOverview = vi.fn().mockResolvedValue(undefined)
     useOverviewDataStore.setState({
       overview: overviewSnapshot(staleOverviewLayers, overviewDefaultScopeKey),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
       loadOverview,
     })
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-16T00:00:00Z')
@@ -1157,7 +1168,8 @@ describe('App route state', () => {
 
     useOverviewDataStore.setState({
       overview: overviewSnapshot(m11Layers, overviewFloodScopeKey),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
     })
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
   })
@@ -1167,7 +1179,8 @@ describe('App route state', () => {
     vi.stubGlobal('fetch', tileFetch)
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey, overviewFloodValid06ScopeKey),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
     })
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
 
@@ -1183,7 +1196,8 @@ describe('App route state', () => {
   it('renders only visible basin boundaries on the overview map (M26)', async () => {
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(m11Layers, overviewDefaultScopeKey, overviewValid06ScopeKey),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
     })
     window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
 
@@ -1202,7 +1216,8 @@ describe('App route state', () => {
         'source=gfs&basinVersionId=bv-sibling&segmentId=seg-sibling',
         'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-sibling&segmentId=seg-sibling',
       ),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
     })
     window.history.pushState(
       {},
@@ -1326,7 +1341,8 @@ describe('App route state', () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey, overviewFloodValid06ScopeKey, 'basin-demo'),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
     })
     window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
 
@@ -1365,6 +1381,7 @@ describe('App route state', () => {
           warningLevel: null,
           q: null,
         },
+        bootstrap: { basins: [], layers: [], layerStates: [], currentLayerValidTime: null },
         basins: [],
         layers: [],
         aggregationDecision: {
@@ -1434,6 +1451,7 @@ describe('App route state', () => {
           warningLevel: null,
           q: null,
         },
+        bootstrap: { basins: [], layers: [], layerStates: [], currentLayerValidTime: null },
         basins: [],
         layers: [],
         aggregationDecision: {
@@ -1969,7 +1987,8 @@ describe('App route state', () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasins(m11Layers, 'source=gfs', 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z'),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
       basinLoading: false,
     })
     window.history.pushState({}, '', '/?source=gfs&validTime=2026-05-18T06:00:00Z')
@@ -1994,7 +2013,8 @@ describe('App route state', () => {
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(m11Layers, 'source=gfs', 'source=gfs', 'basin-demo'),
       basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs', 'source=gfs'),
-      loading: false,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
       basinLoading: false,
     })
     await renderAppAtBasinDetail('/?source=gfs&basinId=basin-demo')

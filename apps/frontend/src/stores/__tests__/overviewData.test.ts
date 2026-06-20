@@ -3762,4 +3762,183 @@ describe('useOverviewDataStore', () => {
     expect(useOverviewDataStore.getState().basinDetail).toBe(latestSnapshot)
     expect(useOverviewDataStore.getState().basinDetail?.selectedSegment?.riverSegmentId).toBe(query.segmentId)
   })
+
+  // PR 3/7 #582 — loadOverview 拆分为 mapBootstrap / enrichment 两阶段（spec
+  // "Map interactivity is decoupled from enrichment loading"）。下面的测试覆盖：
+  // (a) 4 状态矩阵（00 初始 / 10 phase1 in-flight / 01 phase2 in-flight / 11 同帧调用）；
+  // (b) phase 1 settle 不依赖 fetchRuns；
+  // (c) phase 1 reject → mapBootstrapLoading=false + scoped bootstrap error 暴露；
+  // (d) enrichment 单点 reject → scoped panel error；mapBootstrapLoading 保持 false；map 可交互。
+  describe('mapBootstrap vs enrichment loading split (PR 3/7)', () => {
+    // (a)-00 初始（未 loadOverview）：spec scenario "Initial state before loadOverview"
+    it('initial state before loadOverview: both flags false and overview null', () => {
+      const state = useOverviewDataStore.getState()
+      expect(state.mapBootstrapLoading).toBe(false)
+      expect(state.enrichmentLoading).toBe(false)
+      expect(state.overview).toBeNull()
+      expect(state.bootstrapError).toBeNull()
+    })
+
+    // (a)-10/01/11 + (b) phase 1 不依赖 fetchRuns / phase 1 settle 写 bootstrap：
+    // 用受控的 runs/pipeline 仅阻塞 enrichment；basins/layers 立刻成功 → phase 1 settle，
+    // 此时观察 mapBootstrapLoading=false 且 enrichmentLoading=true（state 01 = phase 2 in-flight），
+    // 同时 overview.bootstrap 已写入；释放 runs 后 enrichmentLoading=false（state 00 settle）。
+    it('phase 1 settles independently of fetchRuns and writes bootstrap snapshot', async () => {
+      let releaseRuns: ((value: unknown) => void) | null = null
+      const runsPromise = new Promise<unknown>((resolve) => {
+        releaseRuns = resolve
+      })
+      const fetchRunsObserved: string[] = []
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') {
+          fetchRunsObserved.push('runs')
+          return (await runsPromise) as never
+        }
+        if (path === '/api/v1/layers') {
+          // metadata.valid_times 携带，phase 1 直接消费、无需 /layers/<id>/valid-times fan-out。
+          return success([
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: [],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      const load = useOverviewDataStore.getState().loadOverview(query)
+
+      // (a)-11 同帧：两 flag 都为 true（call site 刚同步发出 loadOverview）。
+      const initialState = useOverviewDataStore.getState()
+      expect(initialState.mapBootstrapLoading).toBe(true)
+      expect(initialState.enrichmentLoading).toBe(true)
+      expect(initialState.overview).toBeNull()
+
+      // 等 phase 1 settle（basins + runless layers 都立刻成功 → 一个 microtask 队列轮转就能解锁）。
+      await vi.waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
+
+      // (a)-01：phase 1 已 settle、phase 2 仍 in-flight；
+      // (b)：phase 1 settle 不需要 fetchRuns 完成（runs 仍 pending）。
+      const phase1State = useOverviewDataStore.getState()
+      expect(phase1State.mapBootstrapLoading).toBe(false)
+      expect(phase1State.enrichmentLoading).toBe(true)
+      expect(phase1State.overview?.bootstrap).not.toBeNull()
+      expect(phase1State.overview?.bootstrap?.basins).toEqual([basin])
+      expect(phase1State.overview?.bootstrap?.layers.map((layer) => layer.layer_id)).toEqual(['flood-return-period'])
+      expect(phase1State.overview?.bootstrap?.layerStates.some((s) => s.layerId === 'flood-return-period')).toBe(true)
+      expect(phase1State.bootstrapError).toBeNull()
+      // fetchRuns 已发但未 resolve → phase 1 仍 settle 通过（不阻塞）。
+      expect(fetchRunsObserved.length).toBeGreaterThan(0)
+
+      // 释放 enrichment → 两个 flag 都解锁（state 00 settle）。
+      releaseRuns?.(success({ items: [run], total: 1, limit: 20, offset: 0 }))
+      await load
+
+      const finalState = useOverviewDataStore.getState()
+      expect(finalState.mapBootstrapLoading).toBe(false)
+      expect(finalState.enrichmentLoading).toBe(false)
+      expect(finalState.overview?.bootstrap).not.toBeNull()
+      expect(finalState.bootstrapError).toBeNull()
+    })
+
+    // (c) phase 1 reject（fetchBasins 失败）→ mapBootstrapLoading=false + bootstrapError；
+    // enrichment 仍可独立推进（不阻塞 phase 2 promise）。
+    it('phase 1 rejection exposes scoped bootstrap error without blocking enrichment', async () => {
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/basins') {
+          return { data: undefined, error: { error: { message: 'basins exploded' } } } as never
+        }
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') {
+          return success([{ layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [], metadata: null }]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      await useOverviewDataStore.getState().loadOverview(query)
+
+      const finalState = useOverviewDataStore.getState()
+      expect(finalState.mapBootstrapLoading).toBe(false)
+      expect(finalState.enrichmentLoading).toBe(false)
+      // scoped bootstrap error 写入 bootstrapError（不与 enrichment 通用 error 共流）。
+      expect(finalState.bootstrapError).toBeTruthy()
+      expect(finalState.bootstrapError).toMatch(/basins/)
+      // overview.bootstrap 仍为 null 表示 mapBootstrap 失败；OverviewPage 据此走"bootstrap failed"分支。
+      expect(finalState.overview?.bootstrap ?? null).toBeNull()
+    })
+
+    // (d) enrichment 单点 reject（fetchPipelineStatus 失败）→ scoped partial error 仅暴露在 panel；
+    // mapBootstrap 仍正常 settle；map 可交互（overview.bootstrap 非空 + bootstrapError 为 null）。
+    it('enrichment single-point rejection (pipeline) does not block map interactivity', async () => {
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') {
+          return success([
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: [],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        // 阶段 2 单点失败：pipeline 拒绝；其它端点正常返回。
+        if (path === '/api/v1/pipeline/status') {
+          return { data: undefined, error: { error: { message: 'pipeline downstream timeout' } } } as never
+        }
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      await useOverviewDataStore.getState().loadOverview(query)
+
+      const finalState = useOverviewDataStore.getState()
+      // 关键合同：map 仍可交互（mapBootstrap 已 settle + bootstrap 已写入 + bootstrapError 为 null）。
+      expect(finalState.mapBootstrapLoading).toBe(false)
+      expect(finalState.bootstrapError).toBeNull()
+      expect(finalState.overview?.bootstrap).not.toBeNull()
+      expect(finalState.overview?.bootstrap?.basins).toEqual([basin])
+      // enrichment 完成（即便单点 reject），但 scoped partial error 透出到 panel level。
+      expect(finalState.enrichmentLoading).toBe(false)
+      expect(finalState.overview?.summary.partialErrors).toEqual(expect.arrayContaining(['pipeline: 暂不可用']))
+      // 通用 error 字段拿到 enrichment partial error 摘要（既有契约：partialErrors[0] → error），
+      // 仅 panel/notice 消费，不阻塞 map（OverviewPage.surfaceSettling 只看 mapBootstrap+bootstrap）。
+      expect(finalState.error).toMatch(/pipeline/)
+    })
+  })
 })
