@@ -79,7 +79,7 @@ The system SHALL show selected segment metadata, current forecast values, source
 
 #### Scenario: Segment detail renders available fields
 - **WHEN** selected segment detail and forecast data are available
-- **THEN** the detail panel MUST show `river_segment_id`, basin name, model identifier when available, catchment area or length when available, current Q, water-level delta when available, return-period level, forecast valid time, source, and cycle time
+- **THEN** the detail panel MUST show `river_segment_id`, basin name, model identifier when available, catchment area or length when available, current Q, return-period level, forecast valid time, source, and cycle time
 
 #### Scenario: Trend sparkline is shown for selected segment
 - **WHEN** recent or forecast trend points are available for the selected segment
