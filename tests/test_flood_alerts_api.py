@@ -3582,6 +3582,11 @@ def test_mvt_invalid_low_zoom_xy_fails_with_tile_xyz_invalid(path: str) -> None:
     [
         f"/api/v1/tiles/hydro/{RUN_ID}/velocity/{VALID_TIME_1_ISO}/6/12/24.pbf",
         f"/api/v1/tiles/flood-return-period/{RUN_ID}/2h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+        # Retired hydro variant must be rejected at the tile-route boundary
+        # (mirrors the layer/valid-times deny). Split-string sentinel defeats
+        # naive grep-replace from reintroducing the legacy variable id.
+        f"/api/v1/tiles/hydro/{RUN_ID}/" + "wat" + "er_level" + f"/{VALID_TIME_1_ISO}/6/12/24.pbf",
+        "/api/v1/tiles/hydro-national/" + "wat" + "er_level" + f"/{VALID_TIME_1_ISO}/6/12/24.pbf",
     ],
 )
 def test_unsupported_mvt_route_variants_fail_before_live_cache_or_sql(
@@ -5718,21 +5723,105 @@ def test_layers_catalog_advertises_four_layers_without_retired_hydro_variant() -
         assert forbidden_layer_id not in (metadata.get("legacy_layer_ids") or [])
 
 
-def test_layer_valid_times_for_retired_hydro_layer_returns_422() -> None:
+@pytest.mark.parametrize(
+    "layer_variant",
+    [
+        "wat" + "er-level",  # canonical lowercase id removed from catalog
+        ("wat" + "er-level").upper(),  # WATER-LEVEL — SAFE_TILE_IDENTIFIER_RE permits A-Z
+        "Water-Level",  # mixed case path
+    ],
+)
+def test_layer_valid_times_for_retired_hydro_layer_returns_422(layer_variant: str) -> None:
     """`GET /api/v1/layers/<retired-layer>/valid-times` MUST return 422 at the
     backend boundary now that the catalog removed the layer (#580). Covers
-    spec scenario `water_level variable is rejected at the backend boundary`.
+    spec scenario `water_level variable is rejected at the backend boundary`,
+    including case-variant paths — `SUPPORTED_PUBLIC_LAYER_IDS` is a
+    case-sensitive frozenset and `SAFE_TILE_IDENTIFIER_RE` admits A-Z, so
+    uppercase / mixed-case spellings must also fail at the 422 deny gate
+    (not 200, not 404).
     """
     with _client() as client:
-        response = client.get("/api/v1/layers/wat" + "er-level/valid-times")
+        response = client.get(f"/api/v1/layers/{layer_variant}/valid-times")
 
     assert response.status_code == 422
     body = response.json()
     assert body["status"] == "error"
     assert body["error"]["code"] == "VALIDATION_ERROR"
-    assert body["error"]["details"]["layer_id"] == "wat" + "er-level"
+    assert body["error"]["details"]["layer_id"] == layer_variant
     supported = body["error"]["details"]["supported"]
     assert set(supported) == {"discharge", "flood-return-period", "warning-level", "river-network"}
+
+
+def test_supported_public_layer_ids_matches_default_catalog() -> None:
+    """Drift sentinel: `SUPPORTED_PUBLIC_LAYER_IDS` (used by the valid-times
+    422 gate) MUST stay in lockstep with `_PUBLIC_LAYER_DEFINITIONS` (consumed
+    by `_default_layer_catalog`). Both are derived from the single
+    `_PUBLIC_LAYER_DEFINITIONS` literal; this test pins that derivation so
+    that a future 5th-layer addition cannot silently 422-reject the new layer
+    if someone edits one side without the other.
+    """
+    catalog_layer_ids = {
+        definition[0] for definition in flood_alert_routes._PUBLIC_LAYER_DEFINITIONS
+    }
+    assert flood_alert_routes.SUPPORTED_PUBLIC_LAYER_IDS == catalog_layer_ids
+    # Pin the canonical 4-layer set explicitly so neither side can drop a
+    # layer without updating tests too.
+    assert catalog_layer_ids == {
+        "discharge",
+        "flood-return-period",
+        "warning-level",
+        "river-network",
+    }
+
+
+def test_cache_layer_metadata_rejects_retired_hydro_variant() -> None:
+    """Defense-in-depth: `_cache_layer_metadata`'s `hydro:` fallback MUST
+    refuse to synthesize a tile URI / cache row for any hydrology variant
+    outside `SUPPORTED_HYDRO_MVT_VARIABLES`, including the retired
+    `water_level` id. Today every route validates `variable` first, but a
+    future CLI / worker / debug `TileInput(layer_id="hydro:<retired>")`
+    must not silently rebuild the legacy URI shape.
+    """
+    from services.tiles.mvt import (
+        SUPPORTED_HYDRO_MVT_VARIABLES,
+        TileInput,
+        _cache_layer_metadata,
+    )
+
+    retired_layer_id = "hydro:" + "wat" + "er_level"
+    synthetic_tile = TileInput(
+        layer_id=retired_layer_id,
+        source_id="run_synthetic",
+        source_version="synthetic",
+        valid_time=VALID_TIME_1_ISO,
+        z=6,
+        x=12,
+        y=24,
+        variant_id="variable:" + "wat" + "er_level",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _cache_layer_metadata(synthetic_tile)
+    message = str(excinfo.value)
+    assert retired_layer_id in message
+    # Allow-list must be referenced in the error for actionable debugging.
+    for variable in SUPPORTED_HYDRO_MVT_VARIABLES:
+        assert variable in message
+
+    # Sanity: the canonical allow-listed hydro variants must still pass.
+    for canonical_variable in SUPPORTED_HYDRO_MVT_VARIABLES:
+        canonical_tile = TileInput(
+            layer_id=f"hydro:{canonical_variable}",
+            source_id="run_synthetic",
+            source_version="synthetic",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id=f"variable:{canonical_variable}",
+        )
+        metadata = _cache_layer_metadata(canonical_tile)
+        assert metadata["variable"] == canonical_variable
+        assert metadata["layer_type"] == "hydrological_output"
 
 
 def test_runs_does_not_require_flood_product_ready_for_discharge() -> None:

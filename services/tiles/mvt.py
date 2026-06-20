@@ -1477,6 +1477,17 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
         }
     if tile.layer_id.startswith("hydro:"):
         variable = tile.layer_id.split(":", 1)[1]
+        # Defense-in-depth: route-level handlers already validate `variable`
+        # against `SUPPORTED_HYDRO_MVT_VARIABLES`, but non-route callers
+        # (CLI tools, workers, future debug constructors) could synthesize a
+        # `TileInput(layer_id="hydro:<retired>")` and silently materialize a
+        # legacy-shaped URI template / cache row. Reject any hydro variant
+        # outside the canonical allow-list before any URI/cache work.
+        if variable not in SUPPORTED_HYDRO_MVT_VARIABLES:
+            raise ValueError(
+                f"Unsupported hydro layer_id={tile.layer_id!r}; "
+                f"supported variables: {SUPPORTED_HYDRO_MVT_VARIABLES}"
+            )
         return {
             "layer_type": "hydrological_output",
             "tile_uri_template": f"/api/v1/tiles/hydro/{{run_id}}/{variable}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf",

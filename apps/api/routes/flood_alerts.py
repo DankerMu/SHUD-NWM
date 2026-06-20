@@ -84,13 +84,23 @@ WARNING_COLORS = {
 WARNING_LEVELS = tuple(WARNING_COLORS)
 USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
 FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
+# Single source of truth for the public layer catalog advertised by
+# `/api/v1/layers` and accepted by `/api/v1/layers/{layer_id}/valid-times`.
+# `_default_layer_catalog` walks these definitions to build `Layer` rows;
+# `SUPPORTED_PUBLIC_LAYER_IDS` is derived from the same literal so the two
+# cannot drift when a 5th layer is added. Tuple shape:
+#   (layer_id, display_name, layer_type, variables)
+_PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
+    ("discharge", "Discharge", "hydrology", ["q_down"]),
+    ("flood-return-period", "Flood return period", "hydrology", ["return_period"]),
+    ("warning-level", "Warning level", "hydrology", ["warning_level"]),
+    ("river-network", "River network", "base", ["geometry"]),
+)
 # Public layer_ids advertised by `_default_layer_catalog`. Used by the
 # `/api/v1/layers/{layer_id}/valid-times` route to reject layer_ids that
 # are not part of the canonical hydrology/base catalog with a 422 before
 # any DB work, so retired/unknown ids fail loudly at the route boundary.
-SUPPORTED_PUBLIC_LAYER_IDS = frozenset(
-    {"discharge", "flood-return-period", "warning-level", "river-network"}
-)
+SUPPORTED_PUBLIC_LAYER_IDS = frozenset(definition[0] for definition in _PUBLIC_LAYER_DEFINITIONS)
 FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
     {
         "quality_state",
@@ -2287,14 +2297,8 @@ def _default_layer_catalog(
                 "river_network_version_id": river_network_version_id,
             },
         )
-    definitions = [
-        ("discharge", "Discharge", "hydrology", ["q_down"]),
-        ("flood-return-period", "Flood return period", "hydrology", ["return_period"]),
-        ("warning-level", "Warning level", "hydrology", ["warning_level"]),
-        ("river-network", "River network", "base", ["geometry"]),
-    ]
     layers = []
-    for layer_id, name, layer_type, variables in definitions:
+    for layer_id, name, layer_type, variables in _PUBLIC_LAYER_DEFINITIONS:
         national_discharge = national and layer_id == "discharge"
         if national_discharge:
             # No run_id: discharge becomes a national overview (union across every
