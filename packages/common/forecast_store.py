@@ -66,6 +66,21 @@ def default_database_url() -> str:
     return database_url
 
 
+def _timeseries_segment_id(segment_id: str) -> str:
+    """Translate a ``core.river_segment`` reach-row id to the matching
+    ``hydro.river_timeseries`` output-row id.
+
+    Reach rows use ``<model>_reach_<iRiv:06d>`` (PR #569); the timeseries table
+    only holds ``<model>_shud_riv_<iRiv:06d>`` output rows. The mapping is a
+    strict 1:1 substring substitution because ``iRiv`` is the same number in
+    both layers. Returns the id unchanged when ``_reach_`` is absent so legacy
+    callers and any future basin that ingests direct shud_riv ids still work.
+    """
+    if "_reach_" not in segment_id:
+        return segment_id
+    return segment_id.replace("_reach_", "_shud_riv_", 1)
+
+
 def _escape_like(value: str) -> str:
     """Escape LIKE/ILIKE wildcards so user search input matches literally."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -159,6 +174,12 @@ class PsycopgForecastStore:
 
         run_type_tokens = _run_type_tokens(run_types)
         scenario_filter = _scenario_filter(scenarios)
+        # PR-2 reach rows live under <model>_reach_<iRiv>; hydro.river_timeseries
+        # (and downstream flood.flood_frequency_curve, which is derived from it)
+        # are keyed by the matching <model>_shud_riv_<iRiv> output id. Validate
+        # against the reach row, but query the timeseries side with the
+        # translated id. See issue #577.
+        ts_segment_id = _timeseries_segment_id(segment_id)
         with self._transaction() as cursor:
             self._validate_series_target(
                 cursor,
@@ -172,7 +193,7 @@ class PsycopgForecastStore:
                 selected_issue_time = parsed_issue_time or self._latest_run_type_valid_time(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     run_types=run_type_tokens,
                 )
@@ -181,12 +202,12 @@ class PsycopgForecastStore:
                 rows = self._fetch_run_type_segment_rows(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     run_types=run_type_tokens,
                     end_time=selected_issue_time,
                 )
-                thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=segment_id)
+                thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=ts_segment_id)
                 return _forecast_response_from_rows(
                     segment_id=segment_id,
                     issue_time=selected_issue_time,
@@ -200,7 +221,7 @@ class PsycopgForecastStore:
                 latest_cycles_by_scenario = self._per_source_latest_cycles(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     scenario_filter=scenario_filter,
                 )
@@ -209,7 +230,7 @@ class PsycopgForecastStore:
                 selected_issue_time = self._latest_analysis_issue_time(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                 )
             if selected_issue_time is None:
@@ -227,7 +248,7 @@ class PsycopgForecastStore:
                 analysis_rows = self._fetch_analysis_segment_rows(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     start_time=analysis_start,
                     end_time=analysis_end,
@@ -235,14 +256,14 @@ class PsycopgForecastStore:
                 forecast_rows = self._fetch_forecast_segment_rows(
                     cursor,
                     basin_version_id=basin_version_id,
-                    segment_id=segment_id,
+                    segment_id=ts_segment_id,
                     river_network_version_id=river_network_version_id,
                     issue_time=selected_issue_time,
                     scenario_filter=scenario_filter,
                     cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                     end_time=forecast_end,
                 )
-                thresholds = self._frequency_thresholds_for_rows(cursor, forecast_rows, segment_id=segment_id)
+                thresholds = self._frequency_thresholds_for_rows(cursor, forecast_rows, segment_id=ts_segment_id)
                 return _spliced_response_from_rows(
                     river_segment_id=segment_id,
                     issue_time=selected_issue_time,
@@ -255,14 +276,14 @@ class PsycopgForecastStore:
             rows = self._fetch_forecast_segment_rows(
                 cursor,
                 basin_version_id=basin_version_id,
-                segment_id=segment_id,
+                segment_id=ts_segment_id,
                 river_network_version_id=river_network_version_id,
                 issue_time=selected_issue_time,
                 scenario_filter=scenario_filter,
                 cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                 end_time=selected_issue_time + timedelta(days=7),
             )
-            thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=segment_id)
+            thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=ts_segment_id)
 
         if not rows and parsed_issue_time is not None:
             raise ForecastStoreError(

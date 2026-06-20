@@ -26,6 +26,7 @@ from packages.common.forecast_store import (
     _PsycopgTransaction,
     _qhh_latest_candidate_response,
     _spliced_response_from_rows,
+    _timeseries_segment_id,
     analysis_window_for_issue_time,
 )
 
@@ -3990,3 +3991,92 @@ def _qhh_variable_coverage(
         }
         for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
     ]
+
+
+def test_timeseries_segment_id_translates_reach_to_shud_riv() -> None:
+    assert (
+        _timeseries_segment_id("basins_qhh_shud_reach_000001")
+        == "basins_qhh_shud_shud_riv_000001"
+    )
+    assert (
+        _timeseries_segment_id("basins_heihe_shud_reach_004321")
+        == "basins_heihe_shud_shud_riv_004321"
+    )
+
+
+def test_timeseries_segment_id_passes_through_non_reach_ids() -> None:
+    # Legacy / direct shud_riv ids must round-trip unchanged so this hotfix
+    # doesn't corrupt any future basin that ingests output ids directly.
+    assert (
+        _timeseries_segment_id("basins_qhh_shud_shud_riv_000001")
+        == "basins_qhh_shud_shud_riv_000001"
+    )
+    assert _timeseries_segment_id("legacy_seg_42_7") == "legacy_seg_42_7"
+
+
+def test_forecast_series_validates_reach_id_but_queries_timeseries_with_shud_riv_id() -> None:
+    issue_time = _dt("2026-05-07T00:00:00Z")
+    reach_id = "basins_qhh_shud_reach_000001"
+    shud_riv_id = "basins_qhh_shud_shud_riv_000001"
+    forecast_rows = [
+        {
+            "scenario_id": "forecast_gfs_deterministic",
+            "model_id": "basins_qhh_shud",
+            "source_id": "GFS",
+            "cycle_time": issue_time,
+            "run_end_time": issue_time + timedelta(days=7),
+            "lineage_json": {},
+            "river_network_version_id": "basins_qhh_rivnet_vbasins",
+            "valid_time": issue_time,
+            "value": 12.5,
+            "unit": "m3/s",
+        }
+    ]
+    store = SqlCaptureForecastStore(
+        [
+            [{"basin_version_id": "basins_qhh_vbasins"}],
+            [
+                {
+                    "river_segment_id": reach_id,
+                    "river_network_version_id": "basins_qhh_rivnet_vbasins",
+                    "properties_json": {},
+                }
+            ],
+            [{"scenario_id": "forecast_gfs_deterministic", "cycle_time": issue_time}],
+            forecast_rows,
+            [],
+        ]
+    )
+
+    response = store.forecast_series(
+        basin_version_id="basins_qhh_vbasins",
+        segment_id=reach_id,
+        river_network_version_id="basins_qhh_rivnet_vbasins",
+        issue_time="latest",
+        variables=["q_down"],
+        scenarios=["GFS"],
+    )
+
+    # Response surfaces the reach id the frontend supplied — unchanged.
+    assert response["segment_id"] == reach_id
+
+    executions = store.cursor.executions
+    statements = [statement for statement, _params in executions]
+
+    # core.river_segment validation uses the reach id as-is.
+    assert "core.river_segment" in statements[1]
+    assert reach_id in executions[1][1]
+    assert shud_riv_id not in executions[1][1]
+
+    # Every hydro.river_timeseries query (latest-cycle probe + the forecast
+    # fetch) must bind the shud_riv id, never the reach id, otherwise the
+    # discharge chart comes back empty (issue #577).
+    ts_executions = [
+        (statement, params)
+        for statement, params in executions
+        if "hydro.river_timeseries" in statement
+    ]
+    assert len(ts_executions) >= 2
+    for statement, params in ts_executions:
+        assert shud_riv_id in params, statement
+        assert reach_id not in params, statement
