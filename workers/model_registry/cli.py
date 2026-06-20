@@ -293,6 +293,23 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--output", required=True, help="Path to write per-basin receipt JSON.")
     @click.option("--auth-actor-id", default=None, help="Dev/test CLI auth actor id.")
     @click.option("--auth-role", multiple=True, help="Dev/test CLI auth role. May be repeated.")
+    @click.option(
+        "--no-seed-output-river",
+        is_flag=True,
+        help=(
+            "Skip the generic _ensure_output_river_segments seed. Use for basins originally seeded via "
+            "qhh_production_bootstrap or another custom output-row writer whose properties_json digest "
+            "diverges from the generic contract."
+        ),
+    )
+    @click.option(
+        "--no-backfill-output-geometry",
+        is_flag=True,
+        help=(
+            "Skip _backfill_output_segment_geometry. Use together with --no-seed-output-river when the "
+            "output rows already carry their display geometry from the original bootstrap."
+        ),
+    )
     def reingest_basin_command(
         basin_slug: str,
         model_id: str,
@@ -303,6 +320,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         output: str,
         auth_actor_id: str | None,
         auth_role: tuple[str, ...],
+        no_seed_output_river: bool,
+        no_backfill_output_geometry: bool,
     ) -> None:
         try:
             receipt = reingest_basin(
@@ -315,6 +334,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 output_path=output,
                 auth_actor_id=auth_actor_id,
                 auth_roles=list(auth_role),
+                seed_output_river_segments=not no_seed_output_river,
+                backfill_output_segment_geometry=not no_backfill_output_geometry,
             )
         except BasinsReingestError as error:
             click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
@@ -381,6 +402,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     reingest_parser.add_argument("--database-url", default=None)
     reingest_parser.add_argument("--work-dir", required=True)
     reingest_parser.add_argument("--output", required=True)
+    reingest_parser.add_argument("--no-seed-output-river", action="store_true")
+    reingest_parser.add_argument("--no-backfill-output-geometry", action="store_true")
     _add_argparse_auth_options(reingest_parser)
     args = parser.parse_args(argv)
 
@@ -505,6 +528,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 output_path=args.output,
                 auth_actor_id=args.auth_actor_id,
                 auth_roles=args.auth_role,
+                seed_output_river_segments=not args.no_seed_output_river,
+                backfill_output_segment_geometry=not args.no_backfill_output_geometry,
             )
         except BasinsReingestError as error:
             print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)

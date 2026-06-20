@@ -72,6 +72,8 @@ def reingest_basin(
     database_url: str | None = None,
     auth_actor_id: str | None = None,
     auth_roles: Sequence[str] | None = None,
+    seed_output_river_segments: bool = True,
+    backfill_output_segment_geometry: bool = True,
 ) -> dict[str, Any]:
     """Run discover -> publish -> import for a single basin and emit a receipt.
 
@@ -146,6 +148,8 @@ def reingest_basin(
             output_path=import_receipt_path,
             policy_decision=manifest_decision,
             preflight_policy_decision=preflight_decision,
+            seed_output_river_segments=seed_output_river_segments,
+            backfill_output_segment_geometry=backfill_output_segment_geometry,
         )
     except BasinsRegistryImportError as error:
         raise BasinsReingestError(

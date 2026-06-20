@@ -3510,3 +3510,145 @@ def test_segment_slice_length_m_none_uses_equal_partition(tmp_path: Path) -> Non
     # qhh-sample fixture sanity: documented in tests/fixtures/.../README.md.
     assert (_QHH_SAMPLE_DIR / "gis" / "seg.dbf").is_file()
     assert tmp_path  # silence unused-fixture warning
+
+
+# ---------------------------------------------------------------------------
+# Issue #575: reingest CLI seed_output toggle + extended refresh helper
+# ---------------------------------------------------------------------------
+
+
+def _spy_import_basin_helpers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace every helper that ``import_basin_into_registry_core`` calls with
+    a MagicMock that returns 0 (count helpers) or None (mutators). Returns the
+    spy dict so the test can assert on call counts.
+    """
+    from unittest.mock import MagicMock
+
+    import workers.model_registry.basins_registry_import as bri
+
+    spies = {
+        "_delete_legacy_seg_rows": MagicMock(return_value=False),
+        "_refresh_parent_version_materialization": MagicMock(return_value=None),
+        "_ensure_basin": MagicMock(return_value=0),
+        "_ensure_basin_version": MagicMock(return_value=0),
+        "_ensure_river_network": MagicMock(return_value=0),
+        "_ensure_river_segments": MagicMock(return_value=0),
+        "_ensure_output_river_segments": MagicMock(return_value=0),
+        "_ensure_river_segment_crosswalk": MagicMock(return_value=0),
+        "_ensure_mesh": MagicMock(return_value=0),
+        "_ensure_model_instance": MagicMock(return_value=0),
+        "_backfill_output_segment_geometry": MagicMock(return_value=None),
+    }
+    for name, spy in spies.items():
+        monkeypatch.setattr(bri, name, spy)
+    return spies
+
+
+def test_import_basin_into_registry_core_calls_output_seed_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    import workers.model_registry.basins_registry_import as bri
+
+    spies = _spy_import_basin_helpers(monkeypatch)
+    row_counts = bri.import_basin_into_registry_core(MagicMock(), MagicMock())
+
+    assert spies["_ensure_output_river_segments"].call_count == 1
+    assert spies["_backfill_output_segment_geometry"].call_count == 1
+    assert "output_river_segment" in row_counts
+
+
+def test_import_basin_into_registry_core_skips_output_seed_and_backfill_when_flags_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #575: re-ingesting a bootstrapped basin (e.g. qhh after
+    qhh_production_bootstrap) needs to skip the generic output-row seed +
+    backfill because the existing output rows carry custom properties_json
+    that would trip BASINS_REGISTRY_CHECKSUM_CONFLICT.
+    """
+    from unittest.mock import MagicMock
+
+    import workers.model_registry.basins_registry_import as bri
+
+    spies = _spy_import_basin_helpers(monkeypatch)
+    row_counts = bri.import_basin_into_registry_core(
+        MagicMock(),
+        MagicMock(),
+        seed_output_river_segments=False,
+        backfill_output_segment_geometry=False,
+    )
+
+    assert spies["_ensure_output_river_segments"].call_count == 0
+    assert spies["_backfill_output_segment_geometry"].call_count == 0
+    assert "output_river_segment" not in row_counts
+    # Reach + crosswalk + mesh + model_instance still land — toggles only
+    # affect the output-row contract.
+    assert spies["_ensure_river_segments"].call_count == 1
+    assert spies["_ensure_river_segment_crosswalk"].call_count == 1
+    assert spies["_ensure_mesh"].call_count == 1
+    assert spies["_ensure_model_instance"].call_count == 1
+
+
+def test_refresh_parent_version_materialization_updates_mesh_and_model_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #575: a basin originally bootstrapped under a different
+    package_version still carries the old mesh_uri / model_package_uri at
+    re-ingest time. _refresh_parent_version_materialization must in-place
+    rewrite them along with basin_version / river_network_version, so the
+    subsequent _ensure_* idempotency checks take the no-op path instead of
+    raising CHECKSUM_CONFLICT.
+    """
+    from unittest.mock import MagicMock
+
+    import workers.model_registry.basins_registry_import as bri
+
+    captured: list[str] = []
+
+    class _RecordingCursor:
+        def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
+            captured.append(" ".join(str(statement).split()))
+
+    # All 4 parent rows already exist in DB → every UPDATE branch fires.
+    monkeypatch.setattr(bri, "_fetch_optional", lambda c, sql, params: {"present": 1})
+    monkeypatch.setattr(bri, "_mesh_uri", lambda src: "s3://pkg-new/test_input.sp.mesh")
+    monkeypatch.setattr(bri, "_source_checksum", lambda src, name: "ck-mesh-new")
+    monkeypatch.setattr(bri, "_resource_profile", lambda src: {"scheduler": "slurm", "version": "new"})
+    monkeypatch.setattr(bri, "_json", lambda value: json.dumps(value, sort_keys=True))
+
+    sources = MagicMock()
+    sources.ids = {
+        "river_network_version_id": "rnv-id",
+        "basin_version_id": "bv-id",
+        "mesh_version_id": "mesh-id",
+        "model_id": "model-id",
+    }
+    sources.geometry = MagicMock(
+        segment_count=42,
+        river_network_source_uri="s3://pkg-new/river.shp",
+        river_network_checksum="ck-rn-new",
+        domain_source_uri="s3://pkg-new/domain.shp",
+        domain_checksum="ck-dom-new",
+    )
+    sources.manifest = {
+        "model_package_uri": "s3://pkg-new/package/",
+        "manifest_uri": "s3://pkg-new/manifest.json",
+        "package_checksum": "ck-pkg-new",
+        "source_inventory_checksum": "ck-inv-new",
+    }
+    sources.model = {
+        "basin_slug": "test-basin",
+        "shud_input_name": "test_input",
+        "source_path": "/src",
+        "resolved_source_path": "/abs/src",
+    }
+
+    bri._refresh_parent_version_materialization(_RecordingCursor(), sources)
+
+    update_statements = [s for s in captured if s.startswith("UPDATE")]
+    assert any("UPDATE core.river_network_version" in s for s in update_statements)
+    assert any("UPDATE core.basin_version" in s for s in update_statements)
+    assert any("UPDATE core.mesh_version" in s for s in update_statements)
+    assert any("UPDATE core.model_instance" in s for s in update_statements)
+    assert len(update_statements) == 4

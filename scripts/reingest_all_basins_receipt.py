@@ -82,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=receipt_path,
                 auth_actor_id=args.auth_actor_id,
                 auth_roles=args.auth_role,
+                seed_output_river_segments=not args.no_seed_output_river,
+                backfill_output_segment_geometry=not args.no_backfill_output_geometry,
             )
             receipts.append(receipt)
         except BasinsReingestError as error:
@@ -164,6 +166,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--auth-actor-id", default=None)
     parser.add_argument("--auth-role", action="append", default=[])
+    parser.add_argument(
+        "--no-seed-output-river",
+        action="store_true",
+        help=(
+            "Skip the generic _ensure_output_river_segments seed for every basin. "
+            "Use only when re-ingesting basins whose output rows were written by a custom "
+            "bootstrap path (e.g. qhh_production_bootstrap) with divergent properties_json."
+        ),
+    )
+    parser.add_argument(
+        "--no-backfill-output-geometry",
+        action="store_true",
+        help=(
+            "Skip _backfill_output_segment_geometry for every basin. Use together with "
+            "--no-seed-output-river when the existing output rows already carry display geometry."
+        ),
+    )
     return parser.parse_args(argv)
 
 
