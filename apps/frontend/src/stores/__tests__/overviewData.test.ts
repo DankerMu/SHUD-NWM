@@ -4210,11 +4210,25 @@ describe('useOverviewDataStore', () => {
       // - flood-return-period layer 强制 flood_product_ready=true → 后端只返回 [run-B]（run-A 因洪频
       //   不完整被过滤），前端必须重选 run-B（而非沿用 cache 中的 run-A）。这是 spec scenario
       //   "Layer toggle re-evaluates flood_product_ready filter" 的 latest-run-re-resolution 子句。
+      // 关键：runA 必须显式覆盖 product_quality.flood_return_period.quality_state 为非 'ready'，
+      // 否则继承 fixture 的 'ready' 后即使后端模拟过滤了 runA，前端 isReadyFloodRun post-filter
+      // 仍会把它当作 ready —— 测的就不是 spec scenario 而是 mock 的副作用。
       const runA = {
         ...run,
         run_id: 'run-A-flood-incomplete',
         cycle_time: '2026-05-19T00:00:00Z',
         updated_at: '2026-05-19T01:00:00Z',
+        product_quality: {
+          flood_return_period: {
+            quality_state: 'unavailable' as const,
+            max_over_window: null,
+            result_rows: 0,
+            return_period_rows: 0,
+            warning_rows: 0,
+            unavailable_products: ['flood_return_period'],
+            residual_blockers: [],
+          },
+        },
       }
       const runB = {
         ...run,
