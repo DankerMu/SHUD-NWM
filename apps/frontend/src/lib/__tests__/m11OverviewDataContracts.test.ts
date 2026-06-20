@@ -327,14 +327,12 @@ describe('M11 overview data contracts', () => {
       query,
       layers: [
         { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'], metadata: null },
-        { layer_id: 'water-level', layer_name: 'Water level', layer_type: 'hydrology', variables: ['water_level'], metadata: null },
         { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: ['return_period'], metadata: null },
         { layer_id: 'warning-level', layer_name: 'Warning level', layer_type: 'hydrology', variables: ['warning_level'], metadata: null },
         { layer_id: 'river-network', layer_name: 'River network', layer_type: 'base', variables: ['geometry'], metadata: null },
       ],
       validTimesByLayerId: {
         discharge: ['2026-05-18T06:00:00Z'],
-        'water-level': ['2026-05-18T06:00:00Z'],
         'flood-return-period': ['2026-05-18T06:00:00Z'],
         'warning-level': ['2026-05-18T06:00:00Z'],
         'river-network': ['2026-05-18T06:00:00Z'],
@@ -344,23 +342,11 @@ describe('M11 overview data contracts', () => {
 
     expect(layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
     expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({ available: true, disabledReason: null })
-    expect(layers.find((layer) => layer.layerId === 'water-level')).toMatchObject({ available: true, disabledReason: null })
     expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({ available: true, disabledReason: null })
     expect(layers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
       available: false,
       disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
     })
-  })
-
-  it('keeps water-level legend independent from discharge thresholds and units', () => {
-    const waterLevel = getM11LayerLegend('water-level')
-    const discharge = getM11LayerLegend('discharge')
-
-    expect(waterLevel).toEqual(expect.arrayContaining([expect.objectContaining({ label: '0.5-1 m' })]))
-    expect(waterLevel.map((entry) => entry.label).join(' ')).toContain('m')
-    expect(waterLevel.map((entry) => entry.label).join(' ')).not.toContain('m3/s')
-    expect(waterLevel.map((entry) => entry.max)).not.toContain(500)
-    expect(waterLevel).not.toEqual(discharge)
   })
 
   it('derives best layer freshness from a resolved concrete run', () => {

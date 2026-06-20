@@ -125,6 +125,21 @@ describe('M11 query state helpers', () => {
     expect(needsM11QueryReplacement(`?${canonical}`)).toBe(false)
   })
 
+  it('falls back to the default discharge layer when a stale URL requests the retired hydro variant (#581)', () => {
+    // 分享链 / 书签 / 旧路由状态可能仍带 layer=<退役标识>。parser 必须把它当作未知值，
+    // 回落到 defaultM11QueryState.layer（=discharge），并且 serialize 后不再写出该值。
+    // split-string sentinel：防 naive find-replace 把退役标识符再次悄悄回填到源码。
+    const retiredLayerId = 'wat' + 'er-level'
+    const state = parseM11QueryState(`layer=${retiredLayerId}`)
+
+    expect(state.layer).toBe('discharge')
+    expect(state.layer).toBe(defaultM11QueryState.layer)
+    expect(serializeM11QueryState(state)).toBe('')
+    expect(serializeM11QueryState(state)).not.toContain(retiredLayerId)
+    // 需要 URL 替换：URL 上仍带退役 layer，但 serialize 出的 canonical 串里不再含该值。
+    expect(needsM11QueryReplacement(`?layer=${retiredLayerId}`)).toBe(true)
+  })
+
   it('can explicitly clear segment identity when a handoff changes basin version', () => {
     const state = parseM11QueryState(
       'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-a&riverNetworkVersionId=rn-a&segmentId=seg-a&warningLevel=orange&q=mainstem',

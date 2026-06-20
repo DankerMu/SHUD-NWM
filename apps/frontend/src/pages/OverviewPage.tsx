@@ -297,8 +297,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
-      // 点 discharge/water-level 河段 → 就地开流量预报弹窗（national：feature 自带 segment 身份）。
-      if (interaction.layerId === state.layer && (state.layer === 'discharge' || state.layer === 'water-level')) {
+      // 点 discharge 河段 → 就地开流量预报弹窗（national：feature 自带 segment 身份）。
+      if (interaction.layerId === state.layer && state.layer === 'discharge') {
         const segmentId =
           mapFeatureStringProperty(interaction.feature, 'river_segment_id') ?? mapFeatureStringProperty(interaction.feature, 'segment_id')
         const basinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')

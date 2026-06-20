@@ -75,16 +75,6 @@ const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
-const m11RiverWaterLevelLegend: LayerLegendEntry[] = [
-  { label: '<0.5 m', color: '#8FDCE8', max: 0.5 },
-  { label: '0.5-1 m', color: '#80DEEA', min: 0.5, max: 1 },
-  { label: '1-2 m', color: '#26C6DA', min: 1, max: 2 },
-  { label: '2-4 m', color: '#00897B', min: 2, max: 4 },
-  { label: '4-8 m', color: '#FDD835', min: 4, max: 8 },
-  { label: '>8 m', color: '#D81B60', min: 8 },
-  { label: '无水位数据', color: m11WaterLevelColor(null) },
-]
-
 const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
   { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
   { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
@@ -329,7 +319,6 @@ export const emptyWarningCounts: Record<M11WarningLevel, number> = {
 
 const layerLabels: Record<M11Layer, string> = {
   discharge: 'Discharge',
-  'water-level': 'Water level',
   'flood-return-period': 'Flood return period',
   'warning-level': 'Warning level',
   'met-stations': 'Meteorological stations',
@@ -569,7 +558,7 @@ export function normalizeLayerStates(input: {
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
   const apiLayersById = new Map(input.layers.map((layer) => [layer.layer_id, layer]))
-  const requiredLayers: M11Layer[] = ['discharge', 'water-level', 'flood-return-period', 'warning-level']
+  const requiredLayers: M11Layer[] = ['discharge', 'flood-return-period', 'warning-level']
   const layerIds = [...new Set([...requiredLayers, ...input.layers.map((layer) => layer.layer_id)])]
 
   return layerIds.map((layerId) => {
@@ -1239,7 +1228,7 @@ function serializedByteLength(value: unknown): number {
 }
 
 function isM11RenderableLayer(layerId: string) {
-  return layerId === 'discharge' || layerId === 'water-level' || layerId === 'flood-return-period' || layerId === 'warning-level'
+  return layerId === 'discharge' || layerId === 'flood-return-period' || layerId === 'warning-level'
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {
@@ -1311,7 +1300,6 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
   if (layerId === 'warning-level') return m11RiverWarningLevelLegend.map((entry) => ({ ...entry }))
   if (layerId === 'flood-return-period') return m11RiverReturnPeriodLegend.map((entry) => ({ ...entry }))
   if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
-  if (layerId === 'water-level') return m11RiverWaterLevelLegend.map((entry) => ({ ...entry }))
   return []
 }
 
@@ -1333,16 +1321,6 @@ export function m11DischargeColor(value: number | null) {
   if (value >= 10) return '#2171B5'
   if (value >= 1) return '#4292C6'
   return '#7FB8DC'
-}
-
-export function m11WaterLevelColor(value: number | null) {
-  if (value === null) return '#94ADC7'
-  if (value >= 8) return '#D81B60'
-  if (value >= 4) return '#FDD835'
-  if (value >= 2) return '#00897B'
-  if (value >= 1) return '#26C6DA'
-  if (value >= 0.5) return '#80DEEA'
-  return '#8FDCE8'
 }
 
 export function m11ReturnPeriodColor(value: number | null) {

@@ -109,7 +109,7 @@ describe('validateHydroMetRiverForecastForChart (gold standard honest display)',
     expect(result.renderedPoints).toHaveLength(points.length)
   })
 
-  it('uses q_down discharge identity and never water-level / stage wording', () => {
+  it('uses q_down discharge identity and never the retired stage variant wording', () => {
     const result = validateHydroMetRiverForecastForChart(
       payload([pointAt(0, 3000), pointAt(24, 3100)], { available_lead_hours: 168 }),
       product(),
@@ -120,13 +120,14 @@ describe('validateHydroMetRiverForecastForChart (gold standard honest display)',
     if (!result.ok) return
     expect(result.variable).toBe('q_down')
     expect(HYDRO_MET_RIVER_FORECAST_VARIABLE).toBe('q_down')
-    // discharge 单位，且 lib 输出中不含任何水位措辞字段/值。
+    // discharge 单位，且 lib 输出中不含任何已退役变量措辞字段/值。
+    // split-string sentinel：防止 naive find-replace 把退役标识符再次悄悄回填到源码中。
     expect(result.unit).toBe('m3/s')
     const serialized = JSON.stringify(result).toLowerCase()
-    expect(serialized).not.toContain('water level')
-    expect(serialized).not.toContain('water-level')
+    expect(serialized).not.toContain('wat' + 'er level')
+    expect(serialized).not.toContain('wat' + 'er-level')
     expect(serialized).not.toContain('stage')
-    expect(serialized).not.toContain('水位')
+    expect(serialized).not.toContain('水' + '位')
   })
 
   it('rejects identity mismatch (segment id) and does not produce rendered points', () => {
