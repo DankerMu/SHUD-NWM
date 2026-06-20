@@ -1576,7 +1576,9 @@ describe('useOverviewDataStore', () => {
       resolvedSource: 'Unknown',
       scenarioIds: [],
     })
-    expect(snapshot.detail.warningDistribution.severe).toBe(0)
+    // ranking 在该 stale-version path 内被显式 settle（同 path 走 best 解析失败但仍 normalize），
+    // warningDistribution 当为定义后再断言；narrow 是 PR 4/7 把 warningDistribution 改成 `| undefined` 的兼容写法。
+    expect(snapshot.detail.warningDistribution).toEqual(expect.objectContaining({ severe: 0 }))
     expect(snapshot.segments[0]).toMatchObject({
       basinVersionId: oldVersion.basin_version_id,
       currentQ: null,
@@ -3680,7 +3682,8 @@ describe('useOverviewDataStore', () => {
       comparisonAvailable: true,
     })
     expect(snapshot.detail.latestRun.runId).toBeNull()
-    expect(snapshot.detail.warningDistribution.warning).toBe(0)
+    // PR 4/7 之后 warningDistribution 是 `| undefined`，用 objectContaining narrow 兼容空态。
+    expect(snapshot.detail.warningDistribution).toEqual(expect.objectContaining({ warning: 0 }))
     expect(snapshot.selectedSegment).toMatchObject({
       riverSegmentId: 'seg-123',
       lineageStatus: 'unavailable',
@@ -4077,7 +4080,10 @@ describe('useOverviewDataStore', () => {
 
     // 4.5 (a)：concurrent 面板挂载 coalesce 到同一 in-flight promise（只发一次网络 RTT）。
     it('coalesces concurrent on-demand ranking requests through the in-flight cache', async () => {
-      let release: ((value: unknown) => void) | null = null
+      // Promise constructor 同步运行 callback → release 在下一句即被赋值；用 definite-assignment
+      // assertion 跳开 `null` 初值，避免 TS control-flow 把闭包内赋值的回写 narrow 成 `never`
+      // 后再触发 TS2349 "expression is not callable"（PR 内同 pattern 的旧测试也踩过该坑）。
+      let release!: (value: unknown) => void
       const blockedRanking = new Promise<unknown>((resolve) => {
         release = resolve
       })
@@ -4093,7 +4099,7 @@ describe('useOverviewDataStore', () => {
       const p1 = loadFloodRankingOnDemand(run.run_id, query)
       const p2 = loadFloodRankingOnDemand(run.run_id, query)
       expect(_floodRankingInFlightSize()).toBe(1)
-      release?.(success(ranking))
+      release(success(ranking))
       const [r1, r2] = await Promise.all([p1, p2])
       expect(r1).toBe(r2)
       expect(calls.filter((p) => p === '/api/v1/flood-alerts/ranking').length).toBe(1)
@@ -4103,7 +4109,8 @@ describe('useOverviewDataStore', () => {
 
     // 4.5 (c)：unmount / layer 切回 discharge → release 清掉 in-flight，下一次调用发新 fetch。
     it('clears the in-flight ranking entry on release (unmount / layer switch back to discharge)', async () => {
-      let release: ((value: unknown) => void) | null = null
+      // 同上：用 definite-assignment 跳开 TS narrowing 与 optional-call narrowing 问题。
+      let release!: (value: unknown) => void
       const blockedRanking = new Promise<unknown>((resolve) => {
         release = resolve
       })
@@ -4120,7 +4127,7 @@ describe('useOverviewDataStore', () => {
       releaseFloodRankingOnDemand(run.run_id, query)
       expect(_floodRankingInFlightSize()).toBe(0)
       // 释放原 promise 不影响 in-flight 状态（已被清空，新调用要发新 fetch）。
-      release?.(success(ranking))
+      release(success(ranking))
       await inFlight
       expect(_floodRankingInFlightSize()).toBe(0)
     })

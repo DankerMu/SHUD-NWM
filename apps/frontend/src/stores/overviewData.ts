@@ -1132,7 +1132,9 @@ export function releaseFloodRankingOnDemand(
   query: M11QueryState,
   basinId?: string | null,
 ): void {
-  if (runIdOrNull) {
+  // runId 必须是非空字符串才走精准 delete；空串会让 floodRankingKey 生成纯 suffix 形状，
+  // 之后 suffix 兜底分支又会按 suffix 匹配 → 误删其它 run 的同 query 条目。
+  if (typeof runIdOrNull === 'string' && runIdOrNull.length > 0) {
     floodRankingInFlight.delete(floodRankingKey(runIdOrNull, query, basinId))
     return
   }
@@ -1195,17 +1197,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
       const basins = basinsResult.value
       const runlessLayers = runlessLayersResult.value
-      // 直接从 apiLayer.metadata.valid_times 解析（spec D3 / scenario "Bootstrap minimal request set"
-      // 不调用 /layers/<id>/valid-times；PR 4/7 在 normalizeLayerStates 内固化 metadata-first 路径）。
-      const metadataValidTimesByLayerId: Record<string, string[]> = {}
-      for (const layer of runlessLayers) {
-        const metaTimes = layer.metadata?.valid_times
-        if (Array.isArray(metaTimes)) metadataValidTimesByLayerId[layer.layer_id] = metaTimes
-      }
+      // normalizeLayerStates 内三态 metadata-first（spec D3 / scenario "Bootstrap minimal request set"）；
+      // 这里不发 /layers/<id>/valid-times、也不预解 metadata.valid_times：fallback 入参只在
+      // metadata 缺失（schema gap）才被消费，而 phase-1 仍由同一份 metadata 决定，没有独立 fallback
+      // 来源 → 传 fallback 等于死代码（与 enrichment 默认 path ~L1332 保持一致：不传 validTimesByLayerId）。
       const bootstrapLayerStates = normalizeLayerStates({
         query,
         layers: runlessLayers,
-        validTimesByLayerId: metadataValidTimesByLayerId,
         resolvedRun: null,
       })
       const currentLayerState = bootstrapLayerStates.find((state) => state.layerId === query.layer) ?? null
@@ -1373,12 +1371,17 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     } catch (error) {
       if (isCurrentRequest()) {
         const message = '加载总览数据失败'
+        // IIFE 内的 `bootstrapSnapshot = snapshot` 异步赋值不参与 outer 作用域的 control-flow
+        // 分析；TS 会把变量 narrow 到 `null` 然后看作 `never` 上的属性访问。显式断言回声明类型
+        // 让 catch 路径仍能消费已写入的 phase-1 快照（spec scenario "Map bootstrap rejection"
+        // 要求 fallback layers 用 bootstrap 的 layerStates 而非空数组）。
+        const settledBootstrap = bootstrapSnapshot as OverviewBootstrapSnapshot | null
         const fallback: OverviewDataSnapshot = {
           requestScope: overviewRequestScope(query),
-          bootstrap: bootstrapSnapshot,
+          bootstrap: settledBootstrap,
           basins: [],
           summary: createEmptyOverviewSummary(query),
-          layers: bootstrapSnapshot?.layerStates ?? [],
+          layers: settledBootstrap?.layerStates ?? [],
           aggregationDecision: decideAggregationEndpoint({
             initialRequestCount: 0,
             createsPerBasinNPlusOne: false,

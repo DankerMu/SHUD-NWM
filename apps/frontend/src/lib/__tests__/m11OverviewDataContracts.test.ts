@@ -395,7 +395,13 @@ describe('M11 overview data contracts', () => {
             layer_name: 'Flood return period',
             layer_type: 'hydrology',
             variables: ['return_period'],
-            metadata: { valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z'] },
+            metadata: {
+              layer_id: 'flood-return-period',
+              tile_format: 'mvt',
+              fallback_available: false,
+              release_blocking: false,
+              valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z'],
+            },
           },
         ],
         // fallback 入参出现也应被忽略（metadata 已是数组 → metadata 优先；spec MUST NOT 子句）。
@@ -421,8 +427,14 @@ describe('M11 overview data contracts', () => {
             layer_name: 'Discharge',
             layer_type: 'hydrology',
             variables: ['q_down'],
-            // 显式空数组 = time-less（不是 schema gap）。
-            metadata: { valid_times: [] },
+            metadata: {
+              layer_id: 'discharge',
+              tile_format: 'mvt',
+              fallback_available: false,
+              release_blocking: false,
+              // 显式空数组 = time-less（不是 schema gap）。
+              valid_times: [],
+            },
           },
         ],
         validTimesByLayerId: { discharge: ['2026-06-01T00:00:00Z'] },

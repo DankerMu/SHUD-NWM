@@ -33,7 +33,13 @@ import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { useAuthStore } from '@/stores/auth'
-import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
+import {
+  loadFloodRankingOnDemand,
+  overviewSnapshotMatchesQuery,
+  overviewSnapshotMetadataMatchesQuery,
+  releaseFloodRankingOnDemand,
+  useOverviewDataStore,
+} from '@/stores/overviewData'
 
 const OPERATOR_ROLES = ['operator', 'model_admin', 'sys_admin']
 
@@ -272,6 +278,39 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     if (correctedValidTime === undefined) return
     onQueryChange({ validTime: correctedValidTime })
   }, [onQueryChange, mapBootstrapLoading, metadataLayers, overviewMetadataMatchesQuery, state])
+
+  // 按需 ranking（spec capability "overview-data-contracts" Requirement
+  // "Flood ranking is fetched on demand, not on overview bootstrap"）：
+  // 当前 layer ∈ {flood-return-period, warning-level} 且 latestRun.run_id 已落定时触发 fetch；
+  // unmount / layer 切走 / runId 变更时调用 release 清掉 in-flight 条目，下一次挂载再发新 fetch。
+  // mountedRef 守护后续可能的 then/catch 副作用（spec scenario "Ranking fetch is cancelled on
+  // unmount or layer change" 的 "no setState MUST occur" 子句）；本组件目前不消费 ranking 结果，
+  // store 也不跟踪它（in-flight 用作 coalesce + 模块级 cached() 持久化兜底），但保留 mountedRef
+  // 让未来加 setState 消费时仍有显式 guard。
+  const overviewLatestRunId = currentOverview?.summary?.freshness?.runId ?? null
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    const rankingDrivenLayer = state.layer === 'flood-return-period' || state.layer === 'warning-level'
+    if (!rankingDrivenLayer || !overviewLatestRunId) return
+    // 全国总览：basinId 始终 null（overviewLatestRunId 已隐含到 run_id），无须二次过滤；
+    // basinId 缺省值与 in-flight key 形状对齐（floodRankingKey 第三参 `basinId ?? ''`）。
+    void loadFloodRankingOnDemand(overviewLatestRunId, state, null)
+      .then(() => {
+        if (!mountedRef.current) return
+        // 未来若需把 ranking 写回本地 state，必须先校验 mountedRef.current（防 unmount 后 setState）。
+      })
+      .catch(() => undefined)
+    return () => {
+      // 释放 in-flight 条目：layer 切走 / runId 变更 / 组件 unmount 都走同一清理路径。
+      releaseFloodRankingOnDemand(overviewLatestRunId, state, null)
+    }
+  }, [overviewLatestRunId, state])
 
   // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
   const nationalGeo = useNationalBasinGeo(true)
