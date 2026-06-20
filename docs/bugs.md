@@ -428,3 +428,59 @@ retest_command: >-
 Open follow-up #386 covers stale failed-stage evidence after successful manual
 retry. The browser still needs a live display_readonly receipt showing stable
 log unavailable feedback and no hidden retry/cancel mutation from node-27.
+
+## 2026-06-20 Display bootstrap decoupling (Epic #579)
+
+### BUG-20260620-001: `/api/v1/layers` cold path ran 21+ seconds because of dead `water-level` variant + frontend `flood_product_ready=true` hardcode
+
+```yaml
+status: resolved
+owner_area: display_readonly
+github_issue: https://github.com/DankerMu/SHUD-NWM/issues/579
+resolved_by: >-
+  Epic #579 split into PR 1/7..PR 5/7 (#587 backend dead-variant + #588 frontend
+  dead-variant + #589 loading split + #590 dead-call removal + #591 discharge
+  decoupling); PR 6/7 (#585) live receipt on node-27 captures the 21,430 ms
+  warm → 413 ms cold proof at SHA 122ea95.
+evidence:
+  - docs/runbooks/receipts/display-bootstrap-decoupling-20260620.md
+  - scripts/diagnostic/display-cold-waterfall.sh
+  - openspec/changes/refactor-display-overview-bootstrap/issue-585-worklog.md
+  - openspec/changes/refactor-display-overview-bootstrap/specs/overview-data-contracts/spec.md
+  - openspec/changes/refactor-display-overview-bootstrap/design.md
+retest_command: >-
+  ssh -p 32099 nwm@210.77.77.27
+  'cd /home/nwm/NWM && git pull --ff-only && bash scripts/diagnostic/display-cold-waterfall.sh --runs 3'
+```
+
+Root cause was a `code-contract` defect with two coupled vectors: (a) the
+`water-level` MVT variant remained in the backend layer catalog and SQL
+path even though no frontend consumer rendered it — every catalog request
+fanned out the dead variant's `hydro.river_timeseries` SkipScan (92M rows),
+contributing the majority of the 21.8 s cold tail; (b) the frontend hardcoded
+`flood_product_ready=true` on every `/api/v1/runs` request including discharge,
+turning a non-blocking enrichment gate into a blocking 12 s aggregation on the
+default user path. Receipt at SHA `122ea95` shows the pre-merge 21,430 ms warm
+baseline reproduced live and the post-merge cold median of 413 ms (51.9×
+speedup); steady-state warm 2–3 ms.
+
+PR 5/7's live spec proof recorded in the receipt: GFS discharge has 142 runs
+in the current node-27 DB, ALL `frequency_done: unavailable` — without the PR
+the frontend's filter would have returned 0 runs and the discharge layer would
+have been broken end-to-end. The bug is therefore not just a latency one but a
+spec-faithfulness one: the prior code mis-served "discharge MUST be independent
+of flood readiness" as "discharge requires flood readiness", breaking the
+default user path silently when no flood-ready runs existed.
+
+Cold-cache fidelity note: receipt is `Python-LRU-cold + Postgres-buffer-warm`
+(Postgres restart needs sudo, out of scope). The 51.9× delta is real
+code-path improvement, not buffer-cache artifact — both pre- and post-merge
+were measured against the same Postgres buffer state.
+
+Carried follow-ups (recorded in receipt, NOT this bug entry):
+- 413 ms exceeds spec's 200 ms cold floor by ~213 ms; mitigation tracked
+  in follow-up issue #593 (uvicorn `--preload`, sqlalchemy pool pre-ping,
+  or spec amendment).
+- Browser PNG capture deferred — operator attested acceptance #2 directly
+  after reviewing API-side proof (see receipt Section E); capture procedure
+  preserved for future regression replay.
