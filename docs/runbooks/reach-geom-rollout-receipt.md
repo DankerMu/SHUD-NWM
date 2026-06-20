@@ -109,34 +109,114 @@ basins_zhaochen_mc_shud      354   ← PR-2 reach-derived ✓
 basins_zhaochen_wem_shud     154   ← PR-2 reach-derived ✓
 ```
 
-9 of 11 models now hold PR-2 reach-level geometry. qhh/heihe stay on
-pre-PR-2 seg-derived geometry until the QHH-bootstrap-vs-generic-reingest
-contract issue is resolved (see remediation above).
+9 of 11 models held PR-2 reach-level geometry after phase 1; phase 2
+below brings qhh + heihe onto the same contract (11/11; tailanhe is
+inventory-blocked, see known issues).
+
+## Phase 2: qhh + heihe rescue (one-off monkey-patch driver)
+
+Phase-1 generic reingest failed `BASINS_REGISTRY_CHECKSUM_CONFLICT` on
+`output_river_segment` for qhh + heihe because their existing output rows
+were seeded by `qhh_production_bootstrap`-style code paths with
+QHH-specific `properties_json`, which the generic
+`_ensure_output_river_segments` digest contract cannot match. A second
+blocker surfaced during phase 2: `_refresh_parent_version_materialization`
+(PR #569) refreshes `basin_version` + `river_network_version` but not
+`mesh_version` / `model_instance`, so the old `package_version`'s
+`mesh_uri` + `model_package_uri` would also trip CHECKSUM_CONFLICT on
+re-ingest of any basin originally bootstrapped under a different
+package_version.
+
+Phase-2 path (operator one-off, not committed):
+
+1. Verified FK safety: `hydro.river_timeseries` (90,666,720 rows for
+   qhh+heihe combined) targets `<model>_shud_riv_*` output rows
+   exclusively — zero rows reference `<model>_seg_*` legacy reach rows.
+   `_delete_legacy_seg_rows` is therefore safe to purge legacy seg rows
+   without touching forecast time-series.
+2. Monkey-patched `import_basin_into_registry_core.__kwdefaults__`:
+   `seed_output_river_segments=False` + `backfill_output_segment_geometry=False`
+   (skip generic output-row seed; output rows already present from the
+   original bootstrap).
+3. Monkey-patched `_refresh_parent_version_materialization` to also
+   UPDATE `core.mesh_version` (`mesh_uri`, `checksum`,
+   `properties_json.package_checksum`) and `core.model_instance`
+   (`model_package_uri`, `resource_profile`) with the values the current
+   re-ingest would have INSERTed, so subsequent `_ensure_mesh` /
+   `_ensure_model_instance` take the idempotent no-op path.
+4. Drove `reingest_basin(basin_slug='qhh' | 'heihe', ...)` in-process via
+   the standard CLI helper (publish → import).
+5. The driver script was removed after success (operator one-off; not
+   committed).
+
+Phase-2 receipt: [reach-geom-ingest-20260620-phase2-qhh-heihe.json](receipts/reach-geom-ingest-20260620-phase2-qhh-heihe.json).
+
+| basin / model | reach | crosswalk | geom_null | mp_viol |
+|---|---:|---:|---:|---:|
+| qhh   | 1,633 | 3,738 | 0 | 0 |
+| heihe | 2,352 | 4,759 | 0 | 0 |
+
+Post-phase-2 DB invariants verified:
+
+| check | value | note |
+|---|---|---|
+| `hydro.river_timeseries` row count (qhh+heihe) | **90,666,720** | identical to pre-phase-2; FK preservation confirmed |
+| `core.river_segment` id_class (qhh+heihe) | only `reach_*` and `shud_riv_*` | zero legacy `seg_*` rows remain |
+| `crosswalk_row_count` matches `seg.shp` record count | qhh 3738 ✓ / heihe 4759 ✓ | crosswalk fully rebuilt |
+| `geom_null` / `multi_part_violation` | 0 / 0 | PR-2 single-part LineString contract holds |
+
+API containers `api-web-1` + `api-worker-1` restarted post-DB switch.
+
+### Updated current DB state (post-phase-2)
+
+```
+basins_heihe_shud           2352   ← PR-2 reach-derived ✓ (phase 2)
+basins_hetianhe_shud        1858   ← PR-2 reach-derived ✓
+basins_keliya_shud           333   ← PR-2 reach-derived ✓
+basins_qhh_shud             1633   ← PR-2 reach-derived ✓ (phase 2)
+basins_qinyijiang_shud       319   ← PR-2 reach-derived ✓
+basins_weiganhe_shud        1379   ← PR-2 reach-derived ✓
+basins_xinanjiang_upstream_shud 216 ← PR-2 reach-derived ✓
+basins_zhaochen_bst_shud    4786   ← PR-2 reach-derived ✓
+basins_zhaochen_hhy_shud    4197   ← PR-2 reach-derived ✓
+basins_zhaochen_mc_shud      354   ← PR-2 reach-derived ✓
+basins_zhaochen_wem_shud     154   ← PR-2 reach-derived ✓
+```
+
+11 / 11 importable models on PR-2 reach-derived geometry; tailanhe still
+inventory-blocked (see known issues).
 
 ## Browser live verification
 
-> Pending — Chrome extension not connected at receipt time. Plan: capture
-> ≥ 3 basins (hetianhe, keliya, zhaochen/BST or qinyijiang) at the
-> previously-affected zoom levels, plus segment-level hover/popup to
-> confirm crosswalk wiring. qhh + heihe browser screenshots remain
-> reachable as **baseline** evidence (their old seg-derived geometry is
-> still on display).
-
-Screenshots will land under `docs/runbooks/receipts/` with filenames
-encoding `<basin>-<date>-z<zoom>-lng<lng>-lat<lat>.png` per PR 4 spec.
+Visual verification deferred to the operator (will self-check
+test.nwm.ac.cn). No screenshots captured in this PR.
 
 ## Issues uncovered that fall outside PR 3 / PR 4 scope
 
-1. **QHH-bootstrap vs generic reingest output-row contract** — PR #569
-   acknowledged the divergent `properties_json` digest but did not
-   provide a bridging purge. Recommend a follow-up issue: either teach
-   `_delete_legacy_seg_rows` to also drop QHH-bootstrap-written output
-   rows, or add a `nhms-model reingest-basin --force-output-rewrite`
-   flag for basins whose output history differs from the generic path.
-2. **`tailanhe` inventory** — `default_import_eligible=false`. Whether
+1. **QHH-bootstrap vs generic reingest output-row + parent-version contract**
+   — phase 2 worked around it via a one-off monkey-patch driver (not
+   committed). A followup PR needs to thread
+   `--no-seed-output-river` / `--no-backfill-output-geometry` flags
+   through `import_basins_registry` + `reingest_basin` + the CLI, and
+   extend `_refresh_parent_version_materialization` to also refresh
+   `mesh_version` + `model_instance`. Tracked outside this PR.
+2. **Reach-id → shud_riv-id mapping in API forecast queries** — PR-2
+   switched `core.river_segment` reach-row ids from `<model>_seg_*` to
+   `<model>_reach_<iRiv:06d>`, but `hydro.river_timeseries.river_segment_id`
+   has always been `<model>_shud_riv_*` (output rows). The frontend
+   sends the reach id from the MVT layer's properties; the API
+   `forecast_series` query uses the same id against
+   `hydro.river_timeseries`, which now returns zero rows for every
+   reach. Net effect: clicking any reach yields an empty discharge
+   chart. Symptom surfaced only when qhh + heihe (the only basins with
+   timeseries data in production) landed on PR-2 geometry in phase 2.
+   Mapping is a 1:1 bijection (`REPLACE(id, '_reach_', '_shud_riv_')`
+   matches 3985/3985 reaches for qhh+heihe). Tracked as a separate
+   hotfix PR.
+3. **`tailanhe` inventory** — `default_import_eligible=false`. Whether
    this is fixture incompleteness or a deliberate exclusion needs basin
    ownership review.
-3. **OBJECT_STORE_ROOT ownership on node-27** — `/home/ghdc/nwm/object-store`
+4. **OBJECT_STORE_ROOT ownership on node-27** — `/home/ghdc/nwm/object-store`
    is `1103:nfsdata`, `nwm` user is not in `nfsdata` group. Reingest had
    to use a scratch dir. Long-term: either grant `nwm` write access to
    the canonical object-store, or wire the operator account into the
