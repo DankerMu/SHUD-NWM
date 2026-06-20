@@ -68,8 +68,31 @@ export interface M11BasinRequestScope extends M11SnapshotRequestScope {
 
 type ModelInstancePage = components['schemas']['ModelInstancePage']
 
+/**
+ * mapBootstrap critical-path snapshot：阶段 1 settle 后冻结的最小字段集，足够 OverviewPage
+ * 注册 MVT hit layer（[M11MapLibreSurface::buildM11RegisteredOverlay]）使其首次河段可点击。
+ *
+ * 形状由 PR 3/7 固化（spec design.md D2/D3）；后续 PR 4/7 重写 normalizeLayerStates 时必须
+ * 按 `{ basins, layers, layerStates, currentLayerValidTime }` 形状消费，不得重命名 layerStates
+ * 等关键字段，避免沿同一文件接力时 snapshot contract drift。
+ *
+ * 字段语义：
+ * - basins: 原始 ApiBasin[]（用于 basin 选择器与 basin 身份映射）
+ * - layers: runless 图层目录 ApiLayer[]（自带 metadata.valid_times）
+ * - layerStates: 按当前 query 解析后的 LayerState[]（MVT hit layer 注册条件直接消费）
+ * - currentLayerValidTime: 当前 query.layer 的 valid_time（从 metadata.valid_times 解析）
+ */
+export interface OverviewBootstrapSnapshot {
+  basins: ApiBasin[]
+  layers: ApiLayer[]
+  layerStates: LayerState[]
+  currentLayerValidTime: string | null
+}
+
 export interface OverviewDataSnapshot {
   requestScope: M11OverviewRequestScope
+  // 阶段 1 mapBootstrap 字段（settle 后可注册 MVT hit layer；enrichment 中仍可为 null 表示尚未 settle）
+  bootstrap: OverviewBootstrapSnapshot | null
   basins: OverviewBasin[]
   summary: OverviewSummary
   layers: LayerState[]
@@ -91,8 +114,17 @@ export interface BasinDataSnapshot {
 interface OverviewDataState {
   overview: OverviewDataSnapshot | null
   basinDetail: BasinDataSnapshot | null
-  loading: boolean
+  // 拆分自旧 `loading: boolean` 闸门（spec D2 / scenario "Map interactivity is decoupled from enrichment loading"）。
+  // - mapBootstrapLoading：地图可交互快路径（basins + runless layers + 当前 layer 的 valid_time）。
+  // - enrichmentLoading：runs/models/queue/pipeline/summary/per-basin versions 等背景；阶段 2 单点 reject
+  //   只产 scoped error 不挡 map（scenario "Enrichment failure does not block map"）。
+  // 初始 (false, false, null) 视为「尚未 bootstrap」，不是「ready / empty」。
+  mapBootstrapLoading: boolean
+  enrichmentLoading: boolean
   basinLoading: boolean
+  // 阶段 1 失败专属：basins / runless layers reject 时写入；与 enrichment 阶段的 partial error
+  // 路径解耦（scenario "Map bootstrap rejection"）。
+  bootstrapError: string | null
   error: string | null
   basinError: string | null
   loadOverview: (query: M11QueryState) => Promise<OverviewDataSnapshot>
@@ -1048,11 +1080,13 @@ async function fetchLineage(runId: string, riverNetworkVersionId: string, segmen
   )
 }
 
-export const useOverviewDataStore = create<OverviewDataState>((set) => ({
+export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   overview: null,
   basinDetail: null,
-  loading: false,
+  mapBootstrapLoading: false,
+  enrichmentLoading: false,
   basinLoading: false,
+  bootstrapError: null,
   error: null,
   basinError: null,
   clearCache: clearOverviewDataCache,
@@ -1063,12 +1097,102 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const requestNonce = ++overviewRequestNonce
     activeOverviewRequestKey = requestKey
-    set({ loading: true, error: null })
+    // 两阶段同时进入 loading；spec scenario "Map bootstrap completes before enrichment" 允许两者同时为 true。
+    set({ mapBootstrapLoading: true, enrichmentLoading: true, bootstrapError: null, error: null })
 
-    const load = (async () => {
+    // 共享谓词：写 set 前要求 nonce 仍匹配（stale 防御），否则丢弃。
+    const isCurrentRequest = () => requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey
+    // 阶段 1 settle 时已写入的 bootstrap 快照（phase 2 合并到 final snapshot 时复用）。
+    let bootstrapSnapshot: OverviewBootstrapSnapshot | null = null
+
+    // 阶段 1（mapBootstrap critical path）：basins + runless layers + 当前 layer 的 valid_time。
+    // 不依赖 fetchRuns/fetchModels/fetchPipelineStatus/fetchFloodSummary/fetchFloodRanking/
+    // fetchBasinVersions/fetchLayerValidTimes（spec scenario "Bootstrap minimal request set"）。
+    const bootstrapPromise = (async () => {
+      const [basinsResult, runlessLayersResult] = await Promise.allSettled([fetchBasins(), fetchLayers(null)])
+
+      if (basinsResult.status === 'rejected' || runlessLayersResult.status === 'rejected') {
+        // scoped bootstrap error，与 enrichment partial error 不共流（spec scenario "Map bootstrap rejection"）。
+        const which =
+          basinsResult.status === 'rejected' && runlessLayersResult.status === 'rejected'
+            ? 'basins + layers'
+            : basinsResult.status === 'rejected'
+              ? 'basins'
+              : 'layers'
+        if (isCurrentRequest()) {
+          set({ mapBootstrapLoading: false, bootstrapError: safeM11ErrorMessage(which) })
+        }
+        return null
+      }
+
+      const basins = basinsResult.value
+      const runlessLayers = runlessLayersResult.value
+      // 直接从 apiLayer.metadata.valid_times 解析（spec D3 / scenario "Bootstrap minimal request set"
+      // 不调用 /layers/<id>/valid-times；PR 4/7 在 normalizeLayerStates 内固化 metadata-first 路径）。
+      const metadataValidTimesByLayerId: Record<string, string[]> = {}
+      for (const layer of runlessLayers) {
+        const metaTimes = layer.metadata?.valid_times
+        if (Array.isArray(metaTimes)) metadataValidTimesByLayerId[layer.layer_id] = metaTimes
+      }
+      const bootstrapLayerStates = normalizeLayerStates({
+        query,
+        layers: runlessLayers,
+        validTimesByLayerId: metadataValidTimesByLayerId,
+        resolvedRun: null,
+      })
+      const currentLayerState = bootstrapLayerStates.find((state) => state.layerId === query.layer) ?? null
+      const currentLayerValidTime = currentLayerState?.currentValidTime ?? null
+
+      const snapshot: OverviewBootstrapSnapshot = {
+        basins,
+        layers: runlessLayers,
+        layerStates: bootstrapLayerStates,
+        currentLayerValidTime,
+      }
+      bootstrapSnapshot = snapshot
+      if (isCurrentRequest()) {
+        // 阶段 1 settle：写入 bootstrap 快照（OverviewPage surfaceSettling 解除）+ 同时初始化最小
+        // overview 快照。
+        // basins 字段用 bootstrap 已取的真实 basins normalize（models/runs/ranking 留空 → 详细面板
+        // 的依赖字段在 enrichment settle 时被 phase-2 写入覆盖）。这样首屏即可显示 basin 边界 / 静态
+        // 河网回填，不闪「暂无可用流域数据」误导提示；enrichment 阶段最终用同一份 basins 加 models/
+        // versions 重 normalize 后覆盖本 placeholder。
+        const placeholderBasins = normalizeOverviewBasins({
+          basins,
+          versionsByBasinId: {},
+          // 多 basin 时跨 basin versions 不可得：phase 1 不发 per-basin version 请求（spec 关键路径）。
+          basinVersionUnavailableReason:
+            basins.length > 1 ? 'Basin version and bbox require the M11 aggregation endpoint.' : null,
+          models: [],
+          runs: [],
+          rankingItems: [],
+        })
+        const currentOverview = get().overview
+        const placeholderOverview: OverviewDataSnapshot = currentOverview && overviewSnapshotMetadataMatchesQuery(currentOverview, query)
+          ? { ...currentOverview, bootstrap: snapshot, layers: bootstrapLayerStates, basins: placeholderBasins }
+          : {
+              requestScope: overviewRequestScope(query),
+              bootstrap: snapshot,
+              basins: placeholderBasins,
+              summary: createEmptyOverviewSummary(query),
+              layers: bootstrapLayerStates,
+              aggregationDecision: decideAggregationEndpoint({
+                initialRequestCount: 0,
+                createsPerBasinNPlusOne: false,
+                missingRequiredFields: [],
+              }),
+              basinVersionToBasinId: {},
+            }
+        set({ mapBootstrapLoading: false, overview: placeholderOverview })
+      }
+      return snapshot
+    })()
+
+    // 阶段 2（enrichment）：与阶段 1 并行；不 await bootstrapPromise。
+    // 阶段 2 内单点 reject 仅产 scoped partial error，不传播到 map / bootstrap 状态
+    // （spec scenario "Enrichment failure does not block map"）。
+    const enrichmentPromise = (async () => {
       const partialErrors: string[] = []
-      // 投机预热 run-less 图层目录（同 loadBasinDetail：layers 慢端点不串行排在 runs 后）。
-      void fetchLayers(null).catch(() => undefined)
       const [basinsResult, modelsResult, runsResult, queueResult] = await Promise.allSettled([
         fetchBasins(),
         fetchModels(),
@@ -1153,18 +1277,29 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       for (const model of models as ApiModelInstance[]) {
         if (model.basin_version_id && model.basin_id) basinVersionToBasinId[model.basin_version_id] = model.basin_id
       }
-      const snapshot: OverviewDataSnapshot = {
+      // 等阶段 1 settle 后再合成最终快照（bootstrap 字段需存在）；bootstrap reject 时仍生成快照
+      // 但 bootstrap=null（OverviewPage 将识别为 mapBootstrap 失败态而非 ready）。
+      const bootstrapForSnapshot = await bootstrapPromise.catch(() => null)
+      const finalSnapshot: OverviewDataSnapshot = {
         requestScope: overviewRequestScope(query),
+        bootstrap: bootstrapForSnapshot,
         basins: overviewBasins,
         summary,
         layers: layerStates,
         aggregationDecision,
         basinVersionToBasinId,
       }
-      if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
-        set({ overview: snapshot, loading: false, error: partialErrors[0] ?? null })
+      if (isCurrentRequest()) {
+        set({ overview: finalSnapshot, enrichmentLoading: false, error: partialErrors[0] ?? null })
       }
-      return snapshot
+      return finalSnapshot
+    })()
+
+    const load = (async () => {
+      // 同时等两阶段；阶段 1 reject 不阻 enrichment（bootstrapPromise 在 reject 路径已 set false）。
+      const [, enrichmentResult] = await Promise.allSettled([bootstrapPromise, enrichmentPromise])
+      if (enrichmentResult.status === 'fulfilled') return enrichmentResult.value
+      throw enrichmentResult.reason
     })()
 
     overviewLoads.set(requestKey, load)
@@ -1172,13 +1307,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
     try {
       return await load
     } catch (error) {
-      if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
+      if (isCurrentRequest()) {
         const message = '加载总览数据失败'
         const fallback: OverviewDataSnapshot = {
           requestScope: overviewRequestScope(query),
+          bootstrap: bootstrapSnapshot,
           basins: [],
           summary: createEmptyOverviewSummary(query),
-          layers: [],
+          layers: bootstrapSnapshot?.layerStates ?? [],
           aggregationDecision: decideAggregationEndpoint({
             initialRequestCount: 0,
             createsPerBasinNPlusOne: false,
@@ -1186,7 +1322,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           }),
           basinVersionToBasinId: {},
         }
-        set({ overview: fallback, loading: false, error: message })
+        set({ overview: fallback, mapBootstrapLoading: false, enrichmentLoading: false, error: message })
       }
       throw error
     } finally {

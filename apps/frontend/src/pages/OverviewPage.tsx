@@ -250,8 +250,10 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     ],
   )
   const overview = useOverviewDataStore((store) => store.overview)
-  const loading = useOverviewDataStore((store) => store.loading)
+  const mapBootstrapLoading = useOverviewDataStore((store) => store.mapBootstrapLoading)
+  // enrichment 错误透出对应面板，但不阻塞 map（spec scenario "Enrichment failure does not block map"）。
   const error = useOverviewDataStore((store) => store.error)
+  const bootstrapError = useOverviewDataStore((store) => store.bootstrapError)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
@@ -264,11 +266,12 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   }, [dataLoadState, loadOverview])
 
   useEffect(() => {
-    if (loading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
+    // validTime 校正只需 bootstrap 落定即可（与 enrichment 解耦）。
+    if (mapBootstrapLoading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
     const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers)
     if (correctedValidTime === undefined) return
     onQueryChange({ validTime: correctedValidTime })
-  }, [onQueryChange, loading, metadataLayers, overviewMetadataMatchesQuery, state])
+  }, [onQueryChange, mapBootstrapLoading, metadataLayers, overviewMetadataMatchesQuery, state])
 
   // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
   const nationalGeo = useNationalBasinGeo(true)
@@ -345,10 +348,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     cycle: state.cycle,
   })
 
-  // 「总览数据尚未首次落定」单一信号：用 raw overview（首次成功加载后恒非 null），仅首挂载 frame-1
-  // 为真，统一驱动 surface 占位与浮层提示、消除空态/不可用闪一帧；不用 currentOverview——那会在
-  // query 已切但快照未匹配（如选 met-raster 图层）时误抑制诚实降级提示「未注册」。
-  const surfaceSettling = loading || !overview
+  // 「mapBootstrap 尚未首次落定」单一信号：阶段 1 完成且 overview.bootstrap 已写入即解锁。
+  // 与 enrichment 解耦（spec scenario "Map bootstrap completes before enrichment"）。
+  //   surfaceSettling = mapBootstrapLoading || (!overview?.bootstrap && !bootstrapError)
+  // bootstrap reject 时 mapBootstrapLoading=false / bootstrapError !=null / overview.bootstrap=null →
+  //   surfaceSettling=false → emptyBasinReason 走 bootstrapError 分支诚实告知失败（spec scenario
+  //   "Map bootstrap rejection"：renders bootstrap failed state rather than indefinite spinner）。
+  const surfaceSettling = mapBootstrapLoading || (!overview?.bootstrap && !bootstrapError)
   // 有已发布 run 的流域（latestForecastTime != null ⟺ 河段进了流量 MVT）的静态河流须剔除，规避双线；
   // 无 run 的流域（如 heihe）不在 MVT 中，保留其静态河流。
   const meshRiverBasinIds = useMemo(
@@ -357,7 +363,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   )
   const emptyBasinReason =
     !surfaceSettling && basins.length === 0
-      ? error ??
+      ? bootstrapError ??
+        error ??
         (summary?.totalBasins === 0
           ? '暂无可用流域数据'
           : currentOverview?.aggregationDecision.needsAggregationEndpoint

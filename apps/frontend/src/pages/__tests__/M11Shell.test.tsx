@@ -502,6 +502,8 @@ function matchedEmptyOverviewSnapshot(query: M11QueryState): OverviewDataSnapsho
   const summary: OverviewSummary = createEmptyOverviewSummary(query)
   return {
     requestScope: matchedOverviewScope(query),
+    // bootstrap 非空 ≡ mapBootstrap 已 settle；空 basins/layers 让 OverviewPage 走"matched-but-empty"诚实空态。
+    bootstrap: { basins: [], layers: [], layerStates: [], currentLayerValidTime: null },
     basins: [],
     summary,
     layers: [],
@@ -1388,7 +1390,11 @@ describe('M11 visual foundation shell', () => {
   it('still shows honest overview empty notice when a query-matched snapshot has no basins', () => {
     window.history.pushState({}, '', '/?warningLevel=major')
     const query = parseM11QueryState(window.location.search)
-    useOverviewDataStore.setState({ overview: matchedEmptyOverviewSnapshot(query), loading: false })
+    useOverviewDataStore.setState({
+      overview: matchedEmptyOverviewSnapshot(query),
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
 
     render(
       <BrowserRouter>
@@ -1399,6 +1405,108 @@ describe('M11 visual foundation shell', () => {
     // 关键反回归：query 已匹配 → currentOverview 非空 → surfaceSettling=false → 诚实空态如实显示
     expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
     expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
+  })
+
+  // PR #589 round-2 C1：阶段 1 reject（bootstrapError !=null + overview.bootstrap=null）→
+  // surfaceSettling 必须退出（spec scenario "Map bootstrap rejection"：MUST render bootstrap
+  // failed state rather than indefinite spinner）。bootstrapError 必须从 m11-overview-empty 透出。
+  it('surfaces bootstrap error and exits surface settling when bootstrap rejected', () => {
+    window.history.pushState({}, '', '/?warningLevel=major')
+    const query = parseM11QueryState(window.location.search)
+    // bootstrap reject 后 phase 2 final snapshot：bootstrap=null + basins=[]（reject 路径 fetchBasins
+    // 通常仍 reject → settledValue 返回 [] → overviewBasins=[]）。
+    const rejectedSnapshot: OverviewDataSnapshot = {
+      requestScope: matchedOverviewScope(query),
+      bootstrap: null,
+      basins: [],
+      summary: createEmptyOverviewSummary(query),
+      layers: [],
+      aggregationDecision: decideAggregationEndpoint({
+        initialRequestCount: 1,
+        createsPerBasinNPlusOne: false,
+        missingRequiredFields: [],
+      }),
+      basinVersionToBasinId: {},
+    }
+    useOverviewDataStore.setState({
+      overview: rejectedSnapshot,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+      bootstrapError: 'basins: 暂不可用',
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // 关键合同：bootstrap reject 时 spinner 必须消失（否则永远 spinner = spec 违约）。
+    expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
+    // emptyBasinReason 走 bootstrapError 分支 → 诚实告知失败。
+    const emptyNotice = screen.getByTestId('m11-overview-empty')
+    expect(emptyNotice).toHaveTextContent('basins')
+    expect(emptyNotice).toHaveTextContent('暂不可用')
+  })
+
+  // PR 3/7 #582 task 3.5：mapBootstrap settle 后 MVT hit layer 已注册 + 地图可点击；
+  // enrichmentLoading=true 不阻塞 surface（spec scenario "Map bootstrap completes before enrichment"
+  // 的浏览器层验证：interactiveLayerIds 非空，且 m11-overview-loading 占位不再渲染）。
+  it('registers MVT hit layer and keeps surface interactive once mapBootstrap settles even while enrichment is still loading', () => {
+    // 默认 national overview URL：discharge + 当前 valid_time 已被 metadata.valid_times 覆盖。
+    window.history.pushState({}, '', '/?source=gfs&validTime=2026-05-18T06:00:00.000Z')
+    const query = parseM11QueryState(window.location.search)
+    // 构造可注册的 discharge LayerState：必须 available + currentValidTime 匹配 + metadata 携带相同
+    // valid_time（M11MapLibreSurface.buildM11RegisteredOverlay 要求三者齐备）。
+    const dischargeLayer: LayerState = {
+      layerId: 'discharge',
+      displayName: 'River discharge',
+      group: 'hydrology',
+      available: true,
+      validTimes: ['2026-05-18T06:00:00.000Z'],
+      currentValidTime: '2026-05-18T06:00:00.000Z',
+      validTimeSource: 'api',
+      disabledReason: null,
+      metadata: { ...dischargeNationalMvtMetadata, valid_times: ['2026-05-18T06:00:00.000Z'] },
+      freshness: { ...freshness, runId: null, validTime: '2026-05-18T06:00:00.000Z' },
+      legend: [],
+    }
+    const settledLayers: LayerState[] = [dischargeLayer]
+    const snapshot: OverviewDataSnapshot = {
+      requestScope: matchedOverviewScope(query),
+      bootstrap: { basins: [], layers: [], layerStates: settledLayers, currentLayerValidTime: '2026-05-18T06:00:00.000Z' },
+      basins: overviewBasins,
+      summary: createEmptyOverviewSummary(query),
+      layers: settledLayers,
+      aggregationDecision: decideAggregationEndpoint({
+        initialRequestCount: 1,
+        createsPerBasinNPlusOne: false,
+        missingRequiredFields: [],
+      }),
+      basinVersionToBasinId: {},
+    }
+    // 关键合同：phase 1 settle / phase 2 仍 in-flight（enrichmentLoading=true）。
+    useOverviewDataStore.setState({
+      overview: snapshot,
+      mapBootstrapLoading: false,
+      enrichmentLoading: true,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // surface 未被 enrichment 阻塞：loading 浮层 / 不可用浮层都不应渲染。
+    expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+    // MVT hit layer 已注册（按 buildM11RegisteredOverlay 命名）→ map 可点击。
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute(
+      'data-interactive-layer-ids',
+      expect.stringContaining('m11-discharge-line-hit'),
+    )
   })
 
   // Bug-1 合同：刷新/直达带 basinId 的 URL → 首挂载剥离 basinId，落在全国总览主页（不进流域详情），
