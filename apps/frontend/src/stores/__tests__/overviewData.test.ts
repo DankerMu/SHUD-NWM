@@ -3892,53 +3892,99 @@ describe('useOverviewDataStore', () => {
       expect(finalState.overview?.bootstrap ?? null).toBeNull()
     })
 
-    // (d) enrichment 单点 reject（fetchPipelineStatus 失败）→ scoped partial error 仅暴露在 panel；
-    // mapBootstrap 仍正常 settle；map 可交互（overview.bootstrap 非空 + bootstrapError 为 null）。
-    it('enrichment single-point rejection (pipeline) does not block map interactivity', async () => {
-      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
-        const path = String(args[0])
-        if (path === '/api/v1/basins') return success([basin]) as never
-        if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
-        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
-        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
-        if (path === '/api/v1/layers') {
-          return success([
-            {
-              layer_id: 'flood-return-period',
-              layer_name: 'Flood return period',
-              layer_type: 'hydrology',
-              variables: [],
-              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
-            },
-          ]) as never
-        }
-        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
-        // 阶段 2 单点失败：pipeline 拒绝；其它端点正常返回。
-        if (path === '/api/v1/pipeline/status') {
-          return { data: undefined, error: { error: { message: 'pipeline downstream timeout' } } } as never
-        }
-        if (path === '/api/v1/flood-alerts/summary') {
-          return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
-        }
-        if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
-        if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
-        throw new Error(`Unexpected GET ${path}`)
-      })
+    // (d) enrichment 单点 reject（tasks.md 3.4(d) 枚举 4 端点：pipeline / queue / flood summary /
+    // basin versions）→ scoped partial error 仅暴露在 panel；mapBootstrap 仍正常 settle；map 可交互
+    // （overview.bootstrap 非空 + bootstrapError 为 null）。每条 case 只 reject 一个端点，其余正常。
+    // 注：basin versions 需要 shouldFetchVersions=true（initialRequestCount<=8），该阈值在 hasLatestRun
+    // 时被超过 → basin versions case 显式让 /api/v1/runs 返回空 page（latestRun=null → baseRequestCount
+    // 从 7 降到 5 → versions 被请求 → reject 才能透出 partial error），不污染其它端点。
+    describe.each([
+      {
+        label: 'pipeline status',
+        rejectPath: '/api/v1/pipeline/status',
+        rejectMessage: 'pipeline downstream timeout',
+        partialErrorEntry: 'pipeline: 暂不可用',
+        errorPattern: /pipeline/,
+        runsReturnsEmpty: false,
+      },
+      {
+        label: 'queue depth',
+        rejectPath: '/api/v1/queue/depth',
+        rejectMessage: 'queue downstream timeout',
+        partialErrorEntry: 'queue: 暂不可用',
+        errorPattern: /queue/,
+        runsReturnsEmpty: false,
+      },
+      {
+        label: 'flood summary',
+        rejectPath: '/api/v1/flood-alerts/summary',
+        rejectMessage: 'flood summary downstream timeout',
+        partialErrorEntry: 'flood summary: 暂不可用',
+        errorPattern: /flood summary/,
+        runsReturnsEmpty: false,
+      },
+      {
+        label: 'basin versions',
+        rejectPath: '/api/v1/basins/{basin_id}/versions',
+        rejectMessage: 'basin versions downstream timeout',
+        partialErrorEntry: 'basin versions: 暂不可用',
+        errorPattern: /basin versions/,
+        // versions 仅在 initialRequestCount<=8 时才发，需要 hasLatestRun=false → /api/v1/runs 空 page。
+        runsReturnsEmpty: true,
+      },
+    ])(
+      'enrichment single-point rejection ($label) does not block map interactivity',
+      ({ rejectPath, rejectMessage, partialErrorEntry, errorPattern, runsReturnsEmpty }) => {
+        it('keeps mapBootstrap settled + scoped partial error surfaced (panel only)', async () => {
+          vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+            const path = String(args[0])
+            // 阶段 2 单点失败：被点名端点拒绝；其它端点正常返回。
+            if (path === rejectPath) {
+              return { data: undefined, error: { error: { message: rejectMessage } } } as never
+            }
+            if (path === '/api/v1/basins') return success([basin]) as never
+            if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+            if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+            if (path === '/api/v1/runs') {
+              return success({ items: runsReturnsEmpty ? [] : [run], total: runsReturnsEmpty ? 0 : 1, limit: 20, offset: 0 }) as never
+            }
+            if (path === '/api/v1/layers') {
+              return success([
+                {
+                  layer_id: 'flood-return-period',
+                  layer_name: 'Flood return period',
+                  layer_type: 'hydrology',
+                  variables: [],
+                  metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+                },
+              ]) as never
+            }
+            if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+            if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+            if (path === '/api/v1/flood-alerts/summary') {
+              return success({ run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+            }
+            if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+            if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+            throw new Error(`Unexpected GET ${path}`)
+          })
 
-      await useOverviewDataStore.getState().loadOverview(query)
+          await useOverviewDataStore.getState().loadOverview(query)
 
-      const finalState = useOverviewDataStore.getState()
-      // 关键合同：map 仍可交互（mapBootstrap 已 settle + bootstrap 已写入 + bootstrapError 为 null）。
-      expect(finalState.mapBootstrapLoading).toBe(false)
-      expect(finalState.bootstrapError).toBeNull()
-      expect(finalState.overview?.bootstrap).not.toBeNull()
-      expect(finalState.overview?.bootstrap?.basins).toEqual([basin])
-      // enrichment 完成（即便单点 reject），但 scoped partial error 透出到 panel level。
-      expect(finalState.enrichmentLoading).toBe(false)
-      expect(finalState.overview?.summary.partialErrors).toEqual(expect.arrayContaining(['pipeline: 暂不可用']))
-      // 通用 error 字段拿到 enrichment partial error 摘要（既有契约：partialErrors[0] → error），
-      // 仅 panel/notice 消费，不阻塞 map（OverviewPage.surfaceSettling 只看 mapBootstrap+bootstrap）。
-      expect(finalState.error).toMatch(/pipeline/)
-    })
+          const finalState = useOverviewDataStore.getState()
+          // 关键合同：map 仍可交互（mapBootstrap 已 settle + bootstrap 已写入 + bootstrapError 为 null）。
+          expect(finalState.mapBootstrapLoading).toBe(false)
+          expect(finalState.bootstrapError).toBeNull()
+          expect(finalState.overview?.bootstrap).not.toBeNull()
+          expect(finalState.overview?.bootstrap?.basins).toEqual([basin])
+          // enrichment 完成（即便单点 reject），但 scoped partial error 透出到 panel level。
+          expect(finalState.enrichmentLoading).toBe(false)
+          expect(finalState.overview?.summary.partialErrors).toEqual(expect.arrayContaining([partialErrorEntry]))
+          // 通用 error 字段拿到 enrichment partial error 摘要（既有契约：partialErrors[0] → error），
+          // 仅 panel/notice 消费，不阻塞 map（OverviewPage.surfaceSettling 只看 mapBootstrap+bootstrap）。
+          expect(finalState.error).toMatch(errorPattern)
+        })
+      },
+    )
   })
 })

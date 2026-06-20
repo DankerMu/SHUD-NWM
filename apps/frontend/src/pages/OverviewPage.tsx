@@ -349,11 +349,12 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   })
 
   // 「mapBootstrap 尚未首次落定」单一信号：阶段 1 完成且 overview.bootstrap 已写入即解锁。
-  // 与 enrichment 解耦（spec scenario "Map bootstrap completes before enrichment"）：
-  //   surfaceSettling = mapBootstrapLoading || !overview?.bootstrap
-  // 注意：bootstrap reject 时 mapBootstrapLoading=false / bootstrapError !=null → surfaceSettling=false
-  //   → emptyBasinReason 走 bootstrapError 分支诚实告知失败（而非永远 spinner）。
-  const surfaceSettling = mapBootstrapLoading || !overview?.bootstrap
+  // 与 enrichment 解耦（spec scenario "Map bootstrap completes before enrichment"）。
+  //   surfaceSettling = mapBootstrapLoading || (!overview?.bootstrap && !bootstrapError)
+  // bootstrap reject 时 mapBootstrapLoading=false / bootstrapError !=null / overview.bootstrap=null →
+  //   surfaceSettling=false → emptyBasinReason 走 bootstrapError 分支诚实告知失败（spec scenario
+  //   "Map bootstrap rejection"：renders bootstrap failed state rather than indefinite spinner）。
+  const surfaceSettling = mapBootstrapLoading || (!overview?.bootstrap && !bootstrapError)
   // 有已发布 run 的流域（latestForecastTime != null ⟺ 河段进了流量 MVT）的静态河流须剔除，规避双线；
   // 无 run 的流域（如 heihe）不在 MVT 中，保留其静态河流。
   const meshRiverBasinIds = useMemo(

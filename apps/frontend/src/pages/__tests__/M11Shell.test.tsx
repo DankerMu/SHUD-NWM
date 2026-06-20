@@ -1407,6 +1407,48 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
   })
 
+  // PR #589 round-2 C1：阶段 1 reject（bootstrapError !=null + overview.bootstrap=null）→
+  // surfaceSettling 必须退出（spec scenario "Map bootstrap rejection"：MUST render bootstrap
+  // failed state rather than indefinite spinner）。bootstrapError 必须从 m11-overview-empty 透出。
+  it('surfaces bootstrap error and exits surface settling when bootstrap rejected', () => {
+    window.history.pushState({}, '', '/?warningLevel=major')
+    const query = parseM11QueryState(window.location.search)
+    // bootstrap reject 后 phase 2 final snapshot：bootstrap=null + basins=[]（reject 路径 fetchBasins
+    // 通常仍 reject → settledValue 返回 [] → overviewBasins=[]）。
+    const rejectedSnapshot: OverviewDataSnapshot = {
+      requestScope: matchedOverviewScope(query),
+      bootstrap: null,
+      basins: [],
+      summary: createEmptyOverviewSummary(query),
+      layers: [],
+      aggregationDecision: decideAggregationEndpoint({
+        initialRequestCount: 1,
+        createsPerBasinNPlusOne: false,
+        missingRequiredFields: [],
+      }),
+      basinVersionToBasinId: {},
+    }
+    useOverviewDataStore.setState({
+      overview: rejectedSnapshot,
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+      bootstrapError: 'basins: 暂不可用',
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // 关键合同：bootstrap reject 时 spinner 必须消失（否则永远 spinner = spec 违约）。
+    expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
+    // emptyBasinReason 走 bootstrapError 分支 → 诚实告知失败。
+    const emptyNotice = screen.getByTestId('m11-overview-empty')
+    expect(emptyNotice).toHaveTextContent('basins')
+    expect(emptyNotice).toHaveTextContent('暂不可用')
+  })
+
   // PR 3/7 #582 task 3.5：mapBootstrap settle 后 MVT hit layer 已注册 + 地图可点击；
   // enrichmentLoading=true 不阻塞 surface（spec scenario "Map bootstrap completes before enrichment"
   // 的浏览器层验证：interactiveLayerIds 非空，且 m11-overview-loading 占位不再渲染）。
