@@ -8,7 +8,11 @@
 
 ## Goal
 
-Close #585 with a live, on-node-27 latency receipt showing PR 1/7..PR 5/7 collectively replaced the canonical 21.8 s `/api/v1/layers` cold path with a sub-second cold path. The receipt is the binding oracle for the Epic #579 latency budget; it must come from real node-27 traffic, not local fixtures or CI mocks.
+Close #585 with a live, on-node-27 latency receipt showing PR 1/7..PR 5/7
+collectively replaced the canonical 21.8 s `/api/v1/layers` cold path with a
+sub-second cold path. The receipt is the binding oracle for the Epic #579
+latency budget; it must come from real node-27 traffic, not local fixtures or
+CI mocks.
 
 ## Boundaries (YAGNI)
 
@@ -49,7 +53,11 @@ Close #585 with a live, on-node-27 latency receipt showing PR 1/7..PR 5/7 collec
    - Without PR 5/7, frontend's hardcoded filter would have returned 0 → discharge layer broken end-to-end. With PR 5/7, discharge gets all 142. **Spec-faithful regression boundary.**
 10. **Wrote receipt** `docs/runbooks/receipts/display-bootstrap-decoupling-20260620.md`.
 11. **Wrote bugs.md ledger** entry `BUG-20260620-001`.
-12. **Browser PNG**: no Claude-in-Chrome browser was connected; operator (qingdanker@gmail.com) attested acceptance #2 directly after reviewing the API-side proof (51.9× speedup + 451 ms cold first-paint waterfall). Receipt Section E records the user-attested sign-off + preserves the capture procedure for future replay.
+12. **Browser PNG**: no Claude-in-Chrome browser was connected; operator
+    (`qingdanker@gmail.com`) attested acceptance #2 directly after reviewing
+    the API-side proof (51.9× speedup + 451 ms cold first-paint waterfall).
+    Receipt Section E records the user-attested sign-off + preserves the
+    capture procedure for future replay.
 
 ## Results summary
 
@@ -63,8 +71,12 @@ Close #585 with a live, on-node-27 latency receipt showing PR 1/7..PR 5/7 collec
 ## Risks + caveats
 
 - Cold-cache fidelity: `Python-LRU-cold + Postgres-buffer-warm` (Postgres restart needs sudo). Real production cold-cold is bounded below by 413 ms and above by Postgres warm-up cost on first session after Postgres restart — both within waterfall budget.
-- 413 ms exceeds spec's 200 ms cold floor by ~213 ms — likely Python module import + DB pool init at first request. Mitigation candidates (e.g., uvicorn `--preload`, sqlalchemy `pool_pre_ping=true`) are out of scope for PR 6/7; carried as follow-up.
-- Browser PNG was not captured (no Claude-in-Chrome browser connected); operator attested acceptance #2 directly. Receipt Section E records the user-attested sign-off + preserves the capture procedure for future regression replay. API-side first-paint waterfall (~451 ms cold) is the dominant timing evidence.
+- 413 ms exceeds spec's 200 ms cold floor by ~213 ms — likely Python module import + DB pool init at first request. Mitigation candidates (e.g., uvicorn `--preload`, sqlalchemy `pool_pre_ping=true`) are out of scope for PR 6/7; tracked as follow-up issue #593.
+- Browser PNG was not captured (no Claude-in-Chrome browser connected);
+  operator attested acceptance #2 directly. Receipt Section E records the
+  user-attested sign-off + preserves the capture procedure for future
+  regression replay. API-side first-paint waterfall (~451 ms cold) is the
+  dominant timing evidence.
 
 ## Cross-PR dependencies honored
 

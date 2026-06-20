@@ -2,37 +2,44 @@
 #
 # display-cold-waterfall.sh — cold-cache latency waterfall for NHMS display API
 #
+# Target: node-27 (Linux + bash 5+, pgrep, setsid, /home/nwm/NWM layout,
+# infra/env/display.env present). The --host arg supports remote probing of
+# the API surface but the uvicorn-restart logic is node-27-specific; pass
+# --skip-restart when running off-node and accept that the result is warm.
+#
 # Usage:
-#   scripts/diagnostic/display-cold-waterfall.sh [--host HOST:PORT] [--runs N]
+#   scripts/diagnostic/display-cold-waterfall.sh [--host HOST:PORT] [--runs N] [--skip-restart]
 #
 # Defaults:
 #   --host 127.0.0.1:8080
-#   --runs 3 (median of 3 cold passes per endpoint)
+#   --runs 3 (median of N cold passes per endpoint; supports any N >= 1)
 #
 # Cold-cache strategy:
-#   1. Restart uvicorn (flushes Python-level `cached()` LRU)
-#   2. Wait for /api/v1/health 200
+#   1. Restart uvicorn (flushes Python-level `cached()` LRU; SIGTERM + 5s grace
+#      + SIGKILL fallback, always relaunches when not --skip-restart)
+#   2. Wait for /healthz 200
 #   3. For each endpoint hit ONCE per measurement (no repeats in a single pass)
 #   4. Between passes, restart uvicorn again — every measurement is cold
 #
 # Measures:
-#   - /api/v1/health           (sanity)
-#   - /api/v1/layers           (canonical 21.8s baseline; spec target < 200 ms p95)
+#   - /healthz                      (sanity)
+#   - /api/v1/layers                (canonical 21.8s baseline; spec target < 200 ms p95)
 #   - /api/v1/basins
-#   - /api/v1/runs?source=best (default discharge — should NOT carry flood_product_ready=true post PR 5/7)
+#   - /api/v1/runs?source=best      (default discharge — should NOT carry flood_product_ready=true post PR 5/7)
 #   - /api/v1/models
 #   - /api/v1/queue-depth
 #   - /api/v1/pipeline-status
 #
 # Output:
-#   - Markdown table to stdout (waterfall + per-endpoint cold timing + median + p95)
+#   - Markdown table to stdout (header dynamically sized for $RUNS; per-endpoint
+#     cold timing + median + max; --skip-restart prepends a WARM-mode banner)
 #   - Raw curl-format timings to /tmp/display-cold-waterfall-<timestamp>.tsv
 #
 # Exit codes:
 #   0 success
-#   1 health check never came up
-#   2 uvicorn restart failed
-#   3 missing required tool (curl, jq, awk)
+#   1 health check never came up (uvicorn never bound the port)
+#   2 uvicorn relaunch failed (env file missing OR launcher subshell aborted)
+#   3 missing required tool (curl, jq, awk, sort, pgrep)
 
 set -euo pipefail
 
@@ -47,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --runs)        RUNS="$2"; shift 2 ;;
     --skip-restart) SKIP_RESTART=1; shift ;;
     -h|--help)
-      sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -57,41 +64,76 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ---- tool check ----
-for tool in curl jq awk sort; do
+# Validate RUNS
+if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: --runs must be a positive integer, got: $RUNS" >&2
+  exit 1
+fi
+
+# ---- tool check (pgrep required for restart_uvicorn even though skipped on --skip-restart, for clarity) ----
+REQUIRED_TOOLS=(curl jq awk sort)
+if [[ "$SKIP_RESTART" -eq 0 ]]; then
+  REQUIRED_TOOLS+=(pgrep setsid)
+fi
+for tool in "${REQUIRED_TOOLS[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || { echo "MISSING: $tool" >&2; exit 3; }
 done
 
 BASE="http://${HOST}"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-RAW_OUT="/tmp/display-cold-waterfall-${TS}.tsv"
+RAW_OUT="${RAW_OUT_DIR:-/tmp}/display-cold-waterfall-${TS}.tsv"
 echo -e "endpoint\trun\ttime_namelookup\ttime_connect\ttime_starttransfer\ttime_total\thttp_code\tsize_download" > "$RAW_OUT"
+NWM_ROOT="${NHMS_NWM_ROOT:-/home/nwm/NWM}"
+UVICORN_LOG="${UVICORN_LOG:-/tmp/uvicorn-display.log}"
 
 # ---- helpers ----
+launch_uvicorn() {
+  # node-27-specific launcher: cd, source env, setsid uvicorn, detach.
+  # Returns 0 if the env file existed and the launcher subshell exited 0;
+  # 1 if env file missing (caller decides whether to fail or proceed).
+  if [[ ! -f "${NWM_ROOT}/infra/env/display.env" ]]; then
+    echo "[launch_uvicorn] ERROR: ${NWM_ROOT}/infra/env/display.env not found." >&2
+    echo "[launch_uvicorn] On node-27 this file should exist; on other hosts use --skip-restart." >&2
+    return 1
+  fi
+  (
+    cd "$NWM_ROOT"
+    # shellcheck disable=SC1091
+    set -a; source infra/env/display.env; set +a
+    setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 \
+      >"$UVICORN_LOG" 2>&1 </dev/null &
+    disown
+  )
+  return 0
+}
+
 restart_uvicorn() {
-  # Find current uvicorn PID for our app, kill it, and let the supervisor (parent bash) relaunch.
-  # On node-27 the uvicorn was launched via:
-  #   setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 >/tmp/uvicorn-display.log 2>&1
-  # so we kill the python process and rely on the operator to have relaunched it OR rely on a supervisor.
-  # If --skip-restart is set, this is a no-op (measurements are NOT cold).
+  # Kill any existing uvicorn matching our app, then always relaunch.
+  # SIGTERM -> 5s grace -> SIGKILL fallback. If no existing pid, just launch.
+  # If --skip-restart, no-op (caller knows measurements are NOT cold).
   if [[ "$SKIP_RESTART" -eq 1 ]]; then
     return 0
   fi
   local pid
   pid=$(pgrep -f 'uvicorn apps.api.main:app' | head -1 || true)
   if [[ -n "$pid" ]]; then
-    kill "$pid" 2>/dev/null || true
-    sleep 2
-    # Relaunch via the canonical command (no supervisor on node-27 currently)
-    if [[ -d /home/nwm/NWM ]]; then
-      (
-        cd /home/nwm/NWM
-        # shellcheck disable=SC1091
-        set -a; source infra/env/display.env; set +a
-        setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 \
-          >/tmp/uvicorn-display.log 2>&1 </dev/null &
-      )
+    if ! kill "$pid" 2>/dev/null; then
+      echo "[restart_uvicorn] WARN: kill $pid returned non-zero (pid recycled?); proceeding to relaunch" >&2
     fi
+    local g=0
+    while [[ $g -lt 5 ]]; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1; g=$((g+1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "[restart_uvicorn] SIGTERM after 5s grace did not stop pid $pid — escalating to SIGKILL" >&2
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  if ! launch_uvicorn; then
+    echo "[restart_uvicorn] launch_uvicorn returned non-zero; exit 2" >&2
+    exit 2
   fi
 }
 
@@ -132,8 +174,13 @@ ENDPOINTS=(
 # ---- main ----
 declare -A ROUND_TIMES   # key="endpoint|run" → ttfb_ms
 
+PASS_LABEL="Cold"
+if [[ "$SKIP_RESTART" -eq 1 ]]; then
+  PASS_LABEL="Warm (--skip-restart)"
+fi
+
 for run in $(seq 1 "$RUNS"); do
-  echo "=== Cold pass ${run}/${RUNS} ===" >&2
+  echo "=== ${PASS_LABEL} pass ${run}/${RUNS} ===" >&2
   restart_uvicorn
   if ! wait_for_health; then
     echo "health check timeout on pass ${run}" >&2
@@ -149,14 +196,29 @@ done
 
 # ---- aggregate + markdown output ----
 echo
-echo "## Cold-waterfall results (${RUNS} cold passes)"
+if [[ "$SKIP_RESTART" -eq 1 ]]; then
+  echo "## Waterfall results — WARM (${RUNS} passes, --skip-restart)"
+  echo
+  echo "> **NOT cold-cache.** --skip-restart was passed, so Python LRU + Postgres buffers retain state between passes. Use without --skip-restart for cold measurements."
+else
+  echo "## Cold-waterfall results (${RUNS} cold passes)"
+fi
 echo
 echo "**Target host**: \`${HOST}\`"
 echo "**UTC timestamp**: \`${TS}\`"
 echo "**Raw timings**: \`${RAW_OUT}\`"
 echo
-echo "| Endpoint | TTFB run1 (ms) | TTFB run2 (ms) | TTFB run3 (ms) | Median (ms) | Max (ms) | Spec target |"
-echo "|---|---|---|---|---|---|---|"
+# Dynamic table header sized to $RUNS
+header="| Endpoint "
+sep="|---"
+for run in $(seq 1 "$RUNS"); do
+  header+="| TTFB run${run} (ms) "
+  sep+="|---"
+done
+header+="| Median (ms) | Max (ms) | Spec target |"
+sep+="|---|---|---|"
+echo "$header"
+echo "$sep"
 
 for ep in "${ENDPOINTS[@]}"; do
   vals=()
@@ -164,7 +226,12 @@ for ep in "${ENDPOINTS[@]}"; do
     vals+=("${ROUND_TIMES["${ep}|${run}"]:-0}")
   done
   sorted=$(printf '%s\n' "${vals[@]}" | sort -n)
-  median=$(echo "$sorted" | awk -v r="$RUNS" 'NR==int((r+1)/2){print}')
+  # Median: for odd N, the middle value; for even N, average of two middle values
+  if (( RUNS % 2 == 1 )); then
+    median=$(echo "$sorted" | awk -v r="$RUNS" 'NR==int((r+1)/2){print}')
+  else
+    median=$(echo "$sorted" | awk -v r="$RUNS" 'NR==r/2{a=$1; getline b; printf "%.0f", (a+b)/2}')
+  fi
   max=$(echo "$sorted" | tail -1)
   cells=$(printf '| %s ' "${vals[@]}")
   case "$ep" in

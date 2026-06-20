@@ -478,8 +478,9 @@ code-path improvement, not buffer-cache artifact — both pre- and post-merge
 were measured against the same Postgres buffer state.
 
 Carried follow-ups (recorded in receipt, NOT this bug entry):
-- 413 ms exceeds spec's 200 ms cold floor by ~213 ms; mitigation (uvicorn
-  `--preload`, sqlalchemy pool pre-ping) deferred to a separate issue.
+- 413 ms exceeds spec's 200 ms cold floor by ~213 ms; mitigation tracked
+  in follow-up issue #593 (uvicorn `--preload`, sqlalchemy pool pre-ping,
+  or spec amendment).
 - Browser PNG capture deferred — operator attested acceptance #2 directly
   after reviewing API-side proof (see receipt Section E); capture procedure
   preserved for future regression replay.

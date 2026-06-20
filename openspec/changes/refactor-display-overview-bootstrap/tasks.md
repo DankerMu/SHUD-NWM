@@ -76,13 +76,13 @@
 
 ## 6. node-27 live receipt
 
-- [x] 6.1 新增 `scripts/diagnostic/display-cold-waterfall.sh`（注意目录名是已存在的单数 `diagnostic/`，不新建 `diagnostics/`）：force-refresh 全瀑布 timing 脚本，输出 markdown 表格 + canonical 字段名（与 21.8s 基线 diff 用）
-- [x] 6.2 node-27 实测 cold receipt 写入 `docs/runbooks/receipts/display-bootstrap-decoupling-20260620.md`：
-  - merge 前后 `/api/v1/layers` cold timing 对比表（pre-merge warm 21,430 ms vs post-merge cold median 413 ms = 51.9× speedup；warm steady-state 2–3 ms；spec floor 200 ms cold 由 ~213 ms 差距 carried 为 follow-up）
-  - 完整 force-refresh 瀑布表，每个端点 < 500 ms p95（已满足）
-  - **浏览器 cold first-paint 证据**：API-side first-paint waterfall ~451 ms cold 强 imply < 1 s 满足；操作员（qingdanker@gmail.com）直接 attested 验收 #2；receipt Section E 记录用户签字 + 保留未来 replay 的捕获步骤
-- [x] 6.3 worklog 记录到 `openspec/changes/refactor-display-overview-bootstrap/issue-585-worklog.md`：execution_mode=live_proof
-- [x] 6.4 `docs/bugs.md` ledger 增加 `BUG-20260620-001` 条目：归因 `code-contract`（dead variant + 闸门耦合）+ live receipt 链接
+- [ ] 6.1 新增 `scripts/diagnostic/display-cold-waterfall.sh`（注意目录名是已存在的单数 `diagnostic/`，不新建 `diagnostics/`）：force-refresh 全瀑布 timing 脚本，输出 markdown 表格 + canonical 字段名（与 21.8s 基线 diff 用）
+- [ ] 6.2 node-27 实测 cold receipt 写入 `docs/runbooks/receipts/display-bootstrap-decoupling-<date>.md`：
+  - merge 前后 `/api/v1/layers` cold timing 对比表（baseline = canonical 21.8s；预期 < 200 ms p95，对应 spec scenario「Cold `/api/v1/layers` budget」）
+  - 完整 force-refresh 瀑布表，每个端点 < 500 ms p95
+  - **浏览器 cold first-paint 必需证据**（PNG + 时间戳表）：Network panel TTFB 截图、Performance panel 首个 "click a river segment" interaction 时间戳，证明 `mapBootstrapLoading=false` 到首次河段可点 < 1 s（对应 spec scenario「Cold first-paint interactivity budget」）。screen recording 是 nice-to-have；截图 + 时间戳表是必需
+- [ ] 6.3 worklog 记录到 `worklogs/<date>-display-bootstrap-decoupling.md`：execution_mode=live_proof
+- [ ] 6.4 `docs/bugs.md` ledger 增加条目：归因 `code-contract`（dead variant + 闸门耦合）+ live receipt 链接
 
 ## 7. Docs + archive
 

@@ -13,15 +13,39 @@
 
 ## TL;DR
 
-| Endpoint | Pre-merge warm (real-world witness) | Post-merge COLD median (3 passes) | Speedup | Spec target |
+| Endpoint | Pre-merge warm (real witness) | Post-merge COLD median 3-pass | Speedup (lower bound) | Spec target |
 |---|---|---|---|---|
-| `/api/v1/layers` | **21,430 ms** | **413 ms** | **51.9×** | < 200 ms p95 cold (steady-state) |
+| `/api/v1/layers` | **21,430 ms** | **413 ms** | **≥ 51.9×** [^ratio] | < 200 ms p95 cold (per spec; **partially met**, see [Caveats](#caveats) + issue #593) |
 | `/api/v1/layers` warm steady-state | n/a | **2–3 ms** | n/a | (post-LRU cache hit) |
-| Layer catalog count | **5** (incl. dead `water-level`) | **4** | (dead variant removed) | 4 active layers (discharge / flood-return-period / warning-level / river-network) |
+| Layer catalog count | **5** (incl. dead `water-level`) | **4** | (dead variant removed) | 4 active layers |
 
-The canonical 21.8 s baseline cited in `openspec/changes/refactor-display-overview-bootstrap/design.md` is reproduced live (21,430 ms pre-merge warm probe), and post-merge the same endpoint settles to 413 ms first-hit cold / 2–3 ms warm. The 21 s tail vanished entirely.
+[^ratio]: warm vs cold comparison; cold-vs-cold pre-merge was not measured
+    but is ≥ warm on this code path by construction. See [Caveats](#caveats).
 
-`/api/v1/layers` post-merge cold (413 ms) is above the spec's 200 ms target for the first hit after a cold uvicorn restart, but well within the 500 ms per-endpoint waterfall budget and 1 s first-paint interactivity budget; steady-state warm 2–3 ms is the post-cache regime users experience under normal session continuation. See [Caveats](#caveats) for the cold-cache fidelity discussion.
+The canonical 21.8 s baseline cited in
+`openspec/changes/refactor-display-overview-bootstrap/design.md` is reproduced
+live (21,430 ms pre-merge warm probe), and post-merge the same endpoint
+settles to 413 ms first-hit cold / 2–3 ms warm. The 21 s tail vanished
+entirely.
+
+> **Note on the headline ratio**: the TL;DR table compares pre-merge **warm**
+> (21,430 ms) against post-merge **cold** (413 ms). This is asymmetric on
+> purpose — we never measured pre-merge cold (would require redeploying old
+> code to production for benchmarking). Pre-merge cold ≥ pre-merge warm by
+> construction on this code path (SkipScan + sequential aggregation), so the
+> 51.9× ratio is a **lower bound** on the cold-vs-cold speedup. The
+> apples-to-apples warm comparison is **21,430 ms → 2–3 ms ≈ 7,000×**, which
+> is even more dramatic but also includes the post-merge LRU effect.
+
+`/api/v1/layers` post-merge cold (413 ms median, 418 ms p95-of-3) is above
+the spec's 200 ms p95 cold target by ~213 ms for the first hit after a cold
+uvicorn restart, but well within the 500 ms per-endpoint waterfall budget and
+1 s first-paint interactivity budget; steady-state warm 2–3 ms is the
+post-cache regime users experience under normal session continuation. The 213
+ms cold-floor gap is filed as follow-up issue **#593** (`uvicorn --preload` /
+sqlalchemy pool pre-init investigation); spec amendment vs code mitigation
+decision is the issue's scope. See [Caveats](#caveats) for the cold-cache
+fidelity discussion.
 
 ---
 
@@ -52,7 +76,10 @@ This was NOT a cold-cache measurement — it was a **warm hit** on a uvicorn pro
 
 ## Section B — Post-merge cold waterfall (3 passes)
 
-After ff-pull to `122ea95`, frontend rebuilt (`corepack pnpm install --frozen-lockfile && corepack pnpm run check:api-types && corepack pnpm run build`, 2530 modules → `dist/` regenerated at `Jun 20 23:34 CST`), uvicorn restarted via the canonical relaunch pattern (`setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080`).
+After ff-pull to `122ea95`, frontend rebuilt
+(`corepack pnpm install --frozen-lockfile && corepack pnpm run check:api-types && corepack pnpm run build`,
+2530 modules → `dist/` regenerated at `Jun 20 23:34 CST`), uvicorn restarted
+via the canonical relaunch pattern (`setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080`).
 
 `scripts/diagnostic/display-cold-waterfall.sh --runs 3` (restarts uvicorn between passes; each pass is cold-Python-LRU). Source: [`scripts/diagnostic/display-cold-waterfall.sh`](../../../scripts/diagnostic/display-cold-waterfall.sh).
 
@@ -131,9 +158,17 @@ $ curl -s 'http://127.0.0.1:8080/api/v1/runs?source=GFS' \
 ]
 ```
 
-**Spec proof**: GFS discharge has 142 runs in DB; ALL are `frequency_done: unavailable` (flood-incomplete). Without PR 5/7's discharge decoupling, the frontend's hardcoded `flood_product_ready=true` filter would have returned **0 runs** → discharge layer would have been broken end-to-end → users would see "no discharge data available". With PR 5/7, the discharge layer correctly omits the filter, gets all 142 runs, and renders.
+**Spec proof**: GFS discharge has 142 runs in DB; ALL are
+`frequency_done: unavailable` (flood-incomplete). Without PR 5/7's discharge
+decoupling, the frontend's hardcoded `flood_product_ready=true` filter would
+have returned **0 runs** → discharge layer would have been broken
+end-to-end → users would see "no discharge data available". With PR 5/7, the
+discharge layer correctly omits the filter, gets all 142 runs, and renders.
 
-The timing differential at warm steady-state is small (both ~3 ms warm) because the relevant SQL aggregation is buffer-cached on the node-27 Postgres after 5 days of uptime. The **functional** correctness is the spec-faithful evidence here, not just latency.
+The timing differential at warm steady-state is small (both ~3 ms warm)
+because the relevant SQL aggregation is buffer-cached on the node-27 Postgres
+after 5 days of uptime. The **functional** correctness is the spec-faithful
+evidence here, not just latency.
 
 ---
 
@@ -141,7 +176,24 @@ The timing differential at warm steady-state is small (both ~3 ms warm) because 
 
 **Status (2026-06-20)**: **User-attested acceptance — operator signed off acceptance #2 directly.**
 
-The browser PNG + timestamp table was not captured during this receipt run (no Claude-in-Chrome browser was connected). The operator on this session (qingdanker@gmail.com) verified the browser first-paint behavior interactively and attested that the `mapBootstrapLoading=false` → first river segment click latency is met. The API-side cold first-paint waterfall (~451 ms cold for the bootstrap stage; warm steady-state 2–3 ms) is the dominant evidence, and the operator's interactive verification is the user-level oracle for the visual budget.
+The browser PNG + timestamp table was not captured during this receipt run
+(no Claude-in-Chrome browser was connected). The operator on this session
+(`qingdanker@gmail.com`) verified the browser first-paint behavior
+interactively and attested that the `mapBootstrapLoading=false` → first river
+segment click latency is met. The API-side cold first-paint waterfall
+(~451 ms cold for the bootstrap stage; warm steady-state 2–3 ms) is the
+dominant evidence, and the operator's interactive verification is the
+user-level oracle for the visual budget.
+
+**Caveat**: this is a user-override of the issue #585 acceptance criterion #2
+("PNG + timestamp table"), not equivalent automated evidence. The operator
+override is explicit (acknowledged in the PR body's Agent Review block); it
+does NOT establish "operator-attested" as a precedent — future receipts SHOULD
+capture the PNG via the procedure below or via Claude-in-Chrome MCP. This
+substitution is allowed for PR 6/7 because the API-side proof dominates the
+latency story (51.9× speedup is verifiable end-to-end without browser
+instrumentation) and the operator independently confirmed the visual budget
+on real hardware.
 
 The capture procedure below is preserved for future receipts (regression replay / next post-deploy verification).
 
@@ -150,9 +202,11 @@ The capture procedure below is preserved for future receipts (regression replay 
 **Procedure to capture (manual or automated)**:
 
 1. From local Mac (per `CLAUDE.md` tunnel mapping `8080 ↔ 210.77.77.27:8080`):
+
    ```bash
    ssh -L 8080:127.0.0.1:8080 -p 32099 nwm@210.77.77.27
    ```
+
 2. In Chrome (or any browser with DevTools):
    - Open DevTools → Network panel → check `Disable cache` → check `Preserve log`
    - Navigate to `http://localhost:8080/`
@@ -177,12 +231,32 @@ The capture procedure below is preserved for future receipts (regression replay 
 
 ## Caveats
 
-- **Cold-cache fidelity**: The diagnostic script restarts uvicorn between passes to flush the Python-level `cached()` LRU. PostgreSQL buffer cache is NOT flushed (requires Postgres restart with `sudo`, out of scope for this receipt). So the "cold" measurement is `Python-LRU-cold + Postgres-buffer-warm`. This is the realistic post-deploy regime (first request after `pnpm build` + uvicorn restart, Postgres uptime preserved). The 21.43 s pre-merge warm baseline was measured against the SAME Postgres buffer state, so the comparison is valid: the 51.9× speedup is real code-path improvement, not artifact of buffer cache.
-- **Spec target 200 ms cold p95 floor**: 413 ms median exceeds 200 ms. Two interpretations:
-  1. Spec's 200 ms is for steady-state cold (after first-load priming), in which case warm 2–3 ms satisfies it trivially.
-  2. Spec's 200 ms is for true cold-cold including first hit, in which case PR 6/7 finds a residual 213 ms gap. Most likely cause: Python module import overhead at first request (FastAPI router init + DB pool warm-up). Mitigation candidates (not in PR 6/7 scope): `--preload` style worker warming, sqlalchemy pool pre-init. **Carried as follow-up** for PR 7/7 archive discussion or a successor issue.
-- **No new measurement of pre-merge cold (post-restart) latency was attempted**. Only the warm pre-merge probe captured the 21.43 s figure. Restarting uvicorn into pre-merge code (the old SHA-`ec9c46a` checkout) is not done because it would mean re-deploying old code to running production purely for a benchmark — risk-cost > evidence value. The warm probe at 21.43 s is sufficient: warm < cold on the same code path, so pre-merge cold ≥ 21.43 s by construction.
-- **Browser PNG section is placeholder** — see Section E.
+- **Cold-cache fidelity**: The diagnostic script restarts uvicorn between
+  passes to flush the Python-level `cached()` LRU. PostgreSQL buffer cache is
+  NOT flushed (requires Postgres restart with `sudo`, out of scope for this
+  receipt). So the "cold" measurement is
+  `Python-LRU-cold + Postgres-buffer-warm`. This is the realistic post-deploy
+  regime (first request after `pnpm build` + uvicorn restart, Postgres
+  uptime preserved). The 21.43 s pre-merge warm baseline was measured against
+  the SAME Postgres buffer state, so the comparison is valid: the 51.9×
+  speedup is real code-path improvement, not artifact of buffer cache.
+- **Spec target 200 ms cold p95 floor**: 413 ms median (418 ms p95-of-3)
+  exceeds 200 ms. Most likely cause: Python module import overhead at first
+  request (FastAPI router init + DB pool warm-up). Mitigation candidates (not
+  in PR 6/7 scope): `--preload` style worker warming, sqlalchemy pool
+  pre-init. **Tracked as follow-up issue #593**; spec amendment vs code
+  mitigation decision is the issue's scope. Spec scenario "Cold
+  `/api/v1/layers` budget" is currently **partially met** (within waterfall +
+  interactivity budgets, exceeds standalone cold p95 by ~213 ms).
+- **No new measurement of pre-merge cold (post-restart) latency was
+  attempted**. Only the warm pre-merge probe captured the 21.43 s figure.
+  Restarting uvicorn into pre-merge code (the old SHA-`ec9c46a` checkout) is
+  not done because it would mean re-deploying old code to running production
+  purely for a benchmark — risk-cost > evidence value. The warm probe at
+  21.43 s is sufficient: warm < cold on the same code path, so pre-merge cold
+  ≥ 21.43 s by construction.
+- **Browser PNG is user-attested** — see Section E for the explicit operator
+  override + future capture procedure.
 
 ---
 
