@@ -54,6 +54,7 @@
 - [ ] 1.13p unit test: limit=10 截断总 tuple count + `metadata.truncated=true` + 排序保持
 - [ ] 1.13q unit test: N=53 → 5×53=265 默认 tuples (parametric 测 N=1, N=53, N=100 三档)
 - [ ] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
+- [ ] 1.13s unit test: SQL 查询统计 — 用 spy cursor 注入 `FakeStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 只命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
 - [ ] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
 
 ## 2. Series route 切换 — `apps/api/routes/data_sources.py`
@@ -64,7 +65,7 @@
 - [ ] 2.4 保留 query params 解析（不动 signature）
 - [ ] 2.5 `forcing_version_id` query param 在新路径下：与 cycle_time 同时传时静默忽略；单独传（无 cycle_time/model_id/source_id）触发 `MISSING_REQUIRED_FILTER` 422
 - [ ] 2.6 旧 `ForecastStoreError(FORCING_VERSION_NOT_FINALIZED)` / `FORCING_VERSION_NOT_FOUND` 的 try-except 块在该路由上不再出现（reader 不会 raise 这两个）
-- [ ] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series`
+- [ ] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series` + 显式 case `forcing_version_id=X` 单独传（无 `cycle_time`/`model_id`/`source_id`）→ 422 `MISSING_REQUIRED_FILTER` + `forcing_version_id=X` 与 `cycle_time` 同时传 → 200（静默忽略）
 
 ## 3. Startup env check + boundary fix — `apps/api/runtime_mode.py` + `apps/api/main.py`
 
@@ -112,7 +113,7 @@
 - [ ] 6.9 sub-test 7: cycle_time `+08:00` 输入 → 与 `Z` 输入产生相同响应
 - [ ] 6.10 sub-test 8: variables=Press → 200 + `data.series=[]`
 - [ ] 6.11 sub-test 9: variables=PRCP,Press → 200 + 只含 PRCP series
-- [ ] 6.12 sub-test 10: mock cursor 断言：在 `met.met_station` 之外**零** SQL 查询 against `met.forcing_version` / `met.forcing_station_timeseries`（用 psycopg `cursor.execute` 调用统计）
+- [ ] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（mock cursor + FakeStationLookup 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
 - [ ] 6.13 sub-test 11: 4 个 currently-409 cases (heihe×IFS, heihe×gfs, qhh×IFS, qhh×gfs at 2026-06-20T12:00:00Z) 全部 200
 - [ ] 6.14 sub-test 12: 响应 byte-shape 与 §0.10 baseline fixture 对比（除 request_id 和真实数值字段外，结构 + 字段类型 + 排序一致）
 - [ ] 6.15 sub-test 13: read-only side-effect 验证：连续 3 个相同请求后 `OBJECT_STORE_ROOT/forcing/...` mtime 不变（采样几个文件）
@@ -150,7 +151,8 @@
 
 ## 10. Closing actions
 
+- [ ] 10.0 重跑 `openspec validate object-store-station-series-read --strict --no-interactive` PASS（archive guard：防止 PR-C 文档/follow-up 编辑后破坏 spec 结构）
 - [ ] 10.1 `openspec archive object-store-station-series-read`
 - [ ] 10.2 3 条 `docs/review-loop-log.jsonl` append（每 PR 一行）
 - [ ] 10.3 关闭 Epic + 3 子 issue
-- [ ] 10.4 node-27 服务重启刷连接池：`scripts/ops/start-display-api.sh`；验证 uvicorn pid 变化 + `/health` 返回 200
+- [ ] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；如 PR-B receipt 在最近 24h 内已记录 uvicorn pid 变化，PR-C 不必再次重启服务，只做 health probe）
