@@ -1,0 +1,2074 @@
+{
+  "request_id": "<sanitized-request-id>",
+  "status": "ok",
+  "data": {
+    "station_id": "heihe_forc_001",
+    "station": {
+      "station_id": "heihe_forc_001",
+      "basin_version_id": "basins_heihe_vbasins",
+      "station_name": "HEIHE forcing station 001",
+      "longitude": 100.75,
+      "latitude": 37.650000555388,
+      "elevation_m": 0.0,
+      "station_role": "forcing_grid",
+      "active_flag": true,
+      "properties_json": {
+        "x": 110386.42323847,
+        "y": 3911708.47393155,
+        "z": -9999.0,
+        "seed": "qhh_production_bootstrap",
+        "source": "qhh.tsd.forc",
+        "basin_id": "basins_heihe",
+        "model_id": "basins_heihe_shud",
+        "original_id": "1",
+        "source_file": "/volume/data/nwm/Basins/heihe/input/heihe/heihe.tsd.forc",
+        "project_name": "heihe",
+        "source_sha256": "1313f38bc1b52120c1f1c5f638611e4f3b177fd1689a1b5e6acd538545b294c2",
+        "basin_version_id": "basins_heihe_vbasins",
+        "forcing_filename": "X100.75Y37.65.csv",
+        "elevation_metadata": {
+          "raw_z": -9999.0,
+          "source": "qhh.tsd.forc",
+          "normalized_missing_to_zero": true
+        },
+        "shud_forcing_index": 1,
+        "forcing_source_identity": "heihe.tsd.forc:1:X100.75Y37.65.csv"
+      },
+      "name": "HEIHE forcing station 001",
+      "elevation": 0.0
+    },
+    "forcing_version_id": "forc_ifs_2026060100_basins_heihe_shud",
+    "model_id": "basins_heihe_shud",
+    "source_id": "IFS",
+    "cycle_time": "2026-06-01T00:00:00Z",
+    "valid_time_start": "2026-06-01T00:00:00Z",
+    "valid_time_end": "2026-06-08T00:00:00Z",
+    "limit": 500,
+    "requested_from": null,
+    "requested_to": null,
+    "series": [
+      {
+        "variable": "PRCP",
+        "unit": "mm/day",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 0.010680311894119748,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 0.15683653848061552,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 0.0033549925308638934,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 0.09947902010870438,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 1.0998970990882662,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 2.7691757647028212,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 1.1083919537379716,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 0.06897580991478391,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 0.1727322137412629,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 2.4329328080278767,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 10.7924719406762,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 2.8553882582449672,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 0.4522412516230897,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 7.406761207286707,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 13.942636987237945,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 3.260561201541858,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 0.021360623788239497,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 2.3954585489512716,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 19.406156486581214,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 3.473143700398684,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 0.03296454740003272,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 0.034780593911695065,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 6.041067960271063,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 6.664516723449073,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 0.11720510981209367,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 0.3378775960886515,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 0.3088546396588516,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 0.09732473978797476,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      },
+      {
+        "variable": "TEMP",
+        "unit": "degC",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": -0.05237415299684656,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 6.9547559837735875,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 10.931411309381575,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 10.781421389735055,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 7.203733010709661,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 2.474230698194506,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 1.8684748564542042,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 1.2605618355861157,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 4.5127042558522525,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 7.025441587644972,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 5.770787884558838,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 6.187051666177319,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 4.029051821699538,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 0.9514626310833131,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": -1.213472792443825,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": -2.1096071596508645,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 0.738418494633438,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 8.488210139868007,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 11.274354883302731,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 6.956865596060764,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 5.469067371800423,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 1.5562571635243838,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 0.35090826697433997,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": -0.565770941022381,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 3.9401422523725635,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 9.913632778335296,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 9.819706017967697,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 8.425495584998549,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 7.22006785344668,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 2.9685867546254117,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 1.3795991087218802,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 0.3881870822035981,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 4.757230992478066,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 10.580893628700421,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 12.509907384894964,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 7.3794449039933605,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 7.3444050107264065,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 3.7473517789583064,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 2.3584329069785523,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 1.5935964191069902,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 5.437987371039001,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 11.318444821754309,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 11.585378726498655,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 11.220973799127872,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 7.3181832487469185,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 2.467407449578073,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 1.912159628260813,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 0.6311225604935065,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 4.248257737831757,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 12.214347448095616,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 8.718195159673115,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 4.073123090716329,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 4.917028820054662,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      },
+      {
+        "variable": "RH",
+        "unit": "0-1",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": 0.8092934331101831,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 0.5029562698436135,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 0.30033233660479913,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 0.3443355516180709,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 0.5969637546208986,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 0.40464547231808007,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 0.35104145514992025,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 0.37710199899146213,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 0.3982126927614616,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 0.3150698169145872,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 0.453846570573568,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 0.5376288563637188,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 0.6852271991740688,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 0.8917017439313014,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": 0.9299496181163649,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": 0.926062149480555,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 0.885873362172777,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 0.44868581658523027,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 0.39817103167452605,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 0.5934276155025587,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 0.6581975799405688,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 0.7847325977788976,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 0.7486082817068216,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": 0.759442250901601,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 0.6787584809047353,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 0.49549279585088823,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 0.5177286213180307,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 0.5902168747078885,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 0.4954822046941305,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 0.5572199009165726,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 0.5749204471539119,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 0.6037913016700434,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 0.5843906507760801,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 0.4692383675517575,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 0.4466632403823272,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 0.7323339467137718,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 0.6860037568044866,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 0.7178230985685221,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 0.7159310481889007,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 0.759571703888008,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 0.6924216883492165,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 0.5426504241239367,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 0.5559668407220765,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 0.4689162912831783,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 0.45382749561545876,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 0.6618600524737697,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 0.7138471232731596,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 0.7621175473497387,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 0.6087476055717161,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 0.43060892739618317,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 0.48766122924062805,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 0.7980569998668865,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 0.7587366011669433,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      },
+      {
+        "variable": "wind",
+        "unit": "m/s",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": 0.7899647540004564,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 0.8021629600913901,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 1.5893401646316947,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 1.604626677833794,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 0.8298096753721015,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 0.9902081457106341,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 0.8870533276117873,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 0.6160150422726366,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 0.573605722875669,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 4.0765147577873675,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 0.1736567527811127,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 1.1600835791580848,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 1.4252779941288853,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 0.5836071444293657,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": 0.640969500923884,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": 0.5006722227748825,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 1.0434878761012356,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 3.971947437241086,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 3.782258805462545,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 1.7752815903267427,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 1.1925238084613736,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 0.61422566240015,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 0.2691342231784444,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": 0.2785525629547015,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 0.695952518289921,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 2.7539352710521174,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 1.9403121708515758,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 4.454753230798471,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 2.5873029670142014,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 1.1400955543933415,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 0.2072389975145434,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 0.02387752902779637,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 0.42480531601875293,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 1.6173757889327594,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 2.3493201436540194,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 1.9774188172864757,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 0.5143778671664063,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 0.22758705584515004,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 0.7042813237593887,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 0.12168273776949415,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 0.10152317116308876,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 0.3116515785198039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 2.5735544807966964,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 4.442635090397155,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 4.2946150656921604,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 0.9879865178616647,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 0.7270508678631667,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 0.7704377898163043,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 1.4849324850131487,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 2.0692306456267864,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 3.314254559091977,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 1.050430080518861,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 0.7788258697105368,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      },
+      {
+        "variable": "Rn",
+        "unit": "W/m2",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 474.9102494277879,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 860.2957303375002,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 622.638925464634,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 226.46665149932792,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 2.7174029441943435,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 52.24302759380792,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 273.0090682675337,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 413.2613128949753,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 352.680580423003,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 131.9606279127029,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 2.23572829724648,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 59.995432462841066,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 515.5641491674105,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 837.7838688240614,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 600.3533106858416,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 234.8095323711478,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 3.034074074074074,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 82.73941805011704,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 547.3420469762252,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 766.0640414093942,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 557.7077333294019,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 224.6123777987119,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 3.1212864199865575,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 82.88889848273232,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 549.4645895118706,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 773.4241604839303,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 535.9617930003737,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 223.04879245045214,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 3.4133333333333336,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 71.57732246274902,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 533.5638453966565,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 740.6939028053938,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 556.2690274642014,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 225.41737224761937,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 3.4056862248230035,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 0.0,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 0.0006593063738878903,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 80.78587480215955,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 674.7828680367827,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 488.77655675496715,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 1.5947835685846883,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 34.436761630229604,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      },
+      {
+        "variable": "Press",
+        "unit": "Pa",
+        "native_resolution": "3h",
+        "source_id": "IFS",
+        "cycle_time": "2026-06-01T00:00:00Z",
+        "points": [
+          {
+            "valid_time": "2026-06-01T00:00:00Z",
+            "value": 64783.84571956441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T03:00:00Z",
+            "value": 64764.908219564415,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T06:00:00Z",
+            "value": 64662.35236224038,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T09:00:00Z",
+            "value": 64574.67140489106,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T12:00:00Z",
+            "value": 64596.29303520206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T15:00:00Z",
+            "value": 64694.17658099039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T18:00:00Z",
+            "value": 64635.73444145206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-01T21:00:00Z",
+            "value": 64584.02350395206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T00:00:00Z",
+            "value": 64604.33126438843,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T03:00:00Z",
+            "value": 64622.534389388435,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T06:00:00Z",
+            "value": 64674.109441452056,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T09:00:00Z",
+            "value": 64581.91412895206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T12:00:00Z",
+            "value": 64595.98634456441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T15:00:00Z",
+            "value": 64650.23908099039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T18:00:00Z",
+            "value": 64586.16686537804,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-02T21:00:00Z",
+            "value": 64490.494157064415,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T00:00:00Z",
+            "value": 64515.787959128036,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T03:00:00Z",
+            "value": 64512.10583195469,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T06:00:00Z",
+            "value": 64421.65114035274,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T09:00:00Z",
+            "value": 64427.93048724039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T12:00:00Z",
+            "value": 64445.44654877608,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T15:00:00Z",
+            "value": 64534.12506645206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T18:00:00Z",
+            "value": 64430.77814349039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-03T21:00:00Z",
+            "value": 64327.84962581441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T00:00:00Z",
+            "value": 64340.60860813843,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T03:00:00Z",
+            "value": 64355.4668133144,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T06:00:00Z",
+            "value": 64332.90481011766,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T09:00:00Z",
+            "value": 64319.00787895206,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T12:00:00Z",
+            "value": 64380.904313314415,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T15:00:00Z",
+            "value": 64453.425014388435,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T18:00:00Z",
+            "value": 64409.31954563843,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-04T21:00:00Z",
+            "value": 64357.046108138435,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T00:00:00Z",
+            "value": 64377.93946956441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T03:00:00Z",
+            "value": 64406.75280287804,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T06:00:00Z",
+            "value": 64321.18903302871,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T09:00:00Z",
+            "value": 64307.65431331441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T12:00:00Z",
+            "value": 64300.43746642675,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T15:00:00Z",
+            "value": 64333.17501438843,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T18:00:00Z",
+            "value": 64300.03668927871,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-05T21:00:00Z",
+            "value": 64219.00397270207,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T00:00:00Z",
+            "value": 64251.87579974039,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T03:00:00Z",
+            "value": 64265.54303520207,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T06:00:00Z",
+            "value": 64243.702694648826,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T09:00:00Z",
+            "value": 64266.55983002608,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T12:00:00Z",
+            "value": 64385.03639252609,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T15:00:00Z",
+            "value": 64513.63404877608,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T18:00:00Z",
+            "value": 64468.95943735012,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-06T21:00:00Z",
+            "value": 64461.78248627609,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T00:00:00Z",
+            "value": 64553.8774061001,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T06:00:00Z",
+            "value": 64520.29884456441,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T12:00:00Z",
+            "value": 64496.23678110011,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-07T18:00:00Z",
+            "value": 64552.268764388435,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          },
+          {
+            "valid_time": "2026-06-08T00:00:00Z",
+            "value": 64508.52193735011,
+            "quality_flag": "ok",
+            "source_id": "IFS"
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "limit": 500,
+          "returned_points": 53,
+          "requested_from": null,
+          "requested_to": null,
+          "returned_from": "2026-06-01T00:00:00Z",
+          "returned_to": "2026-06-08T00:00:00Z",
+          "truncated": false
+        }
+      }
+    ]
+  }
+}

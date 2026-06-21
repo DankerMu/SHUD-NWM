@@ -1,6 +1,6 @@
 ## 0. Pre-implementation introspection (HARD GATE — must commit findings to `design.md §Introspection Results` or a new `introspection-findings.md` before §1 opens)
 
-- [ ] 0.1 OQ1: SSH node-27, scan IFS + gfs × heihe + qhh × 20 cycles × 抽 5 shud/CSV，确认 header `nrow ncol start_date end_date` 格式跨 cycle 一致；记 row count 范围（实测 53）
+- [ ] 0.1 OQ1: SSH node-27, scan IFS + gfs × heihe + qhh × available cycles × 抽 5 shud/CSV，确认 header `nrow ncol start_date end_date` 格式跨 cycle 一致；记 row count 范围（§0 实测 IFS=53、GFS=56）
 - [ ] 0.2 OQ2: 列举 `/home/ghdc/nwm/object-store/forcing/{ifs,gfs}/` 下所有目录名，确认全是 `YYYYMMDDHH` 10 位格式
 - [ ] 0.3 OQ3: 确认 `met_station.basin_version_id` 取值集合（heihe + qhh）与 disk 目录名 100% 对应
 - [ ] 0.4 OQ4: confirm OBJECT_STORE_ROOT 只读权限即可（reader 不写）；不要求 write
@@ -52,7 +52,7 @@
 - [ ] 1.13n unit test: from/to filter inclusive 两端
 - [ ] 1.13o unit test: from > to → 200 + `data.series=[]`
 - [ ] 1.13p unit test: limit=10 截断总 tuple count + `metadata.truncated=true` + 排序保持
-- [ ] 1.13q unit test: N=53 → 5×53=265 默认 tuples (parametric 测 N=1, N=53, N=100 三档)
+- [ ] 1.13q unit test: 默认 tuples = 5×N，参数化覆盖 N=1、N=53 (IFS shape)、N=56 (GFS shape)、N=100
 - [ ] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
 - [ ] 1.13s unit test: SQL 查询统计 — 用 spy connection/cursor 驱动 `PsycopgStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 恰好 1 次命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
 - [ ] 1.13t unit test: side-effect-free reads — 用 tmp_path CSV 连续调用 reader 3 次，断言 response shape 稳定、CSV mtime 不变，并通过 monkeypatch/spy 证明 reader 不调用 `mkdir` / 写模式 `open(..., "w")`

@@ -92,8 +92,8 @@ The reader SHALL parse the per-station shud CSV with the documented two-row head
 
 #### Scenario: declared nrow mismatch raises STATION_FORCING_FILE_MALFORMED
 
-- **WHEN** the CSV header declares `nrow=53`
-- **AND** the data section contains fewer or more than 53 data rows
+- **WHEN** the CSV header declares `nrow=N`
+- **AND** the data section contains fewer or more than N data rows
 - **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
 - **AND** `details.parse_reason` SHALL identify the row-count mismatch
 
