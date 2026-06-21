@@ -2299,7 +2299,13 @@ def _default_layer_catalog(
         )
     layers = []
     for layer_id, name, layer_type, variables in _PUBLIC_LAYER_DEFINITIONS:
-        national_discharge = national and layer_id == "discharge"
+        # spec invariant (overview-data-contracts: Default discharge tile URL is national across all
+        # /api/v1/layers callers): discharge layer is always national, regardless of whether the caller
+        # passed run_id. Without this, frontend enrichment fetchLayers(latestRun.run_id) collapses the
+        # discharge tile URL to single-basin /api/v1/tiles/hydro/{run_id}/... and basins other than
+        # latestRun's get no tile at all (root cause of issue #601 / heihe-invisible regression).
+        # Flood-return-period/warning-level continue to honor the caller's run_id via the elif below.
+        national_discharge = layer_id == "discharge"
         if national_discharge:
             # No run_id: discharge becomes a national overview (union across every
             # basin's latest frequency-ready run), with a run-less tile template.
