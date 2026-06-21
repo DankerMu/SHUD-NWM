@@ -753,12 +753,33 @@ def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources)
                 ids["basin_version_id"],
             ),
         )
-    mesh_version_present = _fetch_optional(
+    mesh_version_existing = _fetch_optional(
         cursor,
-        "SELECT 1 AS present FROM core.mesh_version WHERE mesh_version_id = %s",
+        """
+        SELECT properties_json
+        FROM core.mesh_version
+        WHERE mesh_version_id = %s
+        """,
         (ids["mesh_version_id"],),
     )
-    if mesh_version_present is not None:
+    if mesh_version_existing is not None:
+        existing_mesh_checksum = _json_dict(mesh_version_existing.get("properties_json")).get(
+            "package_checksum"
+        )
+        new_package_checksum = sources.manifest.get("package_checksum")
+        if (
+            existing_mesh_checksum is not None
+            and new_package_checksum is not None
+            and existing_mesh_checksum != new_package_checksum
+        ):
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+                "mesh_version.properties_json.package_checksum drifted from incoming manifest "
+                "package_checksum without a corresponding mesh_version_id change; refusing to "
+                "silently overwrite (use a new package_version to legitimately re-ingest).",
+                model_id=ids["model_id"],
+                details={"resource": "mesh_version"},
+            )
         mesh_uri = _mesh_uri(sources)
         mesh_checksum = _source_checksum(
             sources, f"{sources.model['shud_input_name']}.sp.mesh"
@@ -787,12 +808,33 @@ def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources)
                 ids["mesh_version_id"],
             ),
         )
-    model_instance_present = _fetch_optional(
+    model_instance_existing = _fetch_optional(
         cursor,
-        "SELECT 1 AS present FROM core.model_instance WHERE model_id = %s",
+        """
+        SELECT resource_profile
+        FROM core.model_instance
+        WHERE model_id = %s
+        """,
         (ids["model_id"],),
     )
-    if model_instance_present is not None:
+    if model_instance_existing is not None:
+        existing_model_checksum = _json_dict(model_instance_existing.get("resource_profile")).get(
+            "package_checksum"
+        )
+        new_package_checksum = sources.manifest.get("package_checksum")
+        if (
+            existing_model_checksum is not None
+            and new_package_checksum is not None
+            and existing_model_checksum != new_package_checksum
+        ):
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+                "model_instance.resource_profile.package_checksum drifted from incoming manifest "
+                "package_checksum without a corresponding model_id change; refusing to silently "
+                "overwrite (use a new package_version to legitimately re-ingest).",
+                model_id=ids["model_id"],
+                details={"resource": "model_instance"},
+            )
         cursor.execute(
             """
             UPDATE core.model_instance
