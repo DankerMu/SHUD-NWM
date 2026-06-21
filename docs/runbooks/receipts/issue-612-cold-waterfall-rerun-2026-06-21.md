@@ -110,3 +110,12 @@ different paths.
   built-in default for non-`/api/v1/layers` endpoints; it is not derived from
   a published spec and should be read as "diagnostic sanity threshold," not
   a hard contract.
+- **Wrapper pre-warm**: `scripts/ops/start-display-api.sh` runs its own
+  bind-wait against `/health` and a smoke check against `/api/v1/models?limit=1`
+  before exiting, so those two endpoints in the measurement loop are
+  post-pool-warm / post-route-cached, not strictly first-hit. The other 5
+  endpoints (including the spec-bound `/api/v1/layers`) ARE fully cold
+  first-hit per pass. For `/health` (constant-dict return) the cold/warm
+  distinction is moot; for `/api/v1/models` (no limit) the query-string
+  differs from the wrapper's `?limit=1` so LRU cache key likely does not hit
+  — values are mostly cold, not strictly so.
