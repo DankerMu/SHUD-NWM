@@ -221,16 +221,22 @@ The reader SHALL return HTTP 404 `STATION_FORCING_FILE_NOT_FOUND` whenever the r
 
 ### Requirement: OBJECT_STORE_ROOT env required at startup, role boundary updated
 
-The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing or does not resolve to an existing readable directory. The display role boundary SHALL be updated to remove `OBJECT_STORE_ROOT` from the forbidden compute-path env list, so that this env can be legitimately set on display.env.
+The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing or does not resolve to an existing readable directory. Any role that sets `OBJECT_STORE_ROOT` SHALL validate that it resolves to an existing readable directory. The default local/dev module import path SHALL remain compatible when `OBJECT_STORE_ROOT` is absent. The display role boundary SHALL be updated to remove `OBJECT_STORE_ROOT` from the forbidden compute-path env list, so that this env can be legitimately set on display.env.
 
 #### Scenario: missing env var fails startup
 
 - **WHEN** the display API process starts without `OBJECT_STORE_ROOT` env var set
 - **THEN** `load_runtime_config()` SHALL raise `RuntimeModeError` with message containing `OBJECT_STORE_ROOT env var is required`; the process SHALL exit non-zero before binding the HTTP port
 
+#### Scenario: default dev app import remains compatible without OBJECT_STORE_ROOT
+
+- **WHEN** `apps.api.main` is imported in the default local/dev environment without `OBJECT_STORE_ROOT`
+- **THEN** the module-level `app = create_app()` SHALL initialize successfully
+- **AND** `RuntimeConfig.object_store_root` SHALL be `None`
+
 #### Scenario: env points to non-existent directory fails startup
 
-- **WHEN** `OBJECT_STORE_ROOT=/no/such/path` and `/no/such/path` does not exist
+- **WHEN** any API role starts with `OBJECT_STORE_ROOT=/no/such/path` and `/no/such/path` does not exist
 - **THEN** `load_runtime_config()` SHALL raise `RuntimeModeError` with message containing `is not a readable directory`
 
 #### Scenario: env points to existing readable directory starts cleanly

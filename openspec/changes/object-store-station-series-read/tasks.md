@@ -79,21 +79,24 @@
 ## 3. Startup env check + boundary fix — `apps/api/runtime_mode.py` + `apps/api/main.py`
 
 - [ ] 3.1 在 `RuntimeConfig` (`apps/api/runtime_mode.py:66`) 加字段 `object_store_root: Path | None = None`
-- [ ] 3.2 在 `load_runtime_config(env)` (`apps/api/runtime_mode.py:101`) 内：
+- [ ] 3.2 在 `load_runtime_config(env)` (`apps/api/runtime_mode.py:101`) 内对 display_readonly 启动强制要求 `OBJECT_STORE_ROOT`，并对任意已配置路径做可读目录校验；默认 dev_monolith / compute_control 未配置时保持 `object_store_root=None`，保证 `apps/api/main.py` 模块级 `app = create_app()` import path 不被破坏：
   ```python
-  raw = env.get("OBJECT_STORE_ROOT", "").strip()
-  if not raw:
-      raise RuntimeModeError("OBJECT_STORE_ROOT env var is required")
-  path = Path(raw).expanduser().resolve()
-  if not path.is_dir() or not os.access(path, os.R_OK):
-      raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
+   raw = env.get("OBJECT_STORE_ROOT", "").strip()
+   if role == ServiceRole.DISPLAY_READONLY and not raw:
+       raise RuntimeModeError("OBJECT_STORE_ROOT env var is required")
+   path = Path(raw).expanduser().resolve() if raw else None
+   if path is not None and (not path.is_dir() or not os.access(path, os.R_OK)):
+       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
   ```
 - [ ] 3.3 `apps/api/main.py:create_app()` (line 304+) 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
 - [ ] 3.4 **AD-11 boundary fix**：从下面三处同步移除 `OBJECT_STORE_ROOT`：
   - `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
   - `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
-  - `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`（位置由 §0.8 introspection 确认）
-- [ ] 3.5 unit test (`tests/test_runtime_mode.py` 现有 + 新加)：`load_runtime_config` 缺 env → raise `RuntimeModeError`；env 指向不存在路径 → raise；env 指向真实目录 → 通过 + `RuntimeConfig.object_store_root == Path(...)`
+  - `scripts/validate_two_node_docker_runtime.py:133 DISPLAY_FORBIDDEN_ENV_KEYS`
+  - `scripts/validate_two_node_docker_runtime.py:273 COMPUTE_ONLY_PATH_ENV_KEYS`
+- [ ] 3.4a display runtime allow/require/audit set 同步：`OBJECT_STORE_ROOT` 加入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set；断言 `OBJECT_STORE_ROOT not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`、`OBJECT_STORE_ROOT not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS`、`OBJECT_STORE_ROOT in docker_runtime.DISPLAY_REQUIRED_ENV`
+- [ ] 3.5 unit test (`tests/test_runtime_mode.py` 现有 + 新加)：display_readonly 缺 env → raise `RuntimeModeError`；env 指向不存在路径 → raise；display env 指向真实目录 → 通过 + `RuntimeConfig.object_store_root == Path(...)`；display env 带可读 root 不触发 `DISPLAY_BOUNDARY_CONFIG_UNSAFE`；默认 dev_monolith 未配置 env 仍可 load 且 `object_store_root is None`
+- [ ] 3.5a `create_app()` downstream compatibility：保证 `from apps.api.main import app` / module-level `app = create_app()` 在默认 dev env 下仍可 import；更新所有受影响的 display test env helpers（例如 runtime / monitoring / pipeline artifact tests）给非 missing-env 场景传入 readable tmp `OBJECT_STORE_ROOT`，并保留专门的 missing-env failure test；验证 sibling routes/runtime config 行为不变
 - [ ] 3.6 `tests/test_role_boundary_static.py` 跑通——同步后 forbidden 集合不再包含 OBJECT_STORE_ROOT，互锁断言 (line 89) 仍 pass
 
 ## 4. OpenAPI schema — `openapi/nhms.v1.yaml` + `apps/api/main.py:_patch_station_series_openapi`
@@ -147,6 +150,7 @@
 
 - [ ] 8.1 `openspec validate object-store-station-series-read --strict --no-interactive` PASS
 - [ ] 8.2 本地 `uv run pytest tests/test_object_store_forcing.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_forecast_api_met_station_series.py -q` PASS
+- [ ] 8.2a 本地 targeted sibling-startup compatibility tests PASS（至少覆盖 `apps.api.main` import smoke、更新过 `create_app()` env helper 的 runtime/monitoring/pipeline artifact tests，例如 `tests/test_monitoring_api.py` 与 `tests/test_pipeline_logs_artifacts.py` 中相关 display app cases）
 - [ ] 8.3 本地 `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py apps/api/routes/data_sources.py apps/api/main.py apps/api/runtime_mode.py tests/test_role_boundary_static.py` PASS
 - [ ] 8.4 node-27 整链路 live：apply env 改动 → 重启 display API (`scripts/ops/start-display-api.sh`) → 跑 §6 real-disk integration → 收 receipt
 - [ ] 8.5 node-27 curl 验证 4 种组合（heihe×IFS / heihe×gfs / qhh×IFS / qhh×gfs）最新 cycle 全部 200 + 真数据（不再 409）
