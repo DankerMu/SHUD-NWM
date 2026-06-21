@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 
@@ -28,7 +29,6 @@ _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS = (
     "WORKSPACE_ROOT",
     "RUN_WORKSPACE_ROOT",
     "SHARED_LOG_ROOT",
-    "OBJECT_STORE_ROOT",
     "NHMS_OBJECT_STORE_COPYBACK_ROOT",
     *_DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENVS,
     "NHMS_BASINS_ROOT",
@@ -69,6 +69,7 @@ class RuntimeConfig:
     require_service_role: bool
     auth_mode: str | None
     production_like: bool
+    object_store_root: Path | None = None
 
     @property
     def control_mutations_enabled(self) -> bool:
@@ -155,6 +156,8 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
             },
         )
 
+    object_store_root = _runtime_object_store_root(source_env, role)
+
     if role == ServiceRole.DISPLAY_READONLY:
         blockers = display_boundary_blockers(source_env)
         if blockers:
@@ -170,6 +173,7 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         require_service_role=require_service_role,
         auth_mode=auth_mode,
         production_like=production_like,
+        object_store_root=object_store_root,
     )
 
 
@@ -238,3 +242,23 @@ def _parse_bool_env(env: Mapping[str, str], key: str) -> bool:
             "accepted_falsy_values": sorted(_FALSY),
         },
     )
+
+
+def _runtime_object_store_root(env: Mapping[str, str], role: ServiceRole) -> Path | None:
+    raw = env.get("OBJECT_STORE_ROOT", "").strip()
+    if role == ServiceRole.DISPLAY_READONLY and not raw:
+        raise RuntimeModeError(
+            code="OBJECT_STORE_ROOT_REQUIRED",
+            message="OBJECT_STORE_ROOT env var is required for display_readonly startup.",
+            details={"env_var": "OBJECT_STORE_ROOT", "service_role": role.value},
+        )
+    if not raw:
+        return None
+    path = Path(raw).expanduser().resolve()
+    if not path.is_dir() or not os.access(path, os.R_OK | os.X_OK):
+        raise RuntimeModeError(
+            code="OBJECT_STORE_ROOT_UNREADABLE",
+            message=f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory.",
+            details={"env_var": "OBJECT_STORE_ROOT", "path": str(path), "service_role": role.value},
+        )
+    return path

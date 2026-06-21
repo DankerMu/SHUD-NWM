@@ -211,21 +211,15 @@ def test_1_13e_file_not_found_includes_operator_details(tmp_path: Path) -> None:
     assert error.value.code == "STATION_FORCING_FILE_NOT_FOUND"
     assert error.value.details == {
         "station_id": STATION_ID,
-        "expected_path": str(
-            tmp_path
-            / "forcing"
-            / "ifs"
-            / "2026062012"
-            / "basins_heihe_vbasins"
-            / MODEL_ID
-            / "shud"
-            / FORCING_FILENAME
-        ),
+        "expected_path": f"forcing/ifs/2026062012/basins_heihe_vbasins/{MODEL_ID}/shud/{FORCING_FILENAME}",
         "basin_version_id": "basins_heihe_vbasins",
         "source_id": "ifs",
         "cycle_time": "2026-06-20T12:00:00Z",
         "model_id": MODEL_ID,
     }
+    assert str(tmp_path) not in error.value.message
+    assert str(tmp_path) not in json.dumps(error.value.details)
+    assert "OBJECT_STORE_ROOT" not in error.value.message
 
 
 @pytest.mark.parametrize(
@@ -313,7 +307,7 @@ def test_unsafe_station_path_segments_reject_before_open(
 def test_1_13f_malformed_csv_variants_return_stable_error(
     tmp_path: Path, raw_content: str, reason: str
 ) -> None:
-    path = _write_csv(tmp_path, raw_content=raw_content)
+    _write_csv(tmp_path, raw_content=raw_content)
 
     with pytest.raises(ForecastStoreError) as error:
         _read(tmp_path)
@@ -321,7 +315,12 @@ def test_1_13f_malformed_csv_variants_return_stable_error(
     assert error.value.status_code == 500
     assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
     assert error.value.details["station_id"] == STATION_ID
-    assert error.value.details["expected_path"] == str(path)
+    assert error.value.details["expected_path"] == (
+        f"forcing/ifs/2026062012/basins_heihe_vbasins/{MODEL_ID}/shud/{FORCING_FILENAME}"
+    )
+    assert str(tmp_path) not in error.value.message
+    assert str(tmp_path) not in json.dumps(error.value.details)
+    assert "OBJECT_STORE_ROOT" not in error.value.message
     assert reason in error.value.details["parse_reason"]
 
 
@@ -362,7 +361,12 @@ def test_symlink_to_outside_root_is_malformed_not_not_found(tmp_path: Path) -> N
 
     assert error.value.status_code == 500
     assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
-    assert error.value.details["expected_path"] == str(path)
+    assert error.value.details["expected_path"] == (
+        f"forcing/ifs/2026062012/basins_heihe_vbasins/{MODEL_ID}/shud/{FORCING_FILENAME}"
+    )
+    assert str(tmp_path) not in error.value.message
+    assert str(tmp_path) not in json.dumps(error.value.details)
+    assert "OBJECT_STORE_ROOT" not in error.value.message
     assert "symlink" in error.value.details["parse_reason"].lower()
 
 
@@ -707,6 +711,36 @@ def test_1_13p_limit_truncates_total_tuple_stream_in_variable_order(tmp_path: Pa
         "2026-06-20T15:00:00Z",
         "2026-06-20T18:00:00Z",
     ]
+
+
+def test_limit_equal_first_variable_full_count_does_not_mark_prcp_truncated(tmp_path: Path) -> None:
+    _write_csv(tmp_path, time_days=[index * 0.125 for index in range(53)])
+
+    response = _read(tmp_path, limit=53)
+
+    assert _total_points(response) == 53
+    assert [series["variable"] for series in response["series"]] == ["PRCP"]
+    assert len(response["series"][0]["points"]) == 53
+    assert response["series"][0]["truncated"] is False
+    assert response["series"][0]["metadata"]["truncated"] is False
+    assert response["series"][0]["metadata"]["returned_points"] == 53
+
+
+def test_partial_next_variable_is_marked_truncated_when_limit_cuts_inside_it(tmp_path: Path) -> None:
+    _write_csv(tmp_path, time_days=[index * 0.125 for index in range(53)])
+
+    response = _read(tmp_path, limit=54)
+
+    assert _total_points(response) == 54
+    assert [series["variable"] for series in response["series"]] == ["PRCP", "TEMP"]
+    prcp, temp = response["series"]
+    assert len(prcp["points"]) == 53
+    assert prcp["truncated"] is False
+    assert prcp["metadata"]["truncated"] is False
+    assert len(temp["points"]) == 1
+    assert temp["truncated"] is True
+    assert temp["metadata"]["truncated"] is True
+    assert temp["metadata"]["returned_points"] == 1
 
 
 @pytest.mark.parametrize("row_count", [1, 53, 56, 100])

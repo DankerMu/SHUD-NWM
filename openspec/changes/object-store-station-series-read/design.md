@@ -102,16 +102,18 @@ Time_Day\tPrecip\tTemp\tRH\tWind\tRN   <- row 2: column names
 2. 在 `load_runtime_config` 内：
    ```python
    raw = env.get("OBJECT_STORE_ROOT", "").strip()
-   if not raw:
+   if role == ServiceRole.DISPLAY_READONLY and not raw:
        raise RuntimeModeError("OBJECT_STORE_ROOT env var is required")
-   path = Path(raw).expanduser().resolve()
-   if not path.is_dir() or not os.access(path, os.R_OK):
-       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
+   path = Path(raw).expanduser().resolve() if raw else None
+   if path is not None and (not path.is_dir() or not os.access(path, os.R_OK)):
+       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory")
    runtime_config.object_store_root = path
    ```
 3. `apps/api/main.py` 把 `runtime_config.object_store_root` 通过 `app.state.object_store_root = ...` 或 FastAPI `Depends(get_object_store_root)` 注入到 reader
 
-fail-fast：env 缺失或不可读 → `RuntimeModeError` 让 process 启动期就 exit，不到第一个 series 请求才报。
+fail-fast：display_readonly env 缺失或任何 role 的 env 指向不可读目录 → `RuntimeModeError` 让 process 启动期就 exit，不到第一个 series 请求才报。
+
+兼容性：仓内存在 `apps/api/main.py:1997 app = create_app()` 的模块级 app，以及大量测试 `from apps.api.main import app`。因此默认 `dev_monolith` import path 不要求 `OBJECT_STORE_ROOT`；非 display role 未配置时 `RuntimeConfig.object_store_root` 为 `None`，但 station-series route 若实际被调用仍必须通过 `get_object_store_root` 拿到有效 root（测试可 override provider）。
 
 **关键：** AD-7 必须配合 AD-11 boundary 调整，否则 display API 启动失败（详见 AD-11）。
 
@@ -152,11 +154,14 @@ reader 内：
 
 **问题：** `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 当前列入 `OBJECT_STORE_ROOT`；display.env 一旦含该 key 即在 `display_boundary_blockers()` (line 176-202) 被 raise `DISPLAY_BOUNDARY_CONFIG_UNSAFE`。`tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` 与 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` (`tests/test_role_boundary_static.py:89` 断言互锁) 同步列入。
 
-**决策：** display 现在合法需要读 forcing CSV（disk-only 路径属于 display 输出业务面），从下面三处同步移除 `OBJECT_STORE_ROOT`：
+**决策：** display 现在合法需要读 forcing CSV（disk-only 路径属于 display 输出业务面），从下面四处同步移除/重分类 `OBJECT_STORE_ROOT`：
 
 1. `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
 2. `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
-3. `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`（如果存在；§0.8 introspection 确认实际位置 + 是否需要改）
+3. `scripts/validate_two_node_docker_runtime.py:133 DISPLAY_FORBIDDEN_ENV_KEYS`
+4. `scripts/validate_two_node_docker_runtime.py:273 COMPUTE_ONLY_PATH_ENV_KEYS`
+
+同时把 `OBJECT_STORE_ROOT` 纳入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set。否则 `COMPUTE_ONLY_PATH_ENV_KEYS <= DISPLAY_FORBIDDEN_ENV_KEYS` 和 `DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(COMPUTE_ONLY_PATH_ENV_KEYS)` 两个静态不变量会把它重新拉回 forbidden。
 
 **理由记录在 AD-11**：display 业务面合法读取 disk-resident forcing CSV，与本 spec 业务目标一致；boundary 收紧到"只读不可写"由 OBJECT_STORE_ROOT 目录权限 + AD-9 read-only 契约保证。
 
@@ -331,3 +336,85 @@ Review focus:
 - Verify the reader's only DB dependency is station lookup, not forcing readiness or station timeseries content.
 - Verify time/unit/limit/filter behavior matches AD-4/AD-5/AD-10 and `spec.md`.
 - Verify malformed/missing inputs produce stable typed errors without hiding path/identity details needed by operators.
+
+## Subagent Workflow Fixture (PR-B #623)
+
+Fixture level: expanded. Repair intensity: high.
+
+Project profile: NHMS (`openspec/project-profile.md`).
+
+Change surface for PR-B:
+- FastAPI route and dependency wiring: `apps/api/routes/data_sources.py`, `apps/api/main.py`.
+- Runtime startup and display boundary config: `apps/api/runtime_mode.py`, `scripts/validate_two_node_docker_runtime.py` (`DISPLAY_FORBIDDEN_ENV_KEYS`, `COMPUTE_ONLY_PATH_ENV_KEYS`, display required/audited runtime env sets), `tests/test_role_boundary_static.py`, `infra/env/display.example`.
+- Public contract and evidence: `_patch_station_series_openapi`, `openapi/nhms.v1.yaml` if generated/static sync is required, API mocked tests, node-27 real-disk tests and live receipt.
+
+Must preserve:
+- `StationSeriesResponse` envelope/schema shape, variable ordering, and existing `STATION_NOT_FOUND` / `MISSING_REQUIRED_FILTER` error shapes.
+- Display role remains read-only: `OBJECT_STORE_ROOT` is allowed and required for display reads, but compute mutation envs and write boundaries stay forbidden.
+- Existing module-level `app = create_app()` import path and dev/compute `create_app()` callers remain compatible without `OBJECT_STORE_ROOT`; display test helpers either receive a readable tmp root or intentionally check the missing-env failure.
+- Existing DB-backed `PsycopgForecastStore.station_series()` implementation remains available for non-route cleanup/deprecation work; PR-B only disconnects the public series route.
+- PR-A reader safety invariants: path containment, no-follow descriptor-bound reads, hard row/bytes/line caps, malformed/non-finite handling, no object-store writes.
+
+Must add/change:
+- `/api/v1/met/stations/{station_id}/series` calls `read_station_forcing_csv(...)` through `Depends(get_station_lookup)` and `Depends(get_object_store_root)` and does not call `store.station_series()` or `_ensure_forcing_version_finalized()`.
+- `RuntimeConfig.object_store_root` is startup-validated for display and for any configured path, stored on `app.state`, and `OBJECT_STORE_ROOT` is removed from display-forbidden/compute-only runtime sets while becoming a display required/audited runtime env.
+- OpenAPI marks `forcing_version_id` deprecated and lists disk-path errors (`STATION_FORCING_FILE_NOT_FOUND`, `STATION_FORCING_FILENAME_MISSING`, `STATION_FORCING_FILE_MALFORMED`, `MISSING_REQUIRED_FILTER`) instead of forcing-version finalize errors for this route.
+- node-27 receipt proves the route+runtime+env boundary works live before draft PR is marked ready.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - this PR changes the public station-series route and documented query/error behavior.
+- Config / project setup: selected - `OBJECT_STORE_ROOT` becomes startup-required runtime config and app state.
+- File IO / path safety / overwrite: selected - public route exposes the PR-A disk reader; PR-B must not weaken reader guards or add fallback/write paths.
+- Schema / columns / units / field names: selected - OpenAPI examples/deprecation and response-shape compatibility are part of the acceptance.
+- Auth / permissions / secrets: selected narrowly - display boundary permits a new read env without exposing secrets or compute mutation knobs; receipts must not leak env values beyond paths already documented.
+- Concurrency / shared state / ordering: not selected - object root is immutable startup config and reader remains stateless/no-cache.
+- Resource limits / large input / discovery: selected - route must use the bounded PR-A reader and real-disk tests must not scan broad object-store roots.
+- Legacy compatibility / examples: selected - `forcing_version_id` is accepted but ignored with `cycle_time`; alone it now returns existing 422 shape.
+- Error handling / rollback / partial outputs: selected - typed reader errors map to stable HTTP envelopes; no fallback DB and no partial write/rollback path.
+- Release / packaging / dependency compatibility: selected narrowly - no dependency changes, but node-27 env/restart receipt is a release gate.
+- Documentation / migration notes: selected narrowly - env example plus runbook env-section placeholder are required; full docs/follow-up issues stay PR-C.
+
+Domain packs:
+- Hydro-met time series / forcing windows: selected - live route must serve the latest IFS/GFS cycle from disk and preserve UTC filter semantics.
+- Published NHMS artifacts / display identity: selected - display response identity must bind station metadata to the exact disk artifact path and not stale DB readiness.
+- PostGIS / TimescaleDB domain behavior: selected narrowly - allowed DB access is only `met.met_station`; forbidden forcing tables stay unused by the route.
+- Geospatial / CRS / basin geometry: not selected - station geometry is read-only response metadata; no CRS or station table change.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD execution or numerical conversion change beyond PR-A parser already covered.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler path.
+- External hydro-met providers / snapshot reproducibility: not selected - no provider fetch/conversion.
+- Run manifest / QC provenance: not selected - no manifest/QC artifact contract change.
+
+Invariant Matrix:
+- Governing invariant: The public series route must serve disk-resident SHUD station CSVs through a readonly display object-store root, without consulting forcing-version readiness or mutating DB/object-store state.
+- Source-of-truth identity/contract: API tuple `station_id + model_id + source_id + cycle_time`; `met.met_station` -> `basin_version_id + forcing_filename`; startup `OBJECT_STORE_ROOT`; existing `StationSeriesResponse` schema and API error envelope.
+- Producers: none - forcing_producer output and DB writers are unchanged.
+- Validators/preflight: `load_runtime_config`, `display_boundary_blockers`, docker runtime validator constants including display forbidden/compute-only/required/audited env sets, OpenAPI schema patch, reader validation from PR-A.
+- Storage/cache/query: `PsycopgStationLookup` may query `met.met_station` only; no route fallback to `met.forcing_version` or `met.forcing_station_timeseries`; no cache.
+- Public routes/entrypoints: `get_met_station_series`, dependency providers, generated/static OpenAPI operation for `getMetStationSeries`.
+- Frontend/downstream consumers: response shape and existing `forcing_version_id` query acceptance preserved; module-level app import and non-display `create_app()` tests still start without object root; display tests/routes still start once they provide a readable object root; front-end UX changes remain PR-C/follow-up.
+- Failure paths/rollback/stale state: missing object root startup fail, unreadable root startup fail, disk miss 404, missing filename/malformed file 500, only-`forcing_version_id` 422, old finalized DB cycle with rotated disk file 404.
+- Evidence/audit/readiness: API mocked tests, runtime/boundary static tests, real-disk node-27 tests, curl receipt, ruff, OpenSpec validation, CI, draft-to-ready gate evidence.
+- Regression rows:
+  - Latest cycle heihe/qhh x IFS/gfs with disk file present -> HTTP 200 non-empty disk series, no 409 finalize error.
+  - `forcing_version_id` alone -> HTTP 422 existing `MISSING_REQUIRED_FILTER`; with `cycle_time/model_id/source_id` -> HTTP 200 identical disk response.
+  - Missing/unreadable/untraversable `OBJECT_STORE_ROOT` -> startup `RuntimeModeError`; display env with readable + traversable root -> no `DISPLAY_BOUNDARY_CONFIG_UNSAFE`.
+  - Module import `from apps.api.main import app` with default dev env -> succeeds; explicit display startup without root -> `RuntimeModeError`; display startup with readable tmp root -> prior runtime route inventory and non-series API tests still pass.
+  - Old cycle present in DB but absent on disk -> HTTP 404 `STATION_FORCING_FILE_NOT_FOUND`, no DB fallback.
+
+Required evidence:
+- `openspec validate object-store-station-series-read --strict --no-interactive`.
+- `uv run pytest tests/test_object_store_forcing.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_forecast_api_met_station_series.py -q`.
+- Targeted sibling-startup compatibility: preserve module-level `app = create_app()` import under default dev env, update all touched display `create_app()` test env helpers, and run at least the affected runtime/monitoring/pipeline artifact tests that previously constructed display apps without `OBJECT_STORE_ROOT`.
+- `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py apps/api/routes/data_sources.py apps/api/main.py apps/api/runtime_mode.py tests/test_role_boundary_static.py`.
+- `cd apps/frontend && pnpm run check:api-types` when available after OpenAPI changes.
+- node-27: sync branch, set gitignored display env, restart with `scripts/ops/start-display-api.sh`, run real-disk tests, capture `/health`, uvicorn pid change, four latest-cycle 200 curls, and four old-cycle 404 curls in the PR body before ready-for-review.
+
+Non-goals:
+- Do not change forcing_producer, station table data, DB schemas, `PsycopgForecastStore.station_series()` internals, frontend UX, S3/MinIO client behavior, or full PR-C runbook/follow-up issue work.
+
+Review focus:
+- Verify AD-11 is fixed consistently in runtime code, docker runtime validator forbidden/compute-only/required/audited constants, and static tests, with `OBJECT_STORE_ROOT` allowed/required but compute mutation envs still forbidden.
+- Verify route injection uses the PR-A reader and station lookup dependency, with no DB fallback and no force-version readiness calls.
+- Verify global `app = create_app()` import and non-display `create_app()` startup stay compatible, while display startup enforces readable `OBJECT_STORE_ROOT`.
+- Verify OpenAPI and tests document `forcing_version_id` deprecation/ignore semantics and remove old finalize error examples for this operation.
+- Verify live node-27 receipt is SHA-matched to the PR head before the PR leaves draft.

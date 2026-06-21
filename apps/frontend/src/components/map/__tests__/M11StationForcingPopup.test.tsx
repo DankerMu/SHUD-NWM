@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
-import { HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
+import { HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT, HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 vi.mock('@/api/client', () => ({
@@ -61,7 +61,7 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
     quality: {
       station_sample_count: 1,
       river_sample_count: 1,
-      required_station_variables: [...HYDRO_MET_STATION_VARIABLES],
+      required_station_variables: ['PRCP', 'TEMP', 'RH', 'wind', 'Rn', 'Press'],
       station_variable_coverage: [],
       candidate_limit: 20,
       search_limit: 20,
@@ -77,7 +77,7 @@ const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_na
 
 function metadata() {
   return {
-    limit: 240,
+    limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     returned_points: 2,
     requested_from: '2026-05-21T00:00:00Z',
     requested_to: '2026-05-22T00:00:00Z',
@@ -92,11 +92,12 @@ function seriesResponse(overrides: Record<string, unknown> = {}) {
     station_id: 'qhh_forc_001',
     station: { station_id: 'qhh_forc_001', basin_version_id: 'bv-1' },
     forcing_version_id: 'forc-1',
+    model_id: 'm-1',
     source_id: 'GFS',
     cycle_time: '2026-05-21T00:00:00Z',
     valid_time_start: '2026-05-21T06:00:00Z',
     valid_time_end: '2026-05-21T12:00:00Z',
-    limit: 240,
+    limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     series: HYDRO_MET_STATION_VARIABLES.map((variable) => ({
       variable,
       unit: 'mm',
@@ -127,13 +128,26 @@ afterEach(() => {
 })
 
 describe('M11StationForcingPopup', () => {
-  it('renders six forcing variable charts in a glass popup when identity matches', async () => {
+  it('renders five public forcing variable charts in a glass popup when identity matches', async () => {
     mockSeries(seriesResponse())
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
+      params: expect.objectContaining({
+        query: expect.objectContaining({
+          forcing_version_id: 'forc-1',
+          model_id: 'm-1',
+          source_id: 'GFS',
+          cycle_time: '2026-05-21T00:00:00Z',
+          variables: [...HYDRO_MET_STATION_VARIABLES],
+          limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
+        }),
+      }),
+    }))
+    expect(HYDRO_MET_STATION_VARIABLES).toEqual(['PRCP', 'TEMP', 'RH', 'wind', 'Rn'])
     for (const variable of HYDRO_MET_STATION_VARIABLES) {
       expect(screen.getByTestId(`m11-station-variable-${variable}-chart`)).toBeInTheDocument()
     }
@@ -148,7 +162,7 @@ describe('M11StationForcingPopup', () => {
     await screen.findByTestId('m11-station-popup-loaded')
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
 
-    // 关掉 PRCP → 只显其余五个变量曲线
+    // 关掉 PRCP → 只显其余四个变量曲线
     await user.click(screen.getByTestId('m11-station-variable-toggle-PRCP'))
     expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
@@ -179,6 +193,26 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
+  })
+
+  it('shows identity-mismatch empty state and draws no curve when model_id mismatches', async () => {
+    mockSeries(seriesResponse({ model_id: 'other-model' }))
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-popup-identity-reasons')).toHaveTextContent('model_id=other-model')
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
+  })
+
+  it('shows identity-mismatch empty state and draws no curve when cycle_time is missing', async () => {
+    const body = seriesResponse() as Record<string, unknown>
+    delete body.cycle_time
+    mockSeries(body)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-popup-identity-reasons')).toHaveTextContent('cycle_time 元数据格式无效')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
@@ -244,5 +278,30 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-truncated')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-capped')).toBeInTheDocument()
+  })
+
+  it('locally caps long series without marking API truncation when metadata is complete', async () => {
+    const body = seriesResponse()
+    const series = (body.series as Record<string, unknown>[])[0]
+    const points = Array.from({ length: 280 }, (_, index) => ({
+      valid_time: new Date(Date.UTC(2026, 4, 21, index)).toISOString(),
+      value: index,
+      quality_flag: 'ok',
+    }))
+    series.points = points
+    series.truncated = false
+    series.metadata = {
+      ...metadata(),
+      returned_points: points.length,
+      returned_from: points[0].valid_time,
+      returned_to: points[points.length - 1].valid_time,
+      truncated: false,
+    }
+    mockSeries(body)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-capped')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-station-variable-PRCP-truncated')).not.toBeInTheDocument()
   })
 })

@@ -139,7 +139,6 @@ DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
         "WORKSPACE_ROOT",
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
-        "OBJECT_STORE_ROOT",
         "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         *DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS,
         "NHMS_BASINS_ROOT",
@@ -156,6 +155,7 @@ DISPLAY_REQUIRED_ENV = {
     "NHMS_AUTH_MODE": "production",
     "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "true",
     "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+    "OBJECT_STORE_ROOT": "/home/ghdc/nwm/object-store",
 }
 COMPUTE_REQUIRED_ENV = {
     "NHMS_SERVICE_ROLE": "compute_control",
@@ -239,6 +239,7 @@ DISPLAY_REQUIRED_RUNTIME_ENV = frozenset(
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
         "NHMS_ENABLE_LIVE_POSTGIS_MVT",
         "DATABASE_URL",
+        "OBJECT_STORE_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
@@ -275,7 +276,6 @@ COMPUTE_ONLY_PATH_ENV_KEYS = frozenset(
         "WORKSPACE_ROOT",
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
-        "OBJECT_STORE_ROOT",
         "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
@@ -328,6 +328,8 @@ DISPLAY_DYNAMIC_HOSTCONFIG_FIELDS = (
 )
 PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR = "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"
 PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR = "NHMS_PUBLISHED_ARTIFACT_ROOT"
+DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR = "OBJECT_STORE_ROOT"
+DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR = "OBJECT_STORE_ROOT"
 DISPLAY_ALLOWED_TMPFS_TARGETS = frozenset({"/tmp", "/run"})
 DISPLAY_AUDITED_INTERPOLATION_ENV = frozenset(
     {
@@ -341,6 +343,7 @@ DISPLAY_AUDITED_INTERPOLATION_ENV = frozenset(
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
         "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        "OBJECT_STORE_ROOT",
         "DATABASE_URL",
         "NHMS_SERVICE_ROLE",
         "NHMS_REQUIRE_SERVICE_ROLE",
@@ -1319,44 +1322,52 @@ def _run_display_startup_probe(
     image_tag: str,
 ) -> dict[str, CommandResult]:
     container_name = f"nhms-display-smoke-{uuid.uuid4().hex[:12]}"
+    object_store_root = Path(tempfile.mkdtemp(prefix="nhms-display-object-store-smoke-")).resolve()
     commands: dict[str, CommandResult] = {}
-    start_command = (
-        "docker",
-        "run",
-        "--rm",
-        "-d",
-        "--name",
-        container_name,
-        "-e",
-        "NHMS_REQUIRE_SERVICE_ROLE=true",
-        "-e",
-        "NHMS_SERVICE_ROLE=display_readonly",
-        "-e",
-        "NHMS_AUTH_MODE=production",
-        "-e",
-        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
-        "-e",
-        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
-        image_tag,
-    )
-    probe_command = (
-        "docker",
-        "exec",
-        container_name,
-        "uv",
-        "run",
-        "python",
-        "-c",
-        DISPLAY_LOCALHOST_PROBE_SCRIPT,
-    )
-    logs_command = ("docker", "logs", container_name)
-    cleanup_command = ("docker", "rm", "-f", container_name)
+    try:
+        start_command = (
+            "docker",
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            container_name,
+            "-e",
+            "NHMS_REQUIRE_SERVICE_ROLE=true",
+            "-e",
+            "NHMS_SERVICE_ROLE=display_readonly",
+            "-e",
+            "NHMS_AUTH_MODE=production",
+            "-e",
+            "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
+            "-e",
+            "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
+            "-e",
+            f"OBJECT_STORE_ROOT={object_store_root}",
+            "-v",
+            f"{object_store_root}:{object_store_root}:ro",
+            image_tag,
+        )
+        probe_command = (
+            "docker",
+            "exec",
+            container_name,
+            "uv",
+            "run",
+            "python",
+            "-c",
+            DISPLAY_LOCALHOST_PROBE_SCRIPT,
+        )
+        logs_command = ("docker", "logs", container_name)
+        cleanup_command = ("docker", "rm", "-f", container_name)
 
-    commands["display_startup_start"] = runner(start_command)
-    if commands["display_startup_start"].returncode == 0:
-        commands["display_startup_probe"] = runner(probe_command)
-        commands["display_startup_logs"] = runner(logs_command)
-    commands["display_startup_cleanup"] = runner(cleanup_command)
+        commands["display_startup_start"] = runner(start_command)
+        if commands["display_startup_start"].returncode == 0:
+            commands["display_startup_probe"] = runner(probe_command)
+            commands["display_startup_logs"] = runner(logs_command)
+        commands["display_startup_cleanup"] = runner(cleanup_command)
+    finally:
+        shutil.rmtree(object_store_root, ignore_errors=True)
     return commands
 
 
@@ -3081,16 +3092,33 @@ def _display_mount_findings(
     findings: list[Finding] = []
     volumes = [_volume_info(volume, env) for volume in service.get("volumes", []) or []]
     approved_artifact_volumes: list[Mapping[str, Any]] = []
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=service_name,
+            env=env,
+            source_key=DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR,
+            target_key=DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR,
+            read_only=True,
+            missing_code="DISPLAY_OBJECT_STORE_MOUNT_MISSING",
+            readonly_code="DISPLAY_OBJECT_STORE_MOUNT_NOT_READONLY",
+            type_code="DISPLAY_OBJECT_STORE_MOUNT_TYPE_INVALID",
+            identity_code="DISPLAY_OBJECT_STORE_MOUNT_IDENTITY_INVALID",
+        )
+    )
     for volume in volumes:
         findings.extend(_display_mount_dynamic_interpolation_findings(path, service_name, volume, env))
         findings.extend(_display_mount_relative_path_findings(path, service_name, volume))
-        if _is_approved_display_published_mount(volume, env):
+        is_approved_published = _is_approved_display_published_mount(volume, env)
+        is_approved_object_store = _is_approved_display_object_store_mount(volume, env)
+        if is_approved_published:
             approved_artifact_volumes.append(volume)
-        else:
+        if not is_approved_published and not is_approved_object_store:
             findings.append(
                 Finding(
                     "DISPLAY_UNAPPROVED_MOUNT",
-                    "display service may only mount the exact readonly published artifact bind.",
+                    "display service may only mount exact readonly published artifact and object-store binds.",
                     path=str(path),
                     service=service_name,
                     details={"volume": volume["text"]},
@@ -3108,7 +3136,7 @@ def _display_mount_findings(
                     details={"volume": volume["text"], "target": volume["target"]},
                 )
             )
-        if not volume["read_only"] and not _is_approved_display_published_mount(volume, env):
+        if not volume["read_only"] and not is_approved_published and not is_approved_object_store:
             findings.append(
                 Finding(
                     "DISPLAY_UNAPPROVED_WRITABLE_MOUNT",
@@ -3287,6 +3315,8 @@ def _display_mount_dynamic_interpolation_findings(
         return []
     if _is_allowed_published_artifact_mount_interpolation(volume, env, dynamic_fields):
         return []
+    if _is_allowed_object_store_mount_interpolation(volume, env, dynamic_fields):
+        return []
     raw_values = {
         field_name: volume.get(raw_key, "")
         for field_name, raw_key in (
@@ -3301,7 +3331,7 @@ def _display_mount_dynamic_interpolation_findings(
     return [
         Finding(
             "DISPLAY_MOUNT_DYNAMIC_INTERPOLATION",
-            "display mounts must use literal audited values except the readonly published artifact bind variables.",
+            "display mounts must use literal audited values except approved readonly bind variables.",
             path=str(path),
             service=service_name,
             details={
@@ -3353,6 +3383,23 @@ def _is_approved_display_published_mount(volume: Mapping[str, Any], env: Mapping
     )
 
 
+def _is_approved_display_object_store_mount(volume: Mapping[str, Any], env: Mapping[str, str]) -> bool:
+    return (
+        _raw_mount_type_is_literal_bind(volume)
+        and volume["source"] == env.get(DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR, "")
+        and volume["target"] == env.get(DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR, "")
+        and _raw_mount_field_has_canonical_identity(
+            volume.get("raw_source", ""),
+            DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR,
+        )
+        and _raw_mount_field_has_canonical_identity(
+            volume.get("raw_target", ""),
+            DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR,
+        )
+        and volume["read_only"]
+    )
+
+
 def _is_published_mount_candidate(volume: Mapping[str, Any], env: Mapping[str, str]) -> bool:
     expected_source = env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "")
     expected_target = env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
@@ -3389,6 +3436,30 @@ def _is_allowed_published_artifact_mount_interpolation(
     ) and _raw_mount_field_has_canonical_identity(
         volume.get("raw_target", ""),
         PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR,
+    )
+
+
+def _is_allowed_object_store_mount_interpolation(
+    volume: Mapping[str, Any],
+    env: Mapping[str, str],
+    dynamic_fields: set[str],
+) -> bool:
+    if not dynamic_fields <= {"source", "target"}:
+        return False
+    expected_source = env.get(DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR, "")
+    expected_target = env.get(DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR, "")
+    if volume["source"] != expected_source or volume["target"] != expected_target:
+        return False
+    if not volume["read_only"]:
+        return False
+    if not _raw_mount_type_is_literal_bind(volume):
+        return False
+    return _raw_mount_field_has_canonical_identity(
+        volume.get("raw_source", ""),
+        DISPLAY_OBJECT_STORE_MOUNT_SOURCE_VAR,
+    ) and _raw_mount_field_has_canonical_identity(
+        volume.get("raw_target", ""),
+        DISPLAY_OBJECT_STORE_MOUNT_TARGET_VAR,
     )
 
 
@@ -4804,7 +4875,6 @@ def _compute_only_roots(env: Mapping[str, str]) -> dict[str, str]:
         "NHMS_MODEL_ASSET_ROOT",
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
-        "OBJECT_STORE_ROOT",
         "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "SLURM_GATEWAY_WORKSPACE_DIR",
         "SLURM_GATEWAY_TEMPLATE_DIR",

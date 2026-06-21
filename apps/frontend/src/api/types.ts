@@ -1059,7 +1059,7 @@ export interface components {
         };
         StationSeries: {
             /** @enum {string} */
-            variable: "PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press";
+            variable: "PRCP" | "TEMP" | "RH" | "wind" | "Rn";
             unit: string | null;
             native_resolution: string | null;
             source_id?: string | null;
@@ -2478,11 +2478,15 @@ export interface operations {
     getMetStationSeries: {
         parameters: {
             query?: {
+                /**
+                 * @deprecated
+                 * @description Deprecated compatibility parameter. The disk-only route ignores this value when model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series.
+                 */
                 forcing_version_id?: string;
                 model_id?: string;
                 source_id?: string;
                 cycle_time?: string;
-                /** @description Station forcing variables. Repeat the parameter or provide comma-separated values. Allowed values are PRCP, TEMP, RH, wind, Rn, and Press. */
+                /** @description Station forcing variables. Repeat the parameter or provide comma-separated values. Public station-series variables are PRCP, TEMP, RH, wind, and Rn. */
                 variables?: string | string[];
                 from?: string;
                 to?: string;
@@ -2507,8 +2511,24 @@ export interface operations {
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Station series client error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Station series server error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     getQhhLatestProduct: {

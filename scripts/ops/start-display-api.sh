@@ -24,7 +24,7 @@ UVICORN_HOST="${NHMS_DISPLAY_HOST:-127.0.0.1}"
 UVICORN_PORT="${NHMS_DISPLAY_PORT:-8080}"
 LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"
 UVICORN_PATTERN='\.venv/bin/python -m uvicorn apps\.api\.main:app'
-REQUIRED_KEYS=(DATABASE_URL NHMS_ENABLE_LIVE_POSTGIS_MVT)
+REQUIRED_KEYS=(DATABASE_URL NHMS_ENABLE_LIVE_POSTGIS_MVT OBJECT_STORE_ROOT)
 
 # -- preflight ------------------------------------------------------------------
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -56,6 +56,11 @@ if (( ${#missing[@]} > 0 )); then
     echo "  (values redacted; fix display.env and rerun)" >&2
     exit 3
 fi
+if [[ ! -d "$OBJECT_STORE_ROOT" || ! -r "$OBJECT_STORE_ROOT" || ! -x "$OBJECT_STORE_ROOT" ]]; then
+    echo "ERROR: OBJECT_STORE_ROOT must be an existing readable and traversable directory: $OBJECT_STORE_ROOT" >&2
+    echo "       fix display.env or filesystem permissions before restarting; existing uvicorn was not stopped." >&2
+    exit 3
+fi
 
 # -- redacted launch preamble ---------------------------------------------------
 db_redact=$(printf '%s' "$DATABASE_URL" | sed -E 's#(://)[^@/]+#\1<redacted>#; s#@([^/]+/[^?]*).*$#@\1#')
@@ -63,6 +68,7 @@ echo "[start-display-api] repo_root=$REPO_ROOT"
 echo "[start-display-api] env_file=$ENV_FILE"
 echo "[start-display-api] DATABASE_URL=$db_redact"
 echo "[start-display-api] NHMS_ENABLE_LIVE_POSTGIS_MVT=${NHMS_ENABLE_LIVE_POSTGIS_MVT}"
+echo "[start-display-api] OBJECT_STORE_ROOT=$OBJECT_STORE_ROOT"
 echo "[start-display-api] target=$UVICORN_HOST:$UVICORN_PORT  log=$LOG_PATH"
 
 # -- gracefully replace prior uvicorn -------------------------------------------

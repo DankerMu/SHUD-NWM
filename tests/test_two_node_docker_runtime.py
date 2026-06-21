@@ -1218,7 +1218,7 @@ def test_static_checker_accepts_display_environment_list_literal_entries(tmp_pat
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
-def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Path) -> None:
+def test_static_checker_rejects_display_env_file_object_store_root_drift(tmp_path: Path) -> None:
     display_env = tmp_path / "display.example"
     display_env.write_text(
         (REPO_ROOT / "infra/env/display.example").read_text(encoding="utf-8")
@@ -1235,15 +1235,12 @@ def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Pat
     )
 
     assert result.status == "FAIL"
-    assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
+    assert "ENV_REQUIRED_VALUE_INVALID" in _codes(result)
 
 
 @pytest.mark.parametrize(
     "environment_entry",
     [
-        {"OBJECT_STORE_ROOT": "/scratch/private/object-store"},
-        ["OBJECT_STORE_ROOT=/scratch/private/object-store"],
-        ["${EXTRA_ENV:-OBJECT_STORE_ROOT=/scratch/private/object-store}"],
         {"NHMS_SCHEDULER_RUNTIME_ROOT": "/scratch/private/scheduler-runtime"},
         ["NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime"],
         ["${EXTRA_ENV:-NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime}"],
@@ -2750,6 +2747,44 @@ def test_static_checker_rejects_display_published_mount_literal_identity(tmp_pat
 
 
 @pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("missing", "DISPLAY_OBJECT_STORE_MOUNT_MISSING"),
+        ("not_readonly", "DISPLAY_OBJECT_STORE_MOUNT_NOT_READONLY"),
+        ("type_invalid", "DISPLAY_OBJECT_STORE_MOUNT_TYPE_INVALID"),
+        ("identity_invalid", "DISPLAY_OBJECT_STORE_MOUNT_IDENTITY_INVALID"),
+    ],
+)
+def test_static_checker_rejects_display_object_store_mount_contract(
+    tmp_path: Path,
+    mutation: str,
+    expected_code: str,
+) -> None:
+    env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    compose = _safe_display_compose()
+    volumes = compose["services"]["display-api"]["volumes"]
+    object_store_volume = next(volume for volume in volumes if "OBJECT_STORE_ROOT" in str(volume.get("target", "")))
+
+    if mutation == "missing":
+        volumes.remove(object_store_volume)
+    elif mutation == "not_readonly":
+        object_store_volume["read_only"] = False
+    elif mutation == "type_invalid":
+        object_store_volume["type"] = "volume"
+    elif mutation == "identity_invalid":
+        object_store_volume["source"] = env["OBJECT_STORE_ROOT"]
+        object_store_volume["target"] = env["OBJECT_STORE_ROOT"]
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+
+
+@pytest.mark.parametrize(
     ("source_key", "target_key", "expected_code"),
     [
         ("WORKSPACE_ROOT", "WORKSPACE_ROOT", "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID"),
@@ -3475,7 +3510,6 @@ def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
         ("WORKSPACE_ROOT", "/workspace"),
         ("RUN_WORKSPACE_ROOT", "/workspace/runs"),
         ("SHARED_LOG_ROOT", "/workspace/logs"),
-        ("OBJECT_STORE_ROOT", "/object-store"),
         ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "/ghdc/data/nwm/object-store"),
         ("NHMS_SCHEDULER_LOCK_ROOT", "/workspace/scheduler/locks"),
         ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/workspace/scheduler/evidence"),
@@ -3533,6 +3567,24 @@ def test_public_display_forbidden_env_docs_align_with_validator_and_entrypoint()
         if line.strip() in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
     }
     assert infra_readme_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    smoke_env_loops = re.findall(
+        r"  for key in \\\n(?P<body>.*?)\n  do\n(?P<loop>.*?)\n  done",
+        infra_readme_text,
+        flags=re.DOTALL,
+    )
+    smoke_forbidden_env_loops = [
+        body
+        for body, loop in smoke_env_loops
+        if 'printf "%s=<present>\\n" "$key"' in loop and "forbidden_found=1" in loop
+    ]
+    assert len(smoke_forbidden_env_loops) == 1
+    smoke_forbidden_env_keys = {
+        line.strip().rstrip("\\").strip()
+        for line in smoke_forbidden_env_loops[0].splitlines()
+        if line.strip()
+    }
+    assert smoke_forbidden_env_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    assert "OBJECT_STORE_ROOT" not in smoke_forbidden_env_keys
 
     env_readme_text = (REPO_ROOT / "infra/env/README.md").read_text(encoding="utf-8")
     env_readme_section = env_readme_text.split("- Forbidden env keys must match", 1)[1].split(
@@ -3747,7 +3799,12 @@ def test_docker_smoke_records_blocked_when_build_is_network_blocked(tmp_path: Pa
     assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_BUILD_BLOCKED"}
 
 
-def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path: Path) -> None:
+def test_docker_smoke_passes_with_expected_role_boundary_probe_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
         repo_root=tmp_path,
@@ -3774,6 +3831,14 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path:
     }
     assert payload["commands"]["image_inspect"]["returncode"] == 0
     assert payload["blockers"] == []
+    start_args = payload["commands"]["display_startup_start"]["args"]
+    object_store_env = next(arg for arg in start_args if arg.startswith("OBJECT_STORE_ROOT="))
+    object_store_root = object_store_env.split("=", 1)[1]
+    assert object_store_root
+    assert "-e" in start_args
+    assert object_store_env in start_args
+    assert "-v" in start_args
+    assert f"{object_store_root}:{object_store_root}:ro" in start_args
 
 
 def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:

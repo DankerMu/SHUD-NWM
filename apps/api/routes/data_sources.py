@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -12,6 +13,11 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
 )
+from packages.common.object_store_forcing import (
+    PsycopgStationLookup,
+    StationLookup,
+    read_station_forcing_csv,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["data-sources"])
 
@@ -21,6 +27,25 @@ def get_data_source_store() -> PsycopgForecastStore:
         return PsycopgForecastStore.from_env()
     except ForecastStoreError as error:
         raise _api_error(error) from error
+
+
+def get_station_lookup() -> StationLookup:
+    try:
+        return PsycopgStationLookup.from_env()
+    except ForecastStoreError as error:
+        raise _api_error(error) from error
+
+
+def get_object_store_root(request: Request) -> Path:
+    object_store_root = getattr(request.app.state, "object_store_root", None)
+    if object_store_root is None:
+        raise ApiError(
+            status_code=500,
+            code="OBJECT_STORE_ROOT_NOT_CONFIGURED",
+            message="OBJECT_STORE_ROOT is not configured for station forcing reads.",
+            details=None,
+        )
+    return Path(object_store_root)
 
 
 @router.get("/data-sources")
@@ -120,20 +145,22 @@ def get_met_station_series(
         default=None,
         description=(
             "Station forcing variables. Repeat the parameter or provide comma-separated values. "
-            "Allowed values are validated by the forecast store."
+            "Public station-series variables are PRCP, TEMP, RH, wind, and Rn."
         ),
     ),
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
     limit: int | None = Query(default=None, ge=1, le=MAX_STATION_SERIES_LIMIT),
-    store: PsycopgForecastStore = Depends(get_data_source_store),
+    station_lookup: StationLookup = Depends(get_station_lookup),
+    object_store_root: Path = Depends(get_object_store_root),
 ) -> dict[str, Any]:
     try:
         return _ok(
             request,
-            store.station_series(
+            read_station_forcing_csv(
+                station_lookup=station_lookup,
+                object_store_root=object_store_root,
                 station_id=station_id,
-                forcing_version_id=forcing_version_id,
                 model_id=model_id,
                 source_id=source_id,
                 cycle_time=cycle_time,

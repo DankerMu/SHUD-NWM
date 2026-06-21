@@ -594,7 +594,6 @@ const stationSeriesUnits = {
   RH: '%',
   wind: 'm/s',
   Rn: 'W/m2',
-  Press: 'Pa',
 } as const
 
 function hydroMetStationSeriesResponse(stationId = 'qhh_forc_001', overrides: Record<string, unknown> = {}) {

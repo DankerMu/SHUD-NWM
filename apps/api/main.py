@@ -309,6 +309,7 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
         version="0.1.0",
     )
     api.state.runtime_config = runtime_config
+    api.state.object_store_root = runtime_config.object_store_root
 
     register_error_handlers(api)
     api.middleware("http")(protected_mutation_auth_guard)
@@ -594,8 +595,40 @@ def _patch_station_series_openapi(schema: dict) -> None:
                 }
             },
         },
-        "4XX": {"$ref": "#/components/responses/Error"},
-        "5XX": {"$ref": "#/components/responses/Error"},
+        "4XX": _station_series_error_response(
+            "Station series client error",
+            {
+                "stationNotFound": _error_example("STATION_NOT_FOUND", "Station not found."),
+                "missingRequiredFilter": _error_example(
+                    "MISSING_REQUIRED_FILTER",
+                    "forcing_version_id or model_id, source_id, and cycle_time are required "
+                    "for station series queries.",
+                    details={
+                        "required_alternatives": [
+                            ["forcing_version_id"],
+                            ["model_id", "source_id", "cycle_time"],
+                        ]
+                    },
+                ),
+                "stationForcingFileNotFound": _error_example(
+                    "STATION_FORCING_FILE_NOT_FOUND",
+                    "Station forcing file not found.",
+                ),
+            },
+        ),
+        "5XX": _station_series_error_response(
+            "Station series server error",
+            {
+                "stationForcingFilenameMissing": _error_example(
+                    "STATION_FORCING_FILENAME_MISSING",
+                    "Station forcing filename is missing.",
+                ),
+                "stationForcingFileMalformed": _error_example(
+                    "STATION_FORCING_FILE_MALFORMED",
+                    "Station forcing file is malformed.",
+                ),
+            },
+        ),
     }
 
 
@@ -1033,6 +1066,11 @@ def _station_series_parameters() -> list[dict[str, Any]]:
             "in": "query",
             "required": False,
             "schema": {"type": "string", "minLength": 1},
+            "deprecated": True,
+            "description": (
+                "Deprecated compatibility parameter. The disk-only route ignores this value when "
+                "model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series."
+            ),
         },
         {
             "name": "model_id",
@@ -1066,7 +1104,7 @@ def _station_series_parameters() -> list[dict[str, Any]]:
             },
             "description": (
                 "Station forcing variables. Repeat the parameter or provide comma-separated values. "
-                "Allowed values are PRCP, TEMP, RH, wind, Rn, and Press."
+                "Public station-series variables are PRCP, TEMP, RH, wind, and Rn."
             ),
         },
         {
@@ -1108,6 +1146,33 @@ def _success_response_schema(data_schema: dict) -> dict:
                 "properties": {"data": data_schema},
             },
         ]
+    }
+
+
+def _station_series_error_response(description: str, examples: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                "examples": examples,
+            }
+        },
+    }
+
+
+def _error_example(code: str, message: str, *, details: Any | None = None) -> dict[str, Any]:
+    return {
+        "summary": code,
+        "value": {
+            "request_id": "req_01J0NHMS",
+            "status": "error",
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+            },
+        },
     }
 
 
@@ -1498,7 +1563,7 @@ def _station_series_schema() -> dict:
         "type": "object",
         "required": ["variable", "unit", "native_resolution", "points", "truncated", "metadata"],
         "properties": {
-            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn"]},
             "unit": {"type": "string", "nullable": True},
             "native_resolution": {"type": "string", "nullable": True},
             "source_id": {"type": "string", "nullable": True},

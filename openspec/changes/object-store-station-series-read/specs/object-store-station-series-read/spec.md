@@ -197,7 +197,7 @@ The 200 response body SHALL conform to the existing `StationSeriesResponse` sche
 #### Scenario: metadata block reports returned_points and time bounds
 
 - **WHEN** the API returns 200
-- **THEN** the response `data.metadata` SHALL contain `returned_points` (total tuple count after filtering+limit), `truncated` (boolean reflecting whether `limit` was hit), `returned_from` and `returned_to` (timezone-aware UTC bounds of returned points)
+- **THEN** each emitted `data.series[].metadata` SHALL contain `returned_points` (that variable's returned point count after filtering+limit), `truncated` (boolean reflecting whether that variable was truncated), `returned_from` and `returned_to` (timezone-aware UTC bounds of returned points)
 
 #### Scenario: series ordering — variables fixed order, points chronologically ascending
 
@@ -205,9 +205,9 @@ The 200 response body SHALL conform to the existing `StationSeriesResponse` sche
 - **THEN** `data.series[]` SHALL be ordered `[PRCP, TEMP, RH, wind, Rn]` (filtering keeps relative order; absent variables are omitted)
 - **AND** each `series.points[]` SHALL be sorted by `valid_time` ascending
 
-### Requirement: Disk-miss returns 404 with explicit expected_path
+### Requirement: Disk-miss returns 404 with safe expected_path
 
-The reader SHALL return HTTP 404 `STATION_FORCING_FILE_NOT_FOUND` whenever the resolved disk path does not exist, including the resolved path in the error details for operator troubleshooting.
+The reader SHALL return HTTP 404 `STATION_FORCING_FILE_NOT_FOUND` whenever the resolved disk path does not exist, including an object-store-relative `expected_path` such as `forcing/<source>/<cycle>/<basin>/<model>/shud/<filename>` in the error details for operator troubleshooting. Public API responses SHALL NOT expose `OBJECT_STORE_ROOT` or host absolute paths.
 
 #### Scenario: file missing returns 404 with expected_path
 
@@ -221,21 +221,27 @@ The reader SHALL return HTTP 404 `STATION_FORCING_FILE_NOT_FOUND` whenever the r
 
 ### Requirement: OBJECT_STORE_ROOT env required at startup, role boundary updated
 
-The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing or does not resolve to an existing readable directory. The display role boundary SHALL be updated to remove `OBJECT_STORE_ROOT` from the forbidden compute-path env list, so that this env can be legitimately set on display.env.
+The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing or does not resolve to an existing readable and traversable directory. Any role that sets `OBJECT_STORE_ROOT` SHALL validate that it resolves to an existing readable and traversable directory. The default local/dev module import path SHALL remain compatible when `OBJECT_STORE_ROOT` is absent. The display role boundary SHALL be updated to remove `OBJECT_STORE_ROOT` from the forbidden compute-path env list, so that this env can be legitimately set on display.env.
 
 #### Scenario: missing env var fails startup
 
 - **WHEN** the display API process starts without `OBJECT_STORE_ROOT` env var set
 - **THEN** `load_runtime_config()` SHALL raise `RuntimeModeError` with message containing `OBJECT_STORE_ROOT env var is required`; the process SHALL exit non-zero before binding the HTTP port
 
+#### Scenario: default dev app import remains compatible without OBJECT_STORE_ROOT
+
+- **WHEN** `apps.api.main` is imported in the default local/dev environment without `OBJECT_STORE_ROOT`
+- **THEN** the module-level `app = create_app()` SHALL initialize successfully
+- **AND** `RuntimeConfig.object_store_root` SHALL be `None`
+
 #### Scenario: env points to non-existent directory fails startup
 
-- **WHEN** `OBJECT_STORE_ROOT=/no/such/path` and `/no/such/path` does not exist
-- **THEN** `load_runtime_config()` SHALL raise `RuntimeModeError` with message containing `is not a readable directory`
+- **WHEN** any API role starts with `OBJECT_STORE_ROOT=/no/such/path` and `/no/such/path` does not exist
+- **THEN** `load_runtime_config()` SHALL raise `RuntimeModeError` with message containing `is not a readable and traversable directory`
 
-#### Scenario: env points to existing readable directory starts cleanly
+#### Scenario: env points to existing readable and traversable directory starts cleanly
 
-- **WHEN** `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store` and that path is a readable directory
+- **WHEN** `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store` and that path is a readable and traversable directory
 - **THEN** the API SHALL start normally and serve requests
 
 #### Scenario: OBJECT_STORE_ROOT no longer triggers DISPLAY_BOUNDARY_CONFIG_UNSAFE
@@ -280,7 +286,7 @@ The reader SHALL accept optional `variables`, `from_time`, `to_time`, and `limit
 - **WHEN** API request includes `limit=10`
 - **AND** the unfiltered output would have 265 tuples (5 vars × 53 rows)
 - **THEN** the response SHALL contain exactly 10 tuples; sort order SHALL be variable order `[PRCP, TEMP, RH, wind, Rn]` first, then `valid_time` ascending within each variable
-- **AND** `data.metadata.truncated` SHALL be `true`
+- **AND** the affected `data.series[].metadata.truncated` SHALL be `true`
 
 #### Scenario: Press variable in request is silently dropped, response omits Press
 

@@ -23,6 +23,7 @@ services:
       NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS: "false"
       NHMS_ENABLE_LIVE_POSTGIS_MVT: ${NHMS_ENABLE_LIVE_POSTGIS_MVT:-false}
       DATABASE_URL: ${DATABASE_URL:?set readonly display database url}
+      OBJECT_STORE_ROOT: ${OBJECT_STORE_ROOT:?set readonly display object-store root}
       NHMS_PUBLISHED_ARTIFACT_ROOT: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
       NHMS_PUBLISHED_ARTIFACT_URI_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_URI_PREFIX:-published://}
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
@@ -39,6 +40,10 @@ services:
       - type: bind
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT:?set host published artifact root}
         target: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
+        read_only: true
+      - type: bind
+        source: ${OBJECT_STORE_ROOT:?set readonly display object-store root}
+        target: ${OBJECT_STORE_ROOT:?set readonly display object-store root}
         read_only: true
     ports:
       - "127.0.0.1:${NHMS_DISPLAY_API_PORT:-8000}:8000"

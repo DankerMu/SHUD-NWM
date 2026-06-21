@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
-from apps.api.runtime_mode import RuntimeModeError, ServiceRole, load_runtime_config
+from apps.api.runtime_mode import RuntimeModeError, ServiceRole, display_boundary_blockers, load_runtime_config
 
 _ROLE_ENV_KEYS = (
     "NHMS_SERVICE_ROLE",
@@ -38,6 +39,7 @@ def test_local_default_runtime_role_is_dev_monolith() -> None:
 
     assert config.service_role == ServiceRole.DEV_MONOLITH
     assert config.service_role_explicit is False
+    assert config.object_store_root is None
     assert config.control_mutations_enabled is True
     assert config.slurm_routes_enabled is True
     assert config.queue_depth_mode == "slurm_gateway"
@@ -97,14 +99,15 @@ def test_slurm_gateway_role_is_reserved_and_does_not_start_business_api() -> Non
     assert exc_info.value.details == {"service_role": "slurm_gateway", "bounded_gateway_app": True}
 
 
-def test_display_readonly_starts_with_runtime_config_and_without_slurm_routes() -> None:
-    app = create_app(_display_env())
+def test_display_readonly_starts_with_runtime_config_and_without_slurm_routes(tmp_path: Path) -> None:
+    app = create_app(_display_env(tmp_path))
 
     with TestClient(app) as client:
         config_response = client.get("/api/v1/runtime/config")
         slurm_response = client.get("/api/v1/slurm/health")
         openapi = client.get("/openapi.json").json()
 
+    assert app.state.object_store_root == (tmp_path / "object-store").resolve()
     assert config_response.status_code == 200
     assert config_response.json()["data"] == {
         "service_role": "display_readonly",
@@ -158,8 +161,8 @@ def test_dev_and_compute_roles_allow_slurm_gateway_url_env(role: str, url: str) 
     assert config.slurm_routes_enabled is True
 
 
-def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
-    display_app = create_app(_display_env())
+def test_display_route_inventory_preserves_non_slurm_business_routes(tmp_path: Path) -> None:
+    display_app = create_app(_display_env(tmp_path))
     compute_app = create_app(_clean_env({"NHMS_SERVICE_ROLE": "compute_control"}))
     display_routes = _route_keys(display_app)
     compute_routes = _route_keys(compute_app)
@@ -196,8 +199,6 @@ def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
         ("RUN_WORKSPACE_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("SHARED_LOG_ROOT", "/work/nhms/logs", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("SHARED_LOG_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
-        ("OBJECT_STORE_ROOT", "/object-store", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
-        ("OBJECT_STORE_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "/ghdc/data/nwm/object-store", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("NHMS_SCHEDULER_LOCK_ROOT", "/work/nhms/scheduler/locks", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
@@ -228,12 +229,13 @@ def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
     ],
 )
 def test_display_readonly_blocks_unsafe_compute_config(
+    tmp_path: Path,
     env_var: str,
     value: str,
     expected_code: str,
 ) -> None:
     with pytest.raises(RuntimeModeError) as exc_info:
-        create_app(_display_env({env_var: value}))
+        create_app(_display_env(tmp_path, {env_var: value}))
 
     assert exc_info.value.code == "DISPLAY_BOUNDARY_CONFIG_UNSAFE"
     blockers = exc_info.value.details["blockers"]
@@ -241,11 +243,78 @@ def test_display_readonly_blocks_unsafe_compute_config(
     assert {blocker["code"] for blocker in blockers} == {expected_code}
 
 
-def _display_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+def test_display_readonly_requires_object_store_root() -> None:
+    with pytest.raises(RuntimeModeError) as exc_info:
+        create_app(_clean_env({"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "display_readonly"}))
+
+    assert exc_info.value.code == "OBJECT_STORE_ROOT_REQUIRED"
+    assert "OBJECT_STORE_ROOT env var is required" in exc_info.value.message
+    assert exc_info.value.details["env_var"] == "OBJECT_STORE_ROOT"
+
+
+@pytest.mark.parametrize("role", ["display_readonly", "compute_control", "dev_monolith"])
+def test_configured_object_store_root_must_be_readable_directory(tmp_path: Path, role: str) -> None:
+    missing_root = tmp_path / "missing-object-store"
+
+    with pytest.raises(RuntimeModeError) as exc_info:
+        create_app(
+            _clean_env(
+                {
+                    "NHMS_SERVICE_ROLE": role,
+                    "OBJECT_STORE_ROOT": str(missing_root),
+                    **({"NHMS_REQUIRE_SERVICE_ROLE": "true"} if role == "display_readonly" else {}),
+                }
+            )
+        )
+
+    assert exc_info.value.code == "OBJECT_STORE_ROOT_UNREADABLE"
+    assert "is not a readable and traversable directory" in exc_info.value.message
+    assert exc_info.value.details["path"] == str(missing_root.resolve())
+
+
+def test_configured_object_store_root_without_execute_permission_fails(
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    object_store_root.chmod(0o600)
+    try:
+        if os.access(object_store_root, os.R_OK | os.X_OK):
+            pytest.skip("platform ACL/root behavior still reports directory traversable")
+        with pytest.raises(RuntimeModeError) as exc_info:
+            create_app(
+                _clean_env(
+                    {
+                        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+                        "NHMS_SERVICE_ROLE": "display_readonly",
+                        "OBJECT_STORE_ROOT": str(object_store_root),
+                    }
+                )
+            )
+    finally:
+        object_store_root.chmod(0o700)
+
+    assert exc_info.value.code == "OBJECT_STORE_ROOT_UNREADABLE"
+    assert "readable and traversable directory" in exc_info.value.message
+    assert exc_info.value.details["path"] == str(object_store_root.resolve())
+
+
+def test_display_readonly_allows_readable_object_store_root_without_boundary_blocker(tmp_path: Path) -> None:
+    config = load_runtime_config(_display_env(tmp_path))
+    blockers = display_boundary_blockers(_display_env(tmp_path))
+
+    assert config.object_store_root == (tmp_path / "object-store").resolve()
+    assert not any(blocker.env_var == "OBJECT_STORE_ROOT" for blocker in blockers)
+
+
+def _display_env(tmp_path: Path, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir(exist_ok=True)
     return _clean_env(
         {
             "NHMS_REQUIRE_SERVICE_ROLE": "true",
             "NHMS_SERVICE_ROLE": "display_readonly",
+            "OBJECT_STORE_ROOT": str(object_store_root),
             **dict(extra or {}),
         }
     )

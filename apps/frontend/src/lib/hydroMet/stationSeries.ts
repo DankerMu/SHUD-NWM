@@ -4,8 +4,9 @@ import type { components } from '@/api/types'
 import { normalizeHydroMetCycle } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
-export const HYDRO_MET_STATION_SERIES_LIMIT = 240
-export const HYDRO_MET_STATION_VARIABLES = ['PRCP', 'TEMP', 'RH', 'wind', 'Rn', 'Press'] as const
+export const HYDRO_MET_STATION_SERIES_DISPLAY_LIMIT = 240
+export const HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT = 1600
+export const HYDRO_MET_STATION_VARIABLES = ['PRCP', 'TEMP', 'RH', 'wind', 'Rn'] as const
 export const HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT = 96
 export const HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT = 180
 
@@ -20,6 +21,7 @@ export type HydroMetStationSeriesPoint = components['schemas']['StationSeriesPoi
 
 export interface HydroMetStationSeriesProductIdentity {
   forcing_version_id: string
+  model_id: string
   source_id: string
   cycle_time: string
 }
@@ -40,9 +42,9 @@ export interface HydroMetStationSeriesUiStringOptions {
   oversizeReplacement?: string
 }
 
-export function boundedHydroMetStationSeriesLimit(value: number | null | undefined) {
-  if (!Number.isFinite(value)) return HYDRO_MET_STATION_SERIES_LIMIT
-  return Math.max(1, Math.min(HYDRO_MET_STATION_SERIES_LIMIT, Math.trunc(Number(value))))
+export function boundedHydroMetStationSeriesApiLimit(value: number | null | undefined) {
+  if (!Number.isFinite(value)) return HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT
+  return Math.max(1, Math.min(HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT, Math.trunc(Number(value))))
 }
 
 function normalizedHydroMetStationSeriesUiString(value: string, fallback: string) {
@@ -102,6 +104,7 @@ export function formatHydroMetStationSeriesContractValue(
 export function stationSeriesRequestKey(product: HydroMetStationSeriesProductIdentity, stationId: string) {
   return [
     product.forcing_version_id,
+    product.model_id,
     product.source_id,
     normalizeHydroMetCycle(product.cycle_time) ?? product.cycle_time,
     stationId,
@@ -115,12 +118,15 @@ export async function loadHydroMetStationSeries({
 }: HydroMetStationSeriesRequest): Promise<HydroMetStationSeriesResponse> {
   try {
     const stationId = station.station_id
-    const boundedLimit = boundedHydroMetStationSeriesLimit(limit)
+    const boundedLimit = boundedHydroMetStationSeriesApiLimit(limit)
     const { data, error } = await client.GET('/api/v1/met/stations/{station_id}/series', {
       params: {
         path: { station_id: stationId },
         query: {
           forcing_version_id: product.forcing_version_id,
+          model_id: product.model_id,
+          source_id: product.source_id,
+          cycle_time: product.cycle_time,
           variables: [...HYDRO_MET_STATION_VARIABLES],
           limit: boundedLimit,
         },
@@ -144,7 +150,7 @@ export function validateHydroMetStationSeriesIdentity(
   const messages: string[] = []
   const responseRecord = isRecord(response) ? response : {}
   const responseStationId = responseRecord.station_id
-  const responseForcingVersionId = responseRecord.forcing_version_id
+  const responseModelId = responseRecord.model_id
   const responseSourceId = responseRecord.source_id
   const responseCycleTime = responseRecord.cycle_time
 
@@ -153,17 +159,17 @@ export function validateHydroMetStationSeriesIdentity(
   } else if (responseStationId !== stationId) {
     messages.push(`station_id=${formatHydroMetStationSeriesContractValue(responseStationId)} 与当前选择 ${formatHydroMetStationSeriesContractValue(stationId)} 不一致`)
   }
-  if (typeof responseForcingVersionId !== 'string') {
-    messages.push('forcing_version_id 元数据格式无效')
-  } else if (responseForcingVersionId !== product.forcing_version_id) {
-    messages.push(`forcing_version_id=${formatHydroMetStationSeriesContractValue(responseForcingVersionId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.forcing_version_id)} 不一致`)
+  if (typeof responseModelId !== 'string') {
+    messages.push('model_id 元数据格式无效')
+  } else if (responseModelId !== product.model_id) {
+    messages.push(`model_id=${formatHydroMetStationSeriesContractValue(responseModelId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.model_id)} 不一致`)
   }
   if (typeof responseSourceId !== 'string') {
     messages.push('source_id 元数据格式无效')
   } else if (responseSourceId !== product.source_id) {
     messages.push(`source_id=${formatHydroMetStationSeriesContractValue(responseSourceId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.source_id)} 不一致`)
   }
-  if (responseCycleTime !== undefined && responseCycleTime !== null && typeof responseCycleTime !== 'string') {
+  if (typeof responseCycleTime !== 'string') {
     messages.push('cycle_time 元数据格式无效')
   }
 
@@ -219,7 +225,7 @@ export type StationSeriesValidation =
   | { ok: false; messages: string[] }
 
 const HYDRO_MET_STATION_SERIES_POINT_SENTINEL = 16
-const HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT = HYDRO_MET_STATION_SERIES_LIMIT + HYDRO_MET_STATION_SERIES_POINT_SENTINEL
+const HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT = HYDRO_MET_STATION_SERIES_DISPLAY_LIMIT + HYDRO_MET_STATION_SERIES_POINT_SENTINEL
 const HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT = 6
 const HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT = 6
 const HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT = 32
@@ -309,7 +315,7 @@ export function validateHydroMetStationSeriesForChart(series: HydroMetStationSer
         invalidPointMessages.push(`变量 ${series.variable} 第 ${index + 1} 个点${parsed}`)
       }
     } else {
-      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_LIMIT) renderedPoints.push(parsed)
+      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_DISPLAY_LIMIT) renderedPoints.push(parsed)
       const flag = parsed.qualityFlag ?? 'missing'
       qualityFlagCounts.set(flag, (qualityFlagCounts.get(flag) ?? 0) + 1)
     }
@@ -331,7 +337,7 @@ export function validateHydroMetStationSeriesForChart(series: HydroMetStationSer
     reportedPointCount,
     inspectedPointCount,
     renderedPoints,
-    capped: reportedPointCount > HYDRO_MET_STATION_SERIES_LIMIT,
+    capped: reportedPointCount > HYDRO_MET_STATION_SERIES_DISPLAY_LIMIT,
     inspectionCapped,
     nonOkFlags,
     nonOkFlagsCapped,

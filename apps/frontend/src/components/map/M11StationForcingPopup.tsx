@@ -13,7 +13,7 @@ import {
 import { useHydroMetPopupProduct } from '@/components/map/useHydroMetPopupProduct'
 import { cn } from '@/lib/cn'
 import {
-  HYDRO_MET_STATION_SERIES_LIMIT,
+  HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
   formatHydroMetStationSeriesMessage,
   loadHydroMetStationSeries,
@@ -45,6 +45,7 @@ type StationSeriesLoadState =
 function stationSeriesProductIdentity(product: QhhLatestProduct): HydroMetStationSeriesProductIdentity {
   return {
     forcing_version_id: product.forcing_version_id,
+    model_id: product.model_id,
     source_id: product.source_id,
     cycle_time: product.cycle_time,
   }
@@ -60,8 +61,8 @@ function seriesByVariable(response: HydroMetStationSeriesResponse) {
 }
 
 /**
- * 代站六要素 forcing 曲线 popup（M26 全屏单页）。玻璃质感 + 弹窗内 source/起报/变量选择。
- * 变量选择：PRCP/TEMP/RH/wind/Rn/Press 多选切换（默认全显），改选只显所选变量曲线。
+ * 代站五要素 forcing 曲线 popup（M26 全屏单页）。玻璃质感 + 弹窗内 source/起报/变量选择。
+ * 变量选择：PRCP/TEMP/RH/wind/Rn 多选切换（默认全显），改选只显所选变量曲线。
  * source 切换 → 以新源重取 latest-product + station-series。
  * honest 红线：身份不符 / 任一无效点 / 缺 unit / 坏 metadata → 空态，绝不渲染 echarts；product=null → honest 空态。
  */
@@ -108,7 +109,7 @@ export function M11StationForcingPopup({
     void loadHydroMetStationSeries({
       product: identity,
       station: { station_id: station.station_id },
-      limit: HYDRO_MET_STATION_SERIES_LIMIT,
+      limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     }).then(
       (response) => {
         if (!cancelled) setState({ kind: 'loaded', requestKey, response })
@@ -129,7 +130,7 @@ export function M11StationForcingPopup({
       <M11PopupHeader
         icon={CloudRain}
         title={`${station.station_id}${station.station_name ? ` · ${station.station_name}` : ''}`}
-        subtitle="气象代站六要素 forcing"
+        subtitle="气象代站五要素 forcing"
         onClose={onClose}
       />
       <M11PopupSourceControls
