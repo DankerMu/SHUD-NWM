@@ -83,3 +83,24 @@ CMFD ingest 已被撤销（commit `ef234f2` revert `1a0c87f`；Epic #614 + 子 #
 - **本 spec 在 disk-path 层引入 source_id lowercase 归一化（IFS→ifs, GFS→gfs），与现有 forecast_store 内 `LOWER(source_id)` 查询语义对齐；API 入参大小写约定本身不变，归一化的统一抽取交给后续 normalization issue**
 - **不验证 IDW 数据值冗余 / source-grid 重合度**：1709 SHUD 代站从 ~250 个 IFS/GFS 0.25° 源 cell IDW 而来，存在数据值冗余，这是 forcing_producer 上游设计层面的事，本 spec 不做去重也不做对比
 - **不写新 `STATION_FORCING_FILENAME_INVALID` 错误码 + path traversal 校验**：当前 `met_station.properties_json.forcing_filename` 仅由 forcing_producer / station_seeder 内部写入，数据源可信；future 如开放运维侧手填该字段，再加 follow-up issue 引入校验
+
+## Forward Compatibility Invariant（direct_grid 模式自动切换条件）
+
+direct_grid 模式（IFS/GFS 0.25° 原生格点当 SHUD 输入站，跳过 IDW 0.1° 插值；rollout 见 `openspec/changes/direct-grid-forcing/`）切换时，本 change 的 reader **0 改、自动生效** 的前提是 forcing_producer 输出保持以下 7 项 SHUD-format CSV invariant：
+
+1. **路径模板**：`${OBJECT_STORE_ROOT}/forcing/{src}/{cycle}/{bv}/{model}/shud/{forcing_filename}`（保留 `shud/` 子目录段）
+2. **文件命名**：`X<lon>Y<lat>.csv`（lon/lat 数值由 0.1° 代站坐标改成 0.25° 源网格坐标即可；模板不变）
+3. **CSV header**：`nrow ncol start_date end_date` 4 token，制表符或空白分隔
+4. **数据列**：固定 6 列、名字不变 `Time_Day Precip Temp RH Wind RN`
+5. **时间编码**：`Time_Day` 列为 decimal day-from-cycle（0 = cycle 起点，0.125 = +3h，6.5 = +6d12h）
+6. **单位映射**：Precip mm/day, Temp degC, RH 0-1, Wind m/s, RN W/m²（reader 据此输出 `unit` 字段）
+7. **station_id → forcing_filename 查询**：仍走 `met.met_station.properties_json.forcing_filename` 单表 lookup（reader 通过 `StationLookup` Protocol 注入，不感知 station 表行数/粒度）
+
+满足以上 7 项 → direct_grid 切换工作仅限：
+- forcing_producer 切换输入源（0.1° IDW 中间结果 → 0.25° 原生格点直接当 SHUD 输入站）
+- `met.met_station` 表新增 ~250 行 direct_grid station（新 `station_id` / lon / lat / `forcing_filename`），可与旧 1709/386 行通过 station_id 命名约定 + 新 `model_id` 隔离共存
+- reader / `packages/common/object_store_forcing.py` / 19 个 unit tests / spec.md 全部 **0 改**
+
+任一打破（换列名、加列、换时间编码、跳 `shud/` 子目录、走非 SHUD producer pipeline），reader 必须 fork 一个 parser dispatch（按 `model_id` 选 SHUD-CSV vs 新格式），**另起 spec + PR**。
+
+**direct-grid-forcing change 启动前的硬门**：先核对上 7 项 invariant，确认 forcing_producer 切换计划全部沿用 SHUD producer pipeline 输出契约；任一不一致则直接升级为"reader 改造 + parser dispatch" scope，不能按本 spec 的"0 改自动切换"承诺执行。
