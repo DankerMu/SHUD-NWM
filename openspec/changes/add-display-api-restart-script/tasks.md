@@ -14,7 +14,12 @@
 ## 2. Runbook update
 
 - [ ] 2.1 [docs/runbooks/display-readonly-live-mvt.md:41](docs/runbooks/display-readonly-live-mvt.md#L41): replace the parenthetical `/tmp/start_display.sh` reference with `scripts/ops/start-display-api.sh`; include the new script's contract one-liner (sources display.env + smoke-checks basin_id)
-- [ ] 2.2 (defer) Check `scripts/diagnostic/display-cold-waterfall.sh` for inlined `setsid python ...` patterns: **VERIFIED PRESENT** at line 103 inside `launch_uvicorn()`; also `/healthz` 404 bug at lines 20/25/143/165 (real defect — `/healthz` does not exist; only `/health` does per `apps/api/main.py:1947`). Refactor + fix tracked in follow-up [#612](https://github.com/DankerMu/SHUD-NWM/issues/612) to preserve PR #611's operator-restart-wrapper single-responsibility scope.
+- [ ] 2.2 (defer) Check `scripts/diagnostic/display-cold-waterfall.sh` for inlined `setsid python ...` patterns:
+  **VERIFIED PRESENT** at line 103 inside `launch_uvicorn()`;
+  also `/healthz` 404 bug at lines 20/25/143/165
+  (real defect — `/healthz` does not exist; only `/health` does per `apps/api/main.py:1947`).
+  Refactor + fix tracked in follow-up [#612](https://github.com/DankerMu/SHUD-NWM/issues/612)
+  to preserve PR #611's operator-restart-wrapper single-responsibility scope.
 
 ## 3. Local verify
 
