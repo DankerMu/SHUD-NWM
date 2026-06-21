@@ -41,6 +41,9 @@ from tests.test_monitoring_api import (
 from workers.data_adapters.base import cycle_id_for
 
 PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
+STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE = (
+    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
+)
 QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
 PIPELINE_JOB_KEYS = {
     "job_id",
@@ -654,6 +657,7 @@ def test_met_station_series_forcing_version_alone_uses_error_envelope_without_st
     assert body["status"] == "error"
     assert body["request_id"]
     assert body["error"]["code"] == "MISSING_REQUIRED_FILTER"
+    assert body["error"]["message"] == STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE
     assert body["error"]["details"] == {
         "required_alternatives": [
             ["forcing_version_id"],
@@ -1217,6 +1221,16 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
         "STATION_NOT_FOUND",
         "MISSING_REQUIRED_FILTER",
         "STATION_FORCING_FILE_NOT_FOUND",
+    }
+    missing_required_filter = operation["responses"]["4XX"]["content"]["application/json"]["examples"][
+        "missingRequiredFilter"
+    ]["value"]["error"]
+    assert missing_required_filter["message"] == STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE
+    assert missing_required_filter["details"] == {
+        "required_alternatives": [
+            ["forcing_version_id"],
+            ["model_id", "source_id", "cycle_time"],
+        ]
     }
     assert {
         example["value"]["error"]["code"]

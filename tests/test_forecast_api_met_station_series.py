@@ -18,6 +18,9 @@ SOURCE_ID = "IFS"
 CYCLE_TIME = "2026-06-20T12:00:00Z"
 BASIN_VERSION_ID = "basins_heihe_vbasins"
 FORCING_FILENAME = "X100.75Y37.65.csv"
+MISSING_REQUIRED_FILTER_MESSAGE = (
+    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
+)
 
 
 def _station(*, properties_json: dict[str, Any] | None = None) -> StationMetadata:
@@ -123,6 +126,7 @@ def test_station_series_route_forcing_version_alone_returns_missing_required_fil
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "MISSING_REQUIRED_FILTER"
+    assert response.json()["error"]["message"] == MISSING_REQUIRED_FILTER_MESSAGE
     assert response.json()["error"]["details"] == {
         "required_alternatives": [
             ["forcing_version_id"],

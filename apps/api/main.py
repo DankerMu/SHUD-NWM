@@ -601,7 +601,8 @@ def _patch_station_series_openapi(schema: dict) -> None:
                 "stationNotFound": _error_example("STATION_NOT_FOUND", "Station not found."),
                 "missingRequiredFilter": _error_example(
                     "MISSING_REQUIRED_FILTER",
-                    "model_id, source_id, and cycle_time are required for disk station series reads.",
+                    "forcing_version_id or model_id, source_id, and cycle_time are required "
+                    "for station series queries.",
                     details={
                         "required_alternatives": [
                             ["forcing_version_id"],

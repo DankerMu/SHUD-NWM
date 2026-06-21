@@ -722,7 +722,7 @@ paths:
                     status: error
                     error:
                       code: MISSING_REQUIRED_FILTER
-                      message: model_id, source_id, and cycle_time are required for disk station series reads.
+                      message: forcing_version_id or model_id, source_id, and cycle_time are required for station series queries.
                       details:
                         required_alternatives:
                           - [forcing_version_id]
