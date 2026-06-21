@@ -109,7 +109,7 @@
 ## 5. Env files — `infra/env/`
 
 - [x] 5.1 `infra/env/display.example`: 新增 `OBJECT_STORE_ROOT=` （注释默认值 `/home/ghdc/nwm/object-store`）
-- [ ] 5.2 `infra/env/display.env` (gitignored 不入 repo) 在 node-27 host 上 ops 配 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`；本仓库不 commit 该文件
+- [x] 5.2 `infra/env/display.env` (gitignored 不入 repo) 在 node-27 host 上 ops 配 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`；本仓库不 commit 该文件
 - [ ] 5.3 在 runbook `docs/runbooks/object-store-forcing-series-read.md` 文档化 "node-27 上 OBJECT_STORE_ROOT 期望值是 `/home/ghdc/nwm/object-store`，由 ops 配置到 display.env"
 
 ## 6. Real-disk integration tests — node-27 oracle
@@ -125,7 +125,7 @@
 - [x] 6.9 sub-test 7: cycle_time `+08:00` 输入 → 与 `Z` 输入产生相同响应
 - [x] 6.10 sub-test 8: variables=Press → 200 + `data.series=[]`
 - [x] 6.11 sub-test 9: variables=PRCP,Press → 200 + 只含 PRCP series
-- [ ] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（`PsycopgStationLookup` + spy connection/cursor 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
+- [x] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（`PsycopgStationLookup` + spy connection/cursor 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
 - [x] 6.13 sub-test 11: 4 个 currently-409 cases (heihe×IFS, heihe×gfs, qhh×IFS, qhh×gfs at 2026-06-20T12:00:00Z) 全部 200
 - [x] 6.14 sub-test 12: 响应 byte-shape 与 §0.10 baseline fixture 对比（除 request_id 和真实数值字段外，结构 + 字段类型 + 排序一致）
 - [x] 6.15 sub-test 13: read-only side-effect 验证：连续 3 个相同请求后 `OBJECT_STORE_ROOT/forcing/...` mtime 不变（采样几个文件）
@@ -152,9 +152,9 @@
 - [x] 8.2 本地 `uv run pytest tests/test_object_store_forcing.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_forecast_api_met_station_series.py -q` PASS
 - [x] 8.2a 本地 targeted sibling-startup compatibility tests PASS（至少覆盖 `apps.api.main` import smoke、更新过 `create_app()` env helper 的 runtime/monitoring/pipeline artifact tests，例如 `tests/test_monitoring_api.py` 与 `tests/test_pipeline_logs_artifacts.py` 中相关 display app cases）
 - [x] 8.3 本地 `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py apps/api/routes/data_sources.py apps/api/main.py apps/api/runtime_mode.py tests/test_role_boundary_static.py` PASS
-- [ ] 8.4 node-27 整链路 live：apply env 改动 → 重启 display API (`scripts/ops/start-display-api.sh`) → 跑 §6 real-disk integration → 收 receipt
-- [ ] 8.5 node-27 curl 验证 4 种组合（heihe×IFS / heihe×gfs / qhh×IFS / qhh×gfs）最新 cycle 全部 200 + 真数据（不再 409）
-- [ ] 8.6 node-27 curl 验证老 cycle (2026-05-31) 4 种组合全部 404 `STATION_FORCING_FILE_NOT_FOUND`（确认不 fallback DB）
+- [x] 8.4 node-27 整链路 live：apply env 改动 → 重启 display API (`scripts/ops/start-display-api.sh`) → 跑 §6 real-disk integration → 收 receipt
+- [x] 8.5 node-27 curl 验证 4 种组合（heihe×IFS / heihe×gfs / qhh×IFS / qhh×gfs）最新 cycle 全部 200 + 真数据（不再 409）
+- [x] 8.6 node-27 curl 验证老 cycle (2026-05-31) 4 种组合全部 404 `STATION_FORCING_FILE_NOT_FOUND`（确认不 fallback DB）
 
 ## 9. PR 边界 (3 PR) — descriptive only, NOT a task; do not check
 
