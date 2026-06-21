@@ -268,8 +268,35 @@ def test_configured_object_store_root_must_be_readable_directory(tmp_path: Path,
         )
 
     assert exc_info.value.code == "OBJECT_STORE_ROOT_UNREADABLE"
-    assert "is not a readable directory" in exc_info.value.message
+    assert "is not a readable and traversable directory" in exc_info.value.message
     assert exc_info.value.details["path"] == str(missing_root.resolve())
+
+
+def test_configured_object_store_root_without_execute_permission_fails(
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    object_store_root.chmod(0o600)
+    try:
+        if os.access(object_store_root, os.R_OK | os.X_OK):
+            pytest.skip("platform ACL/root behavior still reports directory traversable")
+        with pytest.raises(RuntimeModeError) as exc_info:
+            create_app(
+                _clean_env(
+                    {
+                        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+                        "NHMS_SERVICE_ROLE": "display_readonly",
+                        "OBJECT_STORE_ROOT": str(object_store_root),
+                    }
+                )
+            )
+    finally:
+        object_store_root.chmod(0o700)
+
+    assert exc_info.value.code == "OBJECT_STORE_ROOT_UNREADABLE"
+    assert "readable and traversable directory" in exc_info.value.message
+    assert exc_info.value.details["path"] == str(object_store_root.resolve())
 
 
 def test_display_readonly_allows_readable_object_store_root_without_boundary_blocker(tmp_path: Path) -> None:

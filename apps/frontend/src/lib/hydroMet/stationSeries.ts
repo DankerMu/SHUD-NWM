@@ -20,6 +20,7 @@ export type HydroMetStationSeriesPoint = components['schemas']['StationSeriesPoi
 
 export interface HydroMetStationSeriesProductIdentity {
   forcing_version_id: string
+  model_id: string
   source_id: string
   cycle_time: string
 }
@@ -102,6 +103,7 @@ export function formatHydroMetStationSeriesContractValue(
 export function stationSeriesRequestKey(product: HydroMetStationSeriesProductIdentity, stationId: string) {
   return [
     product.forcing_version_id,
+    product.model_id,
     product.source_id,
     normalizeHydroMetCycle(product.cycle_time) ?? product.cycle_time,
     stationId,
@@ -121,6 +123,9 @@ export async function loadHydroMetStationSeries({
         path: { station_id: stationId },
         query: {
           forcing_version_id: product.forcing_version_id,
+          model_id: product.model_id,
+          source_id: product.source_id,
+          cycle_time: product.cycle_time,
           variables: [...HYDRO_MET_STATION_VARIABLES],
           limit: boundedLimit,
         },
@@ -144,7 +149,6 @@ export function validateHydroMetStationSeriesIdentity(
   const messages: string[] = []
   const responseRecord = isRecord(response) ? response : {}
   const responseStationId = responseRecord.station_id
-  const responseForcingVersionId = responseRecord.forcing_version_id
   const responseSourceId = responseRecord.source_id
   const responseCycleTime = responseRecord.cycle_time
 
@@ -152,11 +156,6 @@ export function validateHydroMetStationSeriesIdentity(
     messages.push('station_id 元数据格式无效')
   } else if (responseStationId !== stationId) {
     messages.push(`station_id=${formatHydroMetStationSeriesContractValue(responseStationId)} 与当前选择 ${formatHydroMetStationSeriesContractValue(stationId)} 不一致`)
-  }
-  if (typeof responseForcingVersionId !== 'string') {
-    messages.push('forcing_version_id 元数据格式无效')
-  } else if (responseForcingVersionId !== product.forcing_version_id) {
-    messages.push(`forcing_version_id=${formatHydroMetStationSeriesContractValue(responseForcingVersionId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.forcing_version_id)} 不一致`)
   }
   if (typeof responseSourceId !== 'string') {
     messages.push('source_id 元数据格式无效')

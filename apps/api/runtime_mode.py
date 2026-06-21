@@ -255,10 +255,10 @@ def _runtime_object_store_root(env: Mapping[str, str], role: ServiceRole) -> Pat
     if not raw:
         return None
     path = Path(raw).expanduser().resolve()
-    if not path.is_dir() or not os.access(path, os.R_OK):
+    if not path.is_dir() or not os.access(path, os.R_OK | os.X_OK):
         raise RuntimeModeError(
             code="OBJECT_STORE_ROOT_UNREADABLE",
-            message=f"OBJECT_STORE_ROOT={path} is not a readable directory.",
+            message=f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory.",
             details={"env_var": "OBJECT_STORE_ROOT", "path": str(path), "service_role": role.value},
         )
     return path

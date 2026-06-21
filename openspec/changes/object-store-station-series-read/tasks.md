@@ -33,7 +33,7 @@
 - [x] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断），并拒绝 `NaN` / `inf` / overflow 等非 finite 数值
 - [x] 1.8 `_apply_filters(tuples, variables, from_time, to_time, limit) -> list[tuple]`：variables filter 静默丢弃未知（Press / UnknownVariable 均 drop，不 raise）；from/to inclusive；limit 截断总 tuple count（不是 per-variable）；保持排序 `[PRCP, TEMP, RH, wind, Rn]` 然后 valid_time ascending
 - [x] 1.9 `read_station_forcing_csv(*, station_lookup, object_store_root, station_id, source_id, cycle_time, model_id, variables=None, from_time=None, to_time=None, limit=None) -> StationSeriesResponse` 主入口（Protocol 注入）
-- [x] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.metadata.{returned_points, truncated, returned_from, returned_to}`
+- [x] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.series[].metadata.{returned_points, truncated, returned_from, returned_to}`
 - [x] 1.11 每个 series 项的 `unit` 字段按 AD-5 输出：`PRCP="mm/day", TEMP="degC", RH="0-1", wind="m/s", Rn="W/m^2"`
 - [x] 1.12 文件 OPEN 异常（PermissionError / OSError / FileNotFoundError）转 typed error：
   - FileNotFoundError → `StationForcingFileNotFoundError`
@@ -85,8 +85,8 @@
    if role == ServiceRole.DISPLAY_READONLY and not raw:
        raise RuntimeModeError("OBJECT_STORE_ROOT env var is required")
    path = Path(raw).expanduser().resolve() if raw else None
-   if path is not None and (not path.is_dir() or not os.access(path, os.R_OK)):
-       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
+   if path is not None and (not path.is_dir() or not os.access(path, os.R_OK | os.X_OK)):
+       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory")
   ```
 - [x] 3.3 `apps/api/main.py:create_app()` (line 304+) 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
 - [x] 3.4 **AD-11 boundary fix**：从下面三处同步移除 `OBJECT_STORE_ROOT`：

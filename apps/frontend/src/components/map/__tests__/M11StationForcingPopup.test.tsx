@@ -92,6 +92,7 @@ function seriesResponse(overrides: Record<string, unknown> = {}) {
     station_id: 'qhh_forc_001',
     station: { station_id: 'qhh_forc_001', basin_version_id: 'bv-1' },
     forcing_version_id: 'forc-1',
+    model_id: 'm-1',
     source_id: 'GFS',
     cycle_time: '2026-05-21T00:00:00Z',
     valid_time_start: '2026-05-21T06:00:00Z',
@@ -134,6 +135,16 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
+      params: expect.objectContaining({
+        query: expect.objectContaining({
+          forcing_version_id: 'forc-1',
+          model_id: 'm-1',
+          source_id: 'GFS',
+          cycle_time: '2026-05-21T00:00:00Z',
+        }),
+      }),
+    }))
     for (const variable of HYDRO_MET_STATION_VARIABLES) {
       expect(screen.getByTestId(`m11-station-variable-${variable}-chart`)).toBeInTheDocument()
     }

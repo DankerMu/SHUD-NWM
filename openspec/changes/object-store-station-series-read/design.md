@@ -106,7 +106,7 @@ Time_Day\tPrecip\tTemp\tRH\tWind\tRN   <- row 2: column names
        raise RuntimeModeError("OBJECT_STORE_ROOT env var is required")
    path = Path(raw).expanduser().resolve() if raw else None
    if path is not None and (not path.is_dir() or not os.access(path, os.R_OK)):
-       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
+       raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory")
    runtime_config.object_store_root = path
    ```
 3. `apps/api/main.py` 把 `runtime_config.object_store_root` 通过 `app.state.object_store_root = ...` 或 FastAPI `Depends(get_object_store_root)` 注入到 reader
@@ -397,7 +397,7 @@ Invariant Matrix:
 - Regression rows:
   - Latest cycle heihe/qhh x IFS/gfs with disk file present -> HTTP 200 non-empty disk series, no 409 finalize error.
   - `forcing_version_id` alone -> HTTP 422 existing `MISSING_REQUIRED_FILTER`; with `cycle_time/model_id/source_id` -> HTTP 200 identical disk response.
-  - Missing/unreadable `OBJECT_STORE_ROOT` -> startup `RuntimeModeError`; display env with readable root -> no `DISPLAY_BOUNDARY_CONFIG_UNSAFE`.
+  - Missing/unreadable/untraversable `OBJECT_STORE_ROOT` -> startup `RuntimeModeError`; display env with readable + traversable root -> no `DISPLAY_BOUNDARY_CONFIG_UNSAFE`.
   - Module import `from apps.api.main import app` with default dev env -> succeeds; explicit display startup without root -> `RuntimeModeError`; display startup with readable tmp root -> prior runtime route inventory and non-series API tests still pass.
   - Old cycle present in DB but absent on disk -> HTTP 404 `STATION_FORCING_FILE_NOT_FOUND`, no DB fallback.
 

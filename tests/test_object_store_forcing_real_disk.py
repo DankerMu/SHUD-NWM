@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,11 +40,25 @@ def test_real_disk_latest_cycle_serves_all_currently_409_combinations() -> None:
 
             assert response.status_code == 200, response.text
             data = response.json()["data"]
+            profile = _csv_profile(
+                root=_real_object_store_root(),
+                station_id=station_id,
+                source_id=source_id,
+                model_id=model_id,
+            )
             assert data["station_id"] == station_id
             assert [series["variable"] for series in data["series"]] == ["PRCP", "TEMP", "RH", "wind", "Rn"]
             assert {series["unit"] for series in data["series"]} == {"mm/day", "degC", "0-1", "m/s", "W/m^2"}
-            assert all(series["points"] for series in data["series"])
-            assert data["valid_time_start"] == LATEST_CYCLE
+            assert sum(len(series["points"]) for series in data["series"]) == 5 * profile["nrow"]
+            assert data["valid_time_start"] == profile["valid_time_start"]
+            assert data["valid_time_end"] == profile["valid_time_end"]
+            for series in data["series"]:
+                assert len(series["points"]) == profile["nrow"]
+                assert series["metadata"]["returned_points"] == profile["nrow"]
+                assert series["metadata"]["returned_from"] == profile["valid_time_start"]
+                assert series["metadata"]["returned_to"] == profile["valid_time_end"]
+                assert series["metadata"]["truncated"] is False
+                assert series["truncated"] is False
 
 
 def test_real_disk_error_and_filter_scenarios() -> None:
@@ -115,7 +130,9 @@ def test_real_disk_error_and_filter_scenarios() -> None:
 
     assert missing_cycle.status_code == 404
     assert missing_cycle.json()["error"]["code"] == "STATION_FORCING_FILE_NOT_FOUND"
-    assert "expected_path" in missing_cycle.json()["error"]["details"]
+    missing_details = missing_cycle.json()["error"]["details"]
+    assert missing_details["expected_path"].startswith("forcing/ifs/2020010100/")
+    assert str(_real_object_store_root()) not in missing_cycle.text
     assert missing_station.status_code == 404
     assert missing_station.json()["error"]["code"] == "STATION_NOT_FOUND"
     assert variables.status_code == 200
@@ -206,6 +223,33 @@ def _dt(value: str) -> Any:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def _format_time(value: Any) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _csv_profile(*, root: Path, station_id: str, source_id: str, model_id: str) -> dict[str, Any]:
+    station = PsycopgStationLookup.from_env().lookup(station_id)
+    path = _resolve_disk_path(
+        root,
+        _normalize_source_id(source_id),
+        _compute_cycle_compact(_dt(LATEST_CYCLE)),
+        station.basin_version_id,
+        model_id,
+        station.forcing_filename or "",
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    nrow = int(lines[0].split()[0])
+    rows = lines[2 : 2 + nrow]
+    assert len(rows) == nrow
+    time_days = [float(row.split()[0]) for row in rows]
+    cycle_time = _dt(LATEST_CYCLE)
+    return {
+        "nrow": nrow,
+        "valid_time_start": _format_time(cycle_time + timedelta(seconds=int(round(time_days[0] * 86400)))),
+        "valid_time_end": _format_time(cycle_time + timedelta(seconds=int(round(time_days[-1] * 86400)))),
+    }
+
+
 def _assert_station_series_shape(actual: dict[str, Any], baseline: dict[str, Any]) -> None:
     assert list(actual.keys()) == list(baseline.keys())
     assert isinstance(actual["request_id"], str)
@@ -242,8 +286,15 @@ def _assert_series_shape(actual: dict[str, Any], baseline: dict[str, Any]) -> No
         assert _json_kind(actual_value) == _json_kind(baseline[key]), f"series[{actual['variable']}].{key}"
 
     assert actual["points"], f"series[{actual['variable']}].points must not be empty"
+    assert len(actual["points"]) == len(baseline["points"])
+    assert actual["metadata"]["returned_points"] == baseline["metadata"]["returned_points"]
+    assert actual["metadata"]["returned_points"] == len(actual["points"])
+    assert actual["truncated"] == baseline["truncated"] is False
+    assert actual["metadata"]["truncated"] == baseline["metadata"]["truncated"] is False
     valid_times = [point["valid_time"] for point in actual["points"]]
     assert valid_times == sorted(valid_times, key=_dt)
+    assert actual["metadata"]["returned_from"] == valid_times[0]
+    assert actual["metadata"]["returned_to"] == valid_times[-1]
 
     baseline_point = baseline["points"][0]
     for index, point in enumerate(actual["points"]):

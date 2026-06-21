@@ -45,6 +45,7 @@ type StationSeriesLoadState =
 function stationSeriesProductIdentity(product: QhhLatestProduct): HydroMetStationSeriesProductIdentity {
   return {
     forcing_version_id: product.forcing_version_id,
+    model_id: product.model_id,
     source_id: product.source_id,
     cycle_time: product.cycle_time,
   }

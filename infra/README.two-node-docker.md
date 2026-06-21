@@ -96,6 +96,7 @@ NHMS_AUTH_MODE=production
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 DATABASE_URL=postgresql://<readonly-user>:<secret>@<db-host>:5432/<db-name>
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://

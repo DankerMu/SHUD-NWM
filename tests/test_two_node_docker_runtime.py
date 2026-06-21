@@ -2747,6 +2747,44 @@ def test_static_checker_rejects_display_published_mount_literal_identity(tmp_pat
 
 
 @pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("missing", "DISPLAY_OBJECT_STORE_MOUNT_MISSING"),
+        ("not_readonly", "DISPLAY_OBJECT_STORE_MOUNT_NOT_READONLY"),
+        ("type_invalid", "DISPLAY_OBJECT_STORE_MOUNT_TYPE_INVALID"),
+        ("identity_invalid", "DISPLAY_OBJECT_STORE_MOUNT_IDENTITY_INVALID"),
+    ],
+)
+def test_static_checker_rejects_display_object_store_mount_contract(
+    tmp_path: Path,
+    mutation: str,
+    expected_code: str,
+) -> None:
+    env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    compose = _safe_display_compose()
+    volumes = compose["services"]["display-api"]["volumes"]
+    object_store_volume = next(volume for volume in volumes if "OBJECT_STORE_ROOT" in str(volume.get("target", "")))
+
+    if mutation == "missing":
+        volumes.remove(object_store_volume)
+    elif mutation == "not_readonly":
+        object_store_volume["read_only"] = False
+    elif mutation == "type_invalid":
+        object_store_volume["type"] = "volume"
+    elif mutation == "identity_invalid":
+        object_store_volume["source"] = env["OBJECT_STORE_ROOT"]
+        object_store_volume["target"] = env["OBJECT_STORE_ROOT"]
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+
+
+@pytest.mark.parametrize(
     ("source_key", "target_key", "expected_code"),
     [
         ("WORKSPACE_ROOT", "WORKSPACE_ROOT", "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID"),
@@ -3743,7 +3781,12 @@ def test_docker_smoke_records_blocked_when_build_is_network_blocked(tmp_path: Pa
     assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_BUILD_BLOCKED"}
 
 
-def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path: Path) -> None:
+def test_docker_smoke_passes_with_expected_role_boundary_probe_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
+
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
         repo_root=tmp_path,
@@ -3770,6 +3813,14 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path:
     }
     assert payload["commands"]["image_inspect"]["returncode"] == 0
     assert payload["blockers"] == []
+    start_args = payload["commands"]["display_startup_start"]["args"]
+    object_store_env = next(arg for arg in start_args if arg.startswith("OBJECT_STORE_ROOT="))
+    object_store_root = object_store_env.split("=", 1)[1]
+    assert object_store_root
+    assert "-e" in start_args
+    assert object_store_env in start_args
+    assert "-v" in start_args
+    assert f"{object_store_root}:{object_store_root}:ro" in start_args
 
 
 def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:

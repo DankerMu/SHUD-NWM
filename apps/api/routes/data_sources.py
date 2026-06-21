@@ -30,7 +30,10 @@ def get_data_source_store() -> PsycopgForecastStore:
 
 
 def get_station_lookup() -> StationLookup:
-    return PsycopgStationLookup.from_env()
+    try:
+        return PsycopgStationLookup.from_env()
+    except ForecastStoreError as error:
+        raise _api_error(error) from error
 
 
 def get_object_store_root(request: Request) -> Path:

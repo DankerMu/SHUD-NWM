@@ -1322,44 +1322,52 @@ def _run_display_startup_probe(
     image_tag: str,
 ) -> dict[str, CommandResult]:
     container_name = f"nhms-display-smoke-{uuid.uuid4().hex[:12]}"
+    object_store_root = Path(tempfile.mkdtemp(prefix="nhms-display-object-store-smoke-")).resolve()
     commands: dict[str, CommandResult] = {}
-    start_command = (
-        "docker",
-        "run",
-        "--rm",
-        "-d",
-        "--name",
-        container_name,
-        "-e",
-        "NHMS_REQUIRE_SERVICE_ROLE=true",
-        "-e",
-        "NHMS_SERVICE_ROLE=display_readonly",
-        "-e",
-        "NHMS_AUTH_MODE=production",
-        "-e",
-        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
-        "-e",
-        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
-        image_tag,
-    )
-    probe_command = (
-        "docker",
-        "exec",
-        container_name,
-        "uv",
-        "run",
-        "python",
-        "-c",
-        DISPLAY_LOCALHOST_PROBE_SCRIPT,
-    )
-    logs_command = ("docker", "logs", container_name)
-    cleanup_command = ("docker", "rm", "-f", container_name)
+    try:
+        start_command = (
+            "docker",
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            container_name,
+            "-e",
+            "NHMS_REQUIRE_SERVICE_ROLE=true",
+            "-e",
+            "NHMS_SERVICE_ROLE=display_readonly",
+            "-e",
+            "NHMS_AUTH_MODE=production",
+            "-e",
+            "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
+            "-e",
+            "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
+            "-e",
+            f"OBJECT_STORE_ROOT={object_store_root}",
+            "-v",
+            f"{object_store_root}:{object_store_root}:ro",
+            image_tag,
+        )
+        probe_command = (
+            "docker",
+            "exec",
+            container_name,
+            "uv",
+            "run",
+            "python",
+            "-c",
+            DISPLAY_LOCALHOST_PROBE_SCRIPT,
+        )
+        logs_command = ("docker", "logs", container_name)
+        cleanup_command = ("docker", "rm", "-f", container_name)
 
-    commands["display_startup_start"] = runner(start_command)
-    if commands["display_startup_start"].returncode == 0:
-        commands["display_startup_probe"] = runner(probe_command)
-        commands["display_startup_logs"] = runner(logs_command)
-    commands["display_startup_cleanup"] = runner(cleanup_command)
+        commands["display_startup_start"] = runner(start_command)
+        if commands["display_startup_start"].returncode == 0:
+            commands["display_startup_probe"] = runner(probe_command)
+            commands["display_startup_logs"] = runner(logs_command)
+        commands["display_startup_cleanup"] = runner(cleanup_command)
+    finally:
+        shutil.rmtree(object_store_root, ignore_errors=True)
     return commands
 
 

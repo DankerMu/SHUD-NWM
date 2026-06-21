@@ -34,6 +34,8 @@ MAX_STATION_FORCING_CSV_BYTES = 8 * 1024 * 1024
 MAX_STATION_FORCING_CSV_LINE_BYTES = 64 * 1024
 STATION_FORCING_CSV_READ_CHUNK_BYTES = 64 * 1024
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_ABSOLUTE_POSIX_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[^\s:'\"),;]+/?)+")
+_ABSOLUTE_WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s:'\"),;]+")
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,15 @@ def _resolve_disk_path(
     )
 
 
+def _object_store_relative_path(object_store_root: Path, expected_path: Path) -> Path:
+    root = _absolute_path_without_resolving_symlinks(object_store_root)
+    path = _absolute_path_without_resolving_symlinks(expected_path)
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return Path("forcing")
+
+
 def _parse_csv_header(line1: str) -> ShudCsvHeader:
     tokens = line1.split()
     if len(tokens) != 4:
@@ -367,7 +378,7 @@ def read_station_forcing_csv(
     except ValueError as error:
         raise StationForcingFileMalformedError(
             station_id=station_id,
-            expected_path=Path(object_store_root) / "forcing",
+            expected_path=Path("forcing"),
             parse_reason=str(error),
         ) from error
 
@@ -379,9 +390,11 @@ def read_station_forcing_csv(
         model_id=model_id,
         forcing_filename=forcing_filename,
     )
+    expected_storage_key = _object_store_relative_path(object_store_root, expected_path)
     _ensure_path_under_object_store_root(
         object_store_root=object_store_root,
         expected_path=expected_path,
+        expected_storage_key=expected_storage_key,
         station_id=station_id,
         basin_version_id=basin_version_id,
         source_id=source_normalized,
@@ -390,6 +403,7 @@ def read_station_forcing_csv(
     )
     lines = _read_csv_lines(
         expected_path,
+        expected_storage_key=expected_storage_key,
         object_store_root=object_store_root,
         station_id=station_id,
         basin_version_id=basin_version_id,
@@ -400,7 +414,7 @@ def read_station_forcing_csv(
     parsed_tuples = _parse_station_csv(
         lines,
         station_id=station_id,
-        expected_path=expected_path,
+        expected_path=expected_storage_key,
         cycle_time=cycle_time_utc,
     )
     response_tuples = _apply_filters(parsed_tuples, variables, requested_from, requested_to, selected_limit)
@@ -458,6 +472,7 @@ def _raise_missing_required_filter_if_needed(
 def _read_csv_lines(
     expected_path: Path,
     *,
+    expected_storage_key: Path,
     object_store_root: Path,
     station_id: str,
     basin_version_id: str,
@@ -507,7 +522,7 @@ def _read_csv_lines(
     except FileNotFoundError as error:
         raise StationForcingFileNotFoundError(
             station_id=station_id,
-            expected_path=expected_path,
+            expected_path=expected_storage_key,
             basin_version_id=basin_version_id,
             source_id=source_id,
             cycle_time=cycle_time,
@@ -516,8 +531,8 @@ def _read_csv_lines(
     except (OSError, SafeFilesystemError, ValueError) as error:
         raise StationForcingFileMalformedError(
             station_id=station_id,
-            expected_path=expected_path,
-            parse_reason=_error_reason(error),
+            expected_path=expected_storage_key,
+            parse_reason=_public_error_reason(error),
         ) from error
 
 
@@ -525,6 +540,7 @@ def _ensure_path_under_object_store_root(
     *,
     object_store_root: Path,
     expected_path: Path,
+    expected_storage_key: Path,
     station_id: str,
     basin_version_id: str,
     source_id: str,
@@ -538,7 +554,7 @@ def _ensure_path_under_object_store_root(
     except ValueError as error:
         raise StationForcingFileNotFoundError(
             station_id=station_id,
-            expected_path=checked_path,
+            expected_path=expected_storage_key,
             basin_version_id=basin_version_id,
             source_id=source_id,
             cycle_time=cycle_time,
@@ -651,8 +667,11 @@ def _raise_validation_error(*, field: str, rejected_value: Any, reason: str) -> 
     )
 
 
-def _error_reason(error: BaseException) -> str:
-    return str(error) or error.__class__.__name__
+def _public_error_reason(error: BaseException) -> str:
+    reason = str(error) or error.__class__.__name__
+    reason = _ABSOLUTE_POSIX_PATH.sub("<path>", reason)
+    reason = _ABSOLUTE_WINDOWS_PATH.sub("<path>", reason)
+    return reason
 
 
 def _absolute_path_without_resolving_symlinks(path: Path | str) -> Path:
@@ -678,8 +697,6 @@ def _station_series_response(
     cycle_time_formatted = _format_time(cycle_time)
     available_by_variable = _group_rows(unbounded_rows)
     returned_by_variable = _group_rows(rows)
-    global_truncated = len(unbounded_rows) > len(rows)
-    last_returned_variable = rows[-1][0] if global_truncated and rows else None
     series_items: list[dict[str, Any]] = []
 
     for variable in FORCING_VARIABLES:
@@ -689,7 +706,7 @@ def _station_series_response(
         if not returned_points:
             continue
         available_points = available_by_variable.get(variable, [])
-        is_truncated = len(returned_points) < len(available_points) or variable == last_returned_variable
+        is_truncated = len(returned_points) < len(available_points)
         point_payload = [
             {
                 "valid_time": _format_time(valid_time),

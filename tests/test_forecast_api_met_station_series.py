@@ -191,6 +191,12 @@ def test_station_series_route_maps_reader_errors_to_api_envelope(
     assert body["request_id"]
     assert body["error"]["code"] == expected_code
     assert body["error"]["details"] is not None
+    assert str(tmp_path) not in response.text
+    assert "OBJECT_STORE_ROOT" not in response.text
+    if expected_code in {"STATION_FORCING_FILE_NOT_FOUND", "STATION_FORCING_FILE_MALFORMED"}:
+        assert body["error"]["details"]["expected_path"] == (
+            f"forcing/ifs/2026062012/{BASIN_VERSION_ID}/{MODEL_ID}/shud/{FORCING_FILENAME}"
+        )
 
 
 def test_station_series_route_does_not_call_db_store_or_finalize_gate(
@@ -221,6 +227,33 @@ def test_station_series_route_does_not_call_db_store_or_finalize_gate(
 
     assert response.status_code == 200
     assert calls == []
+
+
+def test_station_series_route_missing_database_url_dependency_returns_api_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _write_csv(tmp_path)
+    api = create_app()
+    api.state.object_store_root = tmp_path
+
+    with TestClient(api) as client:
+        response = client.get(
+            f"/api/v1/met/stations/{STATION_ID}/series",
+            params={
+                "model_id": MODEL_ID,
+                "source_id": SOURCE_ID,
+                "cycle_time": CYCLE_TIME,
+            },
+        )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["request_id"]
+    assert body["error"]["code"] == "DATABASE_URL_MISSING"
+    assert "DATABASE_URL is required" in body["error"]["message"]
 
 
 def _client(tmp_path: Path, lookup: FakeStationLookup | None = None) -> TestClient:

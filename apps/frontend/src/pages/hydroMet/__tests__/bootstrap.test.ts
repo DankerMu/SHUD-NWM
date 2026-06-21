@@ -579,7 +579,7 @@ describe('loadHydroMetStationSeries', () => {
     vi.clearAllMocks()
   })
 
-  it('calls the generated station-series API with latest-product forcing version, six variables, and bounded limit', async () => {
+  it('calls the generated station-series API with tuple filters, deprecated companion, six variables, and bounded limit', async () => {
     vi.mocked(client.GET).mockResolvedValueOnce({
       data: success(stationSeriesResponse()),
       error: undefined,
@@ -598,6 +598,9 @@ describe('loadHydroMetStationSeries', () => {
         path: { station_id: 'qhh_forc_001' },
         query: {
           forcing_version_id: product.forcing_version_id,
+          model_id: product.model_id,
+          source_id: product.source_id,
+          cycle_time: product.cycle_time,
           variables: [...HYDRO_MET_STATION_VARIABLES],
           limit: HYDRO_MET_STATION_SERIES_LIMIT,
         },
@@ -623,7 +626,7 @@ describe('loadHydroMetStationSeries', () => {
     })).rejects.toThrow('station unavailable')
   })
 
-  it('reports station-series identity mismatches without silently switching product identity', () => {
+  it('reports strict station/source/cycle mismatches without blocking on forcing_version_id drift', () => {
     const messages = validateHydroMetStationSeriesIdentity(
       stationSeriesResponse({
         station_id: 'qhh_forc_002',
@@ -636,7 +639,7 @@ describe('loadHydroMetStationSeries', () => {
     )
 
     expect(messages.join(' ')).toContain('station_id=qhh_forc_002')
-    expect(messages.join(' ')).toContain('forcing_version_id=other-forcing')
+    expect(messages.join(' ')).not.toContain('forcing_version_id')
     expect(messages.join(' ')).toContain('source_id=IFS')
     expect(messages.join(' ')).toContain('cycle_time=2026-05-21T12:00:00.000Z')
   })
