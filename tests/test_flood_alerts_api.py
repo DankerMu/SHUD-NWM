@@ -2719,7 +2719,9 @@ def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> 
             )
         }
 
-    for layer_id in ("discharge", "flood-return-period", "warning-level"):
+    # Flood / warning layers stay per-run, so their cache identity must rotate when the
+    # hydro run's updated_at changes (drives source_version → cache_version → cache_etag).
+    for layer_id in ("flood-return-period", "warning-level"):
         assert old_metadata[layer_id]["source_refs"]["run_id"] == RUN_ID
         assert old_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
         assert old_metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
@@ -2729,6 +2731,125 @@ def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> 
         )
         assert old_metadata[layer_id]["cache_version"] != new_metadata[layer_id]["cache_version"]
         assert old_metadata[layer_id]["cache_etag"] != new_metadata[layer_id]["cache_etag"]
+
+    # Discharge is national (spec invariant *Default discharge tile URL is national across all
+    # /api/v1/layers callers*; *Discharge catalog cache identity is run-agnostic*): source_refs is
+    # always empty and cache identity does NOT rotate with the run's updated_at (it rotates only
+    # when national_discharge_valid_times changes, i.e. a new ready run lands).
+    assert old_metadata["discharge"]["source_refs"] == {}
+    assert new_metadata["discharge"]["source_refs"] == {}
+    assert old_metadata["discharge"]["cache_version"] == new_metadata["discharge"]["cache_version"]
+    assert old_metadata["discharge"]["cache_etag"] == new_metadata["discharge"]["cache_etag"]
+
+
+def test_layers_catalog_discharge_always_national() -> None:
+    """Spec invariant (overview-data-contracts: *Default discharge tile URL is national across all
+    `/api/v1/layers` callers* — scenarios *Run-scoped `/api/v1/layers?run_id=<X>` catalog* +
+    *Frontend enrichment phase does not downgrade discharge*): even when the caller passes a concrete
+    `run_id` (simulating frontend enrichment `fetchLayers(latestRun.run_id)`), the discharge entry's
+    tile URL template MUST be the national one (no `{run_id}` placeholder). Issue #601 root cause.
+    """
+    with _store() as session:
+        source_version = flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID))
+        catalog = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=RUN_ID,
+                source_version=source_version,
+                basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
+                national=False,
+            )
+        }
+
+    discharge = catalog["discharge"]
+    assert discharge["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert "{run_id}" not in discharge["tile_url_template"]
+    assert discharge["required_placeholders"] == ["valid_time", "z", "x", "y"]
+    assert "run_id" not in discharge["required_placeholders"]
+    assert discharge["maplibre_source_layer"] == "hydro"
+    # spec phrasing "metadata.properties" maps to `property_schema.required` in the implementation
+    # (see `services/tiles/mvt.py` `layer_metadata` return shape: line 936).
+    assert "basin_id" in discharge["property_schema"]["required"]
+
+
+def test_layers_catalog_flood_warning_remain_run_scoped() -> None:
+    """Spec invariant (overview-data-contracts: *Flood-return-period and warning-level remain
+    run-scoped*): the discharge-specific national fix MUST NOT regress flood-return-period /
+    warning-level (still per-run) or river-network (still basin-scoped) templates.
+    """
+    with _store() as session:
+        source_version = flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID))
+        catalog = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=RUN_ID,
+                source_version=source_version,
+                basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
+                national=False,
+            )
+        }
+
+    for layer_id in ("flood-return-period", "warning-level"):
+        assert "{run_id}" in catalog[layer_id]["tile_url_template"]
+
+    river_network = catalog["river-network"]
+    assert river_network["tile_url_template"] == "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf"
+    assert river_network["required_placeholders"] == ["basin_version_id", "z", "x", "y"]
+
+
+def test_layers_catalog_discharge_cache_identity_run_agnostic() -> None:
+    """Spec invariant (overview-data-contracts: *Discharge catalog cache identity is run-agnostic* +
+    *Runless `/api/v1/layers` catalog*): the discharge entry's per-layer ETag MUST be byte-identical
+    between the runless (`national=True, run_id=None`) call and the run-scoped (`national=False,
+    run_id=RUN_ID`) call, with `source_refs == {}` in both, so the CDN need not partition the
+    discharge entry on run_id. Additionally pins the runless contract: national template + no
+    run_id placeholder + maplibre_source_layer='hydro' + basin_id in properties.
+    """
+    with _store() as session:
+        source_version = flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID))
+        runless = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=None,
+                source_version=None,
+                basin_version_id=None,
+                river_network_version_id=None,
+                national=True,
+            )
+        }
+        run_scoped = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=RUN_ID,
+                source_version=source_version,
+                basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
+                national=False,
+            )
+        }
+
+    runless_discharge = runless["discharge"]
+    run_scoped_discharge = run_scoped["discharge"]
+
+    # Cache identity: source_refs empty + version byte-identical across both call shapes.
+    assert runless_discharge["source_refs"] == {}
+    assert run_scoped_discharge["source_refs"] == {}
+    assert isinstance(runless_discharge["cache_version"], str)
+    assert runless_discharge["cache_version"] == run_scoped_discharge["cache_version"]
+    assert runless_discharge["cache_etag"] == run_scoped_discharge["cache_etag"]
+
+    # Runless invariants explicitly pinned (spec scenario *Runless `/api/v1/layers` catalog*).
+    assert runless_discharge["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert runless_discharge["required_placeholders"] == ["valid_time", "z", "x", "y"]
+    assert runless_discharge["maplibre_source_layer"] == "hydro"
+    # spec phrasing "metadata.properties" maps to `property_schema.required` in the implementation.
+    assert "basin_id" in runless_discharge["property_schema"]["required"]
 
 
 def test_mvt_cache_fixture_enforces_tile_layer_fk() -> None:
@@ -4394,15 +4515,24 @@ def test_unscoped_discharge_valid_times_endpoint_returns_union() -> None:
     assert data["valid_times"] == sorted(data["valid_times"])
 
 
-def test_scoped_discharge_catalog_keeps_single_run_template() -> None:
+def test_scoped_discharge_catalog_returns_national_template() -> None:
+    """Spec invariant (overview-data-contracts: *Default discharge tile URL is national across all
+    `/api/v1/layers` callers*): even when the HTTP caller passes `?run_id=<X>` (simulating the
+    frontend enrichment `fetchLayers(latestRun.run_id)` call), the discharge entry's tile URL
+    template MUST be the national one (no `{run_id}` placeholder). Issue #601 root cause: this
+    test originally pinned the bug behavior (single-run template under `?run_id=<X>`); flipped
+    per the spec so the contract is the regression sentinel for the bug, not for the bug fix.
+    """
     with _client() as client:
         response = client.get(f"/api/v1/layers?run_id={RUN_ID}")
 
     assert response.status_code == 200
     discharge = next(layer for layer in response.json()["data"] if layer["layer_id"] == "discharge")
     metadata = discharge["metadata"]
-    assert metadata["tile_url_template"] == "/api/v1/tiles/hydro/{run_id}/q_down/{valid_time}/{z}/{x}/{y}.pbf"
-    assert metadata["required_placeholders"] == ["run_id", "valid_time", "z", "x", "y"]
+    assert metadata["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert metadata["required_placeholders"] == ["valid_time", "z", "x", "y"]
+    assert "{run_id}" not in metadata["tile_url_template"]
+    assert "run_id" not in metadata["required_placeholders"]
 
 
 def test_hydro_national_tile_sql_binds_only_variable_and_valid_time() -> None:
@@ -4975,13 +5105,20 @@ def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> N
         assert scoped_metadata[layer_id]["source_refs"]["source_version"] != unscoped_metadata[layer_id]["source_refs"][
             "source_version"
         ]
-    # Scoped discharge is still single-run bound; unscoped discharge is national (run-less).
-    assert scoped_metadata["discharge"]["source_refs"]["run_id"] == old_run_id
-    assert scoped_metadata["discharge"]["source_refs"]["river_network_version_id"] == "rnv_v1"
-    assert "run_id" not in unscoped_metadata["discharge"]["source_refs"]
+    # Discharge is national in BOTH the scoped and unscoped catalogs (spec invariant
+    # *Default discharge tile URL is national across all `/api/v1/layers` callers*):
+    # source_refs is empty either way, the tile URL template never carries a {run_id}
+    # placeholder, and the per-layer ETag is byte-identical across the two call shapes.
+    assert scoped_metadata["discharge"]["source_refs"] == {}
+    assert unscoped_metadata["discharge"]["source_refs"] == {}
+    assert scoped_metadata["discharge"]["tile_url_template"] == (
+        "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    )
     assert unscoped_metadata["discharge"]["tile_url_template"] == (
         "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
     )
+    assert "{run_id}" not in scoped_metadata["discharge"]["tile_url_template"]
+    assert scoped_metadata["discharge"]["cache_version"] == unscoped_metadata["discharge"]["cache_version"]
 
 
 def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None:
@@ -5311,7 +5448,8 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
         old_catalog = catalog_for(old_run_id)
         new_catalog = catalog_for(new_run_id)
 
-    for layer_id in ("discharge", "flood-return-period", "warning-level"):
+    # Flood / warning layers are per-run: cache_version + valid_times rotate with the caller's run_id.
+    for layer_id in ("flood-return-period", "warning-level"):
         old_metadata = old_catalog[layer_id]
         new_metadata = new_catalog[layer_id]
         assert old_metadata["source_refs"]["source_version"] == new_metadata["source_refs"]["source_version"]
@@ -5324,6 +5462,16 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
         assert old_metadata["valid_times"] != new_metadata["valid_times"]
         assert old_metadata["cache_version"] != new_metadata["cache_version"]
         assert old_metadata["cache_etag"] != new_metadata["cache_etag"]
+
+    # Discharge is national (spec invariant *Discharge catalog cache identity is run-agnostic*):
+    # both catalog calls observe the same `national_discharge_valid_times(session)` snapshot
+    # (taken after all inserts committed), so metadata is byte-identical across the two calls,
+    # regardless of the caller's run_id. source_refs is empty either way.
+    assert old_catalog["discharge"]["source_refs"] == {}
+    assert new_catalog["discharge"]["source_refs"] == {}
+    assert old_catalog["discharge"]["valid_times"] == new_catalog["discharge"]["valid_times"]
+    assert old_catalog["discharge"]["cache_version"] == new_catalog["discharge"]["cache_version"]
+    assert old_catalog["discharge"]["cache_etag"] == new_catalog["discharge"]["cache_etag"]
 
 
 def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
