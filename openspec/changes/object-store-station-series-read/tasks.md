@@ -56,6 +56,7 @@
 - [ ] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
 - [ ] 1.13s unit test: SQL 查询统计 — 用 spy cursor 注入 `FakeStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 只命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
 - [ ] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
+- [ ] 1.15 PR-A-scoped `openspec validate object-store-station-series-read --strict --no-interactive` PASS — §0 introspection commits 与 design.md/introspection-findings.md 编辑可能破坏 spec 结构，PR-A merge 前必须本地通过 validate（§8.1 是 PR-B 完整重跑；本条是 PR-A 独立 guard）
 
 ## 2. Series route 切换 — `apps/api/routes/data_sources.py`
 
@@ -143,11 +144,14 @@
 - [ ] 8.5 node-27 curl 验证 4 种组合（heihe×IFS / heihe×gfs / qhh×IFS / qhh×gfs）最新 cycle 全部 200 + 真数据（不再 409）
 - [ ] 8.6 node-27 curl 验证老 cycle (2026-05-31) 4 种组合全部 404 `STATION_FORCING_FILE_NOT_FOUND`（确认不 fallback DB）
 
-## 9. PR 边界 (3 PR)
+## 9. PR 边界 (3 PR) — descriptive only, NOT a task; do not check
 
-- [ ] 9.1 **PR 1** (~700 LOC): §0 introspection 结论提交至 design.md/introspection-findings.md + §1 reader module + §1.13a–§1.13r unit tests + §1.14 ruff
-- [ ] 9.2 **PR 2** (~700 LOC): §2 series route 切换 + §3 startup env check + §3.4 boundary fix + §4 OpenAPI + §5 env files + §6 real-disk integration tests + §8.4–§8.6 node-27 live receipt（依赖 PR 1 merged）
-- [ ] 9.3 **PR 3** (~350 LOC): §7 docs + 3 个 follow-up issue 创建 + openspec archive（依赖 PR 2 merged + node-27 sync）
+> 本节是 PR 拆分的文档说明，不是可执行 task；标 `[-]` 而非 `[ ]` 是有意区分。
+> 各 PR 真正的 task 在 §0/§1/§2/§3/§4/§5/§6/§7/§8/§10 中分配，已映射到 sub-issue #622/#623/#624。
+
+- [-] 9.1 **PR 1** (~700 LOC): §0 introspection 结论提交至 design.md/introspection-findings.md + §1 reader module + §1.13a–§1.13s unit tests + §1.14 ruff
+- [-] 9.2 **PR 2** (~700 LOC): §2 series route 切换 + §3 startup env check + §3.4 boundary fix + §4 OpenAPI + §5 env files + §6 real-disk integration tests + §8.4–§8.6 node-27 live receipt（依赖 PR 1 merged）
+- [-] 9.3 **PR 3** (~350 LOC): §7 docs + 3 个 follow-up issue 创建 + §10 closing actions（依赖 PR 2 merged + node-27 sync）
 
 ## 10. Closing actions
 
