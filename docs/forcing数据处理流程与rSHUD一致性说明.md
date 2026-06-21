@@ -317,6 +317,50 @@ legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid`
 
 ---
 
+## 8. API 直读 disk
+
+station-series 读侧自 PR-B #628 起直接读取 forcing producer 写出的 SHUD station CSV：
+`apps/api/routes/data_sources.py:136-174` 的 `/met/stations/{station_id}/series` route 调用
+`packages/common/object_store_forcing.py:342-436` `read_station_forcing_csv()`，而不是旧的
+`PsycopgForecastStore.station_series()`。该变化只影响 API 读路径，不改变本文 §2 的 forcing 生产流程，
+也不改变 rSHUD/AutoSHUD 对齐结论。
+
+路径模板与 SHUD 包布局一致：`packages/common/object_store_forcing.py:219-230` 按
+`OBJECT_STORE_ROOT/forcing/{source}/{YYYYMMDDHH}/{basin_version_id}/{model_id}/shud/{forcing_filename}` 解析文件；
+`source_id` 归一化为 lowercase，`cycle_time` 转 UTC 后格式化为 `YYYYMMDDHH`
+（`object_store_forcing.py:207-216`）。node-27 当前期望 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`，
+因此一个典型叶子文件是
+`/home/ghdc/nwm/object-store/forcing/ifs/2026062012/basins_heihe_vbasins/basins_heihe_shud/shud/X100.75Y37.65.csv`。
+
+DB 仍只承担 station metadata lookup：`PsycopgStationLookup` 查询 `met.met_station` 的 `station_id`、
+`basin_version_id`、坐标、高程、角色、active flag 和 `properties_json`（`object_store_forcing.py:180-204`），
+其中 `properties_json.forcing_filename` 是 station→CSV 的解析键。序列值不再查
+`met.forcing_station_timeseries`，也不再用 `met.forcing_version` 的 checksum/finalize 状态做 gate；
+这解释了为什么 PR-B #628 可以让 latest cycle 在 disk CSV 已存在但 DB finalize 未完成时返回 200。
+
+CSV 契约仍是本文 §4.2 的 SHUD 五变量格式。reader 要求首行是 `nrow ncol start_date end_date`，
+列头包含 `Time_Day Precip Temp RH Wind RN`（`object_store_forcing.py:252-278`）；
+输出变量顺序和单位仍为 `PRCP mm/day`、`TEMP degC`、`RH 0-1`、`wind m/s`、`Rn W/m^2`。
+`Time_Day` 由相对日起点换算为 UTC `valid_time`，所以 API 返回的是标准 `StationSeriesResponse`，
+不是另一套业务格式。
+
+错误语义也随读侧切换而改变：`STATION_NOT_FOUND` 和 `MISSING_REQUIRED_FILTER` 继续复用既有 404/422 形状
+（`object_store_forcing.py:439-468`）；新增 disk 相关错误为 `STATION_FORCING_FILENAME_MISSING`、
+`STATION_FORCING_FILE_NOT_FOUND`、`STATION_FORCING_FILE_MALFORMED`（`object_store_forcing.py:95-148`）。
+旧 DB-backed 路径的 `FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 不应再从该 route 产生。
+
+该 API 是 disk-only：如果 cycle 已超出 `/home/ghdc/nwm/object-store/forcing/{source}/` 的保留窗口，
+即使 DB 里仍有历史 forcing rows，也返回 404 `STATION_FORCING_FILE_NOT_FOUND`，
+不 fallback 到 `met.forcing_station_timeseries`。这是一条读侧一致性边界：
+展示面只承诺读取当前 object-store mirror 中仍存在的 SHUD CSV；长期历史回看如需 DB 路径，应另立 API 契约。
+
+role boundary 同步调整为“display 可以只读 `OBJECT_STORE_ROOT`”：`apps/api/runtime_mode.py:247-264`
+要求 `display_readonly` 启动时配置可读、可遍历的 `OBJECT_STORE_ROOT`，但不要求可写。
+该放开只覆盖共享 object-store mirror 的只读访问，不改变 display 不运行 producer/Slurm/orchestrator、
+不写业务终态的边界。
+
+---
+
 ### 附：关键源码索引
 
 | 主题 | 文件:行 |
@@ -339,3 +383,5 @@ legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid`
 | 单元测试 | `tests/test_forcing_producer.py:259-398` |
 | 时间语义规范 | `docs/spec/02_data_product_and_time_semantics.md` |
 | 阈值对齐 runbook | `docs/runbooks/qhh-22-business-bringup.md` |
+| API 直读 disk route | `apps/api/routes/data_sources.py:136-174` |
+| object-store station CSV reader | `packages/common/object_store_forcing.py:342-436` |

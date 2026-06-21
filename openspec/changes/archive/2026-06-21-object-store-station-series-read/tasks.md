@@ -132,16 +132,16 @@
 
 ## 7. Documentation
 
-- [ ] 7.1 NEW `docs/runbooks/object-store-forcing-series-read.md`：operator 视角，含
+- [x] 7.1 NEW `docs/runbooks/object-store-forcing-series-read.md`：operator 视角，含
   - OBJECT_STORE_ROOT 配置示例 + node-27 期望值
   - 启动失败排错（缺 env / 不可读 / `RuntimeModeError`）
   - 5 种 4xx/5xx 错误码与触发条件
   - 与 forcing_producer 协作约定（disk 路径 layout）
   - disk retention window 与 404 的关系（老 cycle 不可调）
   - role boundary 变化说明（display 现合法读 OBJECT_STORE_ROOT）
-- [ ] 7.2 `docs/forcing数据处理流程与rSHUD一致性说明.md` 末尾追加 §：API 直读 disk 段
-- [ ] 7.3 `CLAUDE.md` 技术栈速查表加一行 "气象代站时间序列 | 直读 object-store /home/ghdc/nwm/object-store/forcing/.../shud/X<lon>Y<lat>.csv"
-- [ ] 7.4 创建 3 个 follow-up GitHub issue，issue 标题 + 编号 commit 至 `docs/runbooks/object-store-forcing-series-read.md` §Follow-ups 段：
+- [x] 7.2 `docs/forcing数据处理流程与rSHUD一致性说明.md` 末尾追加 §：API 直读 disk 段
+- [x] 7.3 `CLAUDE.md` 技术栈速查表加一行 "气象代站时间序列 | 直读 object-store /home/ghdc/nwm/object-store/forcing/.../shud/X<lon>Y<lat>.csv"
+- [x] 7.4 记录 3 个已创建 follow-up GitHub issue，issue 标题 + 编号 commit 至 `docs/runbooks/object-store-forcing-series-read.md` §Follow-ups 段：
   - (a) "Frontend: cycle picker adapt to disk retention window" (前端 cycle 选 disk 已 rotate 的会 404)
   - (b) "PsycopgForecastStore.station_series cleanup or deprecation" (read 路径已不再使用)
   - (c) "Evaluate long-term forcing series API via DB read" (老 cycle 历史回看需求评估)
@@ -167,8 +167,8 @@
 
 ## 10. Closing actions
 
-- [ ] 10.0 重跑 `openspec validate object-store-station-series-read --strict --no-interactive` PASS（archive guard：防止 PR-C 文档/follow-up 编辑后破坏 spec 结构）
-- [ ] 10.1 `openspec archive object-store-station-series-read`
+- [x] 10.0 重跑 `openspec validate object-store-station-series-read --strict --no-interactive` PASS（archive guard：防止 PR-C 文档/follow-up 编辑后破坏 spec 结构）
+- [x] 10.1 `openspec archive object-store-station-series-read`
 - [ ] 10.2 3 条 `docs/review-loop-log.jsonl` append（每 PR 一行）
 - [ ] 10.3 关闭 Epic + 3 子 issue
 - [ ] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；如 PR-B receipt 在最近 24h 内已记录 uvicorn pid 变化，PR-C 不必再次重启服务，只做 health probe）

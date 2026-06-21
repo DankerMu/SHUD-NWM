@@ -170,6 +170,7 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 | 前端 | pnpm, TypeScript | `apps/frontend/` |
 | 数据库 | PostgreSQL + TimescaleDB + PostGIS | 远端有实例 |
 | 对象存储 | MinIO (dev) / S3 | 远端有实例 |
+| 气象代站时间序列 | 直读 object-store | `/home/ghdc/nwm/object-store/forcing/.../shud/X<lon>Y<lat>.csv` |
 | HPC 调度 | Slurm | 仅远端可用 |
 | 水文模型 | SHUD | 仅远端可用 |
 | 规格管理 | OpenSpec | `openspec validate` |
