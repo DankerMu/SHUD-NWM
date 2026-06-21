@@ -169,7 +169,7 @@ export function validateHydroMetStationSeriesIdentity(
   } else if (responseSourceId !== product.source_id) {
     messages.push(`source_id=${formatHydroMetStationSeriesContractValue(responseSourceId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.source_id)} 不一致`)
   }
-  if (responseCycleTime !== undefined && responseCycleTime !== null && typeof responseCycleTime !== 'string') {
+  if (typeof responseCycleTime !== 'string') {
     messages.push('cycle_time 元数据格式无效')
   }
 

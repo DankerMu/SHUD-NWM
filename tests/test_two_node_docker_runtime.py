@@ -3567,6 +3567,24 @@ def test_public_display_forbidden_env_docs_align_with_validator_and_entrypoint()
         if line.strip() in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
     }
     assert infra_readme_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    smoke_env_loops = re.findall(
+        r"  for key in \\\n(?P<body>.*?)\n  do\n(?P<loop>.*?)\n  done",
+        infra_readme_text,
+        flags=re.DOTALL,
+    )
+    smoke_forbidden_env_loops = [
+        body
+        for body, loop in smoke_env_loops
+        if 'printf "%s=<present>\\n" "$key"' in loop and "forbidden_found=1" in loop
+    ]
+    assert len(smoke_forbidden_env_loops) == 1
+    smoke_forbidden_env_keys = {
+        line.strip().rstrip("\\").strip()
+        for line in smoke_forbidden_env_loops[0].splitlines()
+        if line.strip()
+    }
+    assert smoke_forbidden_env_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    assert "OBJECT_STORE_ROOT" not in smoke_forbidden_env_keys
 
     env_readme_text = (REPO_ROOT / "infra/env/README.md").read_text(encoding="utf-8")
     env_readme_section = env_readme_text.split("- Forbidden env keys must match", 1)[1].split(

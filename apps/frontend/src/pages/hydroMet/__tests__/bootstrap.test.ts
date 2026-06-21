@@ -656,6 +656,29 @@ describe('loadHydroMetStationSeries', () => {
 
     expect(messages.join(' ')).toContain('model_id 元数据格式无效')
   })
+
+  it('reports null station-series cycle_time as an identity mismatch', () => {
+    const messages = validateHydroMetStationSeriesIdentity(
+      stationSeriesResponse({ cycle_time: null as never }),
+      latestProduct(),
+      'qhh_forc_001',
+    )
+
+    expect(messages.join(' ')).toContain('cycle_time 元数据格式无效')
+  })
+
+  it('reports missing station-series cycle_time as an identity mismatch', () => {
+    const responseWithoutCycle = { ...stationSeriesResponse() } as Record<string, unknown>
+    delete responseWithoutCycle.cycle_time
+
+    const messages = validateHydroMetStationSeriesIdentity(
+      responseWithoutCycle as components['schemas']['StationSeriesResponse'],
+      latestProduct(),
+      'qhh_forc_001',
+    )
+
+    expect(messages.join(' ')).toContain('cycle_time 元数据格式无效')
+  })
 })
 
 describe('loadHydroMetRiverForecast', () => {

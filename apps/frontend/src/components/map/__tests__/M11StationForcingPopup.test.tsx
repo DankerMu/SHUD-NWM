@@ -205,6 +205,17 @@ describe('M11StationForcingPopup', () => {
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
+  it('shows identity-mismatch empty state and draws no curve when cycle_time is missing', async () => {
+    const body = seriesResponse() as Record<string, unknown>
+    delete body.cycle_time
+    mockSeries(body)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-popup-identity-reasons')).toHaveTextContent('cycle_time 元数据格式无效')
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
+  })
+
   it('shows honest empty state and never resolves a product when basinId=null', () => {
     render(<M11StationForcingPopup basinId={null} initialSource={null} station={station} />)
 
