@@ -78,11 +78,11 @@ CMFD ingest 已被撤销（commit `ef234f2` revert `1a0c87f`；Epic #614 + 子 #
 - **不动前端**：cycle picker / source 选择器 / station 列表点击逻辑保持现状；老 cycle 在前端可能仍可选但调用必 404，前端适配留 follow-up issue
 - **不引入 S3 boto3 客户端**：现 `NHMS_ARTIFACT_BACKEND=local` + disk 直读已满足；S3/MinIO 客户端方案留未来 issue
 - **不改 `_ensure_forcing_version_finalized` 函数本身**：只断 series 路径调用；其他路径（如 `station_summary` 等）若仍需校验则不受影响
-- **不引入缓存**：每次请求直读 CSV（53 行小文件，~3 KB），后续如有性能问题再加 LRU
+- **不引入缓存**：每次请求直读小型 SHUD CSV（当前 IFS/GFS 样本为 53/56 行量级），后续如有性能问题再加 LRU
 - **不动 `met.data_source` / `met.forcing_version` schema 或行内容**
 - **本 spec 在 disk-path 层引入 source_id lowercase 归一化（IFS→ifs, GFS→gfs），与现有 forecast_store 内 `LOWER(source_id)` 查询语义对齐；API 入参大小写约定本身不变，归一化的统一抽取交给后续 normalization issue**
 - **不验证 IDW 数据值冗余 / source-grid 重合度**：1709 SHUD 代站从 ~250 个 IFS/GFS 0.25° 源 cell IDW 而来，存在数据值冗余，这是 forcing_producer 上游设计层面的事，本 spec 不做去重也不做对比
-- **不写新 `STATION_FORCING_FILENAME_INVALID` 错误码 + path traversal 校验**：当前 `met_station.properties_json.forcing_filename` 仅由 forcing_producer / station_seeder 内部写入，数据源可信；future 如开放运维侧手填该字段，再加 follow-up issue 引入校验
+- **不写新 `STATION_FORCING_FILENAME_INVALID` 错误码**：PR-A reader 仍做 path safety hardening；API-controlled `source_id`/`model_id` unsafe path segment 用既有 `VALIDATION_ERROR` 拒绝，station metadata 中 unsafe `basin_version_id` / `forcing_filename`、symlink/no-follow、bounded-read violation、malformed CSV 均用 `STATION_FORCING_FILE_MALFORMED` 拒绝
 
 ## Forward Compatibility Invariant（direct_grid 模式自动切换条件）
 

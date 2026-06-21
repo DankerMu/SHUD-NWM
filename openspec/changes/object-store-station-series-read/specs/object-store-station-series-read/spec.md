@@ -44,6 +44,18 @@ The series reader SHALL derive the absolute disk path of a station's per-cycle f
 - **WHEN** API receives a request missing any of `cycle_time` / `model_id` / `source_id`
 - **THEN** the API SHALL return HTTP 422 with code `MISSING_REQUIRED_FILTER` and details `{"required_alternatives": [["forcing_version_id"], ["model_id", "source_id", "cycle_time"]]}` (reusing the exact existing error shape from `packages/common/forecast_store.py:2132-2146`, the current station_series call-site)
 
+#### Scenario: unsafe API path segments are rejected before file open
+
+- **WHEN** API receives `source_id=ifs/../gfs` or `model_id=../other`
+- **THEN** the reader SHALL reject the request before opening any object-store file
+- **AND** the error SHALL be HTTP 422 with code `VALIDATION_ERROR`
+
+#### Scenario: unsafe station metadata path segments are rejected as malformed
+
+- **WHEN** `met_station.basin_version_id` or `properties_json.forcing_filename` contains `/`, `\`, NUL, `.`, `..`, or an absolute path
+- **THEN** the reader SHALL reject the resolved station artifact before opening any object-store file
+- **AND** the error SHALL be HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+
 ### Requirement: CSV parse and valid_time computation
 
 The reader SHALL parse the per-station shud CSV with the documented two-row header (`nrow ncol start_date end_date` then `Time_Day Precip Temp RH Wind RN`) and emit (variable, valid_time, value) tuples where `valid_time = cycle_time + timedelta(seconds=int(round(Time_Day*86400)))`.
@@ -89,6 +101,44 @@ The reader SHALL parse the per-station shud CSV with the documented two-row head
 
 - **WHEN** the CSV is missing the header row or contains a non-numeric value where a numeric is expected
 - **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED` and details `{station_id, expected_path, parse_reason}`
+
+#### Scenario: non-finite numeric CSV values are malformed
+
+- **WHEN** the CSV contains `NaN`, `inf`, or a numeric token whose `Time_Day` conversion overflows the datetime range
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the response SHALL NOT contain non-finite JSON numeric values
+
+#### Scenario: blank row inside declared data section is malformed
+
+- **WHEN** the CSV header declares `nrow=N`
+- **AND** a blank physical row appears inside those N declared data rows
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the reader SHALL NOT skip the blank row and backfill it with a later extra row
+
+#### Scenario: declared nrow mismatch raises STATION_FORCING_FILE_MALFORMED
+
+- **WHEN** the CSV header declares `nrow=N`
+- **AND** the data section contains fewer or more than N data rows
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** `details.parse_reason` SHALL identify the row-count mismatch
+
+#### Scenario: CSV reader enforces hard input bounds
+
+- **WHEN** the CSV file exceeds the configured byte cap, a single line exceeds the configured line cap, or the header `nrow` exceeds the configured row cap
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the reader SHALL NOT read or parse the full oversized tail after the failure is known
+
+#### Scenario: CSV file is read through no-follow descriptor-bound open
+
+- **WHEN** the expected station CSV path is a symlink or otherwise rejected by no-follow filesystem checks
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** it SHALL NOT follow the symlink target
+
+#### Scenario: file open/read OS errors are mapped to malformed
+
+- **WHEN** opening or reading an existing resolved CSV raises `PermissionError` or a generic `OSError`
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** `details.parse_reason` SHALL preserve operator-useful error text
 
 ### Requirement: Series API disk-only behavior — bypasses forcing_version and forcing_station_timeseries
 
