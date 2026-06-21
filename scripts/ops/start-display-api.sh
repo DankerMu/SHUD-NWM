@@ -98,17 +98,19 @@ disown "$new_pid" 2>/dev/null || true
 echo "[start-display-api] relaunched pid=$new_pid (log: $LOG_PATH)"
 
 # -- wait for port bind ---------------------------------------------------------
+# Probe the root /health endpoint (apps/api/main.py:1947 _register_static_and_health_routes),
+# NOT /api/v1/health which doesn't exist (would 404 even on healthy uvicorn).
 bound=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 30); do
     if curl --silent --show-error --fail --max-time 2 \
-        "http://${UVICORN_HOST}:${UVICORN_PORT}/api/v1/health" >/dev/null 2>&1; then
+        "http://${UVICORN_HOST}:${UVICORN_PORT}/health" >/dev/null 2>&1; then
         bound=1
         break
     fi
     sleep 1
 done
 if (( bound == 0 )); then
-    echo "ERROR: uvicorn did not respond on $UVICORN_HOST:$UVICORN_PORT within 20s; check $LOG_PATH" >&2
+    echo "ERROR: uvicorn did not respond on $UVICORN_HOST:$UVICORN_PORT /health within 30s; check $LOG_PATH" >&2
     exit 4
 fi
 

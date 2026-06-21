@@ -44,7 +44,7 @@ source `infra/env/display.env`（`set -a` 全量 export）→
 断言 `DATABASE_URL` / `NHMS_ENABLE_LIVE_POSTGIS_MVT` 非空 →
 SIGTERM 既有 uvicorn（10s timeout + SIGKILL 兜底）→
 `setsid` 重启 + log 落 `/tmp/display-api.log` →
-等 `/api/v1/health` 200 →
+等 `/health`（root）200 →
 跑 `/api/v1/models` basin_id 非空 smoke check
 （PR [#596](https://github.com/DankerMu/SHUD-NWM/pull/596) 同类回归即时报警）。
 原先 runbook 引用的 `/tmp/start_display.sh` 不存在于仓库，
