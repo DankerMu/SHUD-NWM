@@ -92,7 +92,8 @@ GET /api/v1/pipeline/status?source=&cycle_time=
 
 ```http
 GET /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf
-GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf
+GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # canonical discharge layer URL (per PR #602)
+GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # direct-deeplink only; not surfaced via /api/v1/layers discharge entry — see openspec/specs/mvt-tile-contract/spec.md
 GET /api/v1/tiles/flood-return-period?run_id=&duration=1h&valid_time=&bbox=&return_period=
 GET /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png
 ```

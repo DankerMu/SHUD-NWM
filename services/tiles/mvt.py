@@ -969,6 +969,11 @@ def _layer_source_refs(
     basin_version_id: str | None,
     river_network_version_id: str | None,
 ) -> dict[str, str | None]:
+    assert layer_id != "discharge", (
+        "discharge layer must use national source_refs={} via layer_metadata; "
+        "_layer_source_refs is unreachable for discharge per PR #602 spec invariant "
+        "(mvt-tile-contract: Discharge canonical URL is national across all callers)"
+    )
     refs = {
         key: value
         for key, value in {
