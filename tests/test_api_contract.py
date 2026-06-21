@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
-from apps.api.routes.data_sources import get_data_source_store
+from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
 from packages.common.forecast_store import (
@@ -633,56 +634,33 @@ def test_met_stations_repeated_variables_query_binds_all_values() -> None:
     assert data["filters"]["variables"] == ["PRCP", "TEMP"]
 
 
-def test_met_station_series_contract_uses_success_envelope_and_store_payload() -> None:
+def test_met_station_series_forcing_version_alone_uses_error_envelope_without_store_delegation() -> None:
     store = _DataSourceStore()
     app.dependency_overrides[get_data_source_store] = lambda: store
+    app.dependency_overrides[get_station_lookup] = object
+    app.state.object_store_root = tempfile.mkdtemp(prefix="nhms-station-series-object-store-")
     try:
         with TestClient(app) as client:
             response = client.get(
                 "/api/v1/met/stations/station_1/series",
-                params={
-                    "forcing_version_id": "forc_qhh_gfs_2026050700",
-                    "variables": "PRCP",
-                    "from": "2026-05-07T00:00:00Z",
-                    "to": "2026-05-07T03:00:00Z",
-                    "limit": 2,
-                },
-            )
-            missing = client.get(
-                "/api/v1/met/stations/station_1/series",
-                params={"forcing_version_id": "missing"},
+                params={"forcing_version_id": "forc_qhh_gfs_2026050700"},
             )
     finally:
         app.dependency_overrides.pop(get_data_source_store, None)
+        app.dependency_overrides.pop(get_station_lookup, None)
 
-    assert response.status_code == 200
-    data = _assert_success_envelope(response.json())
-    assert set(data) == {
-        "station_id",
-        "station",
-        "forcing_version_id",
-        "model_id",
-        "source_id",
-        "cycle_time",
-        "valid_time_start",
-        "valid_time_end",
-        "limit",
-        "requested_from",
-        "requested_to",
-        "series",
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["request_id"]
+    assert body["error"]["code"] == "MISSING_REQUIRED_FILTER"
+    assert body["error"]["details"] == {
+        "required_alternatives": [
+            ["forcing_version_id"],
+            ["model_id", "source_id", "cycle_time"],
+        ]
     }
-    assert data["station"]["station_id"] == "station_1"
-    assert data["forcing_version_id"] == "forc_qhh_gfs_2026050700"
-    assert data["source_id"] == "GFS"
-    assert data["series"][0]["unit"] == "mm/h"
-    assert data["series"][0]["native_resolution"] == "1h"
-    assert data["series"][0]["points"][0]["quality_flag"] == "ok"
-    assert data["series"][0]["metadata"]["truncated"] is True
-    assert store.station_series_calls[0]["variables"] == ["PRCP"]
-    assert missing.status_code == 404
-    assert missing.json()["status"] == "error"
-    assert missing.json()["error"]["code"] == "FORCING_VERSION_NOT_FOUND"
-    assert missing.json()["error"]["details"] == {"forcing_version_id": "missing"}
+    assert store.station_series_calls == []
 
 
 def test_model_active_contract_accepts_active_and_active_flag() -> None:
@@ -1203,6 +1181,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     }
     for name in ("forcing_version_id", "model_id", "source_id"):
         assert parameters[name]["schema"] == {"type": "string", "minLength": 1}
+    assert parameters["forcing_version_id"]["deprecated"] is True
+    assert "disk-only route ignores this value" in parameters["forcing_version_id"]["description"]
     assert parameters["limit"]["schema"] == {
         "type": "integer",
         "minimum": 1,
@@ -1224,6 +1204,24 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "quality_flag" in schemas["StationSeriesPoint"]["properties"]
     assert "native_resolution" in schemas["StationSeries"]["properties"]
     assert "returned_points" in schemas["StationSeriesMetadata"]["properties"]
+    operation_text = json.dumps(operation, sort_keys=True)
+    assert "FORCING_VERSION_NOT_FOUND" not in operation_text
+    assert "FORCING_VERSION_NOT_FINALIZED" not in operation_text
+    assert {
+        example["value"]["error"]["code"]
+        for example in operation["responses"]["4XX"]["content"]["application/json"]["examples"].values()
+    } == {
+        "STATION_NOT_FOUND",
+        "MISSING_REQUIRED_FILTER",
+        "STATION_FORCING_FILE_NOT_FOUND",
+    }
+    assert {
+        example["value"]["error"]["code"]
+        for example in operation["responses"]["5XX"]["content"]["application/json"]["examples"].values()
+    } == {
+        "STATION_FORCING_FILENAME_MISSING",
+        "STATION_FORCING_FILE_MALFORMED",
+    }
     assert schemas["ErrorResponse"]["properties"]["error"]["properties"]["details"] == {
         "oneOf": [
             {"type": "object", "nullable": True, "additionalProperties": True},

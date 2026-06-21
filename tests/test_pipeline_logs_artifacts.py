@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -513,6 +514,7 @@ class _client:
                 "NHMS_SERVICE_ROLE": "display_readonly",
                 "NHMS_REQUIRE_SERVICE_ROLE": "true",
                 "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+                "OBJECT_STORE_ROOT": _temp_object_store_root(),
             }
         )
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: self.store
@@ -558,7 +560,12 @@ def _display_env() -> dict[str, str]:
         "NHMS_SERVICE_ROLE": "display_readonly",
         "NHMS_REQUIRE_SERVICE_ROLE": "true",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+        "OBJECT_STORE_ROOT": _temp_object_store_root(),
     }
+
+
+def _temp_object_store_root() -> str:
+    return tempfile.mkdtemp(prefix="nhms-display-object-store-")
 
 
 def _set_display_artifact_env(

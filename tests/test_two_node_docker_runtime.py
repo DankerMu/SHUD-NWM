@@ -1218,7 +1218,7 @@ def test_static_checker_accepts_display_environment_list_literal_entries(tmp_pat
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
-def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Path) -> None:
+def test_static_checker_rejects_display_env_file_object_store_root_drift(tmp_path: Path) -> None:
     display_env = tmp_path / "display.example"
     display_env.write_text(
         (REPO_ROOT / "infra/env/display.example").read_text(encoding="utf-8")
@@ -1235,15 +1235,12 @@ def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Pat
     )
 
     assert result.status == "FAIL"
-    assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
+    assert "ENV_REQUIRED_VALUE_INVALID" in _codes(result)
 
 
 @pytest.mark.parametrize(
     "environment_entry",
     [
-        {"OBJECT_STORE_ROOT": "/scratch/private/object-store"},
-        ["OBJECT_STORE_ROOT=/scratch/private/object-store"],
-        ["${EXTRA_ENV:-OBJECT_STORE_ROOT=/scratch/private/object-store}"],
         {"NHMS_SCHEDULER_RUNTIME_ROOT": "/scratch/private/scheduler-runtime"},
         ["NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime"],
         ["${EXTRA_ENV:-NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime}"],
@@ -3475,7 +3472,6 @@ def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
         ("WORKSPACE_ROOT", "/workspace"),
         ("RUN_WORKSPACE_ROOT", "/workspace/runs"),
         ("SHARED_LOG_ROOT", "/workspace/logs"),
-        ("OBJECT_STORE_ROOT", "/object-store"),
         ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "/ghdc/data/nwm/object-store"),
         ("NHMS_SCHEDULER_LOCK_ROOT", "/workspace/scheduler/locks"),
         ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/workspace/scheduler/evidence"),

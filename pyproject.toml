@@ -74,6 +74,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: requires explicitly configured external services such as PostgreSQL/PostGIS/TimescaleDB",
     "e2e: end-to-end pipeline tests (network/multi-step); run on node-22, excluded from pure CI",
+    "real_disk: requires node-27 DATABASE_URL and OBJECT_STORE_ROOT, excluded from pure CI",
     "grib: requires real GRIB2 decode + eccodes-version-matched fixtures; run on node-22, excluded from pure CI",
 ]
 

@@ -96,6 +96,7 @@ def test_display_env_blockers_align_with_compute_only_static_inventory() -> None
         "NHMS_AUTH_MODE",
         "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
+        "OBJECT_STORE_ROOT",
     }
     assert DISPLAY_REQUIRED_CONFIG_KEYS == allowed_display_required
     shared_required_role_keys = DISPLAY_REQUIRED_CONFIG_KEYS & set(docker_runtime.COMPUTE_REQUIRED_ENV)
@@ -109,6 +110,9 @@ def test_display_env_blockers_align_with_compute_only_static_inventory() -> None
     ).isdisjoint(docker_runtime.COMPUTE_REQUIRED_ENV)
     assert DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS)
     assert DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS)
+    assert "OBJECT_STORE_ROOT" not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    assert "OBJECT_STORE_ROOT" not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS
+    assert "OBJECT_STORE_ROOT" in docker_runtime.DISPLAY_REQUIRED_ENV
 
 
 def test_standalone_slurm_gateway_exposes_only_gateway_routes() -> None:

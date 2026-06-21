@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -3051,6 +3052,7 @@ def _display_env() -> dict[str, str]:
     return {
         "NHMS_REQUIRE_SERVICE_ROLE": "true",
         "NHMS_SERVICE_ROLE": "display_readonly",
+        "OBJECT_STORE_ROOT": tempfile.mkdtemp(prefix="nhms-display-object-store-"),
     }
 
 

@@ -71,12 +71,13 @@ Display role, node 27:
   `NHMS_REQUIRE_SERVICE_ROLE=true`, `NHMS_AUTH_MODE=production`,
   `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`,
   `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false`, readonly `DATABASE_URL`, and a
-  readonly published artifact mount.
+  readonly `OBJECT_STORE_ROOT`, plus readonly published artifact and
+  object-store mounts.
 - Forbidden env keys must match `infra/docker/entrypoint.sh` and
   `scripts/validate_two_node_docker_runtime.py`: `SLURM_GATEWAY_URL`,
   `SLURM_GATEWAY_BACKEND`, `SLURM_GATEWAY_TEMPLATE_DIR`,
   `SLURM_GATEWAY_WORKSPACE_DIR`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`,
-  `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_OBJECT_STORE_COPYBACK_ROOT`,
+  `SHARED_LOG_ROOT`, `NHMS_OBJECT_STORE_COPYBACK_ROOT`,
   `NHMS_SCHEDULER_LOCK_ROOT`, `NHMS_SCHEDULER_EVIDENCE_ROOT`,
   `NHMS_SCHEDULER_RUNTIME_ROOT`, `NHMS_SCHEDULER_TEMP_ROOT`,
   `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`,
@@ -86,7 +87,8 @@ Display role, node 27:
   `/run/docker.sock`, `/var/run/docker.sock`, and 22 private `/scratch` mounts.
 - The display compose filesystem surface is a strict allowlist: exactly one
   `type: bind` mount from `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` to
-  `NHMS_PUBLISHED_ARTIFACT_ROOT`, marked read-only. Extra binds, named
+  `NHMS_PUBLISHED_ARTIFACT_ROOT`, and one `type: bind` mount from
+  `OBJECT_STORE_ROOT` to `OBJECT_STORE_ROOT`, both marked read-only. Extra binds, named
   volumes, relative bind sources, local named-volume bind devices, and tmpfs
   entries below the published artifact root are validation failures. Display
   `configs`, `secrets`, `deploy`, `devices`, `device_cgroup_rules`, and

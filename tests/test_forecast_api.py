@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
@@ -10,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from apps.api.main import app
-from apps.api.routes.data_sources import get_data_source_store
+from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
     FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS,
@@ -687,6 +688,8 @@ def fake_store() -> FakeForecastStore:
     store = FakeForecastStore()
     app.dependency_overrides[get_forecast_store] = lambda: store
     app.dependency_overrides[get_data_source_store] = lambda: store
+    app.dependency_overrides[get_station_lookup] = object
+    app.state.object_store_root = tempfile.mkdtemp(prefix="nhms-station-series-object-store-")
     return store
 
 
@@ -3490,185 +3493,23 @@ async def test_met_stations_requires_basin_or_model_filter(fake_store: FakeForec
 
 
 @pytest.mark.asyncio
-async def test_met_station_series_explicit_forcing_version_uses_success_envelope_and_store_payload(
-    fake_store: FakeForecastStore,
-) -> None:
-    response = await _get(
-        "/api/v1/met/stations/qhh_stn_001/series"
-        "?forcing_version_id=forc_qhh_gfs_2026050700&variables=PRCP,TEMP"
-        "&from=2026-05-07T00:00:00Z&to=2026-05-07T03:00:00Z&limit=2"
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ok"
-    assert body["request_id"]
-    data = body["data"]
-    assert data["station_id"] == "qhh_stn_001"
-    assert data["station"]["longitude"] == 101.0
-    assert data["forcing_version_id"] == "forc_qhh_gfs_2026050700"
-    assert data["model_id"] == "qhh_shud_v1"
-    assert data["source_id"] == "GFS"
-    assert data["cycle_time"] == "2026-05-07T00:00:00Z"
-    assert data["limit"] == 2
-    series_by_variable = {series["variable"]: series for series in data["series"]}
-    assert list(series_by_variable) == ["PRCP", "TEMP"]
-    assert series_by_variable["PRCP"]["unit"] == "mm/h"
-    assert series_by_variable["PRCP"]["native_resolution"] == "1h"
-    assert series_by_variable["PRCP"]["truncated"] is True
-    assert series_by_variable["PRCP"]["metadata"] == {
-        "limit": 2,
-        "returned_points": 2,
-        "requested_from": "2026-05-07T00:00:00Z",
-        "requested_to": "2026-05-07T03:00:00Z",
-        "returned_from": "2026-05-07T00:00:00Z",
-        "returned_to": "2026-05-07T01:00:00Z",
-        "truncated": True,
-    }
-    assert series_by_variable["PRCP"]["points"][0] == {
-        "valid_time": "2026-05-07T00:00:00Z",
-        "value": 1.0,
-        "quality_flag": "ok",
-        "source_id": "GFS",
-    }
-    assert fake_store.station_series_calls[-1] == {
-        "station_id": "qhh_stn_001",
-        "forcing_version_id": "forc_qhh_gfs_2026050700",
-        "model_id": None,
-        "source_id": None,
-        "cycle_time": None,
-        "variables": ["PRCP,TEMP"],
-        "from_time": _dt("2026-05-07T00:00:00Z"),
-        "to_time": _dt("2026-05-07T03:00:00Z"),
-        "limit": 2,
-    }
-
-
-@pytest.mark.asyncio
-async def test_met_station_series_tuple_resolution_and_repeated_variables_delegate_to_store(
-    fake_store: FakeForecastStore,
-) -> None:
-    response = await _get(
-        "/api/v1/met/stations/qhh_stn_001/series"
-        "?model_id=qhh_shud_v1&source_id=GFS&cycle_time=2026-05-07T00:00:00Z"
-        "&variables=PRCP&variables=TEMP"
-    )
-
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["forcing_version_id"] == "forc_resolved_from_tuple"
-    assert fake_store.station_series_calls[-1]["forcing_version_id"] is None
-    assert fake_store.station_series_calls[-1]["model_id"] == "qhh_shud_v1"
-    assert fake_store.station_series_calls[-1]["source_id"] == "GFS"
-    assert fake_store.station_series_calls[-1]["cycle_time"] == _dt("2026-05-07T00:00:00Z")
-    assert fake_store.station_series_calls[-1]["variables"] == ["PRCP", "TEMP"]
-
-
-@pytest.mark.asyncio
-async def test_met_station_series_without_variables_defaults_through_store(
+async def test_met_station_series_forcing_version_alone_returns_missing_required_filter(
     fake_store: FakeForecastStore,
 ) -> None:
     response = await _get("/api/v1/met/stations/qhh_stn_001/series?forcing_version_id=forc_qhh_gfs_2026050700")
 
-    assert response.status_code == 200
-    assert fake_store.station_series_calls[-1]["variables"] is None
-    assert [series["variable"] for series in response.json()["data"]["series"]] == [
-        "PRCP",
-        "TEMP",
-        "RH",
-        "wind",
-        "Rn",
-        "Press",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_met_station_series_empty_valid_filtered_range_returns_no_synthetic_points(
-    fake_store: FakeForecastStore,
-) -> None:
-    fake_store.station_series_response["requested_from"] = "2026-05-15T00:00:00Z"
-    fake_store.station_series_response["requested_to"] = "2026-05-15T01:00:00Z"
-    fake_store.station_series_response["series"] = [
-        {
-            "variable": "PRCP",
-            "unit": "mm/h",
-            "native_resolution": "1h",
-            "source_id": "GFS",
-            "cycle_time": "2026-05-07T00:00:00Z",
-            "points": [],
-            "truncated": False,
-            "metadata": {
-                "limit": 2,
-                "returned_points": 0,
-                "requested_from": "2026-05-15T00:00:00Z",
-                "requested_to": "2026-05-15T01:00:00Z",
-                "returned_from": None,
-                "returned_to": None,
-                "truncated": False,
-            },
-        }
-    ]
-
-    response = await _get(
-        "/api/v1/met/stations/qhh_stn_001/series"
-        "?forcing_version_id=forc_qhh_gfs_2026050700&variables=PRCP"
-        "&from=2026-05-15T00:00:00Z&to=2026-05-15T01:00:00Z&limit=2"
-    )
-
-    assert response.status_code == 200
-    series = response.json()["data"]["series"][0]
-    assert series["points"] == []
-    assert series["metadata"] == {
-        "limit": 2,
-        "returned_points": 0,
-        "requested_from": "2026-05-15T00:00:00Z",
-        "requested_to": "2026-05-15T01:00:00Z",
-        "returned_from": None,
-        "returned_to": None,
-        "truncated": False,
-    }
-    assert all("value" not in point for point in series["points"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("query", "expected_status", "expected_code"),
-    [
-        ("forcing_version_id=missing", 404, "FORCING_VERSION_NOT_FOUND"),
-        ("forcing_version_id=not_finalized", 409, "FORCING_VERSION_NOT_FINALIZED"),
-        ("forcing_version_id=station_absent", 404, "STATION_NOT_IN_FORCING_VERSION"),
-        ("forcing_version_id=forc_qhh_gfs_2026050700&source_id=IFS", 409, "FORCING_VERSION_FILTER_CONFLICT"),
-        ("model_id=ambiguous&source_id=GFS&cycle_time=2026-05-07T00:00:00Z", 409, "FORCING_VERSION_AMBIGUOUS"),
-        ("forcing_version_id=forc_qhh_gfs_2026050700&variables=unknown", 422, "VALIDATION_ERROR"),
-        (
-            "forcing_version_id=forc_qhh_gfs_2026050700&from=2026-05-08T00:00:00Z&to=2026-05-07T00:00:00Z",
-            422,
-            "VALIDATION_ERROR",
-        ),
-    ],
-)
-async def test_met_station_series_preserves_store_error_envelope(
-    fake_store: FakeForecastStore,
-    query: str,
-    expected_status: int,
-    expected_code: str,
-) -> None:
-    response = await _get(f"/api/v1/met/stations/qhh_stn_001/series?{query}")
-
-    assert response.status_code == expected_status
+    assert response.status_code == 422
     body = response.json()
     assert body["status"] == "error"
     assert body["request_id"]
-    assert body["error"]["code"] == expected_code
-    assert body["error"]["details"] is not None
-
-
-@pytest.mark.asyncio
-async def test_met_station_series_missing_station_preserves_store_error(fake_store: FakeForecastStore) -> None:
-    response = await _get("/api/v1/met/stations/missing/series?forcing_version_id=forc_qhh_gfs_2026050700")
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "STATION_NOT_FOUND"
+    assert body["error"]["code"] == "MISSING_REQUIRED_FILTER"
+    assert body["error"]["details"] == {
+        "required_alternatives": [
+            ["forcing_version_id"],
+            ["model_id", "source_id", "cycle_time"],
+        ]
+    }
+    assert fake_store.station_series_calls == []
 
 
 @pytest.mark.asyncio

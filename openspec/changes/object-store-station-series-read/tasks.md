@@ -68,18 +68,18 @@
 
 ## 2. Series route 切换 — `apps/api/routes/data_sources.py`
 
-- [ ] 2.1 import `read_station_forcing_csv` + 4 个 typed errors (new) + 复用 existing `ForecastStoreError` for STATION_NOT_FOUND / MISSING_REQUIRED_FILTER
-- [ ] 2.2 `get_met_station_series` 函数体替换：不再调 `store.station_series()`，改调 `read_station_forcing_csv(station_lookup=..., object_store_root=app.state.object_store_root, ...)`
-- [ ] 2.3 reader 异常 → API HTTP error mapping：`StationForcingFileNotFoundError → 404`、`StationForcingFilenameMissingError → 500`、`StationForcingFileMalformedError → 500`；已有 `STATION_NOT_FOUND` / `MISSING_REQUIRED_FILTER` 维持原 `ForecastStoreError` 路径
-- [ ] 2.4 保留 query params 解析（不动 signature）
-- [ ] 2.5 `forcing_version_id` query param 在新路径下：与 cycle_time 同时传时静默忽略；单独传（无 cycle_time/model_id/source_id）触发 `MISSING_REQUIRED_FILTER` 422
-- [ ] 2.6 旧 `ForecastStoreError(FORCING_VERSION_NOT_FINALIZED)` / `FORCING_VERSION_NOT_FOUND` 的 try-except 块在该路由上不再出现（reader 不会 raise 这两个）
-- [ ] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series` + 显式 case `forcing_version_id=X` 单独传（无 `cycle_time`/`model_id`/`source_id`）→ 422 `MISSING_REQUIRED_FILTER` + `forcing_version_id=X` 与 `cycle_time` 同时传 → 200（静默忽略）
+- [x] 2.1 import `read_station_forcing_csv` + 4 个 typed errors (new) + 复用 existing `ForecastStoreError` for STATION_NOT_FOUND / MISSING_REQUIRED_FILTER
+- [x] 2.2 `get_met_station_series` 函数体替换：不再调 `store.station_series()`，改调 `read_station_forcing_csv(station_lookup=..., object_store_root=app.state.object_store_root, ...)`
+- [x] 2.3 reader 异常 → API HTTP error mapping：`StationForcingFileNotFoundError → 404`、`StationForcingFilenameMissingError → 500`、`StationForcingFileMalformedError → 500`；已有 `STATION_NOT_FOUND` / `MISSING_REQUIRED_FILTER` 维持原 `ForecastStoreError` 路径
+- [x] 2.4 保留 query params 解析（不动 signature）
+- [x] 2.5 `forcing_version_id` query param 在新路径下：与 cycle_time 同时传时静默忽略；单独传（无 cycle_time/model_id/source_id）触发 `MISSING_REQUIRED_FILTER` 422
+- [x] 2.6 旧 `ForecastStoreError(FORCING_VERSION_NOT_FINALIZED)` / `FORCING_VERSION_NOT_FOUND` 的 try-except 块在该路由上不再出现（reader 不会 raise 这两个）
+- [x] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series` + 显式 case `forcing_version_id=X` 单独传（无 `cycle_time`/`model_id`/`source_id`）→ 422 `MISSING_REQUIRED_FILTER` + `forcing_version_id=X` 与 `cycle_time` 同时传 → 200（静默忽略）
 
 ## 3. Startup env check + boundary fix — `apps/api/runtime_mode.py` + `apps/api/main.py`
 
-- [ ] 3.1 在 `RuntimeConfig` (`apps/api/runtime_mode.py:66`) 加字段 `object_store_root: Path | None = None`
-- [ ] 3.2 在 `load_runtime_config(env)` (`apps/api/runtime_mode.py:101`) 内对 display_readonly 启动强制要求 `OBJECT_STORE_ROOT`，并对任意已配置路径做可读目录校验；默认 dev_monolith / compute_control 未配置时保持 `object_store_root=None`，保证 `apps/api/main.py` 模块级 `app = create_app()` import path 不被破坏：
+- [x] 3.1 在 `RuntimeConfig` (`apps/api/runtime_mode.py:66`) 加字段 `object_store_root: Path | None = None`
+- [x] 3.2 在 `load_runtime_config(env)` (`apps/api/runtime_mode.py:101`) 内对 display_readonly 启动强制要求 `OBJECT_STORE_ROOT`，并对任意已配置路径做可读目录校验；默认 dev_monolith / compute_control 未配置时保持 `object_store_root=None`，保证 `apps/api/main.py` 模块级 `app = create_app()` import path 不被破坏：
   ```python
    raw = env.get("OBJECT_STORE_ROOT", "").strip()
    if role == ServiceRole.DISPLAY_READONLY and not raw:
@@ -88,47 +88,47 @@
    if path is not None and (not path.is_dir() or not os.access(path, os.R_OK)):
        raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable directory")
   ```
-- [ ] 3.3 `apps/api/main.py:create_app()` (line 304+) 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
-- [ ] 3.4 **AD-11 boundary fix**：从下面三处同步移除 `OBJECT_STORE_ROOT`：
+- [x] 3.3 `apps/api/main.py:create_app()` (line 304+) 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
+- [x] 3.4 **AD-11 boundary fix**：从下面三处同步移除 `OBJECT_STORE_ROOT`：
   - `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
   - `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
   - `scripts/validate_two_node_docker_runtime.py:133 DISPLAY_FORBIDDEN_ENV_KEYS`
   - `scripts/validate_two_node_docker_runtime.py:273 COMPUTE_ONLY_PATH_ENV_KEYS`
-- [ ] 3.4a display runtime allow/require/audit set 同步：`OBJECT_STORE_ROOT` 加入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set；断言 `OBJECT_STORE_ROOT not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`、`OBJECT_STORE_ROOT not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS`、`OBJECT_STORE_ROOT in docker_runtime.DISPLAY_REQUIRED_ENV`
-- [ ] 3.5 unit test (`tests/test_runtime_mode.py` 现有 + 新加)：display_readonly 缺 env → raise `RuntimeModeError`；env 指向不存在路径 → raise；display env 指向真实目录 → 通过 + `RuntimeConfig.object_store_root == Path(...)`；display env 带可读 root 不触发 `DISPLAY_BOUNDARY_CONFIG_UNSAFE`；默认 dev_monolith 未配置 env 仍可 load 且 `object_store_root is None`
-- [ ] 3.5a `create_app()` downstream compatibility：保证 `from apps.api.main import app` / module-level `app = create_app()` 在默认 dev env 下仍可 import；更新所有受影响的 display test env helpers（例如 runtime / monitoring / pipeline artifact tests）给非 missing-env 场景传入 readable tmp `OBJECT_STORE_ROOT`，并保留专门的 missing-env failure test；验证 sibling routes/runtime config 行为不变
-- [ ] 3.6 `tests/test_role_boundary_static.py` 跑通——同步后 forbidden 集合不再包含 OBJECT_STORE_ROOT，互锁断言 (line 89) 仍 pass
+- [x] 3.4a display runtime allow/require/audit set 同步：`OBJECT_STORE_ROOT` 加入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set；断言 `OBJECT_STORE_ROOT not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`、`OBJECT_STORE_ROOT not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS`、`OBJECT_STORE_ROOT in docker_runtime.DISPLAY_REQUIRED_ENV`
+- [x] 3.5 unit test (`tests/test_runtime_mode.py` 现有 + 新加)：display_readonly 缺 env → raise `RuntimeModeError`；env 指向不存在路径 → raise；display env 指向真实目录 → 通过 + `RuntimeConfig.object_store_root == Path(...)`；display env 带可读 root 不触发 `DISPLAY_BOUNDARY_CONFIG_UNSAFE`；默认 dev_monolith 未配置 env 仍可 load 且 `object_store_root is None`
+- [x] 3.5a `create_app()` downstream compatibility：保证 `from apps.api.main import app` / module-level `app = create_app()` 在默认 dev env 下仍可 import；更新所有受影响的 display test env helpers（例如 runtime / monitoring / pipeline artifact tests）给非 missing-env 场景传入 readable tmp `OBJECT_STORE_ROOT`，并保留专门的 missing-env failure test；验证 sibling routes/runtime config 行为不变
+- [x] 3.6 `tests/test_role_boundary_static.py` 跑通——同步后 forbidden 集合不再包含 OBJECT_STORE_ROOT，互锁断言 (line 89) 仍 pass
 
 ## 4. OpenAPI schema — `openapi/nhms.v1.yaml` + `apps/api/main.py:_patch_station_series_openapi`
 
-- [ ] 4.1 `_patch_station_series_openapi` (line 564) 把 4 个 error code 加入 4xx/5xx 响应的 examples 列表：`STATION_FORCING_FILENAME_MISSING (500)`, `STATION_FORCING_FILE_NOT_FOUND (404)`, `STATION_FORCING_FILE_MALFORMED (500)`, `MISSING_REQUIRED_FILTER (422)`；保留现有 `STATION_NOT_FOUND` 404 example 不变
-- [ ] 4.2 移除（或不再列出）`FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 在 `getMetStationSeries` operation examples 中的出现
-- [ ] 4.3 `getMetStationSeries` operation 的 `forcing_version_id` query parameter 加 `deprecated: true` + description 说明新路径下该参数被忽略
-- [ ] 4.4 `pnpm run check:api-types`（如存在）PASS — 验证 OpenAPI 改动对前端 type-gen 是 additive（不破坏现有类型）
+- [x] 4.1 `_patch_station_series_openapi` (line 564) 把 4 个 error code 加入 4xx/5xx 响应的 examples 列表：`STATION_FORCING_FILENAME_MISSING (500)`, `STATION_FORCING_FILE_NOT_FOUND (404)`, `STATION_FORCING_FILE_MALFORMED (500)`, `MISSING_REQUIRED_FILTER (422)`；保留现有 `STATION_NOT_FOUND` 404 example 不变
+- [x] 4.2 移除（或不再列出）`FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 在 `getMetStationSeries` operation examples 中的出现
+- [x] 4.3 `getMetStationSeries` operation 的 `forcing_version_id` query parameter 加 `deprecated: true` + description 说明新路径下该参数被忽略
+- [x] 4.4 `pnpm run check:api-types`（如存在）PASS — 验证 OpenAPI 改动对前端 type-gen 是 additive（不破坏现有类型）
 
 ## 5. Env files — `infra/env/`
 
-- [ ] 5.1 `infra/env/display.example`: 新增 `OBJECT_STORE_ROOT=` （注释默认值 `/home/ghdc/nwm/object-store`）
+- [x] 5.1 `infra/env/display.example`: 新增 `OBJECT_STORE_ROOT=` （注释默认值 `/home/ghdc/nwm/object-store`）
 - [ ] 5.2 `infra/env/display.env` (gitignored 不入 repo) 在 node-27 host 上 ops 配 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`；本仓库不 commit 该文件
 - [ ] 5.3 在 runbook `docs/runbooks/object-store-forcing-series-read.md` 文档化 "node-27 上 OBJECT_STORE_ROOT 期望值是 `/home/ghdc/nwm/object-store`，由 ops 配置到 display.env"
 
 ## 6. Real-disk integration tests — node-27 oracle
 
-- [ ] 6.1 `tests/test_object_store_forcing_real_disk.py` (marked `e2e` or `real_disk`，CI 跳过，node-27 跑)
-- [ ] 6.2 fixture: 真实 station_id (`heihe_forc_001` / `qhh_forc_001`) + 已存在 cycle (2026-06-20T12:00:00Z)
-- [ ] 6.3 sub-test 1: heihe + IFS + 现存 cycle → 200 + 5×N tuples + 校验 valid_time 范围 + 验证 `unit` 字段全表
-- [ ] 6.4 sub-test 2: qhh + gfs + 现存 cycle → 200
-- [ ] 6.5 sub-test 3: heihe + 不存在 cycle (`2020-01-01T00:00:00Z`) → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path
-- [ ] 6.6 sub-test 4: 不存在 station_id (`bogus_forc_999`) → 404 `STATION_NOT_FOUND`
-- [ ] 6.7 sub-test 5: variables filter (`PRCP,TEMP`) → 只回 2 变量 + 各自 N 个 points
-- [ ] 6.8 sub-test 6: from/to filter → 中间区段 + inclusive 两端
-- [ ] 6.9 sub-test 7: cycle_time `+08:00` 输入 → 与 `Z` 输入产生相同响应
-- [ ] 6.10 sub-test 8: variables=Press → 200 + `data.series=[]`
-- [ ] 6.11 sub-test 9: variables=PRCP,Press → 200 + 只含 PRCP series
+- [x] 6.1 `tests/test_object_store_forcing_real_disk.py` (marked `e2e` or `real_disk`，CI 跳过，node-27 跑)
+- [x] 6.2 fixture: 真实 station_id (`heihe_forc_001` / `qhh_forc_001`) + 已存在 cycle (2026-06-20T12:00:00Z)
+- [x] 6.3 sub-test 1: heihe + IFS + 现存 cycle → 200 + 5×N tuples + 校验 valid_time 范围 + 验证 `unit` 字段全表
+- [x] 6.4 sub-test 2: qhh + gfs + 现存 cycle → 200
+- [x] 6.5 sub-test 3: heihe + 不存在 cycle (`2020-01-01T00:00:00Z`) → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path
+- [x] 6.6 sub-test 4: 不存在 station_id (`bogus_forc_999`) → 404 `STATION_NOT_FOUND`
+- [x] 6.7 sub-test 5: variables filter (`PRCP,TEMP`) → 只回 2 变量 + 各自 N 个 points
+- [x] 6.8 sub-test 6: from/to filter → 中间区段 + inclusive 两端
+- [x] 6.9 sub-test 7: cycle_time `+08:00` 输入 → 与 `Z` 输入产生相同响应
+- [x] 6.10 sub-test 8: variables=Press → 200 + `data.series=[]`
+- [x] 6.11 sub-test 9: variables=PRCP,Press → 200 + 只含 PRCP series
 - [ ] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（`PsycopgStationLookup` + spy connection/cursor 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
-- [ ] 6.13 sub-test 11: 4 个 currently-409 cases (heihe×IFS, heihe×gfs, qhh×IFS, qhh×gfs at 2026-06-20T12:00:00Z) 全部 200
-- [ ] 6.14 sub-test 12: 响应 byte-shape 与 §0.10 baseline fixture 对比（除 request_id 和真实数值字段外，结构 + 字段类型 + 排序一致）
-- [ ] 6.15 sub-test 13: read-only side-effect 验证：连续 3 个相同请求后 `OBJECT_STORE_ROOT/forcing/...` mtime 不变（采样几个文件）
+- [x] 6.13 sub-test 11: 4 个 currently-409 cases (heihe×IFS, heihe×gfs, qhh×IFS, qhh×gfs at 2026-06-20T12:00:00Z) 全部 200
+- [x] 6.14 sub-test 12: 响应 byte-shape 与 §0.10 baseline fixture 对比（除 request_id 和真实数值字段外，结构 + 字段类型 + 排序一致）
+- [x] 6.15 sub-test 13: read-only side-effect 验证：连续 3 个相同请求后 `OBJECT_STORE_ROOT/forcing/...` mtime 不变（采样几个文件）
 
 ## 7. Documentation
 
@@ -148,10 +148,10 @@
 
 ## 8. Validation
 
-- [ ] 8.1 `openspec validate object-store-station-series-read --strict --no-interactive` PASS
-- [ ] 8.2 本地 `uv run pytest tests/test_object_store_forcing.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_forecast_api_met_station_series.py -q` PASS
-- [ ] 8.2a 本地 targeted sibling-startup compatibility tests PASS（至少覆盖 `apps.api.main` import smoke、更新过 `create_app()` env helper 的 runtime/monitoring/pipeline artifact tests，例如 `tests/test_monitoring_api.py` 与 `tests/test_pipeline_logs_artifacts.py` 中相关 display app cases）
-- [ ] 8.3 本地 `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py apps/api/routes/data_sources.py apps/api/main.py apps/api/runtime_mode.py tests/test_role_boundary_static.py` PASS
+- [x] 8.1 `openspec validate object-store-station-series-read --strict --no-interactive` PASS
+- [x] 8.2 本地 `uv run pytest tests/test_object_store_forcing.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_forecast_api_met_station_series.py -q` PASS
+- [x] 8.2a 本地 targeted sibling-startup compatibility tests PASS（至少覆盖 `apps.api.main` import smoke、更新过 `create_app()` env helper 的 runtime/monitoring/pipeline artifact tests，例如 `tests/test_monitoring_api.py` 与 `tests/test_pipeline_logs_artifacts.py` 中相关 display app cases）
+- [x] 8.3 本地 `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py apps/api/routes/data_sources.py apps/api/main.py apps/api/runtime_mode.py tests/test_role_boundary_static.py` PASS
 - [ ] 8.4 node-27 整链路 live：apply env 改动 → 重启 display API (`scripts/ops/start-display-api.sh`) → 跑 §6 real-disk integration → 收 receipt
 - [ ] 8.5 node-27 curl 验证 4 种组合（heihe×IFS / heihe×gfs / qhh×IFS / qhh×gfs）最新 cycle 全部 200 + 真数据（不再 409）
 - [ ] 8.6 node-27 curl 验证老 cycle (2026-05-31) 4 种组合全部 404 `STATION_FORCING_FILE_NOT_FOUND`（确认不 fallback DB）

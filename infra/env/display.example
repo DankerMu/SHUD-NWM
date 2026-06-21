@@ -22,6 +22,9 @@ NHMS_ENABLE_LIVE_POSTGIS_MVT=true
 # Use a real readonly database role. The username here is intentionally ro-suffixed.
 DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhms
 
+# Readonly display object-store root for disk-resident SHUD station forcing CSVs.
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+
 # Host source is compose-only. 22 sees the same exported directory as
 # /ghdc/data/nwm/published; 27 reads it locally from /home/ghdc/nwm/published.
 NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published

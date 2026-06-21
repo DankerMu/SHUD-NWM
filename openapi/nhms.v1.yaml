@@ -632,6 +632,8 @@ paths:
         - name: forcing_version_id
           in: query
           required: false
+          deprecated: true
+          description: Deprecated compatibility parameter. The disk-only route ignores this value when model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series.
           schema:
             type: string
             minLength: 1
@@ -698,9 +700,67 @@ paths:
                       data:
                         $ref: "#/components/schemas/StationSeriesResponse"
         "4XX":
-          $ref: "#/components/responses/Error"
+          description: Station series client error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                stationNotFound:
+                  summary: STATION_NOT_FOUND
+                  value:
+                    request_id: req_01J0NHMS
+                    status: error
+                    error:
+                      code: STATION_NOT_FOUND
+                      message: Station not found.
+                      details: null
+                missingRequiredFilter:
+                  summary: MISSING_REQUIRED_FILTER
+                  value:
+                    request_id: req_01J0NHMS
+                    status: error
+                    error:
+                      code: MISSING_REQUIRED_FILTER
+                      message: model_id, source_id, and cycle_time are required for disk station series reads.
+                      details:
+                        required_alternatives:
+                          - [forcing_version_id]
+                          - [model_id, source_id, cycle_time]
+                stationForcingFileNotFound:
+                  summary: STATION_FORCING_FILE_NOT_FOUND
+                  value:
+                    request_id: req_01J0NHMS
+                    status: error
+                    error:
+                      code: STATION_FORCING_FILE_NOT_FOUND
+                      message: Station forcing file not found.
+                      details: null
         "5XX":
-          $ref: "#/components/responses/Error"
+          description: Station series server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                stationForcingFilenameMissing:
+                  summary: STATION_FORCING_FILENAME_MISSING
+                  value:
+                    request_id: req_01J0NHMS
+                    status: error
+                    error:
+                      code: STATION_FORCING_FILENAME_MISSING
+                      message: Station forcing filename is missing.
+                      details: null
+                stationForcingFileMalformed:
+                  summary: STATION_FORCING_FILE_MALFORMED
+                  value:
+                    request_id: req_01J0NHMS
+                    status: error
+                    error:
+                      code: STATION_FORCING_FILE_MALFORMED
+                      message: Station forcing file is malformed.
+                      details: null
   /api/v1/mvp/qhh/latest-product:
     get:
       operationId: getQhhLatestProduct
