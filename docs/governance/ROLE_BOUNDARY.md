@@ -13,11 +13,29 @@ full API and is not a production deployment category.
 
 ## Node Relation
 
+**Current physical deployment (2026-06-21):**
+
+- node-22 runs the Slurm/SHUD compute wrapper. It does **NOT** connect to any active
+  database. The local PG `:55433` instance on node-22 is historical and pending
+  removal — do not connect to it.
+- node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers, the
+  display API (`:8080`), and the frontend on a single machine. node-27 reads
+  node-22's compute artifacts via NFS (`/home/ghdc/nwm/` ↔ node-22
+  `/ghdc/data/nwm/`) and writes its own database directly.
+- Public service entry: `https://test.nwm.ac.cn` (27 reverse-proxied).
+
+**Design-time role contract (preserved below) describes capability boundaries
+that the codebase still enforces; physical host assignment may differ.**
+
 node-22 runs `compute_control` services and may also run the standalone
-`slurm_gateway`. node-22 owns scheduler execution, Slurm submission, writable
-workspace/object-store roots, database mutation, and publication of display
-artifacts. node-27 runs `display_readonly`, serves the display API/frontend, and
-reads the readonly database plus published artifacts.
+`slurm_gateway`. The `compute_control` role owns scheduler execution, Slurm
+submission, writable workspace/object-store roots, database mutation, and
+publication of display artifacts. The `display_readonly` role serves the
+display API/frontend and reads the readonly database plus published artifacts.
+
+> Note: in the current deployment the `compute_control` writes happen on
+> node-27, not node-22. The role contract is what the code enforces; the host
+> assignment is what ops has rolled out.
 
 Shared contracts are not "node-22 code" or "node-27 code". Paths such as
 `packages/common`, `openapi/nhms.v1.yaml`, `db/migrations`, `schemas`, and

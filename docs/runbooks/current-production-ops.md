@@ -3,6 +3,19 @@
 最后更新：2026-06-14
 适用范围：node-22 计算控制面、Slurm 计算节点、node-27 只读展示面。
 
+> **⚠️ 2026-06-21 STALE WARNING — 整份重写待办**：
+>
+> 本文档 §2 / §3.1 / §3.2 / §5 描述的"22 跑 orchestrator 写 22 本地 DB
+> (`10.0.2.100:55433`)"已**不是当前事实**。当前架构：
+> - **node-22 已退化为纯计算节点**，不连任何活 DB
+> - node-22 本机 PG `:55433` 已弃用、待删（pgrep 验证无 orchestrator/ingest 活进程）
+> - **orchestrator + 入库进程 + DB primary 全部在 node-27** (本机 PG `:55432`)
+> - 公网入口 `https://test.nwm.ac.cn`（27 反代）
+>
+> 本文档待整段重写（已开 follow-up issue）；在此之前请优先看 `CLAUDE.md` 服务器拓扑段 +
+> `docs/governance/ROLE_BOUNDARY.md` 顶部 "Current physical deployment" 段。
+> 第 25-31 行权限矩阵、第 12-13 行入口命令均为历史快照，**不要按此 ssh 22 执行**。
+
 本文是当前业务化运行值守手册，记录服务如何拉起、业务流程、每一步产物位置和当前已知卡点。历史 bring-up 记录见
 [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)；两节点职责边界见
 [`two-node-deployment-overview.md`](two-node-deployment-overview.md)。

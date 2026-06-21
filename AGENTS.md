@@ -49,3 +49,13 @@ pnpm build
   - `uv run pytest -q tests/test_api.py tests/test_gateway.py` must pass
   - `cd apps/frontend && corepack pnpm test` must pass
   - `cd apps/frontend && corepack pnpm build` must pass
+
+## Three-Node Topology
+
+This repo deploys across three machines: local Mac (dev), node-22 (pure compute, no DB), node-27 (primary PG + ingest + display API + frontend). Public service entry: `https://test.nwm.ac.cn`.
+
+**Required reading before any non-trivial change:**
+
+- `CLAUDE.md` — dev workflow + verification oracle routing + current host/DB topology
+- `docs/runbooks/two-node-deployment-overview.md` — deployment topology (note: M22 design-intent doc; see banner for current-vs-design delta)
+- `docs/governance/ROLE_BOUNDARY.md` — service role boundaries (note: "node-22 owns database mutation" is design-intent wording; current physical deployment differs — see banner)

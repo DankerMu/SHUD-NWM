@@ -6,9 +6,9 @@
 
 - **本地 (macOS)**: 代码编辑、commit、push、ruff、openspec validate、前端 tsc/pnpm test
   - 仓库路径: `/Users/danker/Desktop/Hydro-SHUD/NWM`
-- **node-22 (210.77.77.22:32099, user=frd_muziyao)**: SHUD/Slurm 计算执行 —— SHUD 跑完的产物（forcing、模拟结果）会同步到 node-27 `/home/ghdc/nwm/`，**不承担测试 oracle 角色，验证一律在 27**
+- **node-22 (210.77.77.22:32099, user=frd_muziyao)**: **纯计算节点**（Slurm/SHUD/forcing wrapper），**不连任何活 DB**；产物写 NFS `/ghdc/data/nwm/`（与 27 `/home/ghdc/nwm/` 同一份 NFS，零延迟无 rsync）；承担**调度 oracle**（Slurm/SHUD runtime 行为），**数据 + display oracle 在 27**。注：22 host 本地仍跑着一个 historical PG :55433 实例，已弃用待删，**不要连**
   - 仓库路径: `/scratch/frd_muziyao/NWM`（唯一工作树，必须保留 ff-only 同步）
-- **node-27 (210.77.77.27:32099, user=nwm)**: 主 DB（primary，单库）+ basin 源数据 (`/home/ghdc/nwm/Basins`) + forcing + SHUD 产物 + display API + 前端生产化 —— **所有真实数据 oracle、后端真实 DB pytest oracle、display/前端 live 验证 oracle**
+- **node-27 (210.77.77.27:32099, user=nwm)**: 当前 active **primary PostgreSQL（本机 :55432）+ ingest 进程 + display API（:8080）+ 前端**都在本机；27 自己读 NFS 上的 22 产物、自己写入自己的 PG；basin 源数据在 `/home/ghdc/nwm/Basins` —— **所有真实数据 oracle、后端真实 DB pytest oracle、display/前端 live 验证 oracle**
   - 仓库路径: `/home/nwm/NWM`
   - readonly 是 role-level（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本
 - **同步方式**: GitHub (`DankerMu/SHUD-NWM`) 做中转，三端 push/pull
@@ -148,15 +148,12 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 
 ## 服务器拓扑
 
-| 节点 | 地址 | 角色 |
-|------|------|------|
-| Node-22 | 210.77.77.22:32099 | Slurm / SHUD 计算执行（产物同步到 27 ghdc/nwm） |
-| Node-27 | 210.77.77.27:32099 | 主 DB（primary）+ basin 源 + forcing + SHUD 产物 + display API + 前端 |
-| 本地 Mac | localhost | 开发编辑 |
+| 节点 | 地址 | 角色 | DB |
+|------|------|------|----|
+| Node-22 | 210.77.77.22:32099 | 纯计算（Slurm/SHUD/forcing） | **不连任何活 DB**（本机 :55433 PG 已弃用待删） |
+| Node-27 | 210.77.77.27:32099 | active primary PG + ingest + display API + 前端 | **本机 PG :55432**（自写自读） |
+| 本地 Mac | localhost | 开发编辑 | 不连远端 DB |
 
-## 隧穿配置
+## 服务访问
 
-| 本地端口 | 远端目标 | 用途 |
-|----------|----------|------|
-| 18080 | 23.95.164.218:8080 | API 代理 (sub2api) |
-| 8080 | 210.77.77.27:8080 | 服务访问 |
+生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。

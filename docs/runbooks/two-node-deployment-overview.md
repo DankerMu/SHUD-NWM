@@ -3,6 +3,19 @@
 最后更新：2026-06-01
 适用范围：M22 完成后的两节点 Docker 部署，22 `compute_control` + 27 `display_readonly`
 
+> **⚠️ 2026-06-21 当前部署事实 vs 本文档设计意图的差异**：
+>
+> 本文档描述的是 M22 **设计意图**（22 = writer / DB mutation，27 = readonly）。
+> 当前 (2026-06-21) **物理部署已偏离**：
+> - **node-22 已退化为纯计算节点**，不连任何活 DB（本机 PG `:55433` 已弃用待删）
+> - **node-27 一台机器同时跑** primary PG (`:55432`) + ingest 进程 + display API (`:8080`) + 前端
+> - 公网入口 `https://test.nwm.ac.cn` 由 27 反代对外
+>
+> 设计文档保留作为 role contract reference（代码层 `ServiceRole` 仍按角色契约强制）；
+> 物理 host 分配以 `CLAUDE.md` 服务器拓扑段 + `docs/governance/ROLE_BOUNDARY.md` 顶部
+> "Current physical deployment" 段为准。下文 §3.4 权限矩阵、§4 共享表、§5.2 22 compute
+> 启动段都是设计意图描述，**不反映当前生产 host 分配**。
+
 ## 1. 先看结论
 
 当前系统已经从“单机既计算又展示”的形态，收敛为两个清晰角色：
