@@ -2852,6 +2852,24 @@ def test_layers_catalog_discharge_cache_identity_run_agnostic() -> None:
     assert "basin_id" in runless_discharge["property_schema"]["required"]
 
 
+def test_layer_source_refs_rejects_discharge() -> None:
+    """Spec invariant (mvt-tile-contract: *Discharge layer never reaches `_layer_source_refs`*):
+    after PR #602, discharge layer always short-circuits to source_refs={} via layer_metadata;
+    calling _layer_source_refs with layer_id='discharge' MUST raise AssertionError as an
+    invariant guard against a future refactor reintroducing run_id leakage into the cache hash.
+    """
+    from services.tiles.mvt import _layer_source_refs
+
+    with pytest.raises(AssertionError, match="discharge"):
+        _layer_source_refs(
+            "discharge",
+            run_id="fake_run",
+            source_version="v1",
+            basin_version_id="bv1",
+            river_network_version_id="rnv1",
+        )
+
+
 def test_mvt_cache_fixture_enforces_tile_layer_fk() -> None:
     with _store() as session:
         with pytest.raises(SQLAlchemyError):
