@@ -3736,6 +3736,232 @@ def test_list_models_exposes_basin_id_and_basin_name_from_join(
     assert item["basin_version_id"] == "basins_qhh_vbasins"
 
 
+def test_fetch_active_model_for_scope_joins_basin() -> None:
+    # Mirror of test_list_models_exposes_basin_id_and_basin_name_from_join for the
+    # lifecycle sibling path. `_fetch_active_model_for_scope` feeds lifecycle response
+    # rows that flow through `_model_public_projection`; without JOIN core.basin_version
+    # + core.basin, ApiModelInstance.basin_id is null on the wire even though the schema
+    # declares it.
+    join_row = {
+        "model_id": "basins_qhh_shud",
+        "basin_version_id": "basins_qhh_vbasins",
+        "basin_id": "basins_qhh",
+        "basin_name": "Qhh",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "mesh_version_id": "basins_qhh_mesh_vbasins",
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    captured_sql: list[str] = []
+
+    class FakeCursor:
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            captured_sql.append(statement)
+
+        def fetchone(self) -> dict[str, Any]:
+            return join_row
+
+    store = PsycopgModelRegistryStore("postgresql://example")
+    row = store._fetch_active_model_for_scope(FakeCursor(), "basins_qhh_vbasins", for_update=False)
+
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    assert "JOIN core.basin_version" in sql, (
+        "_fetch_active_model_for_scope must JOIN core.basin_version to surface basin_id."
+    )
+    assert "JOIN core.basin" in sql, (
+        "_fetch_active_model_for_scope must JOIN core.basin to surface basin_name."
+    )
+    assert "b.basin_id" in sql and "b.basin_name" in sql, (
+        "_fetch_active_model_for_scope SELECT must project b.basin_id and b.basin_name."
+    )
+    assert row is not None
+    assert row["basin_id"] == "basins_qhh"
+    assert row["basin_name"] == "Qhh"
+
+
+def test_update_model_lifecycle_state_joins_basin() -> None:
+    # Mirror lifecycle-row contract for the UPDATE path. The CTE wrap pattern lets a
+    # single round-trip both transition the lifecycle state and JOIN dimension tables
+    # so the returned row carries basin_id/basin_name for `_model_public_projection`.
+    join_row = {
+        "model_id": "basins_qhh_shud",
+        "basin_version_id": "basins_qhh_vbasins",
+        "basin_id": "basins_qhh",
+        "basin_name": "Qhh",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "mesh_version_id": "basins_qhh_mesh_vbasins",
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    captured_sql: list[str] = []
+
+    class FakeCursor:
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            captured_sql.append(statement)
+
+        def fetchone(self) -> dict[str, Any]:
+            return join_row
+
+    store = PsycopgModelRegistryStore("postgresql://example")
+    row = store._update_model_lifecycle_state(FakeCursor(), "basins_qhh_shud", "active")
+
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    assert "WITH updated AS" in sql, (
+        "_update_model_lifecycle_state must wrap UPDATE in a CTE so the outer SELECT can JOIN."
+    )
+    assert "JOIN core.basin_version" in sql, (
+        "_update_model_lifecycle_state outer SELECT must JOIN core.basin_version."
+    )
+    assert "JOIN core.basin" in sql, (
+        "_update_model_lifecycle_state outer SELECT must JOIN core.basin."
+    )
+    assert "b.basin_id" in sql and "b.basin_name" in sql, (
+        "_update_model_lifecycle_state SELECT must project b.basin_id and b.basin_name."
+    )
+    assert row["basin_id"] == "basins_qhh"
+    assert row["basin_name"] == "Qhh"
+
+
+def test_model_lifecycle_operation_response_populates_basin_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end guard for spec scenario "Lifecycle response basin_id consistency
+    # across internal SQL paths": once the SQL siblings JOIN basin_version + basin,
+    # `model_lifecycle_operation` -> `_model_public_projection` must surface
+    # basin_id on both `model` and `previous_model` regardless of which internal
+    # method produced the row.
+    inactive_model = {
+        "model_id": "candidate_model",
+        "model_name": "candidate_model",
+        "basin_id": "basin",
+        "basin_name": "Basin",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+        "mesh_version_id": "basin_mesh_v01",
+        "calibration_version_id": "basin_cal_v01",
+        "shud_code_version": "2.0",
+        "model_package_uri": "s3://nhms/models/candidate_model/package/",
+        "package_checksum": "package-sha-1",
+        "resource_profile": {"package_checksum": "package-sha-1"},
+        "active_flag": False,
+        "lifecycle_state": "inactive",
+        "segment_count": 1,
+    }
+    current_active = {
+        **inactive_model,
+        "model_id": "current_active",
+        "model_name": "current_active",
+        "model_package_uri": "s3://nhms/models/current_active/package/",
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    rows = {
+        inactive_model["model_id"]: inactive_model,
+        current_active["model_id"]: current_active,
+    }
+
+    class FakeTransaction:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    def fetch_model_row(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        model_id: str,
+        *,
+        for_update: bool,
+    ) -> dict[str, Any] | None:
+        row = rows.get(model_id)
+        return dict(row) if row is not None else None
+
+    def fetch_active_for_scope(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        _basin_version_id: str,
+        *,
+        for_update: bool,
+    ) -> dict[str, Any]:
+        return dict(current_active)
+
+    def update_lifecycle_state(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        model_id: str,
+        lifecycle_state: str,
+    ) -> dict[str, Any]:
+        rows[model_id] = {
+            **rows[model_id],
+            "lifecycle_state": lifecycle_state,
+            "active_flag": lifecycle_state == "active",
+        }
+        return dict(rows[model_id])
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_lock_basin_version_scope", lambda *_args: None)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_fetch_model_lifecycle_row", fetch_model_row)
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore, "_fetch_active_model_for_scope", fetch_active_for_scope
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_trustworthy_rollback_history",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_update_model_lifecycle_state", update_lifecycle_state)
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_build_model_operation_preflight",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "blockers": [],
+            "warnings": [],
+            "restored_model_id": None,
+            "mesh_version_id": None,
+            "lineage": {},
+        },
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_insert_model_lifecycle_audit",
+        lambda *_args, **_kwargs: 99,
+    )
+
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id="candidate_model",
+    )
+
+    result = store.model_lifecycle_operation(
+        "candidate_model",
+        operation="activate",
+        policy_decision=decision,
+    )
+
+    assert result["status"] == "allowed"
+    assert result["operation"] == "activate"
+    assert result["model"]["basin_id"] == "basin", (
+        "lifecycle response model.basin_id must be populated via JOIN-backed rows."
+    )
+    assert result["model"]["basin_name"] == "Basin"
+    assert result["previous_model"] is not None
+    assert result["previous_model"]["basin_id"] == "basin", (
+        "lifecycle response previous_model.basin_id must be populated via JOIN-backed rows."
+    )
+
+
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:
     assert set(body) == {"request_id", "status", "data"}
     assert body["request_id"]

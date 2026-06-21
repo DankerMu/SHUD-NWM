@@ -1940,8 +1940,24 @@ class PsycopgModelRegistryStore:
             SELECT
                 mi.*,
                 COALESCE(mi.lifecycle_state, CASE WHEN mi.active_flag THEN 'active' ELSE 'inactive' END)
-                    AS lifecycle_state
+                    AS lifecycle_state,
+                b.basin_id,
+                b.basin_name,
+                bv.checksum AS basin_checksum,
+                rnv.segment_count,
+                rnv.checksum AS river_network_checksum,
+                mv.mesh_uri,
+                mv.checksum AS mesh_checksum,
+                mv.properties_json AS mesh_properties_json
             FROM core.model_instance mi
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = mi.basin_version_id
+            JOIN core.basin b
+              ON b.basin_id = bv.basin_id
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = mi.river_network_version_id
+            JOIN core.mesh_version mv
+              ON mv.mesh_version_id = mi.mesh_version_id
             WHERE mi.basin_version_id = %s
               AND mi.active_flag = true
               AND COALESCE(mi.lifecycle_state, 'active') = 'active'
@@ -2294,11 +2310,34 @@ class PsycopgModelRegistryStore:
     ) -> dict[str, Any]:
         cursor.execute(
             """
-            UPDATE core.model_instance
-            SET lifecycle_state = %s,
-                active_flag = %s
-            WHERE model_id = %s
-            RETURNING *
+            WITH updated AS (
+                UPDATE core.model_instance
+                SET lifecycle_state = %s,
+                    active_flag = %s
+                WHERE model_id = %s
+                RETURNING *
+            )
+            SELECT
+                u.*,
+                COALESCE(u.lifecycle_state, CASE WHEN u.active_flag THEN 'active' ELSE 'inactive' END)
+                    AS lifecycle_state,
+                b.basin_id,
+                b.basin_name,
+                bv.checksum AS basin_checksum,
+                rnv.segment_count,
+                rnv.checksum AS river_network_checksum,
+                mv.mesh_uri,
+                mv.checksum AS mesh_checksum,
+                mv.properties_json AS mesh_properties_json
+            FROM updated u
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = u.basin_version_id
+            JOIN core.basin b
+              ON b.basin_id = bv.basin_id
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = u.river_network_version_id
+            JOIN core.mesh_version mv
+              ON mv.mesh_version_id = u.mesh_version_id
             """,
             (lifecycle_state, lifecycle_state == "active", model_id),
         )
