@@ -175,6 +175,13 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
     }
     assert static_parameters["limit"]["schema"] == {"type": "integer", "minimum": 1, "maximum": 10000}
     assert static_parameters["cycle_time"]["schema"] == {"type": "string", "format": "date-time"}
+    assert static_spec["components"]["schemas"]["StationSeries"]["properties"]["variable"]["enum"] == [
+        "PRCP",
+        "TEMP",
+        "RH",
+        "wind",
+        "Rn",
+    ]
 
     for schema_name in (
         "SuccessEnvelope",

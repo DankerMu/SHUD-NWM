@@ -1179,6 +1179,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
             {"type": "array", "items": {"type": "string"}},
         ]
     }
+    assert "PRCP, TEMP, RH, wind, and Rn" in parameters["variables"]["description"]
+    assert "Press" not in parameters["variables"]["description"]
     for name in ("forcing_version_id", "model_id", "source_id"):
         assert parameters[name]["schema"] == {"type": "string", "minLength": 1}
     assert parameters["forcing_version_id"]["deprecated"] is True
@@ -1203,6 +1205,7 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     ]
     assert "quality_flag" in schemas["StationSeriesPoint"]["properties"]
     assert "native_resolution" in schemas["StationSeries"]["properties"]
+    assert schemas["StationSeries"]["properties"]["variable"]["enum"] == ["PRCP", "TEMP", "RH", "wind", "Rn"]
     assert "returned_points" in schemas["StationSeriesMetadata"]["properties"]
     operation_text = json.dumps(operation, sort_keys=True)
     assert "FORCING_VERSION_NOT_FOUND" not in operation_text
@@ -1267,6 +1270,11 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert 'data: components["schemas"]["StationSeriesResponse"];' in operation_types
     assert "StationSeriesResponse:" in generated_types
     assert "StationSeriesPoint:" in generated_types
+    station_series_start = generated_types.index("StationSeries:")
+    station_series_response_start = generated_types.index("StationSeriesResponse:")
+    station_series_types = generated_types[station_series_start:station_series_response_start]
+    assert 'variable: "PRCP" | "TEMP" | "RH" | "wind" | "Rn";' in station_series_types
+    assert "Press" not in station_series_types
     assert "quality_flag: string | null;" in generated_types
     assert "native_resolution: string | null;" in generated_types
     error_start = generated_types.index("ErrorResponse:")

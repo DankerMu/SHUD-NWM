@@ -666,7 +666,7 @@ paths:
               - type: array
                 items:
                   type: string
-          description: Station forcing variables. Repeat the parameter or provide comma-separated values. Allowed values are PRCP, TEMP, RH, wind, Rn, and Press.
+          description: Station forcing variables. Repeat the parameter or provide comma-separated values. Public station-series variables are PRCP, TEMP, RH, wind, and Rn.
         - name: from
           in: query
           required: false
@@ -2908,7 +2908,7 @@ components:
       properties:
         variable:
           type: string
-          enum: [PRCP, TEMP, RH, wind, Rn, Press]
+          enum: [PRCP, TEMP, RH, wind, Rn]
         unit:
           type: string
           nullable: true

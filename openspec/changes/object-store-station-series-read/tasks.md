@@ -110,7 +110,7 @@
 
 - [x] 5.1 `infra/env/display.example`: 新增 `OBJECT_STORE_ROOT=` （注释默认值 `/home/ghdc/nwm/object-store`）
 - [x] 5.2 `infra/env/display.env` (gitignored 不入 repo) 在 node-27 host 上 ops 配 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`；本仓库不 commit 该文件
-- [ ] 5.3 在 runbook `docs/runbooks/object-store-forcing-series-read.md` 文档化 "node-27 上 OBJECT_STORE_ROOT 期望值是 `/home/ghdc/nwm/object-store`，由 ops 配置到 display.env"
+- [x] 5.3 在 runbook `docs/runbooks/object-store-forcing-series-read.md` 文档化 "node-27 上 OBJECT_STORE_ROOT 期望值是 `/home/ghdc/nwm/object-store`，由 ops 配置到 display.env"
 
 ## 6. Real-disk integration tests — node-27 oracle
 

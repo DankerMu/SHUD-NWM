@@ -145,7 +145,7 @@ def get_met_station_series(
         default=None,
         description=(
             "Station forcing variables. Repeat the parameter or provide comma-separated values. "
-            "Allowed values are validated by the forecast store."
+            "Public station-series variables are PRCP, TEMP, RH, wind, and Rn."
         ),
     ),
     from_time: datetime | None = Query(default=None, alias="from"),

@@ -1103,7 +1103,7 @@ def _station_series_parameters() -> list[dict[str, Any]]:
             },
             "description": (
                 "Station forcing variables. Repeat the parameter or provide comma-separated values. "
-                "Allowed values are PRCP, TEMP, RH, wind, Rn, and Press."
+                "Public station-series variables are PRCP, TEMP, RH, wind, and Rn."
             ),
         },
         {
@@ -1562,7 +1562,7 @@ def _station_series_schema() -> dict:
         "type": "object",
         "required": ["variable", "unit", "native_resolution", "points", "truncated", "metadata"],
         "properties": {
-            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn"]},
             "unit": {"type": "string", "nullable": True},
             "native_resolution": {"type": "string", "nullable": True},
             "source_id": {"type": "string", "nullable": True},

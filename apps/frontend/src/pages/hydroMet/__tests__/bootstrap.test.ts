@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { client } from '@/api/client'
 import type { components } from '@/api/types'
 import {
-  HYDRO_MET_STATION_SERIES_LIMIT,
+  HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
-  boundedHydroMetStationSeriesLimit,
+  boundedHydroMetStationSeriesApiLimit,
   loadHydroMetStationSeries,
   validateHydroMetStationSeriesIdentity,
 } from '@/lib/hydroMet/stationSeries'
@@ -195,7 +195,7 @@ function stationSeriesResponse(
     cycle_time: '2026-05-21T00:00:00Z',
     valid_time_start: '2026-05-21T00:00:00Z',
     valid_time_end: '2026-05-21T02:00:00Z',
-    limit: HYDRO_MET_STATION_SERIES_LIMIT,
+    limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     requested_from: null,
     requested_to: null,
     series: [],
@@ -579,7 +579,7 @@ describe('loadHydroMetStationSeries', () => {
     vi.clearAllMocks()
   })
 
-  it('calls the generated station-series API with tuple filters, deprecated companion, six variables, and bounded limit', async () => {
+  it('calls the generated station-series API with tuple filters, deprecated companion, five public variables, and tuple limit', async () => {
     vi.mocked(client.GET).mockResolvedValueOnce({
       data: success(stationSeriesResponse()),
       error: undefined,
@@ -602,18 +602,19 @@ describe('loadHydroMetStationSeries', () => {
           source_id: product.source_id,
           cycle_time: product.cycle_time,
           variables: [...HYDRO_MET_STATION_VARIABLES],
-          limit: HYDRO_MET_STATION_SERIES_LIMIT,
+          limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
         },
       },
     })
+    expect(HYDRO_MET_STATION_VARIABLES).toEqual(['PRCP', 'TEMP', 'RH', 'wind', 'Rn'])
     expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('/api/v1/forecast')
   })
 
   it('keeps station-series limit bounded and preserves typed API error messages', async () => {
-    expect(boundedHydroMetStationSeriesLimit(0)).toBe(1)
-    expect(boundedHydroMetStationSeriesLimit(12.7)).toBe(12)
-    expect(boundedHydroMetStationSeriesLimit(5000)).toBe(HYDRO_MET_STATION_SERIES_LIMIT)
-    expect(boundedHydroMetStationSeriesLimit(undefined)).toBe(HYDRO_MET_STATION_SERIES_LIMIT)
+    expect(boundedHydroMetStationSeriesApiLimit(0)).toBe(1)
+    expect(boundedHydroMetStationSeriesApiLimit(12.7)).toBe(12)
+    expect(boundedHydroMetStationSeriesApiLimit(5000)).toBe(HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT)
+    expect(boundedHydroMetStationSeriesApiLimit(undefined)).toBe(HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT)
 
     vi.mocked(client.GET).mockResolvedValueOnce({
       data: undefined,
@@ -626,11 +627,12 @@ describe('loadHydroMetStationSeries', () => {
     })).rejects.toThrow('station unavailable')
   })
 
-  it('reports strict station/source/cycle mismatches without blocking on forcing_version_id drift', () => {
+  it('reports strict station/model/source/cycle mismatches without blocking on forcing_version_id drift', () => {
     const messages = validateHydroMetStationSeriesIdentity(
       stationSeriesResponse({
         station_id: 'qhh_forc_002',
         forcing_version_id: 'other-forcing',
+        model_id: 'other-model',
         source_id: 'IFS',
         cycle_time: '2026-05-21T12:00:00Z',
       }),
@@ -640,8 +642,19 @@ describe('loadHydroMetStationSeries', () => {
 
     expect(messages.join(' ')).toContain('station_id=qhh_forc_002')
     expect(messages.join(' ')).not.toContain('forcing_version_id')
+    expect(messages.join(' ')).toContain('model_id=other-model')
     expect(messages.join(' ')).toContain('source_id=IFS')
     expect(messages.join(' ')).toContain('cycle_time=2026-05-21T12:00:00.000Z')
+  })
+
+  it('reports missing station-series model_id as an identity mismatch', () => {
+    const messages = validateHydroMetStationSeriesIdentity(
+      stationSeriesResponse({ model_id: null }),
+      latestProduct(),
+      'qhh_forc_001',
+    )
+
+    expect(messages.join(' ')).toContain('model_id 元数据格式无效')
   })
 })
 
