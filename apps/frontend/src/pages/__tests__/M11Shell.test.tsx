@@ -282,6 +282,11 @@ const floodMvtMetadata: NonNullable<LayerState['metadata']> = {
   encoder_version: 'encoder-v1',
 }
 
+// LEGACY deeplink-only shape: `/api/v1/tiles/hydro/{run_id}/...` route still
+// exists at `apps/api/routes/flood_alerts.py:1059` but is no longer the
+// canonical `/api/v1/layers` discharge entry shape (post-PR #602). Retained
+// for tests at lines 821/926 that exercise the single-run deeplink code path.
+// Canonical default shape: `dischargeNationalMvtMetadata`.
 const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
   layer_id: 'discharge',
   tile_format: 'mvt',
@@ -301,7 +306,8 @@ const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
 }
 
 // national 总览（无 basinId）：discharge 多流域并集 MVT，url_template 无 {run_id} 占位、
-// required_placeholders 不含 run_id、min_zoom=7、release_blocking=false。
+// required_placeholders 不含 run_id、min_zoom=3（对齐 backend `_NATIONAL_DISCHARGE_METADATA`，
+// 即前端初始全国视图 zoom=3.35 默认能看到主干河道）、release_blocking=false。
 const dischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
   layer_id: 'discharge',
   tile_format: 'mvt',
@@ -312,7 +318,7 @@ const dischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
   fallback_available: false,
   release_blocking: false,
   required_placeholders: ['valid_time', 'z', 'x', 'y'],
-  min_zoom: 7,
+  min_zoom: 3,
   max_zoom: 14,
   valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z', '2026-05-18T12:00:00Z'],
   cache_version: 'discharge-national-cache-v1',
@@ -323,7 +329,7 @@ const dischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
 type HydroMvtLayerId = 'discharge' | 'flood-return-period' | 'warning-level'
 
 const m11MvtMetadataByLayer = {
-  'discharge': dischargeMvtMetadata,
+  'discharge': dischargeNationalMvtMetadata,
   'flood-return-period': floodMvtMetadata,
   'warning-level': {
     ...floodMvtMetadata,
@@ -851,7 +857,7 @@ describe('M11 visual foundation shell', () => {
     expect(source).toMatchObject({
       id: 'm11-discharge-source',
       type: 'vector',
-      minzoom: 7,
+      minzoom: 3,
       tiles: [
         `${window.location.origin}/api/v1/tiles/hydro-national/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-national-cache-v1`,
       ],
