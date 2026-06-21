@@ -3,7 +3,7 @@
   "name": "codeagent",
   "displayName": "Codeagent",
   "description": "Execute codeagent-wrapper for multi-backend AI code tasks with Codex, Claude, and Gemini backends, file references, structured output, and parallel task execution.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "maturity": "experimental",
   "categories": [
     "coding",

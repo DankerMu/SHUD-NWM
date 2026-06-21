@@ -161,4 +161,4 @@ gh issue list --limit 1  # Must have issue permissions
 ## Related Skills
 
 - `stage-change-pipeline` - Creates reviewed OpenSpec changes and implementation-ready issue sets.
-- `codex-codeagent-workflow` - Implements accepted issues through PR review and CI gates.
+- `subagent-workflow` - Implements accepted issues through PR review and CI gates.

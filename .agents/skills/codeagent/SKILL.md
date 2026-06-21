@@ -18,7 +18,7 @@ Execute codeagent-wrapper commands with pluggable AI backends (Codex, Claude, Ge
 ## When Not to Use
 
 - Do not use for ordinary local shell commands, lint/test/build commands, or small edits that the main agent can do directly.
-- Do not use inside delegated codeagent tasks; nested AI delegation is prohibited by workflows such as `codex-codeagent-workflow`.
+- Do not use inside delegated codeagent tasks; nested AI delegation is prohibited by workflows such as `subagent-workflow`.
 - Do not use when the task requires interactive product or scope decisions before implementation.
 
 ## Usage

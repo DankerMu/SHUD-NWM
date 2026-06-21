@@ -50,6 +50,8 @@ data/
 # Local/generated Codex workflow outputs. Existing tracked .codex/reviews/**
 # fixtures remain historical project evidence.
 .codex/
+# Local PR-review scratch evidence (per-PR review notes, not tracked project assets).
+.review/
 apps/frontend/artifacts/
 .tmp/
 

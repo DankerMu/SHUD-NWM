@@ -8,7 +8,7 @@ description: >
   test evidence, spec compliance, or invariant/state-machine compatibility. Do
   not use for ordinary quick review unless the user asks for multi-perspective
   or risk-adaptive depth.
-version: 0.1.0
+version: 0.3.0
 ---
 
 # Risk-Adaptive Cross Review
@@ -64,16 +64,30 @@ reviewer set. Defaults:
   Invariant/State-Machine/Compatibility.
 - OpenSpec Review: Design Consistency, Spec Completeness, Tasks Executability.
 
-Use `codeagent-wrapper --parallel --full-output --backend codex` when multiple
-independent reviewers can run concurrently. If that tool is unavailable, run the
-same reviewer prompts serially and report the limitation.
+Beyond pack scope, every reviewer also applies the change-triggered **cross-cutting
+lenses** in `reviewer-packages.md` — removed-behavior audit, wrapper/proxy
+faithfulness, and altitude/ownership — whenever the diff trips a lens trigger.
+
+Spawn the selected reviewers as parallel subagents through the orchestrator's
+native mechanism (Claude Code: multiple Task calls in one message; Codex: parallel
+subagents) when multiple independent reviewers can run concurrently. If parallel
+subagents are unavailable, run the same reviewer prompts serially and report the
+limitation. Each reviewer is a read-only leaf: it must not edit files, invoke this
+skill, or spawn further nested subagents.
 
 ## Finding Contract
 
 Read [finding-contract.md](references/finding-contract.md) before synthesizing.
-Treat a finding as merge-blocking only when it names severity, failure class,
-violated contract/invariant, concrete scenario, evidence, required fix direction,
-required test or proof, sibling surfaces to audit, and blocking status.
+Treat a finding as merge-blocking only when it names severity, a failure class
+from the contract's Failure-Class Vocabulary, violated contract/invariant,
+concrete scenario, evidence, required fix direction, required test or proof,
+sibling surfaces to audit, and blocking status.
+
+Apply the contract's Reject When precision gate so speculative, unanchored,
+or style-only items become notes rather than blocking findings. Respect Oracle
+Integrity: the spec/fixture, acceptance criteria, and existing tests are the
+immutable oracle a finding is measured against — never propose weakening them to
+clear a finding.
 
 Vague concerns are notes unless you can independently turn them into the full
 contract from the artifact and fixture.
@@ -91,6 +105,18 @@ and produce:
 
 Do not ask implementers to fix each cited line independently when multiple
 findings share the same root invariant.
+
+### Gap Sweep
+
+Before issuing the verdict, run one final clean-slate pass over the artifact as a
+fresh reviewer with the verified findings list visible, looking *only* for real
+defects not already listed. Recall-biased first passes systematically miss:
+removed behavior never re-established, caller/callee contract drift, boundary
+values (empty, single, last, null, zero, unknown enum), error and cleanup paths,
+async ordering and cancellation, cross-tenant/permission paths, migration/backfill
+paths, cache invalidation, and wrapper recursion. Verify any new candidate through
+the same standard and the Reject When gate; do not pad the list when the sweep
+finds nothing.
 
 ## Output
 
@@ -121,4 +147,4 @@ Return concise structured output:
 - Do not approve high-risk work when the governing invariant has not been
   stated or tested.
 - Use `stage-change-pipeline` for turning design stages into issues.
-- Use `codex-codeagent-workflow` for implementing a GitHub issue end to end.
+- Use `subagent-workflow` for implementing a GitHub issue end to end.
