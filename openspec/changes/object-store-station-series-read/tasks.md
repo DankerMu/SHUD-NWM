@@ -27,8 +27,10 @@
   - station 不存在 raise 与 `STATION_NOT_FOUND` 同 code + `{station_id}` details（参见 §1.1）
   - properties_json 不含 `forcing_filename` raise `StationForcingFilenameMissingError`
 - [x] 1.5 `_resolve_disk_path(object_store_root: Path, source_normalized, cycle_compact, basin_version_id, model_id, forcing_filename) -> Path`
-- [x] 1.6 `_parse_csv_header(line1: str) -> CMFDHeader-like` 提取 nrow / start_date / end_date
-- [x] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断）
+  - [x] 1.5a safe path segment hardening: API-controlled `source_id` / `model_id` and station metadata `basin_version_id` / `forcing_filename` reject `/`, `\`, NUL, `.`, `..`, absolute paths, root-inner sibling traversal before open
+  - [x] 1.5b file read hardening: reader uses no-follow descriptor-bound open under `OBJECT_STORE_ROOT`; symlink targets/unsafe filesystem entries map to typed malformed error and are never followed
+- [x] 1.6 `_parse_csv_header(line1: str) -> CMFDHeader-like` 提取 nrow / start_date / end_date，并拒绝超过 hard row cap 的 nrow
+- [x] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断），并拒绝 `NaN` / `inf` / overflow 等非 finite 数值
 - [x] 1.8 `_apply_filters(tuples, variables, from_time, to_time, limit) -> list[tuple]`：variables filter 静默丢弃未知（Press / UnknownVariable 均 drop，不 raise）；from/to inclusive；limit 截断总 tuple count（不是 per-variable）；保持排序 `[PRCP, TEMP, RH, wind, Rn]` 然后 valid_time ascending
 - [x] 1.9 `read_station_forcing_csv(*, station_lookup, object_store_root, station_id, source_id, cycle_time, model_id, variables=None, from_time=None, to_time=None, limit=None) -> StationSeriesResponse` 主入口（Protocol 注入）
 - [x] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.metadata.{returned_points, truncated, returned_from, returned_to}`
@@ -42,6 +44,9 @@
 - [x] 1.13d unit test: forcing_filename missing → 500 `STATION_FORCING_FILENAME_MISSING`
 - [x] 1.13e unit test: file not found → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path + basin_version_id + source_id + cycle_time + model_id
 - [x] 1.13f unit test: malformed CSV 6 变体（缺 header / nrow 非数字 / data 行 column 数错 / 数值非数字 / 空 file / declared nrow 与实际 data 行数不一致）→ 500 `STATION_FORCING_FILE_MALFORMED`
+- [x] 1.13f.1 unit test: open/read `PermissionError` / generic `OSError` → 500 `STATION_FORCING_FILE_MALFORMED`
+- [x] 1.13f.2 unit test: internal blank data row, non-finite numeric (`NaN` / `inf` / overflow), UTF-8/parse failure path → 500 `STATION_FORCING_FILE_MALFORMED`
+- [x] 1.13f.3 unit test: CSV row/bytes/line hard caps reject oversized object files before unbounded read/parse, chunked line reader uses multi-byte reads and does not read full oversized tail
 - [x] 1.13g unit test: 变量名映射全表 + unit 字段全表（5 个变量）
 - [x] 1.13h unit test: valid_time 边界 — 第一行 Time_Day=0 → cycle；最后一行 Time_Day=6.5 → cycle + 6d12h
 - [x] 1.13i unit test: rounding — Time_Day=0.041666 → cycle + 3600s（不是 3599s）
@@ -56,6 +61,8 @@
 - [x] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
 - [x] 1.13s unit test: SQL 查询统计 — 用 spy connection/cursor 驱动 `PsycopgStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 恰好 1 次命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
 - [x] 1.13t unit test: side-effect-free reads — 用 tmp_path CSV 连续调用 reader 3 次，断言 response shape 稳定、CSV mtime 不变，并通过 monkeypatch/spy 证明 reader 不调用 `mkdir` / 写模式 `open(..., "w")`
+- [x] 1.13u unit test: unsafe path segment / root-inner traversal / unsafe station filename 或 basin_version_id 在 open 前被拒绝；valid `X100.75Y37.65.csv` 仍可读
+- [x] 1.13v unit test: symlink target rejected by no-follow read; reader 不跟随 symlink，不读目标文件
 - [x] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
 - [x] 1.15 PR-A-scoped `openspec validate object-store-station-series-read --strict --no-interactive` PASS — §0 introspection commits 与 design.md/introspection-findings.md 编辑可能破坏 spec 结构，PR-A merge 前必须本地通过 validate（§8.1 是 PR-B 完整重跑；本条是 PR-A 独立 guard）
 

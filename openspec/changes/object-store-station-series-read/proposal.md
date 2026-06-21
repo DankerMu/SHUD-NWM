@@ -82,7 +82,7 @@ CMFD ingest 已被撤销（commit `ef234f2` revert `1a0c87f`；Epic #614 + 子 #
 - **不动 `met.data_source` / `met.forcing_version` schema 或行内容**
 - **本 spec 在 disk-path 层引入 source_id lowercase 归一化（IFS→ifs, GFS→gfs），与现有 forecast_store 内 `LOWER(source_id)` 查询语义对齐；API 入参大小写约定本身不变，归一化的统一抽取交给后续 normalization issue**
 - **不验证 IDW 数据值冗余 / source-grid 重合度**：1709 SHUD 代站从 ~250 个 IFS/GFS 0.25° 源 cell IDW 而来，存在数据值冗余，这是 forcing_producer 上游设计层面的事，本 spec 不做去重也不做对比
-- **不写新 `STATION_FORCING_FILENAME_INVALID` 错误码 + path traversal 校验**：当前 `met_station.properties_json.forcing_filename` 仅由 forcing_producer / station_seeder 内部写入，数据源可信；future 如开放运维侧手填该字段，再加 follow-up issue 引入校验
+- **不写新 `STATION_FORCING_FILENAME_INVALID` 错误码**：PR-A reader 仍做 path safety hardening；API-controlled `source_id`/`model_id` unsafe path segment 用既有 `VALIDATION_ERROR` 拒绝，station metadata 中 unsafe `basin_version_id` / `forcing_filename`、symlink/no-follow、bounded-read violation、malformed CSV 均用 `STATION_FORCING_FILE_MALFORMED` 拒绝
 
 ## Forward Compatibility Invariant（direct_grid 模式自动切换条件）
 

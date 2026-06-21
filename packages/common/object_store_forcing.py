@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+import os
+import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -13,6 +16,8 @@ from packages.common.forecast_store import (
     _PsycopgTransaction,
     default_database_url,
 )
+from packages.common.safe_fs import SafeFilesystemError, open_file_no_follow
+from packages.common.source_identity import normalize_source_id as normalize_known_source_id
 
 FORCING_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn")
 CSV_VARIABLE_COLUMNS = {
@@ -24,6 +29,11 @@ CSV_VARIABLE_COLUMNS = {
 }
 CSV_COLUMNS = ("Time_Day", "Precip", "Temp", "RH", "Wind", "RN")
 NATIVE_RESOLUTION = "3h"
+MAX_STATION_FORCING_CSV_ROWS = 10_000
+MAX_STATION_FORCING_CSV_BYTES = 8 * 1024 * 1024
+MAX_STATION_FORCING_CSV_LINE_BYTES = 64 * 1024
+STATION_FORCING_CSV_READ_CHUNK_BYTES = 64 * 1024
+_SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
@@ -193,10 +203,11 @@ class PsycopgStationLookup:
 
 
 def _normalize_source_id(source_id: str) -> str:
-    normalized = str(source_id or "").strip().lower()
-    if not normalized:
+    raw_source_id = str(source_id or "").strip()
+    if not raw_source_id:
         raise ValueError("source_id is required")
-    return normalized
+    normalized = normalize_known_source_id(raw_source_id).lower()
+    return _safe_storage_segment(normalized, "source_id")
 
 
 def _compute_cycle_compact(cycle_time: datetime) -> str:
@@ -211,15 +222,19 @@ def _resolve_disk_path(
     model_id: str,
     forcing_filename: str,
 ) -> Path:
+    source_segment = _safe_storage_segment(source_normalized, "source_id").lower()
+    basin_segment = _safe_storage_segment(basin_version_id, "station.basin_version_id")
+    model_segment = _safe_storage_segment(model_id, "model_id")
+    filename_segment = _safe_station_forcing_filename_or_raise(forcing_filename)
     return (
         Path(object_store_root)
         / "forcing"
-        / source_normalized
+        / source_segment
         / cycle_compact
-        / basin_version_id
-        / model_id
+        / basin_segment
+        / model_segment
         / "shud"
-        / forcing_filename
+        / filename_segment
     )
 
 
@@ -234,6 +249,8 @@ def _parse_csv_header(line1: str) -> ShudCsvHeader:
         raise ValueError("nrow and ncol must be integers") from error
     if nrow < 1:
         raise ValueError("nrow must be positive")
+    if nrow > MAX_STATION_FORCING_CSV_ROWS:
+        raise ValueError(f"nrow must not exceed {MAX_STATION_FORCING_CSV_ROWS}")
     if ncol != len(CSV_COLUMNS):
         raise ValueError(f"ncol must be {len(CSV_COLUMNS)}")
     return ShudCsvHeader(nrow=nrow, ncol=ncol, start_date=tokens[2], end_date=tokens[3])
@@ -258,13 +275,23 @@ def _parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterable[tuple
             time_day = float(values[indexes["Time_Day"]])
         except ValueError as error:
             raise ValueError(f"data row {row_number} has non-numeric Time_Day") from error
-        valid_time = cycle_time_utc + timedelta(seconds=int(round(time_day * 86400)))
+        if not math.isfinite(time_day):
+            raise ValueError(f"data row {row_number} Time_Day is not finite")
+        try:
+            seconds_float = time_day * 86400
+            if not math.isfinite(seconds_float):
+                raise OverflowError
+            valid_time = cycle_time_utc + timedelta(seconds=int(round(seconds_float)))
+        except OverflowError as error:
+            raise ValueError(f"data row {row_number} Time_Day overflows datetime range") from error
         for column in CSV_COLUMNS[1:]:
             variable, _unit = CSV_VARIABLE_COLUMNS[column]
             try:
                 value = float(values[indexes[column]])
             except ValueError as error:
                 raise ValueError(f"data row {row_number} column {column} is non-numeric") from error
+            if not math.isfinite(value):
+                raise ValueError(f"data row {row_number} column {column} is not finite")
             yield (variable, valid_time, value)
 
 
@@ -317,7 +344,13 @@ def read_station_forcing_csv(
     _raise_missing_required_filter_if_needed(model_id=model_id, source_id=source_id, cycle_time=cycle_time)
     station_id = _required_text(station_id, "station_id")
     model_id = _required_text(model_id, "model_id")
-    source_normalized = _normalize_source_id(source_id)
+    try:
+        model_id = _safe_storage_segment(model_id, "model_id")
+        source_normalized = _normalize_source_id(source_id)
+    except ValueError as error:
+        field = "source_id" if "source_id" in str(error) else "model_id"
+        rejected_value = source_id if field == "source_id" else model_id
+        _raise_validation_error(field=field, rejected_value=rejected_value, reason=str(error))
     cycle_time_utc = _ensure_utc(cycle_time)
     cycle_compact = _compute_cycle_compact(cycle_time_utc)
     selected_limit = _station_series_limit(limit)
@@ -328,12 +361,21 @@ def read_station_forcing_csv(
     forcing_filename = station.forcing_filename
     if forcing_filename is None:
         raise StationForcingFilenameMissingError(station_id=station_id)
+    try:
+        basin_version_id = _safe_storage_segment(station.basin_version_id, "station.basin_version_id")
+        forcing_filename = _safe_station_forcing_filename_or_raise(forcing_filename)
+    except ValueError as error:
+        raise StationForcingFileMalformedError(
+            station_id=station_id,
+            expected_path=Path(object_store_root) / "forcing",
+            parse_reason=str(error),
+        ) from error
 
     expected_path = _resolve_disk_path(
         object_store_root=object_store_root,
         source_normalized=source_normalized,
         cycle_compact=cycle_compact,
-        basin_version_id=station.basin_version_id,
+        basin_version_id=basin_version_id,
         model_id=model_id,
         forcing_filename=forcing_filename,
     )
@@ -341,15 +383,16 @@ def read_station_forcing_csv(
         object_store_root=object_store_root,
         expected_path=expected_path,
         station_id=station_id,
-        basin_version_id=station.basin_version_id,
+        basin_version_id=basin_version_id,
         source_id=source_normalized,
         cycle_time=cycle_time_utc,
         model_id=model_id,
     )
     lines = _read_csv_lines(
         expected_path,
+        object_store_root=object_store_root,
         station_id=station_id,
-        basin_version_id=station.basin_version_id,
+        basin_version_id=basin_version_id,
         source_id=source_normalized,
         cycle_time=cycle_time_utc,
         model_id=model_id,
@@ -415,6 +458,7 @@ def _raise_missing_required_filter_if_needed(
 def _read_csv_lines(
     expected_path: Path,
     *,
+    object_store_root: Path,
     station_id: str,
     basin_version_id: str,
     source_id: str,
@@ -422,33 +466,44 @@ def _read_csv_lines(
     model_id: str,
 ) -> list[str]:
     try:
-        with expected_path.open("r", encoding="utf-8", newline="") as handle:
-            raw_header = handle.readline()
-            if raw_header == "":
+        file_fd = open_file_no_follow(expected_path, containment_root=object_store_root)
+        try:
+            file_size = os.fstat(file_fd).st_size
+            if file_size > MAX_STATION_FORCING_CSV_BYTES:
+                raise ValueError(f"file exceeds {MAX_STATION_FORCING_CSV_BYTES} bytes")
+            reader = _BoundedCsvLineReader(file_fd)
+            raw_header = reader.readline("header row")
+            if raw_header is None:
                 raise ValueError("file is empty")
             header_line = raw_header.strip()
             header = _parse_csv_header(header_line)
 
-            raw_column_header = handle.readline()
+            raw_column_header = reader.readline("column header row")
             lines = [header_line]
-            if raw_column_header != "":
+            if raw_column_header is not None:
                 lines.append(raw_column_header.strip())
 
-            for _ in range(header.nrow):
-                row = handle.readline()
-                if row == "":
+            for row_number in range(1, header.nrow + 1):
+                row = reader.readline(f"data row {row_number}")
+                if row is None:
                     break
                 normalized = row.strip()
-                if normalized:
-                    lines.append(normalized)
+                if not normalized:
+                    raise ValueError(f"data row {row_number} is blank")
+                lines.append(normalized)
 
-            extra_row = handle.readline()
-            if extra_row != "":
+            extra_row = reader.readline("extra data row")
+            if extra_row is not None:
                 normalized = extra_row.strip()
                 if normalized:
                     lines.append(normalized)
 
             return lines
+        finally:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
     except FileNotFoundError as error:
         raise StationForcingFileNotFoundError(
             station_id=station_id,
@@ -458,17 +513,11 @@ def _read_csv_lines(
             cycle_time=cycle_time,
             model_id=model_id,
         ) from error
-    except (OSError, PermissionError) as error:
+    except (OSError, SafeFilesystemError, ValueError) as error:
         raise StationForcingFileMalformedError(
             station_id=station_id,
             expected_path=expected_path,
-            parse_reason=str(error),
-        ) from error
-    except ValueError as error:
-        raise StationForcingFileMalformedError(
-            station_id=station_id,
-            expected_path=expected_path,
-            parse_reason=str(error),
+            parse_reason=_error_reason(error),
         ) from error
 
 
@@ -482,14 +531,14 @@ def _ensure_path_under_object_store_root(
     cycle_time: datetime,
     model_id: str,
 ) -> None:
-    root = Path(object_store_root).resolve()
-    resolved_path = expected_path.resolve(strict=False)
+    root = _absolute_path_without_resolving_symlinks(object_store_root)
+    checked_path = _absolute_path_without_resolving_symlinks(expected_path)
     try:
-        resolved_path.relative_to(root)
+        checked_path.relative_to(root)
     except ValueError as error:
         raise StationForcingFileNotFoundError(
             station_id=station_id,
-            expected_path=resolved_path,
+            expected_path=checked_path,
             basin_version_id=basin_version_id,
             source_id=source_id,
             cycle_time=cycle_time,
@@ -520,6 +569,95 @@ def _parse_station_csv(
             expected_path=expected_path,
             parse_reason=str(error),
         ) from error
+
+
+@dataclass
+class _BoundedCsvLineReader:
+    file_fd: int
+    bytes_read: int = 0
+    buffer: bytearray = field(default_factory=bytearray)
+    eof: bool = False
+
+    def readline(self, line_label: str) -> str | None:
+        line = bytearray()
+        while True:
+            newline_index = self.buffer.find(b"\n")
+            if newline_index >= 0:
+                line.extend(self.buffer[: newline_index + 1])
+                del self.buffer[: newline_index + 1]
+                break
+            if self.buffer:
+                line.extend(self.buffer)
+                self.buffer.clear()
+                if len(line) > MAX_STATION_FORCING_CSV_LINE_BYTES:
+                    raise ValueError(f"{line_label} exceeds {MAX_STATION_FORCING_CSV_LINE_BYTES} bytes")
+            if self.eof:
+                if not line:
+                    return None
+                break
+            self._read_more(current_line_bytes=len(line))
+        if len(line) > MAX_STATION_FORCING_CSV_LINE_BYTES:
+            raise ValueError(f"{line_label} exceeds {MAX_STATION_FORCING_CSV_LINE_BYTES} bytes")
+        return bytes(line).decode("utf-8")
+
+    def _read_more(self, *, current_line_bytes: int) -> None:
+        remaining_file_bytes = MAX_STATION_FORCING_CSV_BYTES - self.bytes_read + 1
+        remaining_line_bytes = MAX_STATION_FORCING_CSV_LINE_BYTES - current_line_bytes + 1
+        read_size = min(
+            STATION_FORCING_CSV_READ_CHUNK_BYTES,
+            remaining_file_bytes,
+            remaining_line_bytes,
+        )
+        if read_size <= 0:
+            raise ValueError(f"file exceeds {MAX_STATION_FORCING_CSV_BYTES} bytes")
+        chunk = os.read(self.file_fd, read_size)
+        if chunk == b"":
+            self.eof = True
+            return
+        self.bytes_read += len(chunk)
+        if self.bytes_read > MAX_STATION_FORCING_CSV_BYTES:
+            raise ValueError(f"file exceeds {MAX_STATION_FORCING_CSV_BYTES} bytes")
+        self.buffer.extend(chunk)
+
+
+def _safe_storage_segment(value: str, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field} is required")
+    if "/" in normalized or "\\" in normalized:
+        raise ValueError(f"{field} must be a single path component")
+    if "\x00" in normalized:
+        raise ValueError(f"{field} must not contain NUL")
+    path_value = Path(normalized)
+    if path_value.is_absolute():
+        raise ValueError(f"{field} must be relative")
+    if normalized in {".", ".."} or ".." in path_value.parts:
+        raise ValueError(f"{field} must not contain parent traversal")
+    if _SAFE_PATH_COMPONENT.fullmatch(normalized) is None:
+        raise ValueError(f"{field} contains unsupported characters")
+    return normalized
+
+
+def _safe_station_forcing_filename_or_raise(filename: str) -> str:
+    return _safe_storage_segment(filename, "forcing_filename")
+
+
+def _raise_validation_error(*, field: str, rejected_value: Any, reason: str) -> None:
+    raise ForecastStoreError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=f"{field} is invalid.",
+        details={"field": field, "rejected_value": rejected_value, "reason": reason},
+    )
+
+
+def _error_reason(error: BaseException) -> str:
+    return str(error) or error.__class__.__name__
+
+
+def _absolute_path_without_resolving_symlinks(path: Path | str) -> Path:
+    expanded = Path(path).expanduser()
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 
 def _station_series_response(

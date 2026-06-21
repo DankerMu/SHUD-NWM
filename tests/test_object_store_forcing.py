@@ -7,8 +7,13 @@ from typing import Any
 
 import pytest
 
+from packages.common import object_store_forcing
 from packages.common.forecast_store import DEFAULT_STATION_SERIES_LIMIT, ForecastStoreError
 from packages.common.object_store_forcing import (
+    MAX_STATION_FORCING_CSV_BYTES,
+    MAX_STATION_FORCING_CSV_LINE_BYTES,
+    MAX_STATION_FORCING_CSV_ROWS,
+    STATION_FORCING_CSV_READ_CHUNK_BYTES,
     PsycopgStationLookup,
     StationMetadata,
     _compute_cycle_compact,
@@ -37,7 +42,11 @@ class FakeStationLookup:
         return station
 
 
-def _station(*, properties_json: dict[str, Any] | None = None) -> StationMetadata:
+def _station(
+    *,
+    properties_json: dict[str, Any] | None = None,
+    basin_version_id: str = "basins_heihe_vbasins",
+) -> StationMetadata:
     if properties_json is None:
         properties_json = {
             "forcing_filename": FORCING_FILENAME,
@@ -46,7 +55,7 @@ def _station(*, properties_json: dict[str, Any] | None = None) -> StationMetadat
         }
     return StationMetadata(
         station_id=STATION_ID,
-        basin_version_id="basins_heihe_vbasins",
+        basin_version_id=basin_version_id,
         station_name="HEIHE forcing station 001",
         longitude=100.75,
         latitude=37.650000555388,
@@ -219,45 +228,74 @@ def test_1_13e_file_not_found_includes_operator_details(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("case", ["absolute_model_id", "relative_source_id"])
-def test_path_containment_rejects_api_controlled_traversal_before_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+@pytest.mark.parametrize(
+    ("source_id", "model_id", "expected_field"),
+    [
+        ("ifs/../gfs", MODEL_ID, "source_id"),
+        (SOURCE_ID, "../other", "model_id"),
+        (SOURCE_ID, "subdir/other", "model_id"),
+        (SOURCE_ID, "/tmp/other", "model_id"),
+    ],
+)
+def test_unsafe_api_path_segments_reject_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+    model_id: str,
+    expected_field: str,
 ) -> None:
     root = tmp_path / "object-store"
     root.mkdir()
-    outside_model = tmp_path / "outside-model"
-    if case == "absolute_model_id":
-        model_id = str(outside_model)
-        source_id = SOURCE_ID
-        expected = outside_model / "shud" / FORCING_FILENAME
-    else:
-        model_id = MODEL_ID
-        source_id = "../../outside-source"
-        expected = (
-            tmp_path
-            / "outside-source"
-            / "2026062012"
-            / "basins_heihe_vbasins"
-            / MODEL_ID
-            / "shud"
-            / FORCING_FILENAME
-        )
     open_calls: list[Path] = []
-    original_open = Path.open
 
-    def spy_open(self: Path, *args: Any, **kwargs: Any) -> Any:
-        open_calls.append(self)
-        return original_open(self, *args, **kwargs)
+    def fail_open(path: Path, **_kwargs: Any) -> int:
+        open_calls.append(path)
+        raise AssertionError(f"reader must reject unsafe path before open: {path}")
 
-    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", fail_open)
 
     with pytest.raises(ForecastStoreError) as error:
         _read(root, source_id=source_id, model_id=model_id)
 
-    assert error.value.status_code == 404
-    assert error.value.code == "STATION_FORCING_FILE_NOT_FOUND"
-    assert error.value.details["expected_path"] == str(expected.resolve(strict=False))
-    assert error.value.details["model_id"] == model_id
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    assert error.value.details["field"] == expected_field
+    assert open_calls == []
+
+
+@pytest.mark.parametrize(
+    ("station", "reason_field"),
+    [
+        (_station(properties_json={"forcing_filename": "../x.csv"}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": "subdir/x.csv"}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": "/tmp/x.csv"}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": "bad\\name.csv"}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": "bad\x00name.csv"}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": "."}), "forcing_filename"),
+        (_station(properties_json={"forcing_filename": ".."}), "forcing_filename"),
+        (_station(basin_version_id="../basins"), "station.basin_version_id"),
+    ],
+)
+def test_unsafe_station_path_segments_reject_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    station: StationMetadata,
+    reason_field: str,
+) -> None:
+    open_calls: list[Path] = []
+
+    def fail_open(path: Path, **_kwargs: Any) -> int:
+        open_calls.append(path)
+        raise AssertionError(f"reader must reject unsafe path before open: {path}")
+
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", fail_open)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path, station_lookup=FakeStationLookup({STATION_ID: station}))
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert reason_field in error.value.details["parse_reason"]
     assert open_calls == []
 
 
@@ -287,38 +325,120 @@ def test_1_13f_malformed_csv_variants_return_stable_error(
     assert reason in error.value.details["parse_reason"]
 
 
-def test_malformed_csv_extra_rows_reads_only_one_mismatch_probe(
+def test_symlink_target_is_rejected_without_following(tmp_path: Path) -> None:
+    path = _write_csv(tmp_path)
+    outside = tmp_path / "outside.csv"
+    outside.write_text(
+        "1\t6\t20260620\t20260627\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t99\t99\t99\t99\t99\n",
+        encoding="utf-8",
+    )
+    path.unlink()
+    path.symlink_to(outside)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert "symlink" in error.value.details["parse_reason"].lower()
+
+
+def test_symlink_to_outside_root_is_malformed_not_not_found(tmp_path: Path) -> None:
+    path = _write_csv(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.csv"
+    outside.write_text(
+        "1\t6\t20260620\t20260627\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t99\t99\t99\t99\t99\n",
+        encoding="utf-8",
+    )
+    path.unlink()
+    path.symlink_to(outside)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert error.value.details["expected_path"] == str(path)
+    assert "symlink" in error.value.details["parse_reason"].lower()
+
+
+@pytest.mark.parametrize(
+    ("open_error", "reason"),
+    [
+        (PermissionError("permission denied"), "permission denied"),
+        (OSError("open failed"), "open failed"),
+    ],
+)
+def test_no_follow_open_errors_map_to_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    open_error: OSError,
+    reason: str,
+) -> None:
+    _write_csv(tmp_path)
+
+    def fail_open(_path: Path, **_kwargs: Any) -> int:
+        raise open_error
+
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", fail_open)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert reason in error.value.details["parse_reason"]
+
+
+def test_no_follow_read_oserror_maps_to_malformed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class BoundedHandle:
-        def __init__(self) -> None:
-            self.readline_calls = 0
-            self.lines = [
-                "1\t6\t20260620\t20260627\n",
-                "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n",
-                "0\t1\t2\t3\t4\t5\n",
-                "0.125\t1\t2\t3\t4\t5\n",
-                "poison\tthis\tline\tmust\tnot\tbe\tread\n",
-            ]
+    _write_csv(tmp_path)
 
-        def __enter__(self) -> "BoundedHandle":
-            return self
+    def fail_read(_fd: int, _length: int) -> bytes:
+        raise OSError("read failed")
 
-        def __exit__(self, *_args: object) -> bool:
-            return False
+    monkeypatch.setattr(object_store_forcing.os, "read", fail_read)
 
-        def readline(self) -> str:
-            self.readline_calls += 1
-            if self.readline_calls > 4:
-                raise AssertionError("reader consumed beyond the single extra mismatch probe")
-            return self.lines.pop(0)
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
 
-    handle = BoundedHandle()
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert "read failed" in error.value.details["parse_reason"]
 
-    def fake_open(self: Path, *args: Any, **kwargs: Any) -> BoundedHandle:
-        return handle
 
-    monkeypatch.setattr(Path, "open", fake_open)
+def test_malformed_csv_extra_rows_reads_bounded_mismatch_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    poison_tail = "poison\tthis\tline\tmust\tnot\tbe\tfully\tread\n" * (
+        STATION_FORCING_CSV_READ_CHUNK_BYTES // 8
+    )
+    lines = [
+        "1\t6\t20260620\t20260627\n",
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n",
+        "0\t1\t2\t3\t4\t5\n",
+        "0.125\t1\t2\t3\t4\t5\n",
+        poison_tail,
+    ]
+    content = "".join(lines)
+    _write_csv(tmp_path, raw_content=content)
+    original_read = object_store_forcing.os.read
+    bytes_read = 0
+    requested_lengths: list[int] = []
+
+    def spy_read(fd: int, length: int) -> bytes:
+        nonlocal bytes_read
+        requested_lengths.append(length)
+        chunk = original_read(fd, length)
+        bytes_read += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(object_store_forcing.os, "read", spy_read)
 
     with pytest.raises(ForecastStoreError) as error:
         _read(tmp_path)
@@ -326,13 +446,162 @@ def test_malformed_csv_extra_rows_reads_only_one_mismatch_probe(
     assert error.value.status_code == 500
     assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
     assert "declared nrow 1 does not match data row count 2" in error.value.details["parse_reason"]
-    assert handle.readline_calls == 4
+    assert max(requested_lengths) > 1
+    assert bytes_read < len(content.encode("utf-8"))
+
+
+def test_malformed_csv_large_nrow_rejects_before_data_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    header = f"{MAX_STATION_FORCING_CSV_ROWS + 1}\t6\t20260620\t20260627\n"
+    poison_tail = "0\t1\t2\t3\t4\t5\n" * (STATION_FORCING_CSV_READ_CHUNK_BYTES * 2)
+    content = header + "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n" + poison_tail
+    _write_csv(
+        tmp_path,
+        raw_content=content,
+    )
+    original_read = object_store_forcing.os.read
+    bytes_read = 0
+    requested_lengths: list[int] = []
+
+    def spy_read(fd: int, length: int) -> bytes:
+        nonlocal bytes_read
+        requested_lengths.append(length)
+        chunk = original_read(fd, length)
+        bytes_read += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(object_store_forcing.os, "read", spy_read)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert f"nrow must not exceed {MAX_STATION_FORCING_CSV_ROWS}" in error.value.details["parse_reason"]
+    assert max(requested_lengths) > 1
+    assert bytes_read <= STATION_FORCING_CSV_READ_CHUNK_BYTES
+    assert bytes_read < len(content.encode("utf-8"))
+
+
+def test_malformed_csv_overlong_line_rejects_without_full_line_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_csv(tmp_path, raw_content=("1" * (MAX_STATION_FORCING_CSV_LINE_BYTES + 100)) + "\n")
+    original_read = object_store_forcing.os.read
+    bytes_read = 0
+
+    def spy_read(fd: int, length: int) -> bytes:
+        nonlocal bytes_read
+        chunk = original_read(fd, length)
+        bytes_read += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(object_store_forcing.os, "read", spy_read)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert f"header row exceeds {MAX_STATION_FORCING_CSV_LINE_BYTES} bytes" in error.value.details[
+        "parse_reason"
+    ]
+    assert bytes_read == MAX_STATION_FORCING_CSV_LINE_BYTES + 1
+
+
+def test_malformed_csv_oversized_file_rejects_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_csv(tmp_path)
+    with path.open("r+b") as handle:
+        handle.truncate(MAX_STATION_FORCING_CSV_BYTES + 1)
+
+    def fail_read(_fd: int, _length: int) -> bytes:
+        raise AssertionError("oversized file must be rejected from fstat before read")
+
+    monkeypatch.setattr(object_store_forcing.os, "read", fail_read)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert f"file exceeds {MAX_STATION_FORCING_CSV_BYTES} bytes" in error.value.details["parse_reason"]
+
+
+def test_internal_blank_data_row_is_malformed_not_backfilled_by_extra_row(tmp_path: Path) -> None:
+    _write_csv(
+        tmp_path,
+        raw_content=(
+            "2\t6\t20260620\t20260627\n"
+            "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+            "0\t1\t2\t3\t4\t5\n"
+            "\n"
+            "0.125\t1\t2\t3\t4\t5\n"
+        ),
+    )
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert "data row 2 is blank" in error.value.details["parse_reason"]
+
+
+def test_trailing_blank_after_declared_section_is_ignored(tmp_path: Path) -> None:
+    _write_csv(
+        tmp_path,
+        raw_content=(
+            "1\t6\t20260620\t20260627\n"
+            "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+            "0\t1\t2\t3\t4\t5\n"
+            "\n"
+        ),
+    )
+
+    response = _read(tmp_path, variables="PRCP")
+
+    assert len(response["series"][0]["points"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("data_row", "reason"),
+    [
+        ("nan\t1\t2\t3\t4\t5", "Time_Day is not finite"),
+        ("inf\t1\t2\t3\t4\t5", "Time_Day is not finite"),
+        ("1e100\t1\t2\t3\t4\t5", "Time_Day overflows datetime range"),
+        ("0\tnan\t2\t3\t4\t5", "column Precip is not finite"),
+        ("0\t1e309\t2\t3\t4\t5", "column Precip is not finite"),
+        ("0\t1\tinf\t3\t4\t5", "column Temp is not finite"),
+    ],
+)
+def test_non_finite_numeric_values_are_malformed(
+    tmp_path: Path, data_row: str, reason: str
+) -> None:
+    _write_csv(
+        tmp_path,
+        raw_content=(
+            "1\t6\t20260620\t20260627\n"
+            "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+            f"{data_row}\n"
+        ),
+    )
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read(tmp_path)
+
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert reason in error.value.details["parse_reason"]
 
 
 def test_1_13g_variable_mapping_and_units(tmp_path: Path) -> None:
     _write_csv(tmp_path, time_days=[0.0])
 
     response = _read(tmp_path)
+    json.dumps(response, allow_nan=False)
 
     assert [series["variable"] for series in response["series"]] == VARIABLE_ORDER
     assert {series["variable"]: series["unit"] for series in response["series"]} == {
@@ -526,25 +795,24 @@ def test_1_13t_reader_is_side_effect_free_for_repeated_reads(
 ) -> None:
     path = _write_csv(tmp_path)
     mtime_ns = path.stat().st_mtime_ns
-    original_open = Path.open
-    open_modes: list[str] = []
+    original_open = object_store_forcing.open_file_no_follow
+    open_calls: list[tuple[Path, Path | None]] = []
 
     def fail_mkdir(self: Path, *args: Any, **kwargs: Any) -> None:
         raise AssertionError(f"reader must not mkdir: {self}")
 
-    def spy_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-        open_modes.append(mode)
-        assert not any(flag in mode for flag in ("w", "a", "x", "+"))
-        return original_open(self, mode, *args, **kwargs)
+    def spy_open(path: Path, *, containment_root: Path | None = None) -> int:
+        open_calls.append((path, containment_root))
+        return original_open(path, containment_root=containment_root)
 
     monkeypatch.setattr(Path, "mkdir", fail_mkdir)
-    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", spy_open)
 
     responses = [_read(tmp_path) for _ in range(3)]
 
     assert responses[0] == responses[1] == responses[2]
     assert path.stat().st_mtime_ns == mtime_ns
-    assert open_modes == ["r", "r", "r"]
+    assert open_calls == [(path, tmp_path), (path, tmp_path), (path, tmp_path)]
 
 
 def test_missing_required_filter_reuses_existing_details_shape(tmp_path: Path) -> None:
