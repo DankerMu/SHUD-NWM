@@ -29,3 +29,11 @@ PR [#602](https://github.com/DankerMu/SHUD-NWM/pull/602) reviewer-1 S1 + reviewe
 - **OpenAPI**：无变化。
 - **CI**：路径 scope 命中 `services/**` → `unit-test-targeted` 跑（fast path）；`docs/**` → `markdown-lint` 跑。
 - **Receipts**：本变更不需 node-27 live receipt（pure refactor，无 deploy-affecting 行为变更）。
+
+## Archive ordering
+
+This change MUST be archived AFTER `fix-discharge-tile-always-national` (PR #602 source change). The MODIFIED `mvt-tile-contract` Requirement body in this change assumes the post-#602 canonical baseline (i.e. it includes the *Discharge canonical URL is national across all callers* scenario verbatim from PR #602). If this change is archived first, canonical will absorb PR #602's scenarios under the wrong attribution AND subsequent archive of `fix-discharge-tile-always-national` may detect text drift.
+
+Correct sequence:
+1. `openspec archive fix-discharge-tile-always-national --yes` (apply PR #602's spec delta to canonical)
+2. `openspec archive cleanup-docs-and-dead-source-refs --yes` (apply this change's new *Discharge layer never reaches `_layer_source_refs`* scenario on top)

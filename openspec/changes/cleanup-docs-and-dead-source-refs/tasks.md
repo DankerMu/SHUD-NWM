@@ -25,4 +25,4 @@
 
 - [ ] 5.1 PR body `Closes #604`，附 Chinese 工作总结
 - [ ] 5.2 review-loop log append 一行
-- [ ] 5.3 OpenSpec archive：合并后 `openspec archive cleanup-docs-and-dead-source-refs --yes`
+- [ ] 5.3 OpenSpec archive（**严格顺序**）：合并后先确保 `openspec archive fix-discharge-tile-always-national --yes` 已跑（PR #602 的 change，应先归档以让 canonical mvt-tile-contract 包含 *Discharge canonical URL is national across all callers* scenario），再 `openspec archive cleanup-docs-and-dead-source-refs --yes`。详见 proposal.md *Archive ordering* 段。
