@@ -11,6 +11,7 @@ from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes import pipeline as pipeline_routes
 from packages.common.migrate import MIGRATIONS_DIR, apply_migration
 from tests.integration_helpers import (
+    BASIN_ID,
     BASIN_VERSION_ID,
     CYCLE_TIME,
     FORECAST_RUN_ID,
@@ -499,6 +500,27 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert states.json()["items"][0]["state_id"] == STATE_ID
     assert state_detail.json()["state_id"] == STATE_ID
     assert state_detail.json()["usable_flag"] is True
+
+
+def test_list_models_real_db_returns_basin_id_and_basin_name(
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    object_root = tmp_path / "object-store"
+    seed_issue_126_data(integration_database_url, object_root=object_root)
+    set_integration_env(integration_database_url, object_root, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/models", params={"active": "all"})
+
+    assert response.status_code == 200, response.text
+    items = response.json()["data"]["items"]
+    item = next((m for m in items if m["model_id"] == MODEL_ID), None)
+    assert item is not None, f"seeded MODEL_ID={MODEL_ID} not in /api/v1/models items"
+    assert item["basin_id"] == BASIN_ID
+    assert item["basin_name"] == "Issue 126 Integration Basin"
 
 
 def test_real_reserve_pipeline_job_absorbs_job_id_pk_conflict(
