@@ -1,63 +1,63 @@
 ## 0. Pre-implementation introspection (HARD GATE — must commit findings to `design.md §Introspection Results` or a new `introspection-findings.md` before §1 opens)
 
-- [ ] 0.1 OQ1: SSH node-27, scan IFS + gfs × heihe + qhh × available cycles × 抽 5 shud/CSV，确认 header `nrow ncol start_date end_date` 格式跨 cycle 一致；记 row count 范围（§0 实测 IFS=53、GFS=56）
-- [ ] 0.2 OQ2: 列举 `/home/ghdc/nwm/object-store/forcing/{ifs,gfs}/` 下所有目录名，确认全是 `YYYYMMDDHH` 10 位格式
-- [ ] 0.3 OQ3: 确认 `met_station.basin_version_id` 取值集合（heihe + qhh）与 disk 目录名 100% 对应
-- [ ] 0.4 OQ4: confirm OBJECT_STORE_ROOT 只读权限即可（reader 不写）；不要求 write
-- [ ] 0.5 OQ5: Read `apps/api/main.py` + grep `app.state`/`Depends` 现有注入模式；决定 reader 拿 `object_store_root` 和 `station_lookup` connection 用 `app.state.X` 还是 `Depends(get_X)`；commit 决定到 design.md
-- [ ] 0.6 测试 layout 决定：扁平 `tests/test_object_store_forcing*.py`（不开 `tests/packages/common/` 子目录，保持与现有 test 风格一致）
-- [ ] 0.7 §0 introspection 全部结论写进**仓内已 commit 文件**——`design.md` 新增 `## Introspection Results` 段，或新建 `openspec/changes/object-store-station-series-read/introspection-findings.md`；**不**写 PR body（PR body 不进 repo history）
-- [ ] 0.8 OQ6: grep `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 确认实际位置（`tests/test_role_boundary_static.py:89` import 的源文件）；commit 三处 boundary fix 清单到 design.md AD-11
-- [ ] 0.9 OQ7: 读 `tests/test_forecast_store_product_quality_sql.py` 看现有 psycopg.Connection mock 模式；决定 reader unit test 注入策略选 (a) `Protocol`-typed `StationLookup` (AD-13 推荐) 或 (b) `psycopg.Connection` mock；commit 决定到 design.md
-- [ ] 0.10 200 response baseline capture：在 node-27 curl 老 cycle (2026-06-01T00:00:00Z) heihe + IFS 200，把响应 JSON 保存为 `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`（脱敏 request_id 等）作为新 reader 输出 byte-shape 比对 oracle
+- [x] 0.1 OQ1: SSH node-27, scan IFS + gfs × heihe + qhh × available cycles × 抽 5 shud/CSV，确认 header `nrow ncol start_date end_date` 格式跨 cycle 一致；记 row count 范围（§0 实测 IFS=53、GFS=56）
+- [x] 0.2 OQ2: 列举 `/home/ghdc/nwm/object-store/forcing/{ifs,gfs}/` 下所有目录名，确认全是 `YYYYMMDDHH` 10 位格式
+- [x] 0.3 OQ3: 确认 `met_station.basin_version_id` 取值集合（heihe + qhh）与 disk 目录名 100% 对应
+- [x] 0.4 OQ4: confirm OBJECT_STORE_ROOT 只读权限即可（reader 不写）；不要求 write
+- [x] 0.5 OQ5: Read `apps/api/main.py` + grep `app.state`/`Depends` 现有注入模式；决定 reader 拿 `object_store_root` 和 `station_lookup` connection 用 `app.state.X` 还是 `Depends(get_X)`；commit 决定到 design.md
+- [x] 0.6 测试 layout 决定：扁平 `tests/test_object_store_forcing*.py`（不开 `tests/packages/common/` 子目录，保持与现有 test 风格一致）
+- [x] 0.7 §0 introspection 全部结论写进**仓内已 commit 文件**——`design.md` 新增 `## Introspection Results` 段，或新建 `openspec/changes/object-store-station-series-read/introspection-findings.md`；**不**写 PR body（PR body 不进 repo history）
+- [x] 0.8 OQ6: grep `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 确认实际位置（`tests/test_role_boundary_static.py:89` import 的源文件）；commit 三处 boundary fix 清单到 design.md AD-11
+- [x] 0.9 OQ7: 读 `tests/test_forecast_store_product_quality_sql.py` 看现有 psycopg.Connection mock 模式；决定 reader unit test 注入策略选 (a) `Protocol`-typed `StationLookup` (AD-13 推荐) 或 (b) `psycopg.Connection` mock；commit 决定到 design.md
+- [x] 0.10 200 response baseline capture：在 node-27 curl 老 cycle (2026-06-01T00:00:00Z) heihe + IFS 200，把响应 JSON 保存为 `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`（脱敏 request_id 等）作为新 reader 输出 byte-shape 比对 oracle
 
 ## 1. Reader module — `packages/common/object_store_forcing.py`
 
-- [ ] 1.1 typed errors:
+- [x] 1.1 typed errors:
   - `ObjectStoreForcingError(Exception)` 基类
   - `StationForcingFilenameMissingError(code='STATION_FORCING_FILENAME_MISSING', status_code=500)` (new)
   - `StationForcingFileNotFoundError(code='STATION_FORCING_FILE_NOT_FOUND', status_code=404)` (new)
   - `StationForcingFileMalformedError(code='STATION_FORCING_FILE_MALFORMED', status_code=500)` (new)
   - 不重定义 `STATION_NOT_FOUND` 和 `MISSING_REQUIRED_FILTER`：reader 内 lookup 失败时 raise 与 `forecast_store.py:2099-2104, 909, 2132-2146` 同 code + 同 details shape 的 typed error；建议复用 `ForecastStoreError` 子类或导出常量保持单一来源
-- [ ] 1.2 `_normalize_source_id(source_id: str) -> str` lowercase + 验证非空（None 由 422 在 route 层处理）
-- [ ] 1.3 `_compute_cycle_compact(cycle_time: datetime) -> str` 强制 UTC 转换 + `YYYYMMDDHH` 格式；naive datetime 当 UTC 处理
-- [ ] 1.4 `StationLookup` Protocol + `PsycopgStationLookup` 实现：
+- [x] 1.2 `_normalize_source_id(source_id: str) -> str` lowercase + 验证非空（None 由 422 在 route 层处理）
+- [x] 1.3 `_compute_cycle_compact(cycle_time: datetime) -> str` 强制 UTC 转换 + `YYYYMMDDHH` 格式；naive datetime 当 UTC 处理
+- [x] 1.4 `StationLookup` Protocol + `PsycopgStationLookup` 实现：
   - Protocol: `def lookup(self, station_id: str) -> StationMetadata`
   - psycopg 实现：单 PG 查询 `SELECT properties_json, basin_version_id, station_name, ST_X(geom) AS lon, ST_Y(geom) AS lat, elevation_m, station_role, active_flag FROM met.met_station WHERE station_id = $1`
   - station 不存在 raise 与 `STATION_NOT_FOUND` 同 code + `{station_id}` details（参见 §1.1）
   - properties_json 不含 `forcing_filename` raise `StationForcingFilenameMissingError`
-- [ ] 1.5 `_resolve_disk_path(object_store_root: Path, source_normalized, cycle_compact, basin_version_id, model_id, forcing_filename) -> Path`
-- [ ] 1.6 `_parse_csv_header(line1: str) -> CMFDHeader-like` 提取 nrow / start_date / end_date
-- [ ] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断）
-- [ ] 1.8 `_apply_filters(tuples, variables, from_time, to_time, limit) -> list[tuple]`：variables filter 静默丢弃未知（Press / UnknownVariable 均 drop，不 raise）；from/to inclusive；limit 截断总 tuple count（不是 per-variable）；保持排序 `[PRCP, TEMP, RH, wind, Rn]` 然后 valid_time ascending
-- [ ] 1.9 `read_station_forcing_csv(*, station_lookup, object_store_root, station_id, source_id, cycle_time, model_id, variables=None, from_time=None, to_time=None, limit=None) -> StationSeriesResponse` 主入口（Protocol 注入）
-- [ ] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.metadata.{returned_points, truncated, returned_from, returned_to}`
-- [ ] 1.11 每个 series 项的 `unit` 字段按 AD-5 输出：`PRCP="mm/day", TEMP="degC", RH="0-1", wind="m/s", Rn="W/m^2"`
-- [ ] 1.12 文件 OPEN 异常（PermissionError / OSError / FileNotFoundError）转 typed error：
+- [x] 1.5 `_resolve_disk_path(object_store_root: Path, source_normalized, cycle_compact, basin_version_id, model_id, forcing_filename) -> Path`
+- [x] 1.6 `_parse_csv_header(line1: str) -> CMFDHeader-like` 提取 nrow / start_date / end_date
+- [x] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断）
+- [x] 1.8 `_apply_filters(tuples, variables, from_time, to_time, limit) -> list[tuple]`：variables filter 静默丢弃未知（Press / UnknownVariable 均 drop，不 raise）；from/to inclusive；limit 截断总 tuple count（不是 per-variable）；保持排序 `[PRCP, TEMP, RH, wind, Rn]` 然后 valid_time ascending
+- [x] 1.9 `read_station_forcing_csv(*, station_lookup, object_store_root, station_id, source_id, cycle_time, model_id, variables=None, from_time=None, to_time=None, limit=None) -> StationSeriesResponse` 主入口（Protocol 注入）
+- [x] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.metadata.{returned_points, truncated, returned_from, returned_to}`
+- [x] 1.11 每个 series 项的 `unit` 字段按 AD-5 输出：`PRCP="mm/day", TEMP="degC", RH="0-1", wind="m/s", Rn="W/m^2"`
+- [x] 1.12 文件 OPEN 异常（PermissionError / OSError / FileNotFoundError）转 typed error：
   - FileNotFoundError → `StationForcingFileNotFoundError`
   - PermissionError / OSError → `StationForcingFileMalformedError`
-- [ ] 1.13a unit test: path resolution（heihe + IFS happy path）
-- [ ] 1.13b unit test: cycle UTC 归一化 3 种输入（naive / `+00:00` / `+08:00` 都得到 `2026062012`）
-- [ ] 1.13c unit test: station not found → 404 + `{station_id}`
-- [ ] 1.13d unit test: forcing_filename missing → 500 `STATION_FORCING_FILENAME_MISSING`
-- [ ] 1.13e unit test: file not found → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path + basin_version_id + source_id + cycle_time + model_id
-- [ ] 1.13f unit test: malformed CSV 6 变体（缺 header / nrow 非数字 / data 行 column 数错 / 数值非数字 / 空 file / declared nrow 与实际 data 行数不一致）→ 500 `STATION_FORCING_FILE_MALFORMED`
-- [ ] 1.13g unit test: 变量名映射全表 + unit 字段全表（5 个变量）
-- [ ] 1.13h unit test: valid_time 边界 — 第一行 Time_Day=0 → cycle；最后一行 Time_Day=6.5 → cycle + 6d12h
-- [ ] 1.13i unit test: rounding — Time_Day=0.041666 → cycle + 3600s（不是 3599s）
-- [ ] 1.13j unit test: variables filter 单变量（PRCP）
-- [ ] 1.13k unit test: variables=Press → 200 + `data.series=[]`
-- [ ] 1.13l unit test: variables=PRCP,Press → 200 + 只含 PRCP（Press 静默 drop）
-- [ ] 1.13m unit test: variables=UnknownVariable → 200 + `data.series=[]`
-- [ ] 1.13n unit test: from/to filter inclusive 两端
-- [ ] 1.13o unit test: from > to → 200 + `data.series=[]`
-- [ ] 1.13p unit test: limit=10 截断总 tuple count + `metadata.truncated=true` + 排序保持
-- [ ] 1.13q unit test: 默认 tuples = 5×N，参数化覆盖 N=1、N=53 (IFS shape)、N=56 (GFS shape)、N=100
-- [ ] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
-- [ ] 1.13s unit test: SQL 查询统计 — 用 spy connection/cursor 驱动 `PsycopgStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 恰好 1 次命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
-- [ ] 1.13t unit test: side-effect-free reads — 用 tmp_path CSV 连续调用 reader 3 次，断言 response shape 稳定、CSV mtime 不变，并通过 monkeypatch/spy 证明 reader 不调用 `mkdir` / 写模式 `open(..., "w")`
-- [ ] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
-- [ ] 1.15 PR-A-scoped `openspec validate object-store-station-series-read --strict --no-interactive` PASS — §0 introspection commits 与 design.md/introspection-findings.md 编辑可能破坏 spec 结构，PR-A merge 前必须本地通过 validate（§8.1 是 PR-B 完整重跑；本条是 PR-A 独立 guard）
+- [x] 1.13a unit test: path resolution（heihe + IFS happy path）
+- [x] 1.13b unit test: cycle UTC 归一化 3 种输入（naive / `+00:00` / `+08:00` 都得到 `2026062012`）
+- [x] 1.13c unit test: station not found → 404 + `{station_id}`
+- [x] 1.13d unit test: forcing_filename missing → 500 `STATION_FORCING_FILENAME_MISSING`
+- [x] 1.13e unit test: file not found → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path + basin_version_id + source_id + cycle_time + model_id
+- [x] 1.13f unit test: malformed CSV 6 变体（缺 header / nrow 非数字 / data 行 column 数错 / 数值非数字 / 空 file / declared nrow 与实际 data 行数不一致）→ 500 `STATION_FORCING_FILE_MALFORMED`
+- [x] 1.13g unit test: 变量名映射全表 + unit 字段全表（5 个变量）
+- [x] 1.13h unit test: valid_time 边界 — 第一行 Time_Day=0 → cycle；最后一行 Time_Day=6.5 → cycle + 6d12h
+- [x] 1.13i unit test: rounding — Time_Day=0.041666 → cycle + 3600s（不是 3599s）
+- [x] 1.13j unit test: variables filter 单变量（PRCP）
+- [x] 1.13k unit test: variables=Press → 200 + `data.series=[]`
+- [x] 1.13l unit test: variables=PRCP,Press → 200 + 只含 PRCP（Press 静默 drop）
+- [x] 1.13m unit test: variables=UnknownVariable → 200 + `data.series=[]`
+- [x] 1.13n unit test: from/to filter inclusive 两端
+- [x] 1.13o unit test: from > to → 200 + `data.series=[]`
+- [x] 1.13p unit test: limit=10 截断总 tuple count + `metadata.truncated=true` + 排序保持
+- [x] 1.13q unit test: 默认 tuples = 5×N，参数化覆盖 N=1、N=53 (IFS shape)、N=56 (GFS shape)、N=100
+- [x] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
+- [x] 1.13s unit test: SQL 查询统计 — 用 spy connection/cursor 驱动 `PsycopgStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 恰好 1 次命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
+- [x] 1.13t unit test: side-effect-free reads — 用 tmp_path CSV 连续调用 reader 3 次，断言 response shape 稳定、CSV mtime 不变，并通过 monkeypatch/spy 证明 reader 不调用 `mkdir` / 写模式 `open(..., "w")`
+- [x] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
+- [x] 1.15 PR-A-scoped `openspec validate object-store-station-series-read --strict --no-interactive` PASS — §0 introspection commits 与 design.md/introspection-findings.md 编辑可能破坏 spec 结构，PR-A merge 前必须本地通过 validate（§8.1 是 PR-B 完整重跑；本条是 PR-A 独立 guard）
 
 ## 2. Series route 切换 — `apps/api/routes/data_sources.py`
 
