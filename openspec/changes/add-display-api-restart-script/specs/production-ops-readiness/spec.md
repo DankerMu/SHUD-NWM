@@ -27,3 +27,9 @@ The systemd-unit alternative (`/etc/systemd/system/nhms-display-api.service`) MA
 - **WHEN** the operator launches via `bash scripts/ops/start-display-api.sh` and the env-sourced `DATABASE_URL` resolves to a database where `core.basin_version` JOIN cannot populate `basin_id` for any active model
 - **THEN** the smoke check `jq .data.items[0].basin_id != null` returns false and the script exits non-zero
 - **AND** the operator is alerted in the same restart command output, not after frontend popup breakage in production
+
+#### Scenario: Restart smoke check tolerates empty model registry
+
+- **WHEN** the operator launches via `bash scripts/ops/start-display-api.sh` and `/api/v1/models?limit=1` returns `data.items` with length 0 (no active models registered yet — typical on a fresh DB)
+- **THEN** the script logs a warning ("/api/v1/models returned 0 items; basin_id smoke check skipped (DB may be empty)") and exits 0
+- **AND** the operator-visible message instructs separate model-registration verification before declaring restart healthy

@@ -74,11 +74,18 @@ POST /api/v1/models?limit=1:
   (`jq .data.items[0].basin_id != null` would exit non-zero on PR #596
   regression class).
 - [x] Existing diagnostic script `scripts/diagnostic/display-cold-waterfall.sh`
-  can call the new restart path: **no-op confirmed** — `grep -n setsid
-  scripts/diagnostic/display-cold-waterfall.sh` returns no inlined
-  `setsid python` invocations, so no replacement edit needed for this PR;
-  the diagnostic script remains responsible for its own measurement
-  scaffolding.
+  can call the new restart path: **DEFERRED to follow-up issue
+  [#612](https://github.com/DankerMu/SHUD-NWM/issues/612)**. PR #611 Phase 4
+  cross-review surfaced that the initial "no-op confirmed" determination here
+  was wrong — `scripts/diagnostic/display-cold-waterfall.sh:103` DOES contain
+  an inline `setsid .venv/bin/python -m uvicorn apps.api.main:app ...`
+  launcher inside `launch_uvicorn()`, AND lines 20/25/143/165 reference
+  `/healthz` (which 404s same as the `/api/v1/health` bug PR #611 Phase 1
+  dry-run exposed). Refactoring the diagnostic script to defer to
+  `scripts/ops/start-display-api.sh` AND fixing the `/healthz` → `/health`
+  drift is real follow-up work, but expanding PR #611 scope would dilute
+  the single-responsibility operator restart wrapper change. Tracked
+  honestly in issue #612 instead.
 
 ## Caveats
 
