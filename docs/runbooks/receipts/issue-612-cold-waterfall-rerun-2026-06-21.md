@@ -71,8 +71,8 @@ restart — no parallel inline `setsid python` path remains.
 ## Comparison with PR #592 prior receipt
 
 PR #592 `display-bootstrap-decoupling-20260620.md` reported `/api/v1/layers`
-cold ≈ 213ms (≥ 51.9× lower-bound speedup from 21.8s baseline). This receipt
-shows `/api/v1/layers` cold median ≈ 392ms (≈ 55.6× speedup). Both are well
+cold median 413 ms (p95-of-3 = 418 ms; ≥ 51.9× lower-bound speedup from 21.8s baseline). This receipt
+shows `/api/v1/layers` cold median 392 ms (≈ 55.6× speedup). Both are well
 under the 21.8s pre-PR-5/7 baseline and well above the < 200 ms spec target —
 the Epic [#579](https://github.com/DankerMu/SHUD-NWM/issues/579) PR 1-7 cold-warmup
 recovery holds, with run-to-run variance in the few-hundred-ms band (expected;
