@@ -1,5 +1,16 @@
 # Display bootstrap decoupling — node-27 live receipt
 
+> **History note (2026-06-21, issue [#612](https://github.com/DankerMu/SHUD-NWM/issues/612))**:
+> the `/healthz` column in the table below measured 404 dispatch overhead, not real
+> health-check TTFB. The actual health endpoint is `/health` at root
+> ([apps/api/main.py:1947](../../../apps/api/main.py#L1947)
+> `_register_static_and_health_routes`); `/healthz` returns 404 on a healthy uvicorn.
+> Issue #612 fixed the diagnostic script endpoint drift and re-measured against
+> the real endpoint; see [`issue-612-cold-waterfall-rerun-2026-06-21.md`](issue-612-cold-waterfall-rerun-2026-06-21.md).
+> All other endpoints in this receipt (`/api/v1/layers`, `/api/v1/runs`, `/api/v1/basins`,
+> `/api/v1/models`, etc.) had correct paths and their measurement values stand;
+> the ≥ 51.9× layers-cold speedup conclusion is independent of the `/healthz` defect.
+
 **Date**: 2026-06-20 (UTC `20260620T153243Z`)
 **Node**: node-27 (`210.77.77.27`, role `display_readonly` primary host)
 **Master HEAD measured**: `122ea95` (after PR 1/7 #587 + PR 2/7 #588 + PR 3/7 #589 + PR 4/7 #590 + PR 5/7 #591 all merged)

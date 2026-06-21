@@ -17,12 +17,12 @@
 # Cold-cache strategy:
 #   1. Restart uvicorn (flushes Python-level `cached()` LRU; SIGTERM + 5s grace
 #      + SIGKILL fallback, always relaunches when not --skip-restart)
-#   2. Wait for /healthz 200
+#   2. Wait for /health 200
 #   3. For each endpoint hit ONCE per measurement (no repeats in a single pass)
 #   4. Between passes, restart uvicorn again — every measurement is cold
 #
 # Measures:
-#   - /healthz                      (sanity)
+#   - /health                       (sanity)
 #   - /api/v1/layers                (canonical 21.8s baseline; spec target < 200 ms p95)
 #   - /api/v1/basins
 #   - /api/v1/runs?source=best      (default discharge — should NOT carry flood_product_ready=true post PR 5/7)
@@ -96,40 +96,19 @@ launch_uvicorn() {
     echo "[launch_uvicorn] On node-27 this file should exist; on other hosts use --skip-restart." >&2
     return 1
   fi
-  (
-    cd "$NWM_ROOT"
-    # shellcheck disable=SC1091
-    set -a; source infra/env/display.env; set +a
-    setsid .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 \
-      >"$UVICORN_LOG" 2>&1 </dev/null &
-    disown
-  )
-  return 0
+  # defer to canonical wrapper (PR #611, issue #597) — wrapper handles env source
+  # + SIGTERM-then-SIGKILL of prior uvicorn + setsid relaunch + /health bind-wait
+  # + basin_id smoke check. cold-waterfall's own measurement loop adds nothing on
+  # top of that for the relaunch step.
+  bash "${NWM_ROOT}/scripts/ops/start-display-api.sh"
 }
 
 restart_uvicorn() {
-  # Kill any existing uvicorn matching our app, then always relaunch.
-  # SIGTERM -> 5s grace -> SIGKILL fallback. If no existing pid, just launch.
+  # Defer to the canonical wrapper for stop-then-relaunch (SIGTERM-then-SIGKILL
+  # of the prior uvicorn is handled inside scripts/ops/start-display-api.sh).
   # If --skip-restart, no-op (caller knows measurements are NOT cold).
   if [[ "$SKIP_RESTART" -eq 1 ]]; then
     return 0
-  fi
-  local pid
-  pid=$(pgrep -f 'uvicorn apps.api.main:app' | head -1 || true)
-  if [[ -n "$pid" ]]; then
-    if ! kill "$pid" 2>/dev/null; then
-      echo "[restart_uvicorn] WARN: kill $pid returned non-zero (pid recycled?); proceeding to relaunch" >&2
-    fi
-    local g=0
-    while [[ $g -lt 5 ]]; do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1; g=$((g+1))
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "[restart_uvicorn] SIGTERM after 5s grace did not stop pid $pid — escalating to SIGKILL" >&2
-      kill -9 "$pid" 2>/dev/null || true
-      sleep 1
-    fi
   fi
   if ! launch_uvicorn; then
     echo "[restart_uvicorn] launch_uvicorn returned non-zero; exit 2" >&2
@@ -138,9 +117,10 @@ restart_uvicorn() {
 }
 
 wait_for_health() {
+  # /health is registered at root by apps/api/main.py:1947 _register_static_and_health_routes; /healthz 404s on healthy uvicorn
   local i=0
   while [[ $i -lt 60 ]]; do
-    if curl -sf -m 2 "${BASE}/healthz" >/dev/null 2>&1; then
+    if curl -sf -m 2 "${BASE}/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -162,7 +142,7 @@ measure_one() {
 }
 
 ENDPOINTS=(
-  "/healthz"
+  "/health"
   "/api/v1/layers"
   "/api/v1/basins"
   "/api/v1/runs?source=best"
@@ -246,7 +226,7 @@ echo "## Cold first-paint waterfall (single cold pass, run 1)"
 echo
 echo "Sequence consumed by \`loadOverview\` map-bootstrap stage (PR 3/7 split):"
 echo
-echo "1. \`GET /healthz\` → ${ROUND_TIMES["/healthz|1"]:-N/A} ms"
+echo "1. \`GET /health\` → ${ROUND_TIMES["/health|1"]:-N/A} ms"
 echo "2. \`GET /api/v1/layers\` → ${ROUND_TIMES["/api/v1/layers|1"]:-N/A} ms (**canonical 21.8s baseline endpoint; was THE bottleneck**)"
 echo "3. \`GET /api/v1/basins\` → ${ROUND_TIMES["/api/v1/basins|1"]:-N/A} ms"
 echo
