@@ -3657,6 +3657,85 @@ def test_list_models_returns_public_safe_resource_profile(
         assert token not in public_item_json
 
 
+def test_list_models_exposes_basin_id_and_basin_name_from_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ApiModelInstance OpenAPI schema declares basin_id / basin_name (nullable);
+    # frontend `basinVersionToBasinId` map keys off model.basin_id. If list_models
+    # only SELECTs from core.model_instance (which has basin_version_id but NOT
+    # basin_id), the map is built empty and single-run hydro popups fall back to
+    # "请选择流域". Guard: rows from the JOINed query carry basin_id + basin_name,
+    # and `_model_public_projection` must preserve them on the wire.
+    join_row = {
+        "model_id": "basins_qhh_shud",
+        "basin_version_id": "basins_qhh_vbasins",
+        "basin_id": "basins_qhh",
+        "basin_name": "Qhh",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "mesh_version_id": "basins_qhh_mesh_vbasins",
+        "calibration_version_id": "basins_qhh_shud_calib_vbasins",
+        "shud_code_version": "basins-shud",
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/package/",
+        "active_flag": True,
+        "resource_profile": {"nodes": 1},
+        "created_at": "2026-06-14T05:31:18Z",
+    }
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._result: Any = None
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            if "SELECT COUNT" in statement:
+                # Verify the count query also references the JOIN'd alias (parity).
+                assert "core.model_instance mi" in statement, (
+                    "count query must qualify model_instance with the `mi` alias to keep "
+                    "the WHERE clause compatible with the JOIN form."
+                )
+                self._result = {"total": 1}
+            else:
+                # The data query MUST JOIN basin_version + basin to expose basin_id.
+                assert "JOIN core.basin_version" in statement, (
+                    "list_models data query must JOIN core.basin_version to surface basin_id."
+                )
+                assert "JOIN core.basin" in statement, (
+                    "list_models data query must JOIN core.basin to surface basin_name."
+                )
+                assert "b.basin_id" in statement and "b.basin_name" in statement, (
+                    "list_models SELECT must project b.basin_id and b.basin_name."
+                )
+                self._result = [join_row]
+
+        def fetchone(self) -> dict[str, Any]:
+            return self._result
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._result
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+    page = store.list_models(basin_version_id=None, active=None, limit=10, offset=0)
+
+    assert page["total"] == 1
+    item = page["items"][0]
+    assert item["model_id"] == "basins_qhh_shud"
+    assert item["basin_id"] == "basins_qhh", (
+        "basin_id must survive _model_public_projection so the frontend "
+        "basinVersionToBasinId map can resolve single-run hydro popup basinId."
+    )
+    assert item["basin_name"] == "Qhh"
+    # basin_version_id stays as the JOIN key so the frontend map can build
+    # basinVersionToBasinId[basin_version_id] = basin_id.
+    assert item["basin_version_id"] == "basins_qhh_vbasins"
+
+
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:
     assert set(body) == {"request_id", "status", "data"}
     assert body["request_id"]

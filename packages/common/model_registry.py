@@ -1665,15 +1665,34 @@ class PsycopgModelRegistryStore:
             parameters.append(active)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
+        # JOIN basin_version + basin so each row carries basin_id / basin_name —
+        # parity with get_model_internal. OpenAPI ModelInstance schema declares
+        # basin_id/basin_name (nullable), and the frontend builds basinVersionToBasinId
+        # from model rows; without basin_id the map stays empty and single-run hydro
+        # MVT popups (whose feature properties don't self-describe basin_id) fall back
+        # to null → "请选择流域" placeholder.
+        # Filter clauses must be requalified — `basin_version_id` and `active_flag`
+        # exist on BOTH `core.basin_version` and `core.model_instance`, so the
+        # unqualified WHERE form raises 'column reference is ambiguous' once the
+        # JOIN is in place. The mechanical rewrite below is load-bearing, not
+        # defensive: do NOT remove it.
+        join_where = where.replace("basin_version_id", "mi.basin_version_id").replace(
+            "active_flag", "mi.active_flag"
+        )
         with self._transaction() as cursor:
-            cursor.execute(f"SELECT COUNT(*) AS total FROM core.model_instance {where}", tuple(parameters))
+            cursor.execute(
+                f"SELECT COUNT(*) AS total FROM core.model_instance mi {join_where}",
+                tuple(parameters),
+            )
             total = int(cursor.fetchone()["total"])
             cursor.execute(
                 f"""
-                SELECT *
-                FROM core.model_instance
-                {where}
-                ORDER BY created_at DESC, model_id
+                SELECT mi.*, b.basin_id, b.basin_name
+                FROM core.model_instance mi
+                JOIN core.basin_version bv ON bv.basin_version_id = mi.basin_version_id
+                JOIN core.basin b ON b.basin_id = bv.basin_id
+                {join_where}
+                ORDER BY mi.created_at DESC, mi.model_id
                 LIMIT %s OFFSET %s
                 """,
                 tuple([*parameters, limit, offset]),
