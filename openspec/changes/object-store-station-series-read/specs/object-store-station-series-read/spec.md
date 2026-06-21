@@ -90,6 +90,13 @@ The reader SHALL parse the per-station shud CSV with the documented two-row head
 - **WHEN** the CSV is missing the header row or contains a non-numeric value where a numeric is expected
 - **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED` and details `{station_id, expected_path, parse_reason}`
 
+#### Scenario: declared nrow mismatch raises STATION_FORCING_FILE_MALFORMED
+
+- **WHEN** the CSV header declares `nrow=53`
+- **AND** the data section contains fewer or more than 53 data rows
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** `details.parse_reason` SHALL identify the row-count mismatch
+
 ### Requirement: Series API disk-only behavior — bypasses forcing_version and forcing_station_timeseries
 
 The `/api/v1/met/stations/{station_id}/series` route SHALL serve all series data from the per-station shud/CSV on disk and SHALL NOT query `met.forcing_version` or `met.forcing_station_timeseries` for series content. The route SHALL NOT call `PsycopgForecastStore.station_series()` or `_ensure_forcing_version_finalized()`. (The single `met.met_station` lookup for station metadata is allowed and required per AD-2; this is the only DB query.)

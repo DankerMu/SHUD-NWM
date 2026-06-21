@@ -257,3 +257,76 @@ AD-5 决策为静默丢弃；前端如果显示 `data.series[]` empty 时不区�
 - **OQ7**: reader unit test 注入用 `Protocol`-typed `StationLookup` (AD-13) vs `psycopg.Connection` mock pattern（`tests/test_forecast_store_product_quality_sql.py` 现存模式）哪个更对齐项目惯例？(§0.9)
 
 §0 introspection 必须先做完且 commit 结论，再开始 §1 实现。
+
+## Subagent Workflow Fixture (PR-A #622)
+
+Fixture level: expanded. Repair intensity: high.
+
+Project profile: NHMS (`openspec/project-profile.md`).
+
+Change surface for PR-A:
+- New reader module: `packages/common/object_store_forcing.py`.
+- New flat unit tests: `tests/test_object_store_forcing.py`.
+- Introspection evidence and baseline fixture: `design.md`/`introspection-findings.md` plus `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`.
+
+Must preserve:
+- Existing `StationSeriesResponse` field shape and ordering oracle from `openapi/nhms.v1.yaml`.
+- Existing `STATION_NOT_FOUND` and `MISSING_REQUIRED_FILTER` code/details shape from `packages/common/forecast_store.py`.
+- Existing DB-backed route behavior until PR-B switches the API entrypoint; PR-A only adds the reader and unit evidence.
+
+Must add/change:
+- Disk path resolution from `station_id`, `source_id`, UTC `cycle_time`, `model_id`, and `met_station.properties_json.forcing_filename`.
+- SHUD CSV parsing, unit mapping, UTC valid_time computation, variables/from/to/limit filtering, and side-effect-free reads.
+- Typed disk/read errors for missing `forcing_filename`, missing file, and malformed CSV.
+- SQL-spy evidence that the reader does not query `met.forcing_version` or `met.forcing_station_timeseries`.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected for PR-A - API route switch is PR-B; PR-A only exposes a library entrypoint.
+- Config / project setup: not selected for PR-A - `OBJECT_STORE_ROOT` startup/env wiring is PR-B.
+- File IO / path safety / overwrite: selected - reader opens object-store paths assembled from DB metadata and API inputs; tests must cover file miss, malformed file, and no writes.
+- Schema / columns / units / field names: selected - CSV columns map to API variables/units and response shape must match the existing schema.
+- Auth / permissions / secrets: not selected - no credentials or authorization path changes in PR-A.
+- Concurrency / shared state / ordering: not selected - reader is stateless and has no cache.
+- Resource limits / large input / discovery: selected - CSV reads must be bounded by the declared header row count and tests cover multiple N values.
+- Legacy compatibility / examples: selected - old response shape and existing error-code shapes remain the oracle.
+- Error handling / rollback / partial outputs: selected - every expected reader failure maps to a stable typed error and PR-A has no writes to roll back.
+- Release / packaging / dependency compatibility: not selected - no dependency or package metadata change expected.
+- Documentation / migration notes: not selected for PR-A - docs/runbook work is PR-C.
+
+Domain packs:
+- Hydro-met time series / forcing windows: selected - UTC cycle compact, Time_Day conversion, and forecast-window bounds are core behavior.
+- Published NHMS artifacts / display identity: selected - disk file identity must bind to the same station and response identity without touching DB finalize state.
+- PostGIS / TimescaleDB domain behavior: selected narrowly - allowed DB access is only `met.met_station`; forbidden tables are asserted by SQL spy.
+- Geospatial / CRS / basin geometry: not selected - PR-A reads stored station lon/lat/filename metadata and does not alter geometry/CRS.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD execution or numerical solver behavior.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm path.
+- External hydro-met providers / snapshot reproducibility: not selected - no provider fetch/conversion.
+- Run manifest / QC provenance: not selected - no manifest/QC read or write.
+
+Invariant Matrix:
+- Governing invariant: PR-A's reader may resolve and parse one station CSV, but it must not consult forcing-version readiness or mutate object-store/DB state.
+- Source-of-truth identity/contract: `met.met_station.station_id` -> `basin_version_id` + `properties_json.forcing_filename`; CSV contract `Time_Day Precip Temp RH Wind RN`; existing `StationSeriesResponse` schema.
+- Producers: none - forcing_producer output is consumed as existing disk input, not changed.
+- Validators/preflight: `_normalize_source_id`, `_compute_cycle_compact`, `_resolve_disk_path`, CSV header/data parser, typed error constructors.
+- Storage/cache/query: `StationLookup` / `PsycopgStationLookup` may query `met.met_station` only; no cache.
+- Public routes/entrypoints: none in PR-A - PR-B wires the FastAPI route.
+- Frontend/downstream consumers: unchanged response shape verified against baseline fixture.
+- Failure paths/rollback/stale state: file missing, missing filename, malformed CSV, unknown station, unsupported variables, reversed time window; no writes or cleanup.
+- Evidence/audit/readiness: §0 introspection conclusions, §0.10 baseline fixture, §1.13a-t unit tests, ruff, and `openspec validate`.
+- Regression rows:
+  - Valid heihe/IFS station + existing fixture CSV -> 200-shape payload with fixed variable order and UTC points.
+  - Missing file / malformed CSV / missing forcing_filename -> stable typed error with operator details.
+  - Complete reader call under SQL spy -> zero SELECTs against `met.forcing_version` and `met.forcing_station_timeseries`.
+  - Consecutive reads -> no object-store writes and stable response shape.
+
+Required evidence:
+- `uv run pytest tests/test_object_store_forcing.py -q`.
+- `uv run ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py`.
+- `openspec validate object-store-station-series-read --strict --no-interactive`.
+- Node-27 §0 introspection and baseline capture committed before reader implementation is reviewed.
+
+Review focus:
+- Verify §0 introspection is committed and stable before accepting §1 implementation.
+- Verify the reader's only DB dependency is station lookup, not forcing readiness or station timeseries content.
+- Verify time/unit/limit/filter behavior matches AD-4/AD-5/AD-10 and `spec.md`.
+- Verify malformed/missing inputs produce stable typed errors without hiding path/identity details needed by operators.

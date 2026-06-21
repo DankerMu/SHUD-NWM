@@ -41,7 +41,7 @@
 - [ ] 1.13c unit test: station not found → 404 + `{station_id}`
 - [ ] 1.13d unit test: forcing_filename missing → 500 `STATION_FORCING_FILENAME_MISSING`
 - [ ] 1.13e unit test: file not found → 404 `STATION_FORCING_FILE_NOT_FOUND` + details 含 expected_path + basin_version_id + source_id + cycle_time + model_id
-- [ ] 1.13f unit test: malformed CSV 5 变体（缺 header / nrow 非数字 / data 行 column 数错 / 数值非数字 / 空 file）→ 500 `STATION_FORCING_FILE_MALFORMED`
+- [ ] 1.13f unit test: malformed CSV 6 变体（缺 header / nrow 非数字 / data 行 column 数错 / 数值非数字 / 空 file / declared nrow 与实际 data 行数不一致）→ 500 `STATION_FORCING_FILE_MALFORMED`
 - [ ] 1.13g unit test: 变量名映射全表 + unit 字段全表（5 个变量）
 - [ ] 1.13h unit test: valid_time 边界 — 第一行 Time_Day=0 → cycle；最后一行 Time_Day=6.5 → cycle + 6d12h
 - [ ] 1.13i unit test: rounding — Time_Day=0.041666 → cycle + 3600s（不是 3599s）
@@ -54,7 +54,8 @@
 - [ ] 1.13p unit test: limit=10 截断总 tuple count + `metadata.truncated=true` + 排序保持
 - [ ] 1.13q unit test: N=53 → 5×53=265 默认 tuples (parametric 测 N=1, N=53, N=100 三档)
 - [ ] 1.13r unit test: response shape 对比 §0.10 baseline fixture — 字段名/字段类型/排序与 baseline 一致（除 `request_id` 和 series points 内的真实数值外）
-- [ ] 1.13s unit test: SQL 查询统计 — 用 spy cursor 注入 `FakeStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 只命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
+- [ ] 1.13s unit test: SQL 查询统计 — 用 spy connection/cursor 驱动 `PsycopgStationLookup`，调一次完整 `read_station_forcing_csv` 后断言 cursor.execute 恰好 1 次命中 `met.met_station`，对 `met.forcing_version` / `met.forcing_station_timeseries` 的 SELECT 次数 = 0（覆盖 spec.md "verify met.forcing_version SELECT count = 0 during series request" 场景）
+- [ ] 1.13t unit test: side-effect-free reads — 用 tmp_path CSV 连续调用 reader 3 次，断言 response shape 稳定、CSV mtime 不变，并通过 monkeypatch/spy 证明 reader 不调用 `mkdir` / 写模式 `open(..., "w")`
 - [ ] 1.14 `ruff check packages/common/object_store_forcing.py tests/test_object_store_forcing.py` PASS
 - [ ] 1.15 PR-A-scoped `openspec validate object-store-station-series-read --strict --no-interactive` PASS — §0 introspection commits 与 design.md/introspection-findings.md 编辑可能破坏 spec 结构，PR-A merge 前必须本地通过 validate（§8.1 是 PR-B 完整重跑；本条是 PR-A 独立 guard）
 
@@ -114,7 +115,7 @@
 - [ ] 6.9 sub-test 7: cycle_time `+08:00` 输入 → 与 `Z` 输入产生相同响应
 - [ ] 6.10 sub-test 8: variables=Press → 200 + `data.series=[]`
 - [ ] 6.11 sub-test 9: variables=PRCP,Press → 200 + 只含 PRCP series
-- [ ] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（mock cursor + FakeStationLookup 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
+- [ ] 6.12 sub-test 10: 注：SQL spy 计数断言由 §1.13s unit test 覆盖（`PsycopgStationLookup` + spy connection/cursor 更合适在单元层），real-disk e2e 不重复 — 此条仅占位记录归属，无需在 §6 文件内实现
 - [ ] 6.13 sub-test 11: 4 个 currently-409 cases (heihe×IFS, heihe×gfs, qhh×IFS, qhh×gfs at 2026-06-20T12:00:00Z) 全部 200
 - [ ] 6.14 sub-test 12: 响应 byte-shape 与 §0.10 baseline fixture 对比（除 request_id 和真实数值字段外，结构 + 字段类型 + 排序一致）
 - [ ] 6.15 sub-test 13: read-only side-effect 验证：连续 3 个相同请求后 `OBJECT_STORE_ROOT/forcing/...` mtime 不变（采样几个文件）
@@ -149,7 +150,7 @@
 > 本节是 PR 拆分的文档说明，不是可执行 task；标 `[-]` 而非 `[ ]` 是有意区分。
 > 各 PR 真正的 task 在 §0/§1/§2/§3/§4/§5/§6/§7/§8/§10 中分配，已映射到 sub-issue #622/#623/#624。
 
-- [-] 9.1 **PR 1** (~700 LOC): §0 introspection 结论提交至 design.md/introspection-findings.md + §1 reader module + §1.13a–§1.13s unit tests + §1.14 ruff
+- [-] 9.1 **PR 1** (~700 LOC): §0 introspection 结论提交至 design.md/introspection-findings.md + §1 reader module + §1.13a–§1.13t unit tests + §1.14 ruff
 - [-] 9.2 **PR 2** (~700 LOC): §2 series route 切换 + §3 startup env check + §3.4 boundary fix + §4 OpenAPI + §5 env files + §6 real-disk integration tests + §8.4–§8.6 node-27 live receipt（依赖 PR 1 merged）
 - [-] 9.3 **PR 3** (~350 LOC): §7 docs + 3 个 follow-up issue 创建 + §10 closing actions（依赖 PR 2 merged + node-27 sync）
 
