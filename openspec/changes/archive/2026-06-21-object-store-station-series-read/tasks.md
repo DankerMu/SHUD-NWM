@@ -170,5 +170,5 @@
 - [x] 10.0 重跑 `openspec validate object-store-station-series-read --strict --no-interactive` PASS（archive guard：防止 PR-C 文档/follow-up 编辑后破坏 spec 结构）
 - [x] 10.1 `openspec archive object-store-station-series-read`
 - [ ] 10.2 3 条 `docs/review-loop-log.jsonl` append（每 PR 一行）
-- [ ] 10.3 关闭 Epic + 3 子 issue
-- [ ] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；如 PR-B receipt 在最近 24h 内已记录 uvicorn pid 变化，PR-C 不必再次重启服务，只做 health probe）
+- [x] 10.3 关闭 Epic + 3 子 issue
+- [x] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；如 PR-B receipt 在最近 24h 内已记录 uvicorn pid 变化，PR-C 不必再次重启服务，只做 health probe）
