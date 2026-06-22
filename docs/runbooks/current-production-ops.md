@@ -1,720 +1,542 @@
 # Current Production Operations Runbook
 
-最后更新：2026-06-14
-适用范围：node-22 计算控制面、Slurm 计算节点、node-27 只读展示面。
+最后更新：2026-06-22
 
-> **⚠️ 2026-06-21 STALE WARNING — 整份重写待办**：
->
-> 本文档 §2 / §3.1 / §3.2 / §5 描述的"22 跑 orchestrator 写 22 本地 DB
-> (`10.0.2.100:55433`)"已**不是当前事实**。当前架构：
-> - **node-22 已退化为纯计算节点**，不连任何活 DB
-> - node-22 本机 PG `:55433` 已弃用、待删（pgrep 验证无 orchestrator/ingest 活进程）
-> - **orchestrator + 入库进程 + DB primary 全部在 node-27** (本机 PG `:55432`)
-> - 公网入口 `https://test.nwm.ac.cn`（27 反代）
->
-> 本文档待整段重写（已开 follow-up issue）；在此之前请优先看 `CLAUDE.md` 服务器拓扑段 +
-> `docs/governance/ROLE_BOUNDARY.md` 顶部 "Current physical deployment" 段。
-> 第 25-31 行权限矩阵、第 12-13 行入口命令均为历史快照，**不要按此 ssh 22 执行**。
+适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
+以及两者共享的 NFS object-store/published 数据面。
 
-本文是当前业务化运行值守手册，记录服务如何拉起、业务流程、每一步产物位置和当前已知卡点。历史 bring-up 记录见
-[`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)；两节点职责边界见
-[`two-node-deployment-overview.md`](two-node-deployment-overview.md)。
+本文是当前生产值守手册。物理部署事实以
+[`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"
+段为准；[`two-node-deployment-overview.md`](two-node-deployment-overview.md)
+保留为两节点 role contract 和设计意图背景，不作为当前 host 分配的操作手册。
+
+历史 bring-up 记录见 [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)。
 
 ## 1. 当前结论
 
-- 正式业务入口是 node-22 上的通用调度器：
-  `python -m services.orchestrator.cli plan-production --submit --continuous --max-passes 1`。
-- 调度器每个 pass 发现 GFS/IFS cycle，提交 `download -> convert -> forcing -> forecast -> parse -> state_save_qc -> frequency -> publish`。
-- 计算任务通过 standalone Slurm Gateway 提交到 CPU 分区，实际执行在 Slurm 计算节点。
-- 计算节点不保证能访问 `/ghdc`；运行中间态必须放在 `/scratch/frd_muziyao/nhms-prod`。
-- 完整业务 forcing 包和 SHUD run 输出的共享真相源是 object-store `forcing/...`、`runs/...`，不是 `published/`。
-- 对 27 展示可见的 `published/` 只放 tiles、logs、display manifests；22 路径是 `/ghdc/data/nwm/published`，27 本机对应 `/home/ghdc/nwm/published`。
-- 主展示产品当前以 DB/PostGIS live 查询和 published q_down/logs 为主；`frequency` 的 basin-level 质量记录仍有缺表卡点，见第 8 节。
+- node-27 是当前 active production service host：本机 PostgreSQL `:55432`、
+  cron-driven ingest、display API 和前端公网入口都在 27。
+- node-27 每 10 分钟通过 cron 调用
+  `/home/nwm/NWM/scripts/node27_autopipe_cron.sh`，再运行
+  `scripts/node27_autopipeline.py` 扫描 NFS object-store、注册/解析 run、
+  入库并刷新 display coverage。
+- node-27 display API 由 `scripts/ops/start-display-api.sh` 管理，
+  当前监听 `127.0.0.1:8080`；公网入口是 `https://test.nwm.ac.cn`。
+- node-22 是计算与 Slurm host：运行 Slurm Gateway、诊断 API、Slurm/SHUD
+  wrapper，并向 NFS 写 object-store/published 产物；node-22 不作为当前 NHMS
+  业务数据库 writer。
+- 完整 forcing 包和 SHUD run 输出的共享真相源是
+  `object-store/forcing/...` 与 `object-store/runs/...`；`published/`
+  只放 display products、tiles、logs、manifests。
+- node-22 看到共享数据面为 `/ghdc/data/nwm/...`；node-27 看到同一份 NFS
+  数据为 `/home/ghdc/nwm/...`。
 
 ## 2. 节点和服务
 
 | 面 | 位置 | 当前职责 | 关键入口 |
 | --- | --- | --- | --- |
-| 计算节点 | node-22 / `10.0.2.100` | Slurm/SHUD 计算 wrapper；不连任何活 DB | Slurm job / forcing wrapper |
-| Slurm Gateway | node-22 | 将调度请求转为 Slurm 作业 | `python -m services.slurm_gateway` |
-| Slurm 计算节点 | cnXX | 执行 download/convert/forcing/SHUD/parse/frequency 等 sbatch 阶段 | Slurm job / array task |
-| node-27 服务面 | node-27 | active primary PG、ingest、展示 `/` 和 `/ops` | FastAPI + frontend + 本机 PG |
-| DB | node-27 本机 `:55432/nhms` | `met`、`hydro`、`ops`、`core`、`map`、`flood` 当前状态源 | writer/readonly roles on node-27 |
+| node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | `DATABASE_URL` in `/home/nwm/NWM/infra/env/display.env` and node-27 ingest env |
+| node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | cron -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
+| node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `scripts/ops/start-display-api.sh` |
+| node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
+| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、Slurm/SHUD compute wrapper | `python -m services.slurm_gateway`, Slurm jobs |
+| Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
-当前业务/展示数据库口径以
-[`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"
-段为准：node-27 本机 PostgreSQL `:55432` 是 active primary；node-22
-`:55433` 是 historical/do-not-connect，不再作为当前业务库。
+node-22 may still expose old local database processes for historical reasons.
+Do not use node-22 local PostgreSQL as current NHMS production state. Current
+database checks and ingest/write checks belong on node-27 against `:55432`.
 
 ## 3. 如何拉起和确认服务
 
-### 3.1 调度器
+### 3.1 调度器 / ingest
 
-当前生产 pass 形态：
-
-```bash
-cd /scratch/frd_muziyao/NWM
-set -a
-source infra/env/compute.host.env
-set +a
-
-uv run python -m services.orchestrator.cli plan-production \
-  --submit \
-  --continuous \
-  --max-passes 1
-```
-
-实际值守时通常由外部 supervisor、timer 或守护脚本周期性拉起 bounded pass。确认方式：
+当前生产 ingest 不是常驻 `plan-production` 进程。node-27 使用 cron 周期性启动
+bounded autopipe pass：
 
 ```bash
-pgrep -af "plan-production|services.orchestrator.cli|scheduler"
-find /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence \
-  -maxdepth 1 -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort | tail -20
-tail -200 /scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.log
-tail -200 /scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.err
+ssh -p 32099 nwm@210.77.77.27
+crontab -l | grep -F 'scripts/node27_autopipe_cron.sh'
 ```
 
-正常现象：scheduler evidence 约每 5-6 分钟刷新；正在提交或探测时会出现一个短生命周期
-`plan-production --submit --continuous --max-passes 1` 进程。
+期望存在类似条目：
+
+```text
+*/10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh >> /home/nwm/autopipe.log 2>&1
+```
+
+查看 wrapper 和最近运行结果：
+
+```bash
+cd /home/nwm/NWM
+sed -n '1,180p' scripts/node27_autopipe_cron.sh \
+  | sed -E 's#^(export DATABASE_URL=).*#\1<redacted>#'
+tail -n 160 /home/nwm/autopipe.log
+```
+
+正常现象：
+
+- 日志中每 10 分钟出现 `autopipe: start` 与 `autopipe: done rc=0`。
+- JSON summary 包含 `object_store_root=/home/ghdc/nwm/object-store`、
+  discovered/ingested/already_ingested runs、seeded/already_seeded basins。
+- `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
+  该步骤非 fatal，不应掩盖 autopipe 主返回码。
+
+确认 node-27 只按 bounded cron 模式运行，并且 node-22 没有残留的 active
+production scheduler/writer：
+
+```bash
+pgrep -af 'node27_[a]utopipeline|node27_[a]utopipe' || true
+
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'pgrep -af "services[.]orchestrator|[p]lan-production" || true'
+```
+
+The node-22 scheduler check is expected to print nothing.
+
+如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
+bounded cron 模式，不代表 ingest 停摆。
 
 ### 3.2 Slurm Gateway
 
-确认入口：
+Slurm Gateway 当前仍在 node-22。它负责把调度/诊断请求转成 Slurm 行为；
+node-27 display 不调用 Slurm Gateway。
+
+确认 node-22 Gateway 与诊断 API：
 
 ```bash
-pgrep -af "services.slurm_gateway"
+ssh -p 32099 frd_muziyao@210.77.77.22
+pgrep -af '[s]ervices.slurm_gateway|uvicorn apps[.]api[.]main'
+ss -ltnp 2>/dev/null | grep -E ':(8000|8001)\b' || true
+curl -fsS --max-time 2 http://127.0.0.1:8001/health
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
-sacct -j <job_id> --format=JobID,JobName%24,State,ExitCode,Elapsed,Start,End -P
 ```
 
-Gateway systemd 样例在 [`infra/systemd/nhms-slurm-gateway.service`](../../infra/systemd/nhms-slurm-gateway.service)。
-它只应暴露 Slurm gateway API，不应指向完整业务 API。
+2026-06-22 现场验证：
+
+- `python -m services.slurm_gateway` 在 node-22 运行。
+- node-22 diagnostic API `/health` 在 `:8001` 返回 `{"status":"ok",...}`。
+- node-22 `/ghdc/data/nwm/object-store` 与 `/ghdc/data/nwm/published`
+  可见，是 node-27 `/home/ghdc/nwm/...` 的同一份 NFS 数据面。
 
 ### 3.3 API / 展示服务
 
-当前常见进程形态：
+node-27 display API 通过仓库 wrapper 管理：
 
 ```bash
-pgrep -af "uvicorn apps.api.main"
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+bash scripts/ops/start-display-api.sh
 ```
 
-可能同时存在：
+wrapper 会：
 
-- Docker 容器内 API：`uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`
-- node-22 本机诊断 API：`uvicorn apps.api.main:app --host 0.0.0.0 --port 8001 --log-level info`
+- source `infra/env/display.env`；
+- 校验 `DATABASE_URL`、`NHMS_ENABLE_LIVE_POSTGIS_MVT`、`OBJECT_STORE_ROOT`；
+- 停掉旧的 `apps.api.main:app` uvicorn；
+- 在 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}` 重新启动；
+- 跑 `/health` 与 `/api/v1/models?limit=1` basin_id smoke check。
 
-运行日志示例：
+确认当前 live 状态：
 
 ```bash
-tail -200 /scratch/frd_muziyao/nhms-prod/runtime/api/nhms-api-8001.log
+cd /home/nwm/NWM
+grep -E '^NHMS_DISPLAY_API_PORT=|^NHMS_SERVICE_ROLE=|^OBJECT_STORE_ROOT=' \
+  infra/env/display.env
+
+if grep -q '^DATABASE_URL=' infra/env/display.env; then
+  printf 'DATABASE_URL=<set redacted>\n'
+else
+  printf 'DATABASE_URL=<missing>\n'
+fi
+
+pgrep -af 'uvicorn apps[.]api[.]main'
+ss -ltnp 2>/dev/null | grep -E ':(55432|8080)\b'
+curl -fsS --max-time 5 http://127.0.0.1:8080/health
+curl -fksS --max-time 5 https://test.nwm.ac.cn/health
 ```
 
-27 展示面应使用只读 DB 账号和只读 published mount；不应运行正式 `plan-production`。
+2026-06-22 现场修正过一次 display port drift：`display.env` 曾设置
+`NHMS_DISPLAY_API_PORT=8000`，而 nginx 与仓库模板期望 `8080`。已备份原文件并
+改回 `8080`，随后 `scripts/ops/start-display-api.sh` smoke check 和 public
+`https://test.nwm.ac.cn/health` 均返回 `ok`。后续若公网 502，先同时检查本地
+`127.0.0.1:8080/health`、nginx `proxy_pass` 和 `NHMS_DISPLAY_API_PORT`。
 
 ### 3.4 监控快照
 
-```bash
-cd /scratch/frd_muziyao/NWM
-set -a
-source infra/env/compute.host.env
-set +a
-uv run nhms-monitor
+node-27 ingest 侧优先看 autopipe 日志和 DB/run coverage：
 
-cat /scratch/frd_muziyao/nhms-prod/workspace/monitoring/monitoring_status.json
-cat /scratch/frd_muziyao/nhms-prod/workspace/monitoring/monitoring_alerts.json
-tail -200 /scratch/frd_muziyao/nhms-prod/workspace/monitoring/logs/nhms-live-monitor.log
+```bash
+ssh -p 32099 nwm@210.77.77.27
+tail -n 200 /home/nwm/autopipe.log
+
+cd /home/nwm/NWM
+set -a
+. infra/env/display.env
+set +a
+psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
+select run_id, source_id, cycle_time, model_id, status,
+       coalesce(error_code,''), updated_at
+from hydro.hydro_run
+order by updated_at desc nulls last
+limit 30;"
 ```
 
-`scheduler_stale` 表示最近 evidence 超过阈值未刷新；先结合 scheduler 进程、Slurm 队列和 DB job 状态判断是否真实卡住。
+node-22 compute 侧优先看 Slurm queue、Gateway、shared NFS 输出：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
+pgrep -af '[s]ervices.slurm_gateway'
+find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
+  -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort | tail -20
+```
 
 ## 4. 业务流程
 
-一次 cycle 的主流程如下：
+当前物理流程按数据面理解：
 
 ```text
-source discovery
-  -> download_source_cycle
-  -> convert_canonical
-  -> produce_forcing_array
-  -> run_shud_forecast_array
-  -> parse_output_array
-  -> save_state_snapshot_array
-  -> compute_frequency_array
-  -> publish_tiles
+node-22 / Slurm
+  -> produces forcing and SHUD run artifacts
+  -> writes shared NFS object-store/published roots
+node-27 cron autopipe
+  -> scans /home/ghdc/nwm/object-store/runs
+  -> seeds basin registry when needed
+  -> registers/mirrors/parses runs
+  -> writes node-27 PostgreSQL :55432
+  -> refreshes display coverage and publish status
+node-27 display
+  -> reads PostgreSQL :55432 and NFS object-store/published
+  -> serves /, /ops, /api/v1/* through https://test.nwm.ac.cn
 ```
 
-对应 DB job 类型和阶段：
-
-| 顺序 | `ops.pipeline_job.job_type` | `stage` | 说明 |
-| --- | --- | --- | --- |
-| 1 | `download_source_cycle` | `download` | 下载 GFS/IFS 原始资料 |
-| 2 | `convert_canonical` | `convert` | 转 canonical met product |
-| 3 | `produce_forcing_array` | `forcing` | 按流域和模型生成 SHUD forcing |
-| 4 | `run_shud_forecast_array` | `forecast` | 运行 SHUD |
-| 5 | `parse_output_array` | `parse` | 解析 SHUD 输出并入库 `hydro.river_timeseries` |
-| 6 | `save_state_snapshot_array` | `state_save_qc` | 状态快照和 QC |
-| 7 | `compute_frequency_array` | `frequency` | 计算 flood return period / 质量产物 |
-| 8 | `publish_tiles` | `publish` | 发布 q_down 展示产物和日志到 published 面 |
-
-`met.forecast_cycle.status=complete` 表示该 source cycle 主链路完成。`hydro.hydro_run.status` 当前可能停在
-`parsed`，原因是 basin-level `frequency` 子任务写质量表失败；只看主展示是否可用时，需要同时看
-`ops.pipeline_job` 的 `publish_tiles` 和 `hydro.river_timeseries`。
+`scripts/node27_autopipeline.py` is idempotent. Already-seeded basins and
+already-ingested runs are skipped, so cron re-runs are expected and cheap.
+One run failure should appear in the JSON summary without aborting unrelated
+run discovery.
 
 ## 5. 产物位置
 
 ### 5.1 数据库
 
-| Schema / 表 | 内容 | 值守用途 |
-| --- | --- | --- |
-| `met.forecast_cycle` | source cycle 状态 | 判断时次是否 discovered/downloading/canonical_ready/complete |
-| `met.canonical_met_product` | canonical 气象产品索引 | 查 convert 是否产出完整 |
-| `hydro.hydro_run` | 每个 source/model/basin 的水文 run | 查流域 run 状态、错误码 |
-| `hydro.river_timeseries` | q_down 等河段时序 | 展示主数据源 |
-| `ops.pipeline_job` | 每个阶段 job 状态 | 判断卡在哪个 stage |
-| `ops.pipeline_event` | 状态事件 | 追踪状态流转 |
-| `core.basin_version` / `core.river_segment` | 流域、河段、几何和输出段 | 判断 Heihe/QHH 范围和河段映射 |
-| `map.tile_layer` | 发布图层登记 | 判断 published product 是否被登记 |
-| `flood.return_period_result` / `flood.flood_frequency_curve` | 洪频结果和曲线 | frequency 支线 |
+当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。display API uses a
+readonly role; cron ingest uses writer credentials in its environment defaults
+or host env.
 
-常用查询：
+Secret-safe DB checks:
 
 ```bash
-psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
-select cycle_id, source_id, cycle_time, status, retry_count, coalesce(error_code,'')
-from met.forecast_cycle
-order by cycle_time desc, source_id
-limit 20;"
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+set -a
+. infra/env/display.env
+set +a
+
+psql "$DATABASE_URL" -P pager=off -Atc "
+select current_database(), current_user, inet_server_addr(), inet_server_port();"
 
 psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
-select job_id, cycle_id, job_type, status, slurm_job_id, submitted_at, started_at,
-       finished_at, updated_at, coalesce(error_code,''), left(coalesce(error_message,''),120)
-from ops.pipeline_job
-order by submitted_at desc nulls last
-limit 80;"
+select run_id, source_id, cycle_time, model_id, status,
+       coalesce(error_code,''), updated_at
+from hydro.hydro_run
+order by updated_at desc nulls last
+limit 30;"
 ```
 
-### 5.2 Workspace
+Common tables:
 
-计算中间态和 Slurm 日志在：
+| Schema / table | 用途 |
+| --- | --- |
+| `hydro.hydro_run` | 每个 source/model/basin 的水文 run 状态 |
+| `hydro.river_timeseries` | q_down 等河段时序 |
+| `hydro.run_display_coverage` | latest display fast path coverage |
+| `met.forecast_cycle` | source cycle 状态 |
+| `met.forcing_version` | forcing 包索引 |
+| `ops.pipeline_job` | 阶段 job 状态 |
+| `core.basin_version` / `core.river_segment` | 流域、河段、几何和输出段 |
+| `map.tile_layer` | 发布图层登记 |
+
+### 5.2 Workspace 和运行日志
+
+node-27 ingest wrapper/log:
 
 ```text
+/home/nwm/NWM/scripts/node27_autopipe_cron.sh
+/home/nwm/NWM/scripts/node27_autopipeline.py
+/home/nwm/autopipe.log
+/home/nwm/autopipe-work/
+```
+
+node-22 compute workspace/log roots remain compute-side operational paths:
+
+```text
+/scratch/frd_muziyao/NWM
 /scratch/frd_muziyao/nhms-prod/workspace/
-  cycle_<source>_<YYYYMMDDHH>/logs/<slurm_job_id>.out|err
-  fcst_<source>_<YYYYMMDDHH>_<model_id>/logs/<slurm_job_id>_<array_task>.out|err
-  runs/<run_id>/logs/shud_stdout.log
-  runs/<run_id>/logs/shud_stderr.log
-  scheduler/evidence/*.json
-  scheduler/logs/nhms-compute-scheduler.log|err
-  monitoring/monitoring_status.json
-```
-
-示例：
-
-```bash
-tail -100 /scratch/frd_muziyao/nhms-prod/workspace/cycle_gfs_2026061312/logs/<jobid>.out
-tail -100 /scratch/frd_muziyao/nhms-prod/workspace/fcst_gfs_2026061312_basins_heihe_shud/logs/<jobid>_0.out
-```
-
-### 5.3 Object Store 文件系统根
-
-当前文件系统对象存储根：
-
-```text
-node-22 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
-Slurm/container OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
-
 /scratch/frd_muziyao/nhms-prod/object-store/
-  canonical/<source>/<YYYYMMDDHH>/<variable>/*.nc
-  forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/forcing_package.json
-  runs/<run_id>/
-  tiles/...
+/scratch/frd_muziyao/nhms-prod/runtime/
 ```
 
-URI 口径通常使用 `s3://nhms/...`，但当前本地落盘根是上面的 `/scratch/.../object-store`。
-不要把 `/scratch/frd_muziyao/nhms-prod/object-store` 删除；它是计算节点可见的生产 staging 和对象存储落盘根。
+Use node-22 paths for Slurm/job runtime troubleshooting. Use node-27 paths for
+DB/display/ingest troubleshooting.
 
-### 5.4 Shared Object Store Copyback
+### 5.3 Object-store mirror
 
-完整 forcing 包和水文 run 产物不放在 `published/` 下。`s3://nhms/forcing/...` 和
-`s3://nhms/runs/<run_id>/...` 当前先落在 `OBJECT_STORE_ROOT`，再由 22 控制面的 publish/copyback
-阶段同步到共享对象存储镜像：
+Complete forcing packages and run outputs live under shared object-store:
 
 ```text
-node-22 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
-node-27 shared object-store mirror=/home/ghdc/nwm/object-store
+node-22 view: /ghdc/data/nwm/object-store
+node-27 view: /home/ghdc/nwm/object-store
 
-22 host forcing: /ghdc/data/nwm/object-store/forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
-27 host forcing: /home/ghdc/nwm/object-store/forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
-URI key: forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
-
-22 host runs: /ghdc/data/nwm/object-store/runs/<run_id>/
-27 host runs: /home/ghdc/nwm/object-store/runs/<run_id>/
-URI key: runs/<run_id>/
+forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
+runs/<run_id>/
 ```
 
-当前生产环境通过 `NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store` 启用 copyback。
-如果该同步失败，`publish` 阶段应失败，而不是只发布 tiles 后把完整 run 产物留在 22 私有 staging。
-历史已发布 q_down run 如果缺少对应 `forcing/...` 包，按
-[`forcing-copyback-backfill.md`](forcing-copyback-backfill.md) 在 node-22 先 dry-run、再显式 `--apply`
-补拷；不要通过手动修改 `hydro`/`met` 状态来绕过缺包。
-
-检查最新 run 产物：
+Check current visibility from both hosts:
 
 ```bash
-find /ghdc/data/nwm/object-store/forcing -maxdepth 5 -type f \
-  \( -name 'forcing_package.json' -o -name 'manifest.json' \) \
-  -printf '%TY-%Tm-%Td %TH:%TM %M %u %g %p\n' | sort | tail -30
+# node-22
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'stat -c "%n %A %U:%G" /ghdc/data/nwm/object-store &&
+   find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
+     -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20'
 
-find /ghdc/data/nwm/object-store/runs -maxdepth 2 -type d -name 'fcst_*20260613*' \
-  -printf '%TY-%Tm-%Td %TH:%TM %M %u %g %p\n' | sort | tail -30
-
-ls -la /ghdc/data/nwm/object-store/runs/fcst_gfs_2026061312_basins_heihe_shud/output/
+# node-27
+ssh -p 32099 nwm@210.77.77.27 \
+  'stat -c "%n %A %U:%G" /home/ghdc/nwm/object-store &&
+   find /home/ghdc/nwm/object-store/runs -maxdepth 1 -type d \
+     -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20'
 ```
 
-### 5.5 Published Artifacts
+### 5.4 Published artifacts
 
-当前 22 写、27 读的发布面：
+Display products, tiles, manifests, and logs live under `published/`:
 
 ```text
-node-22 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
-node-22 published host mount: /ghdc/data/nwm/published
-node-27 published host mount: /home/ghdc/nwm/published
-container: /var/lib/nhms/published
-URI prefix: published://
+node-22 view: /ghdc/data/nwm/published
+node-27 view: /home/ghdc/nwm/published
+
+published/logs/<source>/<YYYYMMDDHH>/...
+published/tiles/hydro/<source>_<YYYYMMDDHH>/...
+published/manifests/...
 ```
 
-目录形态：
+Do not look under `published/` for complete SHUD `runs/<run_id>/output`.
+Those belong under `object-store/runs/<run_id>/`.
+
+Checks:
+
+```bash
+# node-22
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'test -d /ghdc/data/nwm/published &&
+   stat -c "%n %A %U:%G" /ghdc/data/nwm/published &&
+   find /ghdc/data/nwm/published/logs /ghdc/data/nwm/published/tiles \
+     -maxdepth 4 -type f -printf "%TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null |
+   sort | tail -40'
+
+# node-27
+ssh -p 32099 nwm@210.77.77.27 \
+  'test -d /home/ghdc/nwm/published &&
+   stat -c "%n %A %U:%G" /home/ghdc/nwm/published &&
+   find /home/ghdc/nwm/published/logs /home/ghdc/nwm/published/tiles \
+     -maxdepth 4 -type f -printf "%TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null |
+   sort | tail -40'
+
+ssh -p 32099 nwm@210.77.77.27 \
+  'find /home/ghdc/nwm/published -path "*/runs/*" -o -path "*/forcing/*"'
+```
+
+The second command should normally print nothing. If full `runs/` or `forcing/`
+payloads appear under `published/`, the publication boundary is wrong.
+
+### 5.5 Basins source data
+
+node-27 autopipe seeds/refreshes basin registry from:
 
 ```text
-/ghdc/data/nwm/published/
-  logs/<source>/<YYYYMMDDHH>/cycle_<source>_<YYYYMMDDHH>/job_*.out
-  tiles/hydro/<source>_<YYYYMMDDHH>/q-down/...
-  manifests/... display manifests only
+/home/ghdc/nwm/Basins
 ```
 
-`published/` 只承载展示发布物、瓦片 manifest 和日志；不要在这里查完整 SHUD `runs/<run_id>/output/`。
-完整 forcing 包和 run 产物见第 5.4 节的 `/ghdc/data/nwm/object-store/forcing/` 和
-`/ghdc/data/nwm/object-store/runs/`。
-
-检查最新发布：
+Check:
 
 ```bash
-find /ghdc/data/nwm/published/logs -maxdepth 4 -type f -name '*publish.out' \
-  -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort | tail -30
-
-find /ghdc/data/nwm/published/tiles/hydro -maxdepth 3 -type f \
-  -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort | tail -30
+ssh -p 32099 nwm@210.77.77.27 \
+  'stat -c "%n %A %U:%G" /home/ghdc/nwm/Basins &&
+   find /home/ghdc/nwm/Basins -maxdepth 2 -type d | sort | head -40'
 ```
-
-注意：Slurm 计算节点不应依赖 `/ghdc`。需要先在 `/scratch/.../object-store` 和 workspace 完成计算，再由 22 控制面的
-publish/copyback 阶段把完整 run 产物写到 `/ghdc/data/nwm/object-store`，把展示产物、manifest、日志写到
-`/ghdc/data/nwm/published`。
-
-### 5.6 单个业务 run 验收元组
-
-以下检查绑定同一个输入元组 `<source_id, cycle_time, basin_version_id, model_id, run_id>`。示例先设置变量：
-
-```bash
-source_id=gfs
-cycle_time='2026-06-13 12:00:00+00'
-cycle_key=2026061312
-basin_version_id=basins_heihe_vbasins
-model_id=basins_heihe_shud
-run_id=fcst_gfs_2026061312_basins_heihe_shud
-previous_cycle_id=gfs_2026061300
-object_store_mirror_root=${NHMS_OBJECT_STORE_COPYBACK_ROOT:-/ghdc/data/nwm/object-store}
-object_store_uri_prefix=${OBJECT_STORE_PREFIX:-s3://nhms-prod}
-
-normalize_object_key() {
-  uri="${1%/}"
-  prefix="${object_store_uri_prefix%/}"
-  if [ -n "$prefix" ] && [ "${uri#"$prefix"/}" != "$uri" ]; then
-    printf '%s\n' "${uri#"$prefix"/}"
-    return 0
-  fi
-  case "$uri" in
-    forcing/*|runs/*|states/*) printf '%s\n' "$uri" ;;
-    *)
-      printf >&2 'unexpected object-store URI/key: %s\n' "$uri"
-      return 1
-      ;;
-  esac
-}
-```
-
-`met.forcing_version` 没有 `status` 字段；这里用真实谓词判断 forcing 包是否可用：`checksum` 非空，且
-`forcing_package_uri` 可规范化为 object-store `forcing/...` key。URI 可以是相对 key（`forcing/...`），也可以是带
-`OBJECT_STORE_PREFIX` 的形式（例如 `s3://nhms-prod/forcing/...`）：
-
-```bash
-psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" \
-  -v object_store_uri_prefix="$object_store_uri_prefix" -Atc "
-select forcing_version_id, source_id, cycle_time, model_id,
-       forcing_package_uri,
-       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present,
-       (
-         forcing_package_uri like 'forcing/%'
-         or (
-           :'object_store_uri_prefix' <> ''
-           and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
-         )
-       ) as forcing_uri_in_object_store_scope
-from met.forcing_version
-where source_id = :'source_id'
-  and cycle_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-order by created_at desc
-limit 5;"
-```
-
-期望：至少一行，且同一行 `checksum_present=t`、`forcing_uri_in_object_store_scope=t`。`checksum` 为空表示 producer
-尚未 finalization，不能把它当成 ready。对象存储检查先把 URI 规范化为相对 key，再检查 package manifest：
-
-```bash
-forcing_package_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" \
-  -v object_store_uri_prefix="$object_store_uri_prefix" -c "
-select forcing_package_uri
-from met.forcing_version
-where source_id = :'source_id'
-  and cycle_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-  and nullif(trim(coalesce(checksum, '')), '') is not null
-  and (
-    forcing_package_uri like 'forcing/%'
-    or (
-      :'object_store_uri_prefix' <> ''
-      and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
-    )
-  )
-order by created_at desc
-limit 1;")
-forcing_key=$(normalize_object_key "$forcing_package_uri")
-
-test -f "$object_store_mirror_root/${forcing_key%/}/forcing_package.json" \
-  || test -f "$object_store_mirror_root/${forcing_key%/}/manifest.json"
-find "$object_store_mirror_root/${forcing_key%/}" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
-```
-
-严格 warm-start 要求当前 cycle 的精确 successor checkpoint：`hydro.state_snapshot.valid_time = cycle_time`、
-`lead_hours = 12`、同一 `source_id/model_id`、`usable_flag=true`。这行通常由上一 allowed cycle 的 run 在
-`state_save_qc` 阶段产出；不要按上一 allowed cycle 的 `valid_time` 查 checkpoint，也不要用当前待启动 `run_id` 去判断
-checkpoint producer：
-
-```bash
-psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -Atc "
-select state_id, source_id, valid_time, run_id as producer_run_id,
-       cycle_id as producer_cycle_id, lead_hours, state_uri, usable_flag,
-       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present
-from hydro.state_snapshot
-where source_id = :'source_id'
-  and valid_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-  and lead_hours = 12
-  and usable_flag is true
-order by created_at desc
-limit 5;"
-
-state_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
-select state_uri
-from hydro.state_snapshot
-where source_id = :'source_id'
-  and valid_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-  and lead_hours = 12
-  and usable_flag is true
-order by created_at desc
-limit 1;")
-state_key=$(normalize_object_key "$state_uri")
-test -f "$object_store_mirror_root/$state_key"
-find "$(dirname "$object_store_mirror_root/$state_key")" -maxdepth 1 -type f -printf '%p\n' | sort
-
-state_producer_run_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
-select run_id
-from hydro.state_snapshot
-where source_id = :'source_id'
-  and valid_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-  and lead_hours = 12
-  and usable_flag is true
-order by created_at desc
-limit 1;")
-state_producer_cycle_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
-select coalesce(cycle_id, '')
-from hydro.state_snapshot
-where source_id = :'source_id'
-  and valid_time = :'cycle_time'::timestamptz
-  and model_id = :'model_id'
-  and lead_hours = 12
-  and usable_flag is true
-order by created_at desc
-limit 1;")
-state_producer_cycle_id=${state_producer_cycle_id:-$previous_cycle_id}
-
-psql "$DATABASE_URL" -P pager=off -F $'\t' \
-  -v producer_run_id="$state_producer_run_id" \
-  -v producer_cycle_id="$state_producer_cycle_id" -Atc "
-select job_id, stage, status, slurm_job_id,
-       coalesce(error_code,''), left(coalesce(error_message,''),140)
-from ops.pipeline_job
-where stage = 'state_save_qc'
-  and (
-    (:'producer_run_id' <> '' and run_id = :'producer_run_id')
-    or (:'producer_cycle_id' <> '' and cycle_id = :'producer_cycle_id')
-  )
-order by updated_at desc
-limit 5;"
-```
-
-期望：snapshot 查询至少一行，且 `lead_hours=12`、`usable_flag=t`、`checksum_present=t`，`state_uri` 文件存在。
-`state_save_qc` job 应是 `succeeded`、`complete`、`completed` 或其他非 failed terminal 状态；如失败，先查修复
-producer run / 上一 allowed cycle 的 state 文件、QC 结果、Slurm 日志，再重跑该 cycle 的 `state_save_qc`/后续链路。
-
-调度、forcing、run 阶段不应有 failed terminal 状态：
-
-```bash
-psql "$DATABASE_URL" -P pager=off -F $'\t' -v run_id="$run_id" -v source_id="$source_id" \
-  -v cycle_key="$cycle_key" -Atc "
-select job_id, stage, job_type, status, slurm_job_id,
-       coalesce(error_code,''), left(coalesce(error_message,''),140)
-from ops.pipeline_job
-where (run_id = :'run_id' or cycle_id = lower(:'source_id') || '_' || :'cycle_key')
-  and stage in ('download','convert','forcing','forecast','parse','state_save_qc','frequency','publish')
-order by submitted_at nulls last, updated_at;"
-```
-
-对象存储 run 输出和 scheduler evidence：
-
-```bash
-test -f "$object_store_mirror_root/runs/${run_id}/input/manifest.json"
-find "$object_store_mirror_root/runs/${run_id}/output" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
-
-grep -R "\"allowed_cycle_hours_utc\"\\|\"cycle_hour_not_allowed\"\\|\"cycle_time_utc\"" \
-  /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence | tail -80
-```
-
-published 面只验展示产物：
-
-```bash
-find /ghdc/data/nwm/published/logs /ghdc/data/nwm/published/tiles \
-  -type f \( -name '*.out' -o -name '*.err' -o -name '*.json' -o -name '*.pmtiles' -o -name '*.pbf' \) \
-  -path "*${source_id}*" -print | tail -80
-
-find /ghdc/data/nwm/published -path '*/runs/*' -o -path '*/forcing/*'
-```
-
-最后一个命令期望无输出；如果 `published/forcing` 或 `published/runs` 出现完整业务包，说明发布边界配置错了。
 
 ## 6. 如何判断是否卡住
 
 先分清三种状态：
 
-- 正常运行：Slurm 有 active job，DB `ops.pipeline_job.status=running`，对应日志持续更新。
-- 等下一 pass：Slurm 队列空，scheduler evidence 在 5-6 分钟内刷新，`met.forecast_cycle` 没有新的可提交 gap。
-- 真实卡住：Slurm job 已 terminal，但 DB 仍 `running` 很久；或 scheduler evidence 超过阈值不刷新；或同一 stage 持续失败。
+- 正常运行：node-22 Slurm 有 active job，或 node-27 autopipe 正在本轮 ingest；
+  `/home/nwm/autopipe.log` 周期性刷新。
+- 等下一 cron tick：Slurm queue 空，autopipe 最近一轮 `rc=0`，DB 中没有新的
+  un-ingested runs。
+- 真实卡住：autopipe 多轮非 0、同一 run 反复 failed，public `/health` 失败，
+  或 node-22 Slurm terminal 后 shared object-store/published 不更新。
 
 推荐检查顺序：
 
 ```bash
 date '+%F %T %Z'
-squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 
-psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
-select job_id, cycle_id, job_type, status, slurm_job_id, submitted_at, started_at,
-       finished_at, updated_at, coalesce(error_code,''), left(coalesce(error_message,''),140)
-from ops.pipeline_job
-where submitted_at >= now() - interval '18 hours'
-order by submitted_at desc nulls last
-limit 80;"
+# node-27 ingest/display
+ssh -p 32099 nwm@210.77.77.27 \
+  'tail -n 120 /home/nwm/autopipe.log &&
+   curl -fsS --max-time 5 http://127.0.0.1:8080/health &&
+   curl -fksS --max-time 5 https://test.nwm.ac.cn/health'
 
-find /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence \
-  -maxdepth 1 -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort | tail -20
+# node-22 compute
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R" &&
+   pgrep -af "[s]ervices.slurm_gateway"'
 ```
 
-如果 `squeue` 为空但 DB 仍显示 `running`，查 Slurm accounting：
-
-```bash
-sacct -j <slurm_job_id> --format=JobID,JobName%24,State,ExitCode,Elapsed,Start,End -P
-```
-
-如果 Slurm 已 `COMPLETED`，等待下一次 scheduler pass 回收；如果超过一个 pass 周期仍未回收，再查 scheduler 日志和 DB 会话：
-
-```bash
-psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
-select pid, state, wait_event_type, wait_event, now()-query_start as query_age,
-       now()-xact_start as xact_age, left(query,200)
-from pg_stat_activity
-where datname='nhms'
-order by query_start nulls last;"
-```
+If public health fails but local `127.0.0.1:8080/health` succeeds, inspect nginx
+proxy target and certificates. If local health fails, restart with
+`bash scripts/ops/start-display-api.sh` from `/home/nwm/NWM` and read
+`/tmp/display-api.log`.
 
 ## 7. 当前运行口径
 
-截至 2026-06-14 中午的现场观察：
+This section is a live snapshot, not a permanent fact. Refresh it during handoff.
 
-- `2026061306` 已完成 GFS/IFS 主链路并发布到 `/ghdc/data/nwm/published`。
-- `2026061312` 已进入运行，GFS/IFS 下载和 canonical 转换完成，正在或已进入后续 forcing/forecast 阶段。
-- `2026061318` 已发现部分 source，可在上一轮完成后由后续 pass 提交。
-- scheduler evidence 持续刷新，不是完全停摆。
+2026-06-22 verification found:
 
-这段是值守快照，不是长期事实。交接时必须用第 6 节命令重新刷新。
+- node-27 `node27_autopipe` cron active every 10 minutes.
+- Recent `/home/nwm/autopipe.log` runs discovered 300 runs, ingested 4 new runs,
+  published 4, and refreshed 4 display coverage rows.
+- node-27 display API listens on `127.0.0.1:8080`; local and public `/health`
+  both returned `ok` after port alignment.
+- node-22 Slurm Gateway process is active; node-22 diagnostic API `/health` on
+  `:8001` returned `ok`.
 
 ## 8. 当前已知卡点
 
-### 8.1 `flood.run_product_quality` 缺表
+### 8.1 Display port drift
 
-现象：
+Symptom:
+
+- `http://127.0.0.1:8080/health` fails or public `https://test.nwm.ac.cn/health`
+  returns 502.
+
+Check:
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+grep -E '^NHMS_DISPLAY_API_PORT=' infra/env/display.env
+ss -ltnp 2>/dev/null | grep -E ':(8080|8000)\b'
+curl -fsS --max-time 5 http://127.0.0.1:8080/health
+curl -fksS --max-time 5 https://test.nwm.ac.cn/health
+```
+
+Fix:
+
+```bash
+cd /home/nwm/NWM
+bash scripts/ops/start-display-api.sh
+```
+
+If `display.env` disagrees with nginx, back up the env file first, align the
+port, restart through the wrapper, and verify both local and public `/health`.
+
+### 8.2 Autopipe ingest failures
+
+Symptoms:
+
+- `/home/nwm/autopipe.log` shows repeated non-zero rc.
+- JSON summary has non-empty `failed_runs`.
+- New `object-store/runs/fcst_*` directories exist but DB `hydro.hydro_run`
+  does not advance.
+
+Checks:
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+tail -n 240 /home/nwm/autopipe.log
+cd /home/nwm/NWM
+bash scripts/node27_autopipe_cron.sh
+```
+
+The wrapper uses the same env defaults, log path, and non-overlap lock as cron.
+It is idempotent; rerun manually only after reading the previous failure and
+confirming no cron run is active.
+
+### 8.3 `flood.run_product_quality` 缺表
+
+Historical symptom:
 
 ```text
 RETURN_PERIOD_FAILED
 relation "flood.run_product_quality" does not exist
 ```
 
-影响：
+Impact:
 
-- basin-level `frequency` 子任务失败。
-- `hydro.hydro_run.status` 可能停在 `parsed`，并记录 `RETURN_PERIOD_FAILED`。
-- 主链路的 `compute_frequency_array` job 可能仍为 `succeeded`，随后 `publish_tiles` 可以继续成功。
-- `q_down` 入库和 q_down 展示发布不受该缺表直接阻断。
+- basin-level `frequency` 子任务失败；
+- `hydro.hydro_run.status` may remain `parsed`;
+- q_down ingestion and display can still be usable.
 
-处理边界：
+Boundary:
 
-- 不要为了消除告警手动把 run 状态改成 `frequency_done`。
-- 正确修复是补齐 schema/migration 或调整 frequency 质量记录写入逻辑。
-- 在修复前，判断主展示是否可用以 `publish_tiles=succeeded`、`hydro.river_timeseries` 覆盖和 published logs/tiles 为准。
-
-### 8.2 `flood.return_period_result` 索引和空间回收
-
-`#490` 清理 no-curve 空行后，只是减少逻辑行数；PostgreSQL/TimescaleDB 不会因此自动把表文件、chunk 文件或索引文件空间还给文件系统。`flood.return_period_result` 的索引精简、`REINDEX`、`VACUUM FULL`、`pg_repack`、chunk rebuild 或 Timescale 压缩都必须作为单独维护窗口处理，不能放进应用启动、普通 migration、CI 或调度器 pass 自动执行。
-
-先只生成审计证据和手工 SQL：
-
-```bash
-cd /scratch/frd_muziyao/NWM
-set -a
-source infra/env/compute.host.env
-set +a
-
-uv run --no-sync python scripts/audit_return_period_indexes.py \
-  --connection-mode readonly \
-  --report-out /scratch/frd_muziyao/nhms-prod/workspace/db-maintenance/return-period-index-audit.json \
-  --manual-sql-out /scratch/frd_muziyao/nhms-prod/workspace/db-maintenance/return-period-index-maintenance.manual.sql
-```
-
-该工具必须连接 live DB；未提供 `DATABASE_URL` 时应非 0 退出且不写 report/manual SQL。`--report-out`
-和 `--manual-sql-out` 也必须是两个不同路径，即使加 `--overwrite` 也不能复用同一文件。
-
-审计报告必须包含：
-
-- `flood.return_period_result` root relation/table/index/total size。
-- root index inventory、`pg_get_indexdef`、`pg_stat_user_indexes` 使用计数。
-- live DB 模式下 root relation、index inventory、root index usage 任一失败都必须阻断并返回非 0；Timescale metadata 可降级，但报告必须明确记录 unavailable reason。
-- Timescale chunk/chunk-index size、chunk index usage，以及各 chunk section 的 total/observed/limit/truncated 元数据；不能把被截断或 unavailable 的 chunk 证据当作完整证据。
-- summary、ranking/segments、timeline、GeoJSON fallback tile、MVT selected identity、valid-time discovery、TilePublisher readiness、latest-ready-run quality behavior 的 `EXPLAIN (ANALYZE, BUFFERS)` 模板。
-- `return_period_result_null_return_period_run_idx`、`return_period_result_null_warning_level_run_idx` 等 NULL partial index 只可标为 drop/investigate 候选，不能无证据静默删除。
-
-维护窗口前后都要保存同一组证据；manual SQL 产物会内置这组 before/after 查询，包含 root table/index
-和 Timescale chunk/chunk-index/usage 证据：
-
-```sql
-select current_database() as database_name,
-       pg_size_pretty(pg_database_size(current_database())) as database_size;
-
-select pg_size_pretty(pg_relation_size('flood.return_period_result'::regclass)) as table_size,
-       pg_size_pretty(pg_indexes_size('flood.return_period_result'::regclass)) as indexes_size,
-       pg_size_pretty(pg_total_relation_size('flood.return_period_result'::regclass)) as total_size;
-
-select idx.indexrelid::regclass::text as index_name,
-       pg_size_pretty(pg_relation_size(idx.indexrelid)) as index_size,
-       pg_get_indexdef(idx.indexrelid) as indexdef
-from pg_index idx
-where idx.indrelid = 'flood.return_period_result'::regclass
-order by pg_relation_size(idx.indexrelid) desc;
-```
-
-执行边界：
-
-- 使用 writer 连接前必须有明确维护窗口和人工审批。
-- 设置短 `lock_timeout`，失败时 `ROLLBACK`，先查 `pg_locks`/`pg_stat_activity`，不要在业务高峰反复重试。
-- `DROP INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` 不能放在 transaction block 内；普通 `DROP INDEX` 可进事务但锁更重，必须逐条审查。
-- 如果热路径 `EXPLAIN` 退化，停止后续索引变更，用报告中的 `pg_get_indexdef` 或原迁移 SQL 先恢复相关索引，再复测。
-
-### 8.3 IFS `SlowDown`
-
-现象：IFS availability probe 或 download 日志中出现 AWS/ECMWF `SlowDown` / HTTP 503。
-
-影响：
-
-- 可能拖慢 source discovery 或 download。
-- 通常会 fallback 到其他 open-data source 或下一次 pass 继续。
-
-处理：
-
-- 先看是否已进入 `download_source_cycle` 和 Slurm 是否仍在跑。
-- 若只是 probe 慢，不要误判为 scheduler 停。
+- Do not manually set run status to `frequency_done` to hide the issue.
+- Judge display readiness with `hydro.river_timeseries`, published tiles/logs,
+  and display coverage, not only frequency status.
 
 ### 8.4 `/ghdc` 与计算节点边界
 
-事实：
+Facts:
 
-- node-22 能访问 `/ghdc/data/nwm/published`。
-- Slurm 计算节点不应假设能访问 `/ghdc`。
-- 计算中间态必须在 `/scratch/frd_muziyao/nhms-prod/workspace` 和 `/scratch/frd_muziyao/nhms-prod/object-store`。
+- node-22 can access `/ghdc/data/nwm/...`.
+- Slurm compute nodes should not assume `/ghdc` is their runtime workspace.
+- Compute intermediates belong under `/scratch/frd_muziyao/nhms-prod/...`;
+  completed shared artifacts appear under `/ghdc/data/nwm/...` and then
+  `/home/ghdc/nwm/...` on node-27.
 
-处理：
-
-- 如果作业因 `/ghdc` 路径不可见失败，说明运行根配置错了。
-- publish/copyback 到 `/ghdc` 应发生在控制面可见路径上，不应把 `/ghdc` 当作 sbatch runtime root。
+If a Slurm job fails because `/ghdc` is missing, runtime roots are wrong. Fix
+the compute-side workspace/object-store config rather than moving display paths
+into sbatch runtime.
 
 ### 8.5 Heihe 底图和 DB 范围混用
 
-当前 DB 注册的 Heihe 使用 `/volume/data/nwm/Basins/heihe/input/heihe/gis/*`，范围覆盖下游额济纳。
-前端静态底图脚本历史上可能读取仓库 `SHUD/input/heihe/gis/*`，范围偏上游祁连。
-
-处理：
-
-- DB/业务模型注册以 `/volume/data/nwm/Basins/...` 为准。
-- 静态底图产物需要改成同一 source-of-truth 或明确标注历史/诊断来源。
+Current DB registered Heihe data uses `/home/ghdc/nwm/Basins/...` on node-27.
+Older static basemap scripts may have used repository-local fixtures with a
+smaller extent. For live display and ingest, use the node-27 Basins source of
+truth.
 
 ### 8.6 Heihe 河段两层模型
 
-Heihe DB 河网有两层：
-
-- GIS 展示段：4759 条，`shud_output_river=false`
-- SHUD 输出段：2352 条，`shud_output_river=true`
-
-`hydro.river_timeseries.q_down` 只直接挂在 2352 条 SHUD 输出段上。GIS 段通过 `properties_json->>'iRiv'`
-映射到输出段。前端/API 若拿 4759 条 GIS 段直接查时序，会表现为“部分河段没有流量”。
+Heihe DB river network has GIS display segments and SHUD output segments.
+`hydro.river_timeseries.q_down` attaches directly to SHUD output segments.
+GIS segments map through `properties_json->>'iRiv'`. If an API/frontend query
+uses GIS segment ids directly, some segments can appear to have no flow.
 
 ## 9. 值守 SQL 片段
 
-最新 cycle：
+Run these on node-27 after sourcing `infra/env/display.env` or another
+secret-safe env file:
 
-```sql
-select cycle_id, source_id, cycle_time, status, retry_count,
-       coalesce(error_code,''), left(coalesce(error_message,''),120)
-from met.forecast_cycle
-order by cycle_time desc, source_id
-limit 20;
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+set -a
+. infra/env/display.env
+set +a
 ```
 
-最新 job：
+Latest runs:
 
 ```sql
-select job_id, cycle_id, job_type, status, slurm_job_id,
-       submitted_at, started_at, finished_at, updated_at,
-       coalesce(error_code,''), left(coalesce(error_message,''),140)
-from ops.pipeline_job
-order by submitted_at desc nulls last
-limit 80;
+select run_id, source_id, cycle_time, model_id, status,
+       coalesce(error_code,''), left(coalesce(error_message,''),120), updated_at
+from hydro.hydro_run
+order by updated_at desc nulls last
+limit 30;
 ```
 
-最新可展示 q_down 覆盖：
+Latest q_down coverage:
 
 ```sql
 select run_id, variable, count(*) as rows,
@@ -727,7 +549,7 @@ order by max(valid_time) desc
 limit 20;
 ```
 
-Heihe 河段层：
+Heihe river segment layers:
 
 ```sql
 select coalesce(properties_json->>'shud_output_river','false') as shud_output_river,
@@ -740,8 +562,13 @@ order by 1;
 
 ## 10. 相关文档
 
-- [`two-node-deployment-overview.md`](two-node-deployment-overview.md)：22/27 职责、发布面、只读展示边界。
-- [`two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)：E2E 验收证据和两节点检查项。
-- [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)：历史 bring-up 和早期踩坑；不要直接当当前状态。
-- [`node-27-bringup-checklist.md`](node-27-bringup-checklist.md)：27 只读展示侧启动检查。
-- [`production-service-config.md`](production-service-config.md)：生产配置模板。
+- [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md)：current physical
+  deployment source of truth.
+- [`two-node-deployment-overview.md`](two-node-deployment-overview.md)：role
+  contract and design-intent background; read its top banner before using it.
+- [`node-27-bringup-checklist.md`](node-27-bringup-checklist.md)：node-27
+  display bring-up and live checks.
+- [`display-readonly-live-mvt.md`](display-readonly-live-mvt.md)：display API
+  restart and live MVT evidence.
+- [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)：historical bring-up
+  and early incident notes; not current topology.
