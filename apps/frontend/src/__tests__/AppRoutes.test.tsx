@@ -13,6 +13,8 @@ import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/stores/modelAssets'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
+import { useStationLayerDataStore } from '@/stores/stationLayerData'
+import { _clearHydroMetLatestProductIdentityCache } from '@/pages/hydroMet/bootstrap'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 
@@ -984,6 +986,9 @@ beforeEach(() => {
     true,
   )
   useModelAssetsStore.setState(useModelAssetsStore.getInitialState(), true)
+  useStationLayerDataStore.setState(useStationLayerDataStore.getInitialState(), true)
+  useStationLayerDataStore.getState().clear()
+  _clearHydroMetLatestProductIdentityCache()
   vi.mocked(client.GET).mockImplementation(async (path: string) => {
     if (path === '/api/v1/runtime/config') {
       return { data: success(computeRuntimeConfig), error: undefined } as never

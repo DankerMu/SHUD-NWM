@@ -3,11 +3,11 @@ import { create } from 'zustand'
 import { getApiErrorMessage } from '@/api/response'
 import {
   HYDRO_MET_STATION_LIMIT,
+  fetchHydroMetLatestProduct,
   fetchHydroMetStations,
-  loadHydroMetBootstrap,
   type HydroMetStation,
 } from '@/pages/hydroMet/bootstrap'
-import type { HydroMetSource } from '@/lib/hydroMet/queryState'
+import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 /**
@@ -50,27 +50,28 @@ let requestNonce = 0
 let activeRequestKey: string | null = null
 
 /**
- * 严格身份分页：以选中流域 latest-product 身份（model_id/basin_version_id 派生自 product）取站点，
+ * 严格身份分页：先取轻量 latest-product identity，再以其 model_id/basin_version_id 取站点，
  * 首页拿 total_count，再 offset 翻页直到 loaded≥total 或 loaded≥STATION_CLIENT_CAP。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const bootstrap = await loadHydroMetBootstrap({
+  const product = await fetchHydroMetLatestProduct({
     source: request.resolvedSource,
     cycle: request.cycle,
     basinId: request.basinId,
-    stationLimit: STATION_PAGE_LIMIT,
   })
-  if (bootstrap.status !== 'ready' || !bootstrap.product) {
-    throw new Error(
-      bootstrap.latestReasons[0] ?? `代站 latest-product 未就绪（${bootstrap.status}）`,
-    )
+  const productCycle = normalizeHydroMetCycle(product.cycle_time)
+  if (request.cycle && productCycle && request.cycle !== productCycle) {
+    throw new Error(`代站起报 ${request.cycle} 已不可用`)
   }
-  if (bootstrap.stationError) throw new Error(bootstrap.stationError)
+  if (product.status !== 'ready' || product.availability?.ready === false) {
+    const reason = product.availability?.unavailable_reasons?.[0]
+    throw new Error(reason ? `${reason.code}: ${reason.message}` : '代站 latest-product 未就绪')
+  }
+  if (!product.model_id || !product.basin_version_id) throw new Error('代站 latest-product 身份不完整')
 
-  const product = bootstrap.product
-  const firstPage = bootstrap.stationPage
-  const total = Number.isFinite(firstPage?.total_count) ? (firstPage?.total_count as number) : bootstrap.stations.length
-  const stations: HydroMetStation[] = [...bootstrap.stations]
+  const firstPage = await fetchHydroMetStations(product, { limit: STATION_PAGE_LIMIT, offset: 0 })
+  const total = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
+  const stations: HydroMetStation[] = [...firstPage.items]
 
   // 后续页：从首页之后继续翻，直到取全或触顶 client cap。
   let offset = stations.length
