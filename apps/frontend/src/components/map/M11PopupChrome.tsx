@@ -76,14 +76,17 @@ export function M11PopupSourceControls({
   onSourceChange,
   issueTimes,
   issueTime,
+  unavailableIssueTimes = [],
   onIssueTimeChange,
 }: {
   source: HydroMetSource
   onSourceChange: (source: HydroMetSource) => void
   issueTimes: string[]
   issueTime: string | null
+  unavailableIssueTimes?: string[]
   onIssueTimeChange?: (issueTime: string) => void
 }) {
+  const unavailableSet = new Set(unavailableIssueTimes)
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
       <div className="inline-flex items-center rounded-lg bg-white/5 p-0.5 ring-1 ring-inset ring-white/10" role="group" aria-label="预报源选择">
@@ -116,11 +119,14 @@ export function M11PopupSourceControls({
             onChange={(event) => onIssueTimeChange?.(event.target.value)}
             disabled={!onIssueTimeChange}
           >
-            {issueTimes.map((time) => (
-              <option key={time} value={time}>
-                {formatIssueTime(time)}
-              </option>
-            ))}
+            {issueTimes.map((time) => {
+              const unavailable = unavailableSet.has(time)
+              return (
+                <option key={time} value={time} disabled={unavailable} data-retention-unavailable={unavailable || undefined}>
+                  {formatIssueTime(time)}{unavailable ? ' · 磁盘保留不可用' : ''}
+                </option>
+              )
+            })}
           </select>
         ) : (
           <span className="text-slate-500" data-testid="m11-popup-issue-time-empty">

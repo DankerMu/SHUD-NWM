@@ -118,6 +118,19 @@ function mockSeries(body: Record<string, unknown>) {
   vi.mocked(client.GET).mockResolvedValue({ data: success(body), error: undefined } as never)
 }
 
+function stationSeriesDiskMiss() {
+  return {
+    error: {
+      code: 'STATION_FORCING_FILE_NOT_FOUND',
+      message: 'Station forcing file not found.',
+      details: {
+        station_id: station.station_id,
+        expected_path: 'forcing/gfs/2026052000/basins_qhh_v1/m-1/shud/qhh_forc_001.csv',
+      },
+    },
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product())
@@ -186,6 +199,44 @@ describe('M11StationForcingPopup', () => {
     await waitFor(() =>
       expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
     )
+  })
+
+  it('marks retained-out issue times unavailable after station-series disk 404 and lets users choose another cycle', async () => {
+    const user = userEvent.setup()
+    const latestCycle = '2026-05-21T00:00:00Z'
+    const retainedOutCycle = '2026-05-20T00:00:00Z'
+    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) =>
+      product({
+        cycle_time: request.cycle ?? latestCycle,
+        forcing_version_id: request.cycle === retainedOutCycle ? 'forc-old' : 'forc-latest',
+        available_issue_times: [latestCycle, retainedOutCycle],
+      }),
+    )
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({ data: success(seriesResponse({ cycle_time: latestCycle, forcing_version_id: 'forc-latest' })), error: undefined } as never)
+      .mockResolvedValueOnce({ data: undefined, error: stationSeriesDiskMiss() } as never)
+      .mockResolvedValueOnce({ data: success(seriesResponse({ cycle_time: latestCycle, forcing_version_id: 'forc-latest' })), error: undefined } as never)
+
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+    await screen.findByTestId('m11-station-popup-loaded')
+
+    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), retainedOutCycle)
+    expect(await screen.findByTestId('m11-station-popup-retention-missing')).toHaveTextContent('磁盘保留窗口')
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
+
+    const unavailableOption = screen.getByRole('option', { name: /05-20 00:00 UTC · 磁盘保留不可用/ }) as HTMLOptionElement
+    expect(unavailableOption.disabled).toBe(true)
+
+    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), latestCycle)
+    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
+    expect(client.GET).toHaveBeenLastCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
+      params: expect.objectContaining({
+        query: expect.objectContaining({
+          cycle_time: latestCycle,
+          forcing_version_id: 'forc-latest',
+        }),
+      }),
+    }))
   })
 
   it('shows identity-mismatch empty state and draws no curve when station_id mismatches', async () => {
