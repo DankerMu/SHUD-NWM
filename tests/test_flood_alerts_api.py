@@ -2925,6 +2925,59 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
     assert tile.cache_status == "bypass"
 
 
+def test_live_mvt_file_cache_fallback_hits_when_db_cache_is_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def first(self) -> None:
+            raise RuntimeError("not used")
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> FakeRowResult:
+            raise SQLAlchemyError("cache unavailable")
+
+        def rollback(self) -> None:
+            return None
+
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
+    tile_input = flood_alert_routes.TileInput(
+        layer_id="discharge",
+        source_id="hydro-national",
+        source_version="hydro-national-latest-per-basin",
+        valid_time=_iso(VALID_TIME_1),
+        z=10,
+        x=795,
+        y=399,
+        variant_id="variable:q_down",
+    )
+
+    first = flood_alert_routes.build_raw_tile_response(
+        FakeSession(),  # type: ignore[arg-type]
+        tile_input,
+        b"live-national-pbf",
+    )
+    second = flood_alert_routes.read_cached_tile_response(
+        FakeSession(),  # type: ignore[arg-type]
+        tile_input,
+    )
+
+    assert first.cache_status == "miss"
+    assert second is not None
+    assert second.cache_status == "hit"
+    assert second.data == b"live-national-pbf"
+    assert list(tmp_path.rglob("*.pbf"))
+
+
 def test_tile_domain_error_maps_to_public_api_error_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_raw_tile_build(*_args: Any, **_kwargs: Any) -> object:
         raise flood_alert_routes.TileError(
@@ -4594,6 +4647,20 @@ def test_hydro_national_tile_sql_generalizes_trunk_by_zoom() -> None:
     assert ":run_id" not in source_cte
     assert ":basin_version_id" not in source_cte
     assert ":river_network_version_id" not in source_cte
+
+
+def test_hydro_national_tile_sql_prefilters_source_rows_by_tile_bounds() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("hydro-national")
+    sql = re.sub(r"\s+", " ", statement)
+    source_cte = sql[sql.index("source_rows AS") : sql.index("source_identity_stats AS")]
+    identity_cte = sql[sql.index("source_identity_stats AS") : sql.index("bounded_rows AS")]
+
+    assert "CROSS JOIN bounds" in source_cte
+    assert "rs.geom IS NOT NULL" in source_cte
+    assert "rs.geom && ST_Transform(bounds.geom_3857, 4490)" in source_cte
+    assert source_cte.index("rs.geom && ST_Transform(bounds.geom_3857, 4490)") < source_cte.index(") ranked")
+    assert "FROM hydro.river_timeseries ts" in identity_cte
+    assert "EXISTS ( SELECT 1 FROM source_rows )" not in identity_cte
 
 
 def test_single_run_hydro_tile_sql_has_no_zoom_trunk_filter() -> None:

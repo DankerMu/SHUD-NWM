@@ -74,6 +74,20 @@ if [[ ! -d "$OBJECT_STORE_ROOT" || ! -r "$OBJECT_STORE_ROOT" || ! -x "$OBJECT_ST
     exit 3
 fi
 
+if [[ -z "${NHMS_MVT_FILE_CACHE_DIR:-}" ]]; then
+    export NHMS_MVT_FILE_CACHE_DIR="${HOME:-/tmp}/.cache/nhms/mvt"
+fi
+if ! mkdir -p "$NHMS_MVT_FILE_CACHE_DIR"; then
+    echo "ERROR: NHMS_MVT_FILE_CACHE_DIR could not be created: $NHMS_MVT_FILE_CACHE_DIR" >&2
+    echo "       fix display.env or filesystem permissions before restarting; existing uvicorn was not stopped." >&2
+    exit 3
+fi
+if [[ ! -d "$NHMS_MVT_FILE_CACHE_DIR" || ! -w "$NHMS_MVT_FILE_CACHE_DIR" || ! -x "$NHMS_MVT_FILE_CACHE_DIR" ]]; then
+    echo "ERROR: NHMS_MVT_FILE_CACHE_DIR must be an existing writable and traversable directory: $NHMS_MVT_FILE_CACHE_DIR" >&2
+    echo "       fix display.env or filesystem permissions before restarting; existing uvicorn was not stopped." >&2
+    exit 3
+fi
+
 # -- redacted launch preamble ---------------------------------------------------
 db_redact=$(printf '%s' "$DATABASE_URL" | sed -E 's#(://)[^@/]+#\1<redacted>#; s#@([^/]+/[^?]*).*$#@\1#')
 echo "[start-display-api] repo_root=$REPO_ROOT"
@@ -81,6 +95,7 @@ echo "[start-display-api] env_file=$ENV_FILE"
 echo "[start-display-api] DATABASE_URL=$db_redact"
 echo "[start-display-api] NHMS_ENABLE_LIVE_POSTGIS_MVT=${NHMS_ENABLE_LIVE_POSTGIS_MVT}"
 echo "[start-display-api] OBJECT_STORE_ROOT=$OBJECT_STORE_ROOT"
+echo "[start-display-api] NHMS_MVT_FILE_CACHE_DIR=$NHMS_MVT_FILE_CACHE_DIR"
 echo "[start-display-api] target=$UVICORN_HOST:$UVICORN_PORT  log=$LOG_PATH"
 
 # -- gracefully replace prior uvicorn -------------------------------------------

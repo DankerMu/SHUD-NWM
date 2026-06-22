@@ -132,6 +132,7 @@ wrapper 会：
 
 - source `infra/env/display.env`；
 - 校验 `DATABASE_URL`、`NHMS_ENABLE_LIVE_POSTGIS_MVT`、`OBJECT_STORE_ROOT`；
+- 创建并校验 `NHMS_MVT_FILE_CACHE_DIR`，未设置时默认 `$HOME/.cache/nhms/mvt`；
 - 停掉旧的 `apps.api.main:app` uvicorn；
 - 在 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}` 重新启动；
 - 跑 `/health` 与 `/api/v1/models?limit=1` basin_id smoke check。

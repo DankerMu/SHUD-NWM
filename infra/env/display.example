@@ -18,6 +18,7 @@ NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 # Enable readonly live PostGIS MVT overlays. This does not grant write/control
 # capability; keep DATABASE_URL on a readonly role and keep control mutations off.
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true
+NHMS_MVT_FILE_CACHE_DIR=/tmp/nhms-mvt-cache
 
 # Use a real readonly database role. The username here is intentionally ro-suffixed.
 DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhms

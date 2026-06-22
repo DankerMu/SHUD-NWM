@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy import text
@@ -26,6 +28,7 @@ MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
+MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
 DEFAULT_FLOOD_RETURN_PERIOD_DURATION = "1h"
@@ -181,6 +184,8 @@ def build_tile_response(
     _enforce_feature_budget(features)
     key = cache_key(tile)
     cached = _safe_read_cache(session, tile, key)
+    if cached is None:
+        cached = _safe_read_file_cache(key)
     if cached is not None:
         data, checksum, etag = cached
         return TileResponse(
@@ -202,7 +207,12 @@ def build_tile_response(
         )
     checksum = hashlib.sha256(data).hexdigest()
     etag = stable_etag(data)
-    cache_status = "miss" if _safe_write_cache(session, tile, key, data, checksum, etag) else "bypass"
+    cache_status = (
+        "miss"
+        if _safe_write_cache(session, tile, key, data, checksum, etag)
+        or _safe_write_file_cache(key, data)
+        else "bypass"
+    )
     return TileResponse(
         data=data,
         checksum=checksum,
@@ -225,6 +235,8 @@ def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> T
 
     key = cache_key(tile)
     cached = _safe_read_cache(session, tile, key)
+    if cached is None:
+        cached = _safe_read_file_cache(key)
     if cached is not None:
         cached_data, checksum, etag = cached
         return TileResponse(
@@ -238,7 +250,12 @@ def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> T
 
     checksum = hashlib.sha256(data).hexdigest()
     etag = stable_etag(data)
-    cache_status = "miss" if _safe_write_cache(session, tile, key, data, checksum, etag) else "bypass"
+    cache_status = (
+        "miss"
+        if _safe_write_cache(session, tile, key, data, checksum, etag)
+        or _safe_write_file_cache(key, data)
+        else "bypass"
+    )
     return TileResponse(
         data=data,
         checksum=checksum,
@@ -253,6 +270,8 @@ def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse
     validate_xyz(tile.z, tile.x, tile.y)
     key = cache_key(tile)
     cached = _safe_read_cache(session, tile, key)
+    if cached is None:
+        cached = _safe_read_file_cache(key)
     if cached is None:
         return None
     data, checksum, etag = cached
@@ -310,6 +329,9 @@ def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, exte
 
 def postgis_tile_sql(layer: str) -> str:
     layer_name = _source_layer_id(layer)
+    source_identity_stats_sql = (
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_identity_count"
+    )
     if layer == "river-network":
         required_property_checks = {
             "feature_id": "feature_id IS NULL OR feature_id::text = ''",
@@ -413,6 +435,29 @@ def postgis_tile_sql(layer: str) -> str:
         # decreases with zoom. Topology is preserved. z>=9 keeps the raw geom and relies on
         # the shared pixel-based simplify in the template.
         #   z<=4 -> 2000m, z=5 -> 1000m, z=6 -> 500m, z=7 -> 200m, z=8 -> 80m, z>=9 -> 0.
+        #
+        # Spatial filtering is deliberately pushed into the source CTE for this national
+        # layer. Otherwise each z/x/y request ranks every nationwide river_timeseries row
+        # for the selected valid_time before clipping a tiny tile, which turns cache misses
+        # into multi-second gateway risks.
+        source_identity_stats_sql = """
+            SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM hydro.river_timeseries ts
+                JOIN (
+                    SELECT DISTINCT ON (mi.river_network_version_id)
+                           h.run_id, mi.river_network_version_id
+                    FROM hydro.hydro_run h
+                    JOIN core.model_instance mi ON mi.model_id = h.model_id
+                    WHERE h.status IN ('frequency_done', 'published')
+                      AND mi.river_network_version_id IS NOT NULL
+                    ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
+                ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
+                WHERE ts.variable = :variable
+                  AND ts.valid_time = :valid_time
+                LIMIT 1
+            ) THEN 1 ELSE 0 END AS source_identity_count
+        """
         source_cte = """
             SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
                    basin_version_id, basin_id, value, unit, quality_flag, run_id, variable,
@@ -465,10 +510,13 @@ def postgis_tile_sql(layer: str) -> str:
                 JOIN core.river_segment rs
                   ON rs.river_segment_id = ts.river_segment_id
                  AND rs.river_network_version_id = ts.river_network_version_id
+                CROSS JOIN bounds
                 LEFT JOIN core.basin_version bv
                   ON bv.basin_version_id = ts.basin_version_id
                 WHERE ts.variable = :variable
                   AND ts.valid_time = :valid_time
+                  AND rs.geom IS NOT NULL
+                  AND rs.geom && ST_Transform(bounds.geom_3857, 4490)
             ) ranked
             WHERE :z >= 9
                OR (
@@ -560,7 +608,7 @@ def postgis_tile_sql(layer: str) -> str:
             {source_cte}
         ),
         source_identity_stats AS (
-            SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_identity_count
+            {source_identity_stats_sql}
         ),
         bounded_rows AS (
             SELECT source_rows.*,
@@ -1350,6 +1398,33 @@ def _safe_read_cache(
         return None
 
 
+def _file_cache_path(key: str) -> Path | None:
+    root = os.getenv(MVT_FILE_CACHE_DIR_ENV, "").strip()
+    if not root:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", key):
+        return None
+    return Path(root).expanduser() / key[:2] / f"{key}.pbf"
+
+
+def _read_file_cache(key: str) -> tuple[bytes, str, str] | None:
+    path = _file_cache_path(key)
+    if path is None or not path.is_file():
+        return None
+    data = path.read_bytes()
+    if len(data) > MVT_MAX_BYTES:
+        return None
+    checksum = hashlib.sha256(data).hexdigest()
+    return data, checksum, stable_etag(data)
+
+
+def _safe_read_file_cache(key: str) -> tuple[bytes, str, str] | None:
+    try:
+        return _read_file_cache(key)
+    except OSError:
+        return None
+
+
 def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
     if not _table_exists(session, "tile_cache", "map"):
         return False
@@ -1521,6 +1596,32 @@ def _safe_write_cache(session: Session, tile: TileInput, key: str, data: bytes, 
             session.rollback()
         except SQLAlchemyError:
             pass
+        return False
+
+
+def _write_file_cache(key: str, data: bytes) -> bool:
+    path = _file_cache_path(key)
+    if path is None:
+        return False
+    if len(data) > MVT_MAX_BYTES:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+    return True
+
+
+def _safe_write_file_cache(key: str, data: bytes) -> bool:
+    try:
+        return _write_file_cache(key, data)
+    except OSError:
         return False
 
 
