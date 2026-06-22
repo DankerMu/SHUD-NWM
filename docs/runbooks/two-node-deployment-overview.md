@@ -11,8 +11,8 @@
 > 当前 (2026-06-22) **物理部署已偏离**：
 > - **node-22 是纯计算 / Slurm / SHUD / artifact producer**，不连任何活 DB
 >   （本机 PG `:55433` 是 historical、do-not-connect、pending removal）
-> - **node-27 一台机器同时跑** active primary PG (`:55432`) + data-plane ingest
->   + display API (`:8080`) + 前端
+> - **node-27 一台机器同时跑** active primary PG (`:55432`)、data-plane ingest、
+>   display API (`:8080`) 和前端
 > - 公网入口 `https://test.nwm.ac.cn` 由 27 反代对外
 > - node-27 是 live DB/display/frontend oracle；node-22 只在改 sbatch、Slurm
 >   gateway、SHUD runtime 或调度行为时作为 Slurm scheduling oracle；本地 lint/unit/

@@ -40,7 +40,7 @@
 - **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live receipt 闭合 #343；`NHMS_ENABLE_LIVE_POSTGIS_MVT=true`
   后 `/api/v1/layers` 返回 live layers，`hydro-national/q_down` tile 200。原 river-network 424 / hydro 409 根因是
   display readonly 未启用 live PostGIS MVT 和图层未注册。
-- **解耦平行 issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-22 oracle）仍 open；**#389** 承接 bbox/framing/点击自动化/popup live click 浏览器证据缺口；二者均独立于 #351/#343 的 live MVT closure。
+- **解耦平行 issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-27/display API oracle，除非改 Slurm/SHUD 调度）仍 open；**#389** 承接 bbox/framing/点击自动化/popup live click 浏览器证据缺口；二者均独立于 #351/#343 的 live MVT closure。
 
 ## 拓扑回顾
 
@@ -132,14 +132,14 @@ pending removal；当前 active DB 和 display/frontend oracle 都在 node-27。
 #### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
 
 > 三类证据严格分离，不得互相冒充：**live MVT closure**（#351→#343，已闭合）/ **station-MVT 端点**
-> （#342，node-22 oracle，open）/ **bbox·framing·popup live click 浏览器自动化**（#389，本节）。
+> （#342，node-27/display API oracle，open；不含 Slurm/SHUD 调度）/ **bbox·framing·popup live click 浏览器自动化**（#389，本节）。
 
 要让 #389 可靠自动化 river/station popup 的 live 点击，需先补齐以下**可被自动化消费的**证据，缺一则
 popup live click 只能人工截图、无法纳入 C4 自动 receipt：
 
 - [ ] **basin/河网 framing bbox**：`/api/v1/basins`（及河段/代站列表响应）当前**不返回 geo bbox**，
   浏览器无法据此 `map.fitBounds` 自动定位到要素再点击。定义所需：列表/详情响应附带要素 bbox（或
-  提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-22/display API 侧**，
+  提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-27/display API 侧**，
   与 #342 station-MVT 协同，非本前端 issue 单独可闭合。
 - [ ] **WebGL 要素命中坐标**：MapLibre WebGL canvas 内要素无 DOM 句柄，CLI/Playwright 难以稳定命中
   点击。定义所需：暴露确定性「测试钩子」（如按 id 触发 popup 的 `window.__m11SelectFeature(id)` 调试入口，

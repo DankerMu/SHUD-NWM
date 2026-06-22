@@ -24,9 +24,10 @@ display env belongs to the read-only display runtime.
 
 - Make object-store artifacts the canonical handoff between node-22 compute and
   node-27 data-plane ingest for forcing-domain data.
-- Keep the transitional node-22 mirror safe until the object-store importer is
-  complete: explicit DSN only, no display-env fallback, structured skip/fail
-  reasons, and no silent use of the historical node-22 DB.
+- Keep the compatibility-only, sunset-bound transitional node-22 mirror safe
+  until the object-store importer is complete: explicit DSN only, no display-env
+  fallback, structured skip/fail reasons, and no silent use of the historical
+  node-22 DB.
 - Give node-27 ingest its own operational contract: env, wrapper preflight before
   seed/import/activate/backfill/register/mirror/parse/coverage/publish writes,
   role label, logging/evidence, and tests.
@@ -52,11 +53,12 @@ display env belongs to the read-only display runtime.
    do-not-connect production state and must have a removal/sunset path rather
    than becoming a permanent compatibility dependency.
 
-2. **The node-22 DB mirror remains transitional and explicit only.** Until the
-   importer covers every live forcing package, mirror mode may remain as a
-   controlled fallback. It must require `--node22-url` or `N22_DSN`, must never
-   read `infra/env/display.env`, and must emit a stable unavailable reason when
-   no explicit mirror DSN is configured.
+2. **The node-22 DB mirror remains transitional, compatibility-only, explicit,
+   and sunset-bound.** Until the importer covers every live forcing package,
+   mirror mode may remain as a controlled fallback. It must require
+   `--node22-url` or `N22_DSN`, must never read `infra/env/display.env`, must
+   emit a stable unavailable reason when no explicit mirror DSN is configured,
+   and must retain removal/sunset wording.
 
 3. **Node-27 ingest is a data-plane writer role, not display_readonly.** The
    cron wrapper and scripts should advertise a distinct ingest role and preflight
@@ -548,7 +550,7 @@ Mandatory expanded triggers:
 - `scripts/node27_autopipeline.py` production control-flow change for per-run
   ingest policy.
 - Fallback policy between canonical object-store forcing-domain handoff and
-  transitional node-22 mirror compatibility mode.
+  explicit, sunset-bound transitional node-22 mirror compatibility mode.
 - Subprocess orchestration and JSON summary stability across register,
   forcing-handoff/mirror, parse, and coverage stages. Publish-status remains the
   existing global post-run phase in #645.

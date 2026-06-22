@@ -95,8 +95,8 @@ evidence.
 
 ### Requirement: Transitional node-22 mirror is explicit and audited
 
-The system SHALL keep any transitional node-22 forcing mirror path explicit,
-audited, and limited to operator-controlled compatibility runs.
+The system SHALL keep any transitional node-22 forcing mirror path explicit-DSN,
+audited, sunset-bound, and limited to operator-controlled compatibility runs.
 
 #### Scenario: Mirror does not read display runtime configuration
 
