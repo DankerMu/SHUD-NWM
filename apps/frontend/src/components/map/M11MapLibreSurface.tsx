@@ -908,7 +908,7 @@ function M11BasinLabelMarkers({ collection }: { collection: BasinFeatureCollecti
         const anchor = multiPolygonAnchor(feature.geometry)
         if (!anchor) return null
         return (
-          <Marker key={feature.properties.basin_id} longitude={anchor[0]} latitude={anchor[1]} anchor="center">
+          <Marker key={feature.properties.basin_id} longitude={anchor[0]} latitude={anchor[1]} anchor="center" style={{ pointerEvents: 'none' }}>
             <span
               className="pointer-events-none select-none rounded-full border border-white/60 bg-white/80 px-2.5 py-0.5 text-xs font-semibold text-primary-700 shadow-sm backdrop-blur-sm"
               data-testid="m11-basin-label"
