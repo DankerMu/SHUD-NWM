@@ -23,10 +23,15 @@
 ## 2. Node-27 Ingest Boundary
 
 - [ ] 2.1 Add a committed node-27 ingest env template or wrapper contract and wire the actual cron/on-demand entry (`scripts/node27_autopipe_cron.sh`) to source or validate ingest-specific writer configuration instead of deriving it from `infra/env/display.env`.
+  Evidence floor: committed ingest template/contract is separate from display env, wrapper sources that contract or requires an explicit ambient override, wrapper exports data-plane ingest role/config-source evidence, wrapper contains no writer `DATABASE_URL` default and no `display.env` source path, and static/focused tests prove missing ingest env blocks before invoking Python or coverage backstop.
 - [ ] 2.2 Add preflight checks for writer `DATABASE_URL`, `OBJECT_STORE_ROOT`, `BASINS_ROOT`, work/log roots, and secret redaction before `node27_autopipeline.py` starts seed/import/activate/backfill/register/mirror/parse/coverage/publish work.
+  Evidence floor: focused autopipeline tests prove missing/unsafe DB URL, display-readonly role leakage, readonly/display-looking DB identity, missing object-store/Basins/work/log roots, and credential-bearing errors return rc=2 structured JSON with stable blocker codes before `_basin_seeded`, `_already_ingested_runs`, `_seed_basin`, `_process_run`, or `_publish_display_runs` are called; wrapper tests prove a preflight-blocked rc=2 exits without running coverage backstop/post-hooks.
 - [ ] 2.3 Add role/evidence fields to node-27 ingest summaries so operators can distinguish data-plane ingest health from display API health.
+  Evidence floor: success and failure summaries contain data-plane ingest role, stage shape, config source, object-store root, Basins root, work/log roots, DB host/port/database without secrets, discovered/processed/skipped counts, final return code, and an explicit statement that display API health is separate.
 - [ ] 2.4 Add tests covering preflight-before-seed, missing env, basin seed failure isolation, one-run failure isolation, already-ingested skip behavior, and credential-safe logs.
+  Evidence floor: focused tests cover preflight-before-seed no-op, wrapper/env missing block with no Python/backstop execution, basin seed failure isolation with unrelated basin continuation, one-run failure isolation after valid preflight, already-ingested skip without per-run work, and serialized stdout/stderr/log evidence that contains no DB password/token strings; blocker assertions include missing `DATABASE_URL`, malformed/unsafe DB URL, display-readonly role leakage, readonly/display-looking DB identity, missing object-store root, missing Basins root, unsafe work root, and unsafe log root.
 - [ ] 2.5 Capture a node-27 live receipt showing ingest writer checks and display API `display_readonly` checks remain separate.
+  Evidence floor: node-27 receipt records git SHA, command(s), redacted ingest preflight output from the actual wrapper or on-demand entry, display API `/health` or runtime evidence showing `display_readonly`, DB identity separation without secrets, and artifact/log paths under node-27 local evidence storage.
 
 ## 3. Production Topology Contract
 
