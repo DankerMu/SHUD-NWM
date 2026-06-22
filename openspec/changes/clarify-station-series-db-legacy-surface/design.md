@@ -9,17 +9,17 @@ CSV files are absent.
 
 `PsycopgForecastStore.station_series()` remains in `packages/common` with
 thorough unit coverage of the historical DB-backed response contract. Deleting
-it now would erase useful design/test material for #631, but leaving it
-unlabeled creates entropy: future changes could reintroduce DB fallback to the
-hot display route by accident.
+it now would erase useful design/test material for the ADR 0001 archive/history
+boundary, but leaving it unlabeled creates entropy: future changes could
+reintroduce DB fallback to the hot display route by accident.
 
 ## Decision
 
 Keep `PsycopgForecastStore.station_series()` as a legacy/internal DB helper.
 It is not an active public display-route implementation and must not be called
 by production route/service code. Tests may continue to exercise it to preserve
-the historical DB contract until #631 decides whether a separate long-term
-archive endpoint or mode is needed.
+the historical DB contract. Any long-term archive endpoint or mode must follow
+ADR 0001 and land through a future explicit API change.
 
 ## Non-Goals
 

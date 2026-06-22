@@ -4,8 +4,8 @@ The public station-series route now reads retained SHUD forcing CSVs directly
 from the object-store disk layout. The old DB-backed
 `PsycopgForecastStore.station_series()` helper still exists and still has unit
 coverage, but its role is ambiguous: production callers should not silently
-fall back to it, while long-term historical access remains a future design
-question tracked by #631.
+fall back to it. Long-term historical access is governed by ADR 0001 and needs
+a future explicit archive/history API change before it becomes product behavior.
 
 ## What Changes
 

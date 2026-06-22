@@ -1029,7 +1029,11 @@ class PsycopgForecastStore:
 
         The public display route now reads retained object-store CSV files via
         `read_station_forcing_csv`. Keep this helper only for historical DB
-        contract tests and future #631 archival API design work.
+        contract tests and ADR 0001 archive/history design material
+        (`docs/adr/0001-station-forcing-history-api-boundary.md`). Product
+        behavior for archive/history data must land through a future explicit
+        archive/history API surface or explicit opt-in mode, not current-route
+        fallback.
         """
         station_id = _required_text(station_id, "station_id")
         requested_variables = _station_variable_tokens(variables)

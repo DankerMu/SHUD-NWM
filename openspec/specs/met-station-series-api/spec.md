@@ -6,7 +6,8 @@ for the current station forcing time-series route. The active route is aligned
 with `object-store-station-series-read`: it serves retained SHUD forcing CSV
 values from `OBJECT_STORE_ROOT`, while using `met.met_station` only for station
 metadata. DB archival/history semantics through `met.forcing_station_timeseries`
-are future work tracked by #631.
+are governed by `docs/adr/0001-station-forcing-history-api-boundary.md` and
+require a future explicit archive/history API change.
 
 ## Requirements
 ### Requirement: Station forcing series route
@@ -78,6 +79,6 @@ helpers, FastAPI routes, OpenAPI, frontend generated types, and tests.
 - **AND** series values come from the retained disk CSV, not from `met.forcing_station_timeseries`.
 
 #### Scenario: Current disk route defers DB archival/history behavior
-- **WHEN** long-term historical station-series access or `met.forcing_station_timeseries` cleanup is evaluated
-- **THEN** that work is tracked outside the current route contract by #631
+- **WHEN** long-term historical station-series access or `met.forcing_station_timeseries` cleanup is implemented
+- **THEN** that work SHALL follow `docs/adr/0001-station-forcing-history-api-boundary.md`
 - **AND** this spec SHALL remain aligned with `object-store-station-series-read` until DB-backed history is explicitly reintroduced by a future change.
