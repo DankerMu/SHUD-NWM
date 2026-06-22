@@ -486,7 +486,7 @@ def _read_csv_lines(
             file_size = os.fstat(file_fd).st_size
             if file_size > MAX_STATION_FORCING_CSV_BYTES:
                 raise ValueError(f"file exceeds {MAX_STATION_FORCING_CSV_BYTES} bytes")
-            reader = _BoundedCsvLineReader(file_fd)
+            reader = _ChunkedBoundedCsvLineReader(file_fd)
             raw_header = reader.readline("header row")
             if raw_header is None:
                 raise ValueError("file is empty")
@@ -588,7 +588,7 @@ def _parse_station_csv(
 
 
 @dataclass
-class _BoundedCsvLineReader:
+class _ChunkedBoundedCsvLineReader:
     file_fd: int
     bytes_read: int = 0
     buffer: bytearray = field(default_factory=bytearray)
