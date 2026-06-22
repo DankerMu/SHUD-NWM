@@ -61,6 +61,7 @@ const flyToCalls: Array<unknown> = []
 const clusterExpansionCalls: Array<unknown> = []
 // 代站 cluster 展开 stub：模拟 source.getClusterExpansionZoom(clusterId, cb) 异步回调。
 const clusterExpansionZoom = { value: 9 as number, error: null as unknown }
+const clusterExpansionMode = { value: 'callback' as 'callback' | 'promise' }
 
 vi.mock('react-map-gl/maplibre', () => ({
   default: forwardRef(
@@ -115,10 +116,20 @@ vi.mock('react-map-gl/maplibre', () => ({
       const map = {
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
         flyTo: (args: unknown) => flyToCalls.push(args),
+        queryRenderedFeatures: (point: { x: number; y: number }, options?: { layers?: string[] }) => {
+          const queriedLayers = options?.layers ?? []
+          if (point.x === 0 && queriedLayers.includes('clusters')) return [clusterFeature]
+          if (point.x === 6 && queriedLayers.includes('met-stations-point')) return [stationPointFeature]
+          return []
+        },
         getSource: (id: string) => ({
-          getClusterExpansionZoom: (clusterId: number, callback: (error: unknown, zoom: number) => void) => {
+          getClusterExpansionZoom: (clusterId: number, callback?: (error: unknown, zoom: number) => void) => {
             clusterExpansionCalls.push({ id, clusterId })
-            callback(clusterExpansionZoom.error, clusterExpansionZoom.value)
+            if (clusterExpansionMode.value === 'callback' && callback) {
+              callback(clusterExpansionZoom.error, clusterExpansionZoom.value)
+              return undefined
+            }
+            return Promise.resolve(clusterExpansionZoom.value)
           },
         }),
       }
@@ -555,6 +566,7 @@ describe('M11 visual foundation shell', () => {
     clusterExpansionCalls.length = 0
     clusterExpansionZoom.value = 9
     clusterExpansionZoom.error = null
+    clusterExpansionMode.value = 'callback'
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] })),
@@ -1977,6 +1989,18 @@ describe('M11 visual foundation shell', () => {
 
       fireEvent.drag(screen.getByTestId('mock-maplibre-map'))
       expect(clusterExpansionCalls).toEqual([{ id: 'm11-met-stations-source', clusterId: 7 }])
+      expect(flyToCalls).toEqual([{ center: [101.5, 30.5], zoom: 9, duration: 450 }])
+    })
+
+    it('expands a rendered cluster when the click event omits interactive features', async () => {
+      clusterExpansionMode.value = 'promise'
+      render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
+
+      fireEvent.click(screen.getByTestId('mock-maplibre-map'))
+
+      await waitFor(() => {
+        expect(clusterExpansionCalls).toEqual([{ id: 'm11-met-stations-source', clusterId: 7 }])
+      })
       expect(flyToCalls).toEqual([{ center: [101.5, 30.5], zoom: 9, duration: 450 }])
     })
 

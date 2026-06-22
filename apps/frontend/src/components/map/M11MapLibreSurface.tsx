@@ -331,7 +331,8 @@ export function M11MapLibreSurface({
       // 代站点 / cluster hover：cursor=pointer（#339 遗留 minor），但不触发 overlay hover 高亮。
       if (showStationLayer) {
         const stationFeature =
-          findEventFeature(event, MET_STATION_POINT_LAYER_ID) ?? findEventFeature(event, MET_STATION_CLUSTER_LAYER_ID)
+          findRenderedFeature(event, mapRef.current, MET_STATION_POINT_LAYER_ID) ??
+          findRenderedFeature(event, mapRef.current, MET_STATION_CLUSTER_LAYER_ID)
         if (stationFeature) {
           setHoveredRiverSegmentId(null)
           onOverlayHover?.(null)
@@ -377,14 +378,15 @@ export function M11MapLibreSurface({
         return
       }
       if (showStationLayer) {
-        // 点 cluster：用 source 运行时 API 取展开 zoom 后 flyTo（测试以 stub 验证调用）。
-        const clusterFeature = findEventFeature(event, MET_STATION_CLUSTER_LAYER_ID)
+        // 点 cluster：用 source 运行时 API 取展开 zoom 后 flyTo。
+        // 真实 MapLibre 可能不给 onClick event.features 填 cluster，因此用 queryRenderedFeatures 兜底命中。
+        const clusterFeature = findRenderedFeature(event, mapRef.current, MET_STATION_CLUSTER_LAYER_ID)
         if (clusterFeature) {
           expandStationCluster(mapRef.current, clusterFeature)
           return
         }
         // 点单个代站：经 onOverlayClick 以 met-stations 分发，feature 带 station_id（为 #340 popup 预留）。
-        const stationFeature = findEventFeature(event, MET_STATION_POINT_LAYER_ID)
+        const stationFeature = findRenderedFeature(event, mapRef.current, MET_STATION_POINT_LAYER_ID)
         if (stationFeature) {
           onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
           return
@@ -1140,7 +1142,10 @@ function M11StationClusterPrimitive({ collection }: { collection: M11StationFeat
 }
 
 type StationClusterSource = {
-  getClusterExpansionZoom?: (clusterId: number, callback: (error: unknown, zoom: number) => void) => void
+  getClusterExpansionZoom?: (
+    clusterId: number,
+    callback?: (error: unknown, zoom: number) => void,
+  ) => Promise<number> | void
 }
 
 function expandStationCluster(
@@ -1154,10 +1159,16 @@ function expandStationCluster(
   const geometry = feature.geometry
   if (!source?.getClusterExpansionZoom || typeof clusterId !== 'number' || geometry?.type !== 'Point') return
   const [lon, lat] = geometry.coordinates as [number, number]
-  source.getClusterExpansionZoom(clusterId, (error, zoom) => {
-    if (error) return
+  const flyToZoom = (zoom: number) => {
+    if (!Number.isFinite(zoom)) return
     map.flyTo({ center: [lon, lat], zoom, duration: 450 })
+  }
+  const expansion = source.getClusterExpansionZoom(clusterId, (error, zoom) => {
+    if (!error) flyToZoom(zoom)
   })
+  if (expansion && typeof expansion.then === 'function') {
+    void expansion.then(flyToZoom).catch(() => undefined)
+  }
 }
 
 export function buildSelectedSegmentFeatureCollection(
@@ -1374,6 +1385,18 @@ function tiandituStyle(base: string, annotation: string): MapStyle {
 
 function findEventFeature(event: MapLayerMouseEvent, layerId: string) {
   return event.features?.find((feature) => feature.layer?.id === layerId) ?? null
+}
+
+function findRenderedFeature(event: MapLayerMouseEvent, mapRef: MapRef | null, layerId: string) {
+  const eventFeature = findEventFeature(event, layerId)
+  if (eventFeature) return eventFeature
+  const map = mapRef?.getMap?.()
+  if (!map) return null
+  try {
+    return map.queryRenderedFeatures(event.point, { layers: [layerId] }).find((feature) => feature.layer?.id === layerId) ?? null
+  } catch {
+    return null
+  }
 }
 
 function featureStringProperty(feature: NonNullable<MapLayerMouseEvent['features']>[number], key: string) {
