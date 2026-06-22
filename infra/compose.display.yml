@@ -46,7 +46,7 @@ services:
         target: ${OBJECT_STORE_ROOT:?set readonly display object-store root}
         read_only: true
     ports:
-      - "127.0.0.1:${NHMS_DISPLAY_API_PORT:-8000}:8000"
+      - "127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}:8000"
     command:
       - uv
       - run

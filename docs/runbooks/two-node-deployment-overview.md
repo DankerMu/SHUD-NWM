@@ -224,7 +224,7 @@ no-flag scheduler 必须在 registry/adapters/orchestrator 前阻塞。
 - 容器根文件系统为只读。
 - 只允许挂载 published artifacts，且挂载为只读。
 - 丢弃 Linux capabilities，并启用 `no-new-privileges`。
-- 对外只绑定本机 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8000}`，通常由反向代理或内网入口转发。
+- 对外只绑定本机 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}`，通常由反向代理或内网入口转发。
 
 27 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
 

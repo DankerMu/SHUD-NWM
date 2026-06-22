@@ -478,24 +478,28 @@ corepack pnpm check:bundle
 
 ### 7.2 API 服务启动检查
 
-启动 27 API：
+启动 27 API。wrapper 会自行读取 `infra/env/display.env`；先确认该文件中的
+`NHMS_SERVICE_ROLE`、`OBJECT_STORE_ROOT`、DB URL 和 published artifact root
+就是本次 evidence 要验证的值，不要依赖调用前临时 export 覆盖：
 
 ```bash
-export NHMS_SERVICE_ROLE=display_readonly
-export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
-export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
-export NHMS_PUBLISHED_ARTIFACT_ROOT=/path/to/published/artifacts
-export OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+DISPLAY_API_PORT="$(
+  set -a
+  . infra/env/display.env
+  set +a
+  printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
+)"
+export DISPLAY_API_BASE_URL="http://127.0.0.1:${DISPLAY_API_PORT}"
+scripts/ops/start-display-api.sh
 ```
 
 检查：
 
 ```bash
-curl -i http://127.0.0.1:8000/health
-curl -i 'http://127.0.0.1:8000/api/v1/models?active=true&limit=20'
-curl -i 'http://127.0.0.1:8000/api/v1/met/stations?model_id=basins_qhh_shud&limit=5'
-curl -i 'http://127.0.0.1:8000/api/v1/slurm/health'
+curl -i "${DISPLAY_API_BASE_URL}/health"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/models?active=true&limit=20"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/met/stations?model_id=basins_qhh_shud&limit=5"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/slurm/health"
 ```
 
 通过条件：
@@ -627,8 +631,8 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
 针对 22 本轮生产出来的 `run_id/source/cycle/model_id`，优先使用强身份约束查询：
 
 ```bash
-curl -i 'http://127.0.0.1:8000/api/v1/mvp/qhh/latest-product?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud'
-curl -i 'http://127.0.0.1:8000/api/v1/mvp/qhh/latest-product?source=IFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud'
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/mvp/qhh/latest-product?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/mvp/qhh/latest-product?source=IFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud"
 ```
 
 `?source=GFS/IFS` 的 latest-only 查询可以作为业务回归检查，但不能单独证明跨面联调通过。
@@ -662,10 +666,10 @@ curl -i '<forecast-series-q-down-url>'
 针对同一个本轮生产 `source/cycle_time/run_id/model_id`：
 
 ```bash
-curl -i 'http://127.0.0.1:8000/api/v1/pipeline/status?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud'
-curl -i 'http://127.0.0.1:8000/api/v1/pipeline/stages?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud'
-curl -i 'http://127.0.0.1:8000/api/v1/jobs?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud&limit=20'
-curl -i 'http://127.0.0.1:8000/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud'
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/pipeline/status?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/pipeline/stages?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/jobs?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud&limit=20"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<cycle_time>&run_id=<run_id>&model_id=basins_qhh_shud"
 ```
 
 通过条件：
