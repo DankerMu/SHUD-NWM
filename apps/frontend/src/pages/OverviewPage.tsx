@@ -29,6 +29,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
+import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
@@ -378,7 +379,16 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     },
     [basins, basinVersionToBasinId, state, visibleBasinSet],
   )
-  const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
+  const handleMapOverlayHover = useCallback(
+    (interaction: M11MapOverlayInteraction | null) => {
+      if (!interaction || interaction.layerId !== state.layer || state.layer !== 'discharge') return
+      const basinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')
+      const basinId = mapFeatureStringProperty(interaction.feature, 'basin_id') ?? (basinVersionId ? basinVersionToBasinId[basinVersionId] : null)
+      if (!basinId) return
+      void prefetchHydroMetLatestProducts({ basinId, cycle: state.cycle })
+    },
+    [basinVersionToBasinId, state.cycle, state.layer],
+  )
 
   const riverForecastPanel = riverPopup ? (
     <M11RiverForecastPanel basinId={riverPopup.basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />

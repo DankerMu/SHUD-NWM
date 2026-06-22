@@ -12,7 +12,10 @@ import {
 import {
   HYDRO_MET_RIVER_SEGMENT_LIMIT,
   HYDRO_MET_STATION_LIMIT,
+  _clearHydroMetLatestProductIdentityCache,
+  fetchHydroMetLatestProduct,
   loadHydroMetBootstrap,
+  prefetchHydroMetLatestProducts,
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
 import {
@@ -273,6 +276,7 @@ describe('hydro-met query state', () => {
 describe('loadHydroMetBootstrap', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    _clearHydroMetLatestProductIdentityCache()
   })
 
   it('loads latest product, station inventory, and river segment candidates from latest-product IDs', async () => {
@@ -574,9 +578,65 @@ describe('loadHydroMetBootstrap', () => {
   })
 })
 
+describe('fetchHydroMetLatestProduct', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _clearHydroMetLatestProductIdentityCache()
+  })
+
+  it('dedupes identity-only latest-product by basin, source, and cycle', async () => {
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success(latestProduct({ available_issue_times: ['2026-05-21T00:00:00Z'] })),
+      error: undefined,
+    } as never)
+
+    const first = await fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })
+    const second = await fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })
+
+    expect(first).toBe(second)
+    expect(client.GET).toHaveBeenCalledTimes(1)
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: { query: { source: 'GFS', identity_only: true, basin_id: 'basins_qhh' } },
+    })
+  })
+
+  it('prefetches only GFS and IFS latest-product identities for a basin and cycle', async () => {
+    vi.mocked(client.GET).mockImplementation(async (_path: string, options?: { params?: { query?: { source?: string } } }) => {
+      const source = options?.params?.query?.source === 'IFS' ? 'IFS' : 'GFS'
+      return { data: success(latestProduct({ source_id: source })), error: undefined } as never
+    })
+
+    await prefetchHydroMetLatestProducts({ basinId: 'basins_qhh', cycle: '2026-05-21T00:00:00.000Z' })
+
+    expect(client.GET).toHaveBeenCalledTimes(2)
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: {
+        query: {
+          source: 'GFS',
+          identity_only: true,
+          cycle_time: '2026-05-21T00:00:00.000Z',
+          basin_id: 'basins_qhh',
+        },
+      },
+    })
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: {
+        query: {
+          source: 'IFS',
+          identity_only: true,
+          cycle_time: '2026-05-21T00:00:00.000Z',
+          basin_id: 'basins_qhh',
+        },
+      },
+    })
+    expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('forecast-series')
+  })
+})
+
 describe('loadHydroMetStationSeries', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    _clearHydroMetLatestProductIdentityCache()
   })
 
   it('calls the generated station-series API with tuple filters, deprecated companion, five public variables, and tuple limit', async () => {

@@ -43,6 +43,10 @@ export interface HydroMetBootstrapResult {
   riverError: string | null
 }
 
+const HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS = 120_000
+
+const latestProductIdentityCache = new Map<string, { expiresAt: number; promise: Promise<QhhLatestProduct> }>()
+
 async function getLatestProduct(request: HydroMetBootstrapRequest) {
   const basinId = request.basinId?.trim() ? { basin_id: request.basinId.trim() } : {}
   const query = request.strictIdentity
@@ -69,7 +73,7 @@ async function getLatestProduct(request: HydroMetBootstrapRequest) {
  * 也不附带 stations / river-segments 候选；并返回最近 N 个 cycle 作为可选起报时间。
  * request.cycle 可指定具体起报 cycle（起报时间选择器重取用）。失败抛错。
  */
-export async function fetchHydroMetLatestProduct(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
+async function fetchHydroMetLatestProductUncached(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
   const basinId = request.basinId?.trim() ? { basin_id: request.basinId.trim() } : {}
   const cycle = request.cycle?.trim() ? { cycle_time: request.cycle.trim() } : {}
   const { data, error } = await client.GET('/api/v1/mvp/qhh/latest-product', {
@@ -79,6 +83,53 @@ export async function fetchHydroMetLatestProduct(request: HydroMetBootstrapReque
   const product = unwrapApiData<QhhLatestProduct>(data, 'latest-product 不可用')
   if (!product || typeof product !== 'object') throw new Error('latest-product 不可用')
   return product
+}
+
+function latestProductIdentityCacheKey(request: HydroMetBootstrapRequest) {
+  return [
+    request.basinId?.trim() ?? '',
+    request.source,
+    request.cycle?.trim() || 'latest',
+  ].join('|')
+}
+
+export async function fetchHydroMetLatestProduct(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
+  const key = latestProductIdentityCacheKey(request)
+  const now = Date.now()
+  const cached = latestProductIdentityCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.promise
+
+  const promise = fetchHydroMetLatestProductUncached(request)
+    .then((product) => {
+      const entry = latestProductIdentityCache.get(key)
+      if (entry?.promise === promise) entry.expiresAt = Date.now() + HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS
+      return product
+    })
+    .catch((error) => {
+      if (latestProductIdentityCache.get(key)?.promise === promise) latestProductIdentityCache.delete(key)
+      throw error
+    })
+  latestProductIdentityCache.set(key, { expiresAt: now + HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS, promise })
+  return promise
+}
+
+export async function prefetchHydroMetLatestProducts({
+  basinId,
+  cycle,
+}: {
+  basinId?: string | null
+  cycle?: string | null
+}): Promise<void> {
+  const normalizedBasinId = basinId?.trim()
+  if (!normalizedBasinId) return
+  await Promise.allSettled([
+    fetchHydroMetLatestProduct({ source: 'GFS', cycle: cycle ?? null, basinId: normalizedBasinId }),
+    fetchHydroMetLatestProduct({ source: 'IFS', cycle: cycle ?? null, basinId: normalizedBasinId }),
+  ])
+}
+
+export function _clearHydroMetLatestProductIdentityCache() {
+  latestProductIdentityCache.clear()
 }
 
 export interface HydroMetStationQuery {

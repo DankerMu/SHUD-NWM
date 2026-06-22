@@ -31,7 +31,6 @@ export interface M11RiverPopupSegment {
 const DUAL_SOURCES: HydroMetSource[] = ['GFS', 'IFS']
 // 字面量配色（GFS 青 / IFS 绿）：ForecastSeries.color 是 hex 字面量联合，须用 as const 收窄。
 const SOURCE_COLOR = { GFS: '#22d3ee', IFS: '#34d399' } as const
-const SOURCE_RESULT_CACHE_TTL_MS = 120_000
 const LOADING_COPY_DELAY_MS = 600
 
 interface SourceResult {
@@ -48,8 +47,6 @@ interface DualForecast {
   data: ForecastData | null
   results: SourceResult[]
 }
-
-const sourceResultCache = new Map<string, { expiresAt: number; promise: Promise<SourceResult> }>()
 
 function productIdentity(product: QhhLatestProduct): HydroMetRiverForecastProductIdentity {
   return {
@@ -124,51 +121,6 @@ async function loadSource(
   }
 }
 
-function sourceResultCacheKey(
-  basinId: string,
-  source: HydroMetSource,
-  segment: HydroMetRiverForecastSegmentIdentity,
-  cycle: string | null,
-) {
-  return [
-    basinId,
-    source,
-    cycle ?? 'latest',
-    segment.basin_version_id,
-    segment.river_network_version_id,
-    segment.river_segment_id,
-  ].join('|')
-}
-
-function loadSourceCached(
-  basinId: string,
-  source: HydroMetSource,
-  segment: HydroMetRiverForecastSegmentIdentity,
-  cycle: string | null,
-) {
-  const key = sourceResultCacheKey(basinId, source, segment, cycle)
-  const now = Date.now()
-  const cached = sourceResultCache.get(key)
-  if (cached && cached.expiresAt > now) return cached.promise
-
-  const promise = loadSource(basinId, source, segment, cycle)
-    .then((result) => {
-      const entry = sourceResultCache.get(key)
-      if (entry?.promise === promise) entry.expiresAt = Date.now() + SOURCE_RESULT_CACHE_TTL_MS
-      return result
-    })
-    .catch((error) => {
-      if (sourceResultCache.get(key)?.promise === promise) sourceResultCache.delete(key)
-      throw error
-    })
-  sourceResultCache.set(key, { expiresAt: now + SOURCE_RESULT_CACHE_TTL_MS, promise })
-  return promise
-}
-
-export function _clearM11RiverForecastCache() {
-  sourceResultCache.clear()
-}
-
 function buildDualForecast(segment: HydroMetRiverForecastSegmentIdentity, results: SourceResult[]): DualForecast {
   const series = results.map((result) => result.series).filter((value): value is ForecastSeries => value !== null)
   if (series.length === 0) return { data: null, results }
@@ -238,7 +190,7 @@ export function M11RiverForecastPanel({
     }
     let cancelled = false
     setLoading(true)
-    void Promise.all(DUAL_SOURCES.map((source) => loadSourceCached(basinId, source, identity, selectedCycle))).then((results) => {
+    void Promise.all(DUAL_SOURCES.map((source) => loadSource(basinId, source, identity, selectedCycle))).then((results) => {
       if (cancelled) return
       setForecast(buildDualForecast(identity, results))
       setLoading(false)
