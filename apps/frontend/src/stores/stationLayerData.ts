@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 
-import { getApiErrorMessage } from '@/api/response'
+import { client } from '@/api/client'
+import { getApiErrorMessage, unwrapApiData } from '@/api/response'
+import type { components } from '@/api/types'
 import {
   HYDRO_MET_STATION_LIMIT,
   fetchHydroMetStationsByIdentity,
@@ -15,6 +17,8 @@ import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
  */
 export const STATION_CLIENT_CAP = 5000
 export const STATION_PAGE_LIMIT = HYDRO_MET_STATION_LIMIT
+
+type ApiBasinVersion = components['schemas']['BasinVersion']
 
 export interface StationLayerData {
   stations: HydroMetStation[]
@@ -77,7 +81,7 @@ let activeRequestKey: string | null = null
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const contexts = normalizeBasinContexts(request.basinContexts).filter((context) => context.basinVersionId)
+  const contexts = await resolveStationBasinContexts(normalizeBasinContexts(request.basinContexts))
   if (contexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
 
   const stations: HydroMetStation[] = []
@@ -124,6 +128,26 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     loaded,
     truncated: truncated || loaded < total,
   }
+}
+
+async function resolveStationBasinContexts(contexts: StationLayerBasinContext[]): Promise<StationLayerBasinContext[]> {
+  const resolved = await Promise.all(
+    contexts.map(async (context) => ({
+      basinId: context.basinId,
+      basinVersionId: context.basinVersionId ?? (await fetchDefaultBasinVersionId(context.basinId)),
+    })),
+  )
+  return resolved.filter((context): context is StationLayerBasinContext & { basinVersionId: string } => Boolean(context.basinVersionId))
+}
+
+async function fetchDefaultBasinVersionId(basinId: string): Promise<string | null> {
+  const { data, error } = await client.GET('/api/v1/basins/{basin_id}/versions', {
+    params: { path: { basin_id: basinId }, query: { limit: 20, offset: 0 } },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取流域版本失败'))
+  const versions = unwrapApiData<ApiBasinVersion[]>(data, '获取流域版本失败')
+  const selected = versions.find((version) => version.active_flag) ?? versions[0] ?? null
+  return selected?.basin_version_id ?? null
 }
 
 function appendStations(

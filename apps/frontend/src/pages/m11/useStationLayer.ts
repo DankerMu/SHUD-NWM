@@ -83,7 +83,7 @@ export function useMetStationLayer({
           basinId: context.basinId.trim(),
           basinVersionId: context.basinVersionId?.trim() || null,
         }))
-        .filter((context) => context.basinId.length > 0 && context.basinVersionId),
+        .filter((context) => context.basinId.length > 0),
     [basinContexts],
   )
   const shouldFetch = active && requestContexts.length > 0 && Boolean(concreteSource)
