@@ -21,6 +21,8 @@
     "forcing_version_id",
     "forcing_uri",
     "forcing_package_uri",
+    "forcing_package_manifest_uri",
+    "forcing_package_manifest_checksum_sha256",
     "forcing_domain_package_manifest_uri",
     "forcing_domain_package_manifest_checksum_sha256",
     "scenario_id",
@@ -91,6 +93,13 @@
       "type": "string",
       "minLength": 1
     },
+    "forcing_package_manifest_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_package_manifest_checksum_sha256": {
+      "$ref": "#/definitions/sha256"
+    },
     "forcing_domain_package_manifest_uri": {
       "type": "string",
       "minLength": 1
@@ -144,23 +153,13 @@
             },
             {
               "required": [
-                "valid_time_start",
-                "valid_time_end",
                 "variables",
                 "units",
-                "native_resolution"
+                "time_lattice"
               ],
               "properties": {
                 "table": {
                   "const": "met.forcing_station_timeseries"
-                },
-                "valid_time_start": {
-                  "type": "string",
-                  "format": "date-time"
-                },
-                "valid_time_end": {
-                  "type": "string",
-                  "format": "date-time"
                 },
                 "variables": {
                   "type": "array",
@@ -168,7 +167,8 @@
                     "type": "string",
                     "minLength": 1
                   },
-                  "minItems": 1
+                  "minItems": 1,
+                  "uniqueItems": true
                 },
                 "units": {
                   "type": "object",
@@ -177,9 +177,12 @@
                     "minLength": 1
                   }
                 },
-                "native_resolution": {
-                  "type": "string",
-                  "minLength": 1
+                "time_lattice": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/definitions/time_lattice_segment"
+                  }
                 }
               }
             }
@@ -262,6 +265,42 @@
         },
         "content_type": {
           "type": "string"
+        }
+      }
+    },
+    "time_lattice_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid_time_start",
+        "valid_time_end",
+        "native_resolution"
+      ],
+      "properties": {
+        "valid_time_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_time_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "variable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "variables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "native_resolution": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }
