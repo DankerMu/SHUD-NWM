@@ -230,6 +230,91 @@ def test_preflight_rejects_database_url_without_password_before_libpq_ambient_cr
     assert str(pgpass_file) not in rendered
 
 
+@pytest.mark.parametrize(
+    ("database_url", "expected_database", "forbidden_fragments"),
+    [
+        (
+            "postgresql://db.example/nhms?user=nhms_display_ro",
+            {
+                "host": "db.example",
+                "port": None,
+                "database": "nhms",
+                "username_class": "display_readonly_like",
+                "password_present": False,
+            },
+            ("nhms_display_ro",),
+        ),
+        (
+            "postgresql://node27_writer:writer-secret@db.example/nhms?host=other.example&port=55433&dbname=otherdb",
+            {
+                "host": "other.example",
+                "port": 55433,
+                "database": "otherdb",
+                "username_class": "writer_candidate",
+                "password_present": True,
+            },
+            ("writer-secret",),
+        ),
+        (
+            "postgresql://node27_writer:writer-secret@db.example/nhms?passfile=/tmp/node27-writer.pgpass",
+            {
+                "host": "db.example",
+                "port": None,
+                "database": "nhms",
+                "username_class": "writer_candidate",
+                "password_present": True,
+            },
+            ("writer-secret", "/tmp/node27-writer.pgpass"),
+        ),
+        (
+            "postgresql://node27_writer:writer-secret@db.example/nhms?service=ambient",
+            {
+                "host": "db.example",
+                "port": None,
+                "database": "nhms",
+                "username_class": "writer_candidate",
+                "password_present": True,
+            },
+            ("writer-secret", "ambient"),
+        ),
+        (
+            "postgresql://node27_writer@db.example/nhms?password=query-secret",
+            {
+                "host": "db.example",
+                "port": None,
+                "database": "nhms",
+                "username_class": "writer_candidate",
+                "password_present": True,
+            },
+            ("query-secret",),
+        ),
+    ],
+)
+def test_preflight_rejects_database_url_query_overrides_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    database_url: str,
+    expected_database: dict[str, Any],
+    forbidden_fragments: tuple[str, ...],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root, database_url))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert autopipe.DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN in _blocker_codes(summary)
+    database_evidence = summary["ingest"]["preflight"]["database"]
+    for key, value in expected_database.items():
+        assert database_evidence[key] == value
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    for forbidden in forbidden_fragments:
+        assert forbidden not in rendered
+
+
 def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -317,6 +402,48 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["runs"]["processed"] == 0
     assert summary["runs"]["published"] == 5
     assert published_calls == ["postgresql://node27_writer:writer-secret@db.example:55432/nhms"]
+    assert "writer-secret" not in rendered
+
+
+def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    (basins_root / "qhh").mkdir()
+    _write_run(object_store_root, RUN_QHH, basin="qhh")
+    monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(autopipe, "_backfill_output_geometry", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(autopipe, "_activate_model", lambda *_args, **_kwargs: 1)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        calls.append((list(argv), dict(env)))
+        if "import-basins-registry" in argv:
+            return 0, json.dumps({"status": "ok", "river_network_version_id": "rnv-qhh"}) + "\n", ""
+        if "discover-basins" in argv or "publish-basins" in argv:
+            return 0, "{}\n", ""
+        raise AssertionError(f"unexpected seed command: {argv}")
+
+    monkeypatch.setattr(autopipe, "_run", fake_run)
+    database_url = "postgresql://node27_writer:writer-secret@db.example/nhms"
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [*_args(object_store_root, basins_root, database_url), "--seed-only"],
+    )
+
+    assert rc == 0
+    assert summary["seed"]["seeded"] == ["qhh"]
+    import_calls = [(argv, env) for argv, env in calls if "import-basins-registry" in argv]
+    assert len(import_calls) == 1
+    import_argv, import_env = import_calls[0]
+    assert "--database-url" not in import_argv
+    argv_text = "\n".join(argument for argv, _env in calls for argument in argv)
+    assert "postgresql://" not in argv_text
+    assert "writer-secret" not in argv_text
+    assert import_env["DATABASE_URL"] == database_url
     assert "writer-secret" not in rendered
 
 

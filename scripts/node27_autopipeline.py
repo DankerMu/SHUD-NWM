@@ -48,7 +48,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -95,6 +95,15 @@ INGEST_STAGE_SHAPE = (
     "publish_status",
 )
 DISPLAY_HEALTH_SEPARATION = "display_api_health_is_readonly_consumer_health_not_ingest_writer_readiness"
+DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
+DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
+    {
+        "application_name",
+        "connect_timeout",
+        "fallback_application_name",
+        "sslmode",
+    }
+)
 
 NO_FORCING_HANDOFF_MODE = "object_store_forcing_domain_handoff_missing"
 NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON = "OBJECT_STORE_HANDOFF_NOT_DECLARED_AND_NODE22_MIRROR_DSN_MISSING"
@@ -163,11 +172,28 @@ def _database_username_class(username: str | None) -> str:
     return "writer_candidate"
 
 
-def _database_password_present(parsed: Any) -> bool:
-    if parsed.password:
-        return True
-    query_values = parse_qs(parsed.query, keep_blank_values=True)
-    return any(bool(value) for value in query_values.get("password", ()))
+def _database_query_blockers(query: str) -> list[dict[str, str]]:
+    if not query:
+        return []
+    query_keys = {key.strip().lower() for key, _value in parse_qsl(query, keep_blank_values=True)}
+    if query_keys and any(key not in DATABASE_URL_ALLOWED_QUERY_KEYS for key in query_keys):
+        return [
+            _preflight_blocker(
+                DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN,
+                "DATABASE_URL",
+                "DATABASE_URL query parameters must not override the ingest target or credential source.",
+            )
+        ]
+    return []
+
+
+def _database_port(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -179,7 +205,6 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
 
     try:
         parsed = urlsplit(raw)
-        port = parsed.port
     except ValueError:
         return {"configured": True}, [
             _preflight_blocker(
@@ -189,20 +214,45 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
             )
         ]
 
-    database = parsed.path.lstrip("/")
-    username_class = _database_username_class(parsed.username)
-    password_present = _database_password_present(parsed)
+    query_blockers = _database_query_blockers(parsed.query)
+
+    try:
+        dsn_parameters = psycopg2.extensions.parse_dsn(raw)
+    except psycopg2.Error:
+        if query_blockers:
+            return {"configured": True, "scheme": parsed.scheme or None}, query_blockers
+        return {"configured": True, "scheme": parsed.scheme or None}, [
+            _preflight_blocker(
+                "DATABASE_URL_INVALID",
+                "DATABASE_URL",
+                "DATABASE_URL must be a valid PostgreSQL URL.",
+            )
+        ]
+
+    database = dsn_parameters.get("dbname")
+    username = dsn_parameters.get("user")
+    host = dsn_parameters.get("host")
+    port = _database_port(dsn_parameters.get("port"))
+    username_class = _database_username_class(username)
+    password_present = bool(dsn_parameters.get("password"))
     identity = {
         "configured": True,
         "scheme": parsed.scheme,
-        "host": parsed.hostname,
+        "host": host,
         "port": port,
-        "database": database or None,
+        "database": database,
         "username_present": username_class != "missing",
         "username_class": username_class,
         "password_present": password_present,
     }
-    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or not database:
+    blockers: list[dict[str, str]] = list(query_blockers)
+    invalid_identity = (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not host
+        or not database
+        or (dsn_parameters.get("port") and port is None)
+    )
+    if invalid_identity:
         return identity, [
             _preflight_blocker(
                 "DATABASE_URL_INVALID",
@@ -211,14 +261,14 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
             )
         ]
     if identity["username_class"] == "missing":
-        return identity, [
+        blockers.append(
             _preflight_blocker(
                 "DATABASE_URL_USERNAME_MISSING",
                 "DATABASE_URL",
                 "DATABASE_URL must include an explicit ingest writer username.",
             )
-        ]
-    blockers: list[dict[str, str]] = []
+        )
+        return identity, blockers
     if identity["username_class"] == "display_readonly_like":
         blockers.append(
             _preflight_blocker(
@@ -824,7 +874,6 @@ def _seed_basin(
                 "import-basins-registry",
                 "--inventory", str(inv),
                 "--package-manifest", str(pkg),
-                "--database-url", database_url,
                 "--auth-actor-id", SEED_AUTH_ACTOR,
                 "--auth-role", SEED_AUTH_ROLE,
             ],
