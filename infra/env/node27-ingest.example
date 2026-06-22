@@ -20,5 +20,9 @@ AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
 
 # Optional explicit transitional mirror fallback for pre-contract runs.
-# Leave unset unless intentionally using the compatibility mirror.
+# Compatibility-only and sunset-bound: leave unset unless an operator
+# intentionally provides an explicit node-22 DSN for legacy packages. The
+# historical node-22 local PostgreSQL :55433 instance is do-not-connect for
+# current NHMS production state and is pending removal after object-store
+# forcing-domain handoff packages cover live readiness.
 # N22_DSN=postgresql://readonly-user:change-me@210.77.77.22:55433/nhms

@@ -4,6 +4,15 @@
 适用范围：22 节点计算控制面 + 27 节点展示服务面
 推荐证据目录：`artifacts/two-node-e2e/<run_id>/` 或显式配置的 `/scratch/frd_muziyao/<project-specific-dir>/`
 
+> **2026-06-22 status: historical / superseded M22 evidence plan.**
+> 本文保留 M22 设计时代的两节点 E2E 证据边界，不是当前生产拓扑操作手册。
+> 当前生产事实是 node-22 只作为 compute/Slurm/SHUD/artifact producer，
+> 不连当前活 DB；node-22 本地 PostgreSQL `:55433` 为 historical、
+> do-not-connect、pending removal。node-27 承担 active PostgreSQL `:55432`、
+> data-plane ingest、display API 和前端。当前值守与 oracle 路由以
+> [`current-production-ops.md`](current-production-ops.md) 和
+> [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 为准。
+
 Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。所有直接 Docker Compose 和 systemd
 install/start/restart lane 都必须先运行 `scripts/validate_two_node_docker_source_trust.py`，把 source-trust
 JSON/text 报告写入 `docker-security/` evidence；compute/display 必须使用同一个 `--evidence-run-id`

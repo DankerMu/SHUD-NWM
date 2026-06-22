@@ -231,9 +231,9 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
     assert tracked_v1_summary["total_test_files"] == 247
     assert tracked_v1_summary["total_instruction_files"] == 3
-    assert inventory.total_test_files == 144
+    assert inventory.total_test_files == 171
     assert inventory.total_instruction_files == 2
-    assert inventory.v1_summary_test_files == 144
+    assert inventory.v1_summary_test_files == 171
     assert inventory.v1_summary_instruction_files == 2
     assert baseline["summary"]["total_test_files"] == inventory.v1_summary_test_files
     assert baseline["summary"]["total_instruction_files"] == inventory.v1_summary_instruction_files
@@ -254,7 +254,7 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
         "docs/governance",
         "docs/runbooks",
         "openapi",
-        "openspec/m21-qhh-hydro-met-ops-mvp",
+        "openspec/archive",
         "progress.md",
     ):
         assert zero_count_module in modules
@@ -1323,6 +1323,126 @@ def test_entropy_audit_hard_gate_markdown_includes_status_and_report_sections(tm
     assert "## Prioritized Cleanup Targets" in markdown
 
 
+def test_entropy_audit_topology_guardrails_flag_active_drift_categories(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433 for active DB checks.
+        """,
+    )
+    _write(
+        tmp_path / "scripts/run-ingest.sh",
+        """
+        source infra/env/display.env
+        uv run python scripts/node27_autopipeline.py
+        """,
+    )
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    findings_by_check = {
+        str(finding["check_id"]): finding
+        for finding in report["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    }
+
+    assert set(findings_by_check) == {
+        "production-topology-node22-db-writer",
+        "production-topology-node22-local-postgres",
+        "production-topology-display-env-writer",
+    }
+    assert all(finding["gate_eligible"] is True for finding in findings_by_check.values())
+    assert report["metadata"]["hard_gate_status"] == "fail"
+    assert audit_repo_entropy._exit_code_for_report(report) == 1
+
+
+def test_entropy_audit_topology_guardrails_allow_non_current_and_readonly_contexts(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        node-22 local PostgreSQL :55433 is historical, do-not-connect for current NHMS
+        production state, and pending removal.
+        The transitional node-22 mirror is compatibility-only, requires explicit DSN
+        via --node22-url or N22_DSN, and has a sunset/removal path after object-store
+        handoff packages replace it.
+        """,
+    )
+    _write(
+        tmp_path / "docs/runbooks/display-readonly-live-mvt.md",
+        """
+        Display API readonly runtime sources infra/env/display.env through
+        scripts/ops/start-display-api.sh and serves display_readonly checks only.
+        """,
+    )
+    _write(
+        tmp_path / "docs/runbooks/receipts/old.md",
+        "Current NHMS production says node-22 is the active database writer on :55433.\n",
+    )
+    _write(
+        tmp_path / "artifacts/drift.md",
+        "Current NHMS production says node-22 is the active database writer on :55433.\n",
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+
+
+def test_entropy_audit_topology_guardrails_flag_current_use_after_compatibility_paragraph(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        "The transitional node-22 mirror is compatibility-only, requires explicit DSN via "
+        "--node22-url or N22_DSN, and has a sunset/removal path after object-store "
+        "handoff packages replace it.\n\n"
+        "Current production DB checks should use :55433 for active state.\n",
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["check_id"], finding["line"]) for finding in findings] == [
+        ("production-topology-node22-local-postgres", 3)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_flag_unmarked_transitional_mirror(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        "Current runbook: run the transitional node-22 mirror before node-27 ingest.\n",
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert len(findings) == 1
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_keep_output_credential_safe(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        Current NHMS production says connect to node-22 local PostgreSQL at
+        postgresql://writer:super-secret-password@210.77.77.22:55433/nhms?token=secret-token
+        for active DB writes.
+        """,
+    )
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    rendered = json.dumps(report, ensure_ascii=False, sort_keys=True)
+
+    assert audit_repo_entropy._exit_code_for_report(report) == 1
+    assert "production-topology-node22-local-postgres" in rendered
+    assert "super-secret-password" not in rendered
+    assert "secret-token" not in rendered
+    assert "postgresql://writer" not in rendered
+
+
 def test_entropy_audit_skips_root_runtime_trees_without_skipping_source_packages(
     tmp_path: Path,
 ) -> None:
@@ -2251,6 +2371,29 @@ def test_agent_artifact_ownership_skips_doc_status_symlink_to_outside_file(
             ("apps-api-layer-inversion",),
             lambda root: _write(root / "packages/common/bad_import.py", "from apps.api.main import create_app\n"),
         ),
+        (
+            (
+                "production-topology-node22-db-writer",
+                "production-topology-node22-local-postgres",
+                "production-topology-display-env-writer",
+            ),
+            lambda root: (
+                _write(
+                    root / "docs/runbooks/current-production-ops.md",
+                    """
+                    Current NHMS production says node-22 is the active database writer.
+                    Operators should connect to node-22 local PostgreSQL on :55433 for current checks.
+                    """,
+                ),
+                _write(
+                    root / "scripts/run-ingest.sh",
+                    """
+                    source infra/env/display.env
+                    uv run python scripts/node27_autopipeline.py
+                    """,
+                ),
+            ),
+        ),
     ],
 )
 def test_entropy_audit_required_families_emit_positive_signals(
@@ -2313,6 +2456,27 @@ def test_entropy_audit_required_families_emit_positive_signals(
         (
             "agent-artifact-ignore-policy",
             lambda root: _write(root / ".gitignore", "# missing generated artifact ignores\n"),
+        ),
+        (
+            "production-topology-node22-db-writer",
+            lambda root: _write(
+                root / "docs/runbooks/current-production-ops.md",
+                "Current NHMS production says node-22 is the active DB writer for hydro/met state.\n",
+            ),
+        ),
+        (
+            "production-topology-node22-local-postgres",
+            lambda root: _write(
+                root / "docs/runbooks/current-production-ops.md",
+                "Use node-22 local PostgreSQL on :55433 for current production state checks.\n",
+            ),
+        ),
+        (
+            "production-topology-display-env-writer",
+            lambda root: _write(
+                root / "scripts/run-ingest.sh",
+                "source infra/env/display.env\nuv run python scripts/node27_autopipeline.py\n",
+            ),
         ),
         ("tracked-generated-artifact", lambda root: _track_generated_artifact(root)),
     ],
@@ -3745,10 +3909,18 @@ def test_route_authority_m26_references_preserve_expected_allowlist_keys(
 
 def test_route_authority_current_repo_m26_route_evidence_preserves_m26_allowlist_key() -> None:
     expected_rows = {
-        ("openspec/changes/m26-unified-map-display/proposal.md", 15, "HydroMetPage"),
-        ("openspec/changes/m26-unified-map-display/proposal.md", 39, "/hydro-met"),
-        ("openspec/changes/m26-unified-map-display/tasks.md", 12, "/hydro-met"),
-        ("openspec/changes/m26-unified-map-display/tasks.md", 49, "/hydro-met"),
+        ("openspec/changes/archive/2026-06-18-m26-unified-map-display/proposal.md", 11, "/hydro-met"),
+        (
+            "openspec/changes/archive/2026-06-18-m26-unified-map-display/specs/single-map-shell-routing/spec.md",
+            17,
+            "/hydro-met",
+        ),
+        (
+            "openspec/changes/archive/2026-06-18-m26-unified-map-display/specs/single-map-shell-routing/spec.md",
+            20,
+            "/hydro-met",
+        ),
+        ("openspec/changes/archive/2026-06-18-m26-unified-map-display/tasks.md", 49, "/hydro-met"),
     }
     findings = [
         finding

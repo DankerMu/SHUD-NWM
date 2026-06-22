@@ -850,3 +850,150 @@ Review focus:
   easy to prove in tests.
 - Evidence must be useful to operators without leaking DSNs, tokens, or secret
   env values.
+
+## Issue #647 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Mandatory expanded triggers:
+- Production topology, verification oracle routing, and current runbook
+  contracts.
+- Static governance checks over active docs/scripts and env-source wording.
+- Legacy compatibility boundary: historical/archive material must remain
+  readable without being mistaken for current operation.
+- Config / project setup boundary for `infra/env/display.env` versus node-27
+  data-plane writer or transitional mirror jobs.
+
+Change surface:
+- Current operational docs and role-boundary docs.
+- `openspec/project-profile.md` evidence/oracle routing guidance.
+- Governance/static drift checks and their focused tests/fixtures.
+- OpenSpec task evidence for the production topology contract.
+
+Must preserve:
+- Explicitly historical, archived, superseded, or compatibility-only documents
+  may still mention node-22 DB/writer history when labeled as non-current.
+- Display API readonly env use remains valid for display runtime operations.
+- Runtime importer, autopipeline, Slurm scheduling, and display API behavior do
+  not change in #647.
+
+Must add/change:
+- Active docs route DB, ingest, display, and frontend live validation to
+  node-27; node-22 is compute/Slurm/artifact producer only.
+- Active docs/scripts mark node-22 local PostgreSQL `:55433` as historical,
+  do-not-connect for current NHMS production state, and pending removal/sunset.
+- Static guardrails flag active node-22 writer assumptions and active
+  `infra/env/display.env` reuse for data-plane writer or mirror authority.
+- Guardrail tests include positive drift fixtures and negative historical,
+  archive, compatibility-only, and display-readonly env fixtures.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - static guard script/entrypoint
+  behavior and exit/finding contract may change.
+- Config / project setup: selected - current topology and env-source authority
+  are production setup contracts.
+- File IO / path safety / overwrite: not selected - no new file traversal,
+  publish, delete, or overwrite behavior; tests may use temporary fixtures only.
+- Schema / columns / units / field names: not selected - no data schema change.
+- Auth / permissions / secrets: selected - checks must not encourage display
+  readonly credentials or leak real env values.
+- Concurrency / shared state / ordering: not selected - no runtime state machine
+  or concurrent job behavior changes.
+- Resource limits / large input / discovery: selected - static scan scope must
+  stay bounded to repo text surfaces and avoid generated/archive false positives.
+- Legacy compatibility / examples: selected - historical/archive/compatibility
+  wording must remain allowed when clearly non-current.
+- Error handling / rollback / partial outputs: selected - drift findings should
+  be deterministic with stable categories and nonzero status when applicable.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or package surface changes.
+- Documentation / migration notes: selected - current runbooks and role docs are
+  the main user-facing surface.
+- Geospatial / CRS / basin geometry: not selected - no geometry or map changes.
+- Hydro-met time series / forcing windows: not selected - no forcing-window
+  behavior changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD runtime
+  changes.
+- PostGIS / TimescaleDB domain behavior: selected - docs must route active DB
+  validation to node-27 and mark node-22 DB non-current.
+- Slurm production lifecycle / mock-vs-real parity: selected - node-22 remains
+  Slurm scheduling oracle only.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider snapshot behavior changes.
+- Run manifest / QC provenance: not selected - no manifest/QC contract changes.
+- Published NHMS artifacts / display identity: selected - display/readiness
+  validation route remains node-27 and distinct from compute artifacts.
+
+Required evidence:
+- Static guard positive fixture: active text that makes node-22 current DB writer
+  or sources `infra/env/display.env` for writer/mirror jobs -> guard finding with
+  stable category.
+- Static guard positive fixture: active text that mentions node-22 local
+  PostgreSQL, `:55433`, or transitional mirror without historical,
+  do-not-connect, compatibility-only, explicit-DSN, and sunset/removal wording
+  -> guard finding with stable category.
+- Static guard negative fixtures: historical/archive/compatibility-only node-22
+  DB text and display API readonly env text -> no finding.
+- Current-doc grep or focused test evidence that node-27 owns active DB, ingest,
+  display API, and frontend, while node-22 owns Slurm/SHUD/artifact production.
+- Project profile evidence guidance distinguishes local checks, node-27 live
+  DB/display checks, and node-22 Slurm checks.
+- `uv run pytest -q <focused guardrail tests>`.
+- `uv run ruff check .`.
+- `openspec validate stabilize-data-compute-plane-handoff --strict --no-interactive`.
+
+Invariant Matrix:
+- Governing invariant: Current operational surfaces must describe node-22 as
+  compute/artifact producer only and node-27 as active DB/ingest/display host;
+  display runtime env must never become data-plane writer or mirror authority.
+- Source-of-truth identity/contract: `production-topology-contract` spec plus
+  current docs/static guard categories for current, historical, compatibility,
+  display-readonly, and drift contexts.
+- Producers: active docs and scripts that mention topology/env sourcing.
+- Validators/preflight: governance/static drift checks and focused tests.
+- Storage/cache/query: none - #647 does not touch DB or object-store writes.
+- Public routes/entrypoints: static guard command or audit entrypoint; no API
+  route changes.
+- Frontend/downstream consumers: operator runbooks and agent instructions that
+  choose local/node-27/node-22 validation oracles.
+- Failure paths/rollback/stale state: guard findings for active drift; allowed
+  historical/archive/compatibility contexts stay non-blocking.
+- Evidence/audit/readiness: focused pytest, ruff, OpenSpec validation, and task
+  evidence.
+- Regression rows:
+  - Active doc says node-22 is current NHMS DB writer -> guard reports topology
+    drift.
+  - Active writer/mirror instructions source `infra/env/display.env` -> guard
+    reports display-env writer drift.
+  - Historical/archive/compatibility-only text mentioning node-22 `:55433` ->
+    guard allows it when clearly non-current.
+  - Display API readonly restart/env instructions -> guard allows
+    `infra/env/display.env` for display runtime.
+  - Current verification routing docs -> local checks, node-27 live DB/display,
+    and node-22 Slurm oracles are distinct.
+
+Boundary-surface checklist:
+- Current docs/runbooks: must describe the verified node-27-centric active
+  topology and node-22 compute-only role.
+- Historical/archive docs: may retain old node-22 writer context only with
+  explicit historical/superseded/compatibility wording.
+- Static guard scope: scan active governance surfaces and fixtures without
+  turning archived evidence into required current behavior.
+- Env-source boundary: display env is valid for display runtime and invalid for
+  data-plane writer or transitional mirror authority.
+- Verification boundary: node-27 is live DB/display oracle; node-22 is Slurm
+  scheduling oracle; local checks do not substitute for required live receipts.
+
+Non-goals:
+- No runtime importer/autopipeline behavior change.
+- No Slurm compute behavior change.
+- No removal of explicitly historical/archive documents.
+- No node-27 qhh/heihe live receipt; #648 owns final production evidence.
+
+Review focus:
+- Guardrail false positives/negatives around historical/archive/compatibility
+  and display-readonly contexts.
+- Current docs must not leave active node-22 writer instructions ambiguous.
+- Verification/oracle routing must match the two-node topology in `AGENTS.md`.

@@ -6,7 +6,7 @@
 
 ## 开发流程衔接（2026-06-07）
 
-- **验证 oracle 路由**：后端代码/DB pytest 在 **node-22**；display API / 前端生产化 / 只读边界（本清单 C1–C4）在 **node-27**——node-22 的 pytest **不**闭合 C1–C4。详见 `CLAUDE.md`「验证 oracle 路由」+ `dual-end-issue-workflow` skill。
+- **验证 oracle 路由**：本地跑 lint/unit/OpenSpec/前端构建；真实 DB、ingest、display API、前端生产化和只读边界（本清单 C1–C4）在 **node-27** 产 live receipt；只有 sbatch、Slurm gateway、SHUD runtime 或调度行为变更才走 **node-22** Slurm scheduling oracle。node-22 检查和本地检查都不闭合 C1–C4。
 - **27 前端生产化的功能性开发走 m25 change**：`openspec/changes/m25-multibasin-frontend-production/`（多流域选择器、latest-product 去硬编码/basin_id、洪水重现期独立 `return_period_status`、/ops·/monitoring display 降级）；并行起点 issue #310/#311/#313/#317。本清单聚焦"上线 live receipt"，m25 聚焦"功能交付"，二者互补。
 - **m25 功能已交付（2026-06-07，#310–#317 已合并，#318 收尾）**：多流域展示（数据驱动选择器 +
   `basin_id` 参数化 + `has_display_product` 动态发现，**无硬编码白名单**）、`/ops`+`/monitoring` 按
@@ -46,10 +46,12 @@
 
 | 节点 | 角色 | 能力 |
 |---|---|---|
-| node-22 | `compute_control` | 调度/Slurm/SHUD/发布/retry-cancel（已业务化） |
-| node-27 | `display_readonly` | 只读消费 DB + published artifacts，`/` 单页地图 + `/ops`；无 Slurm/Docker socket/控制面写 |
+| node-22 | compute/artifact producer | Slurm gateway、Slurm/SHUD compute、forcing/run artifacts 写入 shared NFS；不连当前活 DB |
+| node-27 | active DB + ingest + display | 本机 PostgreSQL `:55432`、node-27 ingest writer、display API、前端；display runtime 为 `display_readonly` |
 
-published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm/published`。DB：27 用只读账号（如 `nhms_display_ro`）。
+shared NFS 路径：node-22 视图为 `/ghdc/data/nwm/...`，node-27 视图为
+`/home/ghdc/nwm/...`。node-22 本地 PG `:55433` 是 historical/do-not-connect/
+pending removal；当前 active DB 和 display/frontend oracle 都在 node-27。
 
 ---
 
