@@ -3,8 +3,9 @@
 ### Requirement: DB-backed station series helper is legacy internal surface
 
 `PsycopgForecastStore.station_series()` SHALL be treated as a legacy/internal
-DB-backed helper retained for historical contract tests and future #631 design
-work. The current public display route SHALL NOT call it.
+DB-backed helper retained for historical contract tests and ADR 0001
+archive/history design material. The current public display route SHALL NOT
+call it.
 
 #### Scenario: production code does not call legacy helper
 
@@ -22,5 +23,6 @@ work. The current public display route SHALL NOT call it.
   contract, not as evidence that the current public route falls back to DB
   history
 - **AND** any reintroduction of DB-backed historical station-series access SHALL
-  be designed as #631 follow-up work rather than a silent fallback from the
-  direct-disk route
+  follow `docs/adr/0001-station-forcing-history-api-boundary.md` and land as a
+  future explicit API change rather than a silent fallback from the direct-disk
+  route

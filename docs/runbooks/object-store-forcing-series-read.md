@@ -95,7 +95,7 @@ station-series reader 只读 forcing producer 已发布到共享 object-store mi
 旧 DB-backed 路径上的 `FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 不应再从该 station-series route 产生。新路径不查 `met.forcing_version` readiness，所以不要用这些 code 排查 disk 读问题。
 
 `PsycopgForecastStore.station_series()` 仍保留在 `packages/common/forecast_store.py`，
-但它现在是 legacy/internal DB helper：只用于保留历史 DB 合同测试和后续 #631
+但它现在是 legacy/internal DB helper：只用于保留历史 DB 合同测试和 ADR 0001 所述的
 长期历史 API 设计，不是当前 display station-series route 的实现。生产 route/service
 代码不得把 disk miss 静默降级到该 helper；如果 retention 外历史回看成为产品需求，应新增独立端点
 或显式 mode，而不是复活旧 fallback。
@@ -119,7 +119,9 @@ find /home/ghdc/nwm/object-store/forcing/ifs /home/ghdc/nwm/object-store/forcing
   -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
 ```
 
-老 cycle 超出 disk retention 后，station-series 应返回 `STATION_FORCING_FILE_NOT_FOUND`。这是当前契约，不是降级路径失败；本 PR 不做 DB fallback。长期历史回看是否走 DB 另见 Follow-ups。
+老 cycle 超出 disk retention 后，station-series 应返回 `STATION_FORCING_FILE_NOT_FOUND`。这是当前契约，不是降级路径失败；本 PR 不做 DB fallback。长期历史回看边界见
+`docs/adr/0001-station-forcing-history-api-boundary.md`：如需 DB/archive 历史回看，必须是独立 archive/history API
+或显式 opt-in mode，不能作为当前 route 的静默 fallback。
 
 ## Role Boundary
 
@@ -150,7 +152,6 @@ curl -sS 'https://test.nwm.ac.cn/api/v1/met/stations/heihe_forc_001/series?model
 ## Follow-ups
 
 - #629 Frontend: cycle picker adapt to disk retention window
-- #631 Evaluate long-term forcing series API via DB read
 
 ## Related References
 
