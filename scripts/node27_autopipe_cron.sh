@@ -61,6 +61,11 @@ if [ -f "$INGEST_ENV" ]; then
     unset AUTOPIPE_WORK_ROOT
     unset AUTOPIPE_LOG_ROOT
     unset N22_DSN
+    unset PGUSER
+    unset PGPASSWORD
+    unset PGPASSFILE
+    unset PGSERVICE
+    unset PGSERVICEFILE
   fi
   set -a
   # shellcheck disable=SC1090

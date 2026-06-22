@@ -48,7 +48,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -163,6 +163,13 @@ def _database_username_class(username: str | None) -> str:
     return "writer_candidate"
 
 
+def _database_password_present(parsed: Any) -> bool:
+    if parsed.password:
+        return True
+    query_values = parse_qs(parsed.query, keep_blank_values=True)
+    return any(bool(value) for value in query_values.get("password", ()))
+
+
 def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
     raw = (database_url or "").strip()
     if not raw:
@@ -184,6 +191,7 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
 
     database = parsed.path.lstrip("/")
     username_class = _database_username_class(parsed.username)
+    password_present = _database_password_present(parsed)
     identity = {
         "configured": True,
         "scheme": parsed.scheme,
@@ -192,6 +200,7 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
         "database": database or None,
         "username_present": username_class != "missing",
         "username_class": username_class,
+        "password_present": password_present,
     }
     if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or not database:
         return identity, [
@@ -209,14 +218,25 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
                 "DATABASE_URL must include an explicit ingest writer username.",
             )
         ]
+    blockers: list[dict[str, str]] = []
     if identity["username_class"] == "display_readonly_like":
-        return identity, [
+        blockers.append(
             _preflight_blocker(
                 "DATABASE_URL_READONLY_IDENTITY",
                 "DATABASE_URL",
                 "DATABASE_URL appears to use a display/readonly identity, not an ingest writer.",
             )
-        ]
+        )
+    if not password_present:
+        blockers.append(
+            _preflight_blocker(
+                "DATABASE_URL_PASSWORD_MISSING",
+                "DATABASE_URL",
+                "DATABASE_URL must include explicit password material for the ingest writer username.",
+            )
+        )
+    if blockers:
+        return identity, blockers
     return identity, []
 
 
@@ -229,6 +249,14 @@ def _role_preflight(env: dict[str, str]) -> tuple[dict[str, Any], list[dict[str,
         "service_role_env": service_role or None,
     }
     blockers: list[dict[str, str]] = []
+    if not ingest_role:
+        blockers.append(
+            _preflight_blocker(
+                "INGEST_ROLE_REQUIRED",
+                "NHMS_NODE27_INGEST_ROLE",
+                "NHMS_NODE27_INGEST_ROLE must be node27_data_plane_ingest for node-27 ingest.",
+            )
+        )
     if service_role == "display_readonly" or ingest_role == "display_readonly":
         blockers.append(
             _preflight_blocker(

@@ -108,6 +108,33 @@ def test_missing_database_url_blocks_before_seed_run_publish_and_redacts(
     assert "preflight-secret-token" not in rendered
 
 
+def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_NODE27_INGEST_ROLE", raising=False)
+    monkeypatch.setenv("SECRET_TOKEN", "preflight-secret-token")
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert summary["status"] == "preflight_blocked"
+    assert summary["return_code"] == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {"INGEST_ROLE_REQUIRED"}
+    assert summary["ingest"]["preflight"]["role"]["ingest_role_env"] is None
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "preflight-secret-token" not in rendered
+    assert "writer-secret" not in rendered
+
+
 def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -174,6 +201,33 @@ def test_preflight_rejects_database_url_without_username_before_libpq_ambient_id
     assert summary["ingest"]["preflight"]["database"]["username_present"] is False
     assert summary["ingest"]["preflight"]["database"]["username_class"] == "missing"
     assert "readonly-secret" not in rendered
+
+
+def test_preflight_rejects_database_url_without_password_before_libpq_ambient_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    pgpass_file = tmp_path / "ambient-pgpass"
+    pgpass_file.write_text("*:*:*:*:readonly-secret\n", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://node27_writer@127.0.0.1:55432/nhms")
+    monkeypatch.setenv("PGPASSWORD", "readonly-secret")
+    monkeypatch.setenv("PGPASSFILE", str(pgpass_file))
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {"DATABASE_URL_PASSWORD_MISSING"}
+    assert summary["ingest"]["preflight"]["database"]["username_present"] is True
+    assert summary["ingest"]["preflight"]["database"]["username_class"] == "writer_candidate"
+    assert summary["ingest"]["preflight"]["database"]["password_present"] is False
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "readonly-secret" not in rendered
+    assert str(pgpass_file) not in rendered
 
 
 def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
@@ -254,6 +308,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
         "host": "db.example",
         "port": 55432,
         "scheme": "postgresql",
+        "password_present": True,
         "username_class": "writer_candidate",
         "username_present": True,
     }
@@ -351,6 +406,11 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "AUTOPIPE_WORK_ROOT",
         "AUTOPIPE_LOG_ROOT",
         "N22_DSN",
+        "PGUSER",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "PGSERVICE",
+        "PGSERVICEFILE",
     ):
         assert f"unset {required_key}" in script
     assert "--database-url" not in script
@@ -445,6 +505,98 @@ def test_wrapper_env_file_missing_database_url_ignores_ambient_without_override(
     assert "DATABASE_URL_MISSING" in bootstrap_log.read_text(encoding="utf-8")
     assert not invocations.exists()
     assert not (log_root / "autopipe.log").exists()
+
+
+def test_wrapper_env_file_passwordless_database_url_does_not_inherit_libpq_credentials(tmp_path: Path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (scripts / "node27_autopipeline.py").write_text("# fake autopipeline\n", encoding="utf-8")
+    (scripts / "node27_refresh_coverage.py").write_text("# fake coverage\n", encoding="utf-8")
+    invocations = tmp_path / "invocations.txt"
+    python_bin.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"echo \"$@\" >> {invocations}",
+                'for key in PGUSER PGPASSWORD PGPASSFILE PGSERVICE PGSERVICEFILE; do',
+                '  eval "value=\\${$key+x}"',
+                '  if [ "$value" = "x" ]; then',
+                '    echo "libpq credential env leaked: $key" >&2',
+                "    exit 99",
+                "  fi",
+                "done",
+                'echo \'{"status":"preflight_blocked","return_code":2,'
+                '"blockers":[{"code":"DATABASE_URL_PASSWORD_MISSING"}]}\'',
+                "exit 2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://node27_writer@db.example/nhms",
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                "OBJECT_STORE_PREFIX=s3://nhms",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    pgpass_file = tmp_path / "ambient.pgpass"
+    pgservice_file = tmp_path / "ambient.pgservice"
+    pgpass_file.write_text("*:*:*:*:ambient-secret\n", encoding="utf-8")
+    pgservice_file.write_text("[ambient]\npassword=ambient-secret\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_flock.chmod(0o755)
+    env = {
+        **os.environ,
+        "NODE27_AUTOPIPE_REPO": str(fake_repo),
+        "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+        "NODE27_AUTOPIPE_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PGUSER": "ambient-user",
+        "PGPASSWORD": "ambient-secret",
+        "PGPASSFILE": str(pgpass_file),
+        "PGSERVICE": "ambient-service",
+        "PGSERVICEFILE": str(pgservice_file),
+    }
+    env.pop("NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV", None)
+
+    proc = subprocess.run(["bash", str(WRAPPER)], env=env, capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 2
+    assert proc.stderr == ""
+    calls = invocations.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 1
+    assert "node27_autopipeline.py" in calls[0]
+    assert "node27_refresh_coverage.py" not in calls[0]
+    log_text = (log_root / "autopipe.log").read_text(encoding="utf-8")
+    assert "DATABASE_URL_PASSWORD_MISSING" in log_text
+    assert "coverage backstop" not in log_text
+    for forbidden in ("ambient-secret", str(pgpass_file), str(pgservice_file)):
+        assert forbidden not in log_text
+        assert forbidden not in proc.stderr
 
 
 def test_wrapper_env_file_missing_ingest_role_ignores_ambient_without_override(tmp_path: Path) -> None:
