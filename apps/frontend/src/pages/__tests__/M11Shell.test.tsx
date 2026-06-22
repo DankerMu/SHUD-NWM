@@ -2011,14 +2011,32 @@ describe('M11 visual foundation shell', () => {
       expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
     })
 
-    it('shows a honest empty state on the national overview and never fetches without a basin', () => {
+    it('loads met-stations on the national overview using an available basin identity', async () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)
       useStationLayerDataStore.setState({
         ...useStationLayerDataStore.getInitialState(),
         loadStationLayer,
         clear: vi.fn(),
       })
-      window.history.pushState({}, '', '/?layer=met-stations')
+      window.history.pushState({}, '', `/?${serializeM11QueryState({ ...state, layer: 'met-stations' })}`)
+      const query = parseM11QueryState(window.location.search)
+      useOverviewDataStore.setState({
+        overview: {
+          requestScope: matchedOverviewScope(query),
+          bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+          basins: overviewBasins,
+          summary: createEmptyOverviewSummary(query),
+          layers,
+          aggregationDecision: decideAggregationEndpoint({
+            initialRequestCount: 1,
+            createsPerBasinNPlusOne: false,
+            missingRequiredFields: [],
+          }),
+          basinVersionToBasinId: {},
+        },
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
 
       render(
         <BrowserRouter>
@@ -2026,8 +2044,10 @@ describe('M11 visual foundation shell', () => {
         </BrowserRouter>,
       )
 
-      expect(screen.getByTestId('m11-met-station-status')).toHaveTextContent('请选择流域以加载气象代站')
-      expect(loadStationLayer).not.toHaveBeenCalled()
+      await waitFor(() => {
+        expect(loadStationLayer).toHaveBeenCalledWith({ basinId: 'yangtze', resolvedSource: 'GFS', cycle: state.cycle })
+      })
+      expect(screen.queryByText('请选择流域以加载气象代站')).not.toBeInTheDocument()
     })
   })
 
