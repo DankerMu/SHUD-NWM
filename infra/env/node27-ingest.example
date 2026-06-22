@@ -1,0 +1,24 @@
+# Node-27 data-plane ingest example for scripts/node27_autopipe_cron.sh.
+# Copy to infra/env/node27-ingest.env with mode 0600 on node-27, then replace
+# placeholders with writer credentials and local paths. This file is not for the
+# display API; do not source infra/env/display.env for ingest.
+
+NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest
+
+# Writer-capable node-27 PostgreSQL URL. Do not use the display_readonly role.
+DATABASE_URL=postgresql://nhms_ingest_rw:change-me@127.0.0.1:55432/nhms
+
+# Node-27 local view of the shared object-store and basin geometry sources.
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+OBJECT_STORE_PREFIX=s3://nhms
+BASINS_ROOT=/home/ghdc/nwm/Basins
+
+# Local working/log roots owned by the nwm user on node-27.
+AUTOPIPE_WORK_ROOT=/home/nwm/autopipe-work
+AUTOPIPE_LOG_ROOT=/home/nwm/autopipe-logs
+AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
+AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
+
+# Optional explicit transitional mirror fallback for pre-contract runs.
+# Leave unset unless intentionally using the compatibility mirror.
+# N22_DSN=postgresql://readonly-user:change-me@210.77.77.22:55433/nhms

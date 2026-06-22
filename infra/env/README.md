@@ -132,3 +132,16 @@ reports or evidence into `infra/env/`; real local env files such as
 are intentionally ignored while `*.example` and this README remain trackable.
 `infra/docker-compose.dev.yml` remains a local development dependency stack and
 must not be used as either production two-node compose file.
+
+Node-27 ingest role:
+
+- `infra/env/node27-ingest.example` is the committed template for
+  `scripts/node27_autopipe_cron.sh`. Copy it to an untracked
+  `infra/env/node27-ingest.env` with mode `0600` and writer-capable
+  `DATABASE_URL` on node-27.
+- This env is not a display API env. It uses
+  `NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest` and must not set
+  `NHMS_SERVICE_ROLE=display_readonly` or use a display/readonly DB user.
+- Required ingest keys are `DATABASE_URL`, `OBJECT_STORE_ROOT`, `BASINS_ROOT`,
+  `AUTOPIPE_WORK_ROOT`, and `AUTOPIPE_LOG_ROOT`. The cron wrapper blocks before
+  Python ingest and coverage backstop when the ingest env is missing or unsafe.

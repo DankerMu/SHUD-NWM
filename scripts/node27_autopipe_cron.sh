@@ -2,33 +2,88 @@
 # node-27 autopipeline cron wrapper.
 #
 # Periodically scans the object-store for new basins/runs and ingests them via
-# scripts/node27_autopipeline.py (seed registry -> register -> mirror -> parse
-# -> refresh-coverage). Idempotent: already-seeded basins and already-parsed
-# runs are detected and skipped, so re-running every N minutes is safe and only
-# does outstanding work.
+# scripts/node27_autopipeline.py (seed registry -> register -> object-store
+# forcing handoff or explicit mirror -> parse -> refresh-coverage). Idempotent:
+# already-seeded basins and already-parsed runs are detected and skipped, so
+# re-running every N minutes is safe and only does outstanding work.
 #
 # flock guards against overlapping runs (a long ingest must not be re-entered by
 # the next cron tick). All output (timestamped + the JSON summary) is appended
-# to /home/nwm/autopipe.log.
+# to AUTOPIPE_LOG_FILE.
 #
 # Install (every 10 minutes):
 #   crontab -e   # then add:
-#   */10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh >> /home/nwm/autopipe.log 2>&1
+#   */10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh
 
 set -u
 
-REPO=/home/nwm/NWM
-LOG=/home/nwm/autopipe.log
-LOCK=/tmp/autopipe.cron.lock
-
-export OBJECT_STORE_ROOT="${OBJECT_STORE_ROOT:-/home/ghdc/nwm/object-store}"
-export OBJECT_STORE_PREFIX="${OBJECT_STORE_PREFIX:-s3://nhms}"
-export DATABASE_URL="${DATABASE_URL:-postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms}"
-export BASINS_ROOT="${BASINS_ROOT:-/home/ghdc/nwm/Basins}"
-# Seed scratch (multi-GB basin copies) on the big /home volume, never the small /.
-export AUTOPIPE_WORK_ROOT="${AUTOPIPE_WORK_ROOT:-/home/nwm/autopipe-work}"
+REPO="${NODE27_AUTOPIPE_REPO:-/home/nwm/NWM}"
+INGEST_ENV="${NODE27_AUTOPIPE_ENV_FILE:-$REPO/infra/env/node27-ingest.env}"
+ALLOW_AMBIENT_ENV="${NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV:-0}"
+BOOTSTRAP_LOG="${NODE27_AUTOPIPE_BOOTSTRAP_LOG:-/home/nwm/autopipe.log}"
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+bootstrap_blocked() {
+  local reason="$1"
+  mkdir -p "$(dirname "$BOOTSTRAP_LOG")" 2>/dev/null || true
+  echo "[$(ts)] autopipe: BLOCKED rc=2 reason=$reason" >> "$BOOTSTRAP_LOG"
+  echo "[$(ts)] autopipe: BLOCKED rc=2 reason=$reason" >&2
+  exit 2
+}
+
+if [ -f "$INGEST_ENV" ]; then
+  case "$INGEST_ENV" in
+    *display.env|*display.example|*display-readonly-secrets.env)
+      bootstrap_blocked "INGEST_ENV_DISPLAY_RUNTIME_FORBIDDEN"
+      ;;
+  esac
+  if [ -L "$INGEST_ENV" ]; then
+    bootstrap_blocked "INGEST_ENV_SYMLINK_FORBIDDEN"
+  fi
+  if [ ! -f "$INGEST_ENV" ]; then
+    bootstrap_blocked "INGEST_ENV_NOT_REGULAR_FILE"
+  fi
+  ENV_MODE=$(stat -c '%a' "$INGEST_ENV" 2>/dev/null || stat -f '%Lp' "$INGEST_ENV" 2>/dev/null || true)
+  if [ "$ENV_MODE" != "600" ]; then
+    bootstrap_blocked "INGEST_ENV_MODE_UNSAFE"
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  if ! . "$INGEST_ENV"; then
+    set +a
+    bootstrap_blocked "INGEST_ENV_SOURCE_FAILED"
+  fi
+  set +a
+  export NHMS_NODE27_INGEST_CONFIG_SOURCE="env_file:$INGEST_ENV"
+elif [ "$ALLOW_AMBIENT_ENV" = "1" ]; then
+  export NHMS_NODE27_INGEST_CONFIG_SOURCE="${NHMS_NODE27_INGEST_CONFIG_SOURCE:-ambient:NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV}"
+else
+  bootstrap_blocked "INGEST_ENV_MISSING"
+fi
+
+if [ "${NHMS_NODE27_INGEST_ROLE:-}" != "node27_data_plane_ingest" ]; then
+  bootstrap_blocked "INGEST_ROLE_REQUIRED"
+fi
+
+if [ -z "${AUTOPIPE_LOG_ROOT:-}" ]; then
+  bootstrap_blocked "AUTOPIPE_LOG_ROOT_MISSING"
+fi
+case "$AUTOPIPE_LOG_ROOT" in
+  /*) ;;
+  *) bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNSAFE" ;;
+esac
+if [ "$AUTOPIPE_LOG_ROOT" = "/" ]; then
+  bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNSAFE"
+fi
+mkdir -p "$AUTOPIPE_LOG_ROOT" 2>/dev/null || bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNWRITABLE"
+CANONICAL_LOG_ROOT=$(cd "$AUTOPIPE_LOG_ROOT" 2>/dev/null && pwd -P) || bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNWRITABLE"
+if [ "$CANONICAL_LOG_ROOT" = "/" ]; then
+  bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNSAFE"
+fi
+
+LOG="${AUTOPIPE_LOG_FILE:-$AUTOPIPE_LOG_ROOT/autopipe.log}"
+LOCK="${AUTOPIPE_LOCK_PATH:-${NODE27_AUTOPIPE_LOCK_PATH:-/tmp/autopipe.cron.lock}}"
 
 # Non-blocking lock: if a previous run is still going, skip this tick.
 exec 9>"$LOCK"
@@ -41,8 +96,17 @@ echo "[$(ts)] autopipe: start" >> "$LOG"
 START=$(date +%s)
 
 cd "$REPO" || { echo "[$(ts)] autopipe: cannot cd $REPO" >> "$LOG"; exit 1; }
-"$REPO/.venv/bin/python" "$REPO/scripts/node27_autopipeline.py" >> "$LOG" 2>&1
+"$REPO/.venv/bin/python" "$REPO/scripts/node27_autopipeline.py" \
+  --object-store-root "${OBJECT_STORE_ROOT:-}" \
+  --database-url "${DATABASE_URL:-}" \
+  --basins-root "${BASINS_ROOT:-}" >> "$LOG" 2>&1
 RC=$?
+
+if [ "$RC" -eq 2 ]; then
+  END=$(date +%s)
+  echo "[$(ts)] autopipe: preflight blocked rc=$RC elapsed_sec=$((END - START))" >> "$LOG"
+  exit "$RC"
+fi
 
 # Backstop: materialize display coverage for any run still missing/stale it so
 # latest-product keeps the <1s fast path (per-run refresh is wired in the
