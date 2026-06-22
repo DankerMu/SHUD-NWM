@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.redaction import redact_payload
+from packages.common.redaction import redact_payload, redact_text
 from packages.common.storage import validate_object_path
 
 CONTRACT_ID = "nhms.forcing_domain_handoff.v1"
@@ -107,56 +107,54 @@ def validate_forcing_domain_handoff_path(
 ) -> dict[str, Any]:
     """Validate one declared forcing-domain handoff manifest without writing files."""
 
-    root = Path(object_store_root).expanduser()
-    if not root.is_dir():
-        return _result(
-            {},
-            [
-                _reason(
-                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
-                    field="object_store_root",
-                )
-            ],
-        )
+    store, manifest, manifest_uri, _manifest_checksum, reasons = _read_handoff_manifest_path(
+        manifest_path,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if reasons or store is None:
+        return _result(manifest, reasons, manifest_uri=manifest_uri)
+    return validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_uri)
 
-    try:
-        store = LocalObjectStore(root, object_store_prefix)
-    except Exception as error:
-        return _result(
-            {},
-            [
-                _reason(
-                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
-                    field="object_store_root",
-                    detail=str(error),
-                )
-            ],
-        )
-    try:
-        manifest_key = _manifest_key(manifest_path, root)
-        manifest_bytes = store.read_bytes_limited(manifest_key, max_bytes=MAX_HANDOFF_MANIFEST_BYTES)
-    except Exception as error:
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_UNREADABLE, field="manifest_uri", detail=str(error))],
-            manifest_uri=_safe_manifest_uri(manifest_path),
-        )
 
-    try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail=str(error))],
-            manifest_uri=manifest_key,
-        )
-    if not isinstance(manifest, Mapping):
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail="manifest root must be an object")],
-            manifest_uri=manifest_key,
-        )
-    return validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_key)
+def parse_forcing_domain_handoff_path(
+    manifest_path: str | Path,
+    *,
+    object_store_root: str | Path,
+    object_store_prefix: str = "",
+) -> dict[str, Any]:
+    """Read a validated forcing-domain handoff package into table-shaped rows.
+
+    The parser is intentionally gated by the existing validator: unavailable
+    validation outcomes are returned with an empty ``parsed`` map and no partial
+    rows.
+    """
+
+    store, manifest, manifest_uri, manifest_checksum, reasons = _read_handoff_manifest_path(
+        manifest_path,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if reasons or store is None:
+        return _with_empty_parsed(_result(manifest, reasons, manifest_uri=manifest_uri))
+
+    validation_result = validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_uri)
+    if not validation_result.get("available"):
+        return _with_empty_parsed(validation_result)
+
+    parse_reasons: list[dict[str, Any]] = []
+    payload_rows = _read_parser_payload_rows(manifest, store, parse_reasons)
+    if parse_reasons:
+        return _parser_unavailable_result(validation_result, parse_reasons)
+
+    parsed = _parsed_handoff_tables(manifest, payload_rows)
+    evidence = dict(validation_result.get("evidence") or {})
+    evidence["handoff"] = {
+        "manifest_uri": manifest_uri,
+        "manifest_checksum_sha256": manifest_checksum,
+    }
+    evidence["parsed_table_row_counts"] = {table: len(rows) for table, rows in parsed.items()}
+    return _parser_result(validation_result, evidence=evidence, parsed=parsed)
 
 
 def validate_forcing_domain_handoff(
@@ -236,6 +234,280 @@ def validate_forcing_domain_handoff(
         "table_row_counts": table_row_counts,
     }
     return _result(manifest, reasons, evidence=evidence, manifest_uri=manifest_uri)
+
+
+def _read_handoff_manifest_path(
+    manifest_path: str | Path,
+    *,
+    object_store_root: str | Path,
+    object_store_prefix: str = "",
+) -> tuple[LocalObjectStore | None, Mapping[str, Any], str | None, str | None, list[dict[str, Any]]]:
+    root = Path(object_store_root).expanduser()
+    if not root.is_dir():
+        return (
+            None,
+            {},
+            None,
+            None,
+            [_reason(REASON_OBJECT_STORE_ROOT_UNAVAILABLE, field="object_store_root")],
+        )
+
+    try:
+        store = LocalObjectStore(root, object_store_prefix)
+    except Exception as error:
+        return (
+            None,
+            {},
+            None,
+            None,
+            [
+                _reason(
+                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
+                    field="object_store_root",
+                    detail=str(error),
+                )
+            ],
+        )
+
+    try:
+        manifest_key = _manifest_key(manifest_path, root)
+        manifest_bytes = store.read_bytes_limited(manifest_key, max_bytes=MAX_HANDOFF_MANIFEST_BYTES)
+    except Exception as error:
+        return (
+            store,
+            {},
+            _safe_manifest_uri(manifest_path),
+            None,
+            [_reason(REASON_MANIFEST_UNREADABLE, field="manifest_uri", detail=str(error))],
+        )
+
+    manifest_checksum = sha256_bytes(manifest_bytes)
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return (
+            store,
+            {},
+            manifest_key,
+            manifest_checksum,
+            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail=str(error))],
+        )
+    if not isinstance(manifest, Mapping):
+        return (
+            store,
+            {},
+            manifest_key,
+            manifest_checksum,
+            [
+                _reason(
+                    REASON_MANIFEST_MALFORMED,
+                    field="manifest_uri",
+                    detail="manifest root must be an object",
+                )
+            ],
+        )
+    return store, manifest, manifest_key, manifest_checksum, []
+
+
+def _with_empty_parsed(result: Mapping[str, Any]) -> dict[str, Any]:
+    parser_result = dict(result)
+    parser_result["parsed"] = {}
+    return _redact_parser_result(parser_result)
+
+
+def _parser_unavailable_result(
+    validation_result: Mapping[str, Any],
+    reasons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result = dict(validation_result)
+    result["available"] = False
+    result["status"] = "unavailable"
+    result["unavailable_reasons"] = reasons
+    evidence = dict(result.get("evidence") or {})
+    evidence["payloads"] = {}
+    evidence["table_row_counts"] = {}
+    result["evidence"] = evidence
+    result["parsed"] = {}
+    return _redact_parser_result(result)
+
+
+def _parser_result(
+    validation_result: Mapping[str, Any],
+    *,
+    evidence: Mapping[str, Any],
+    parsed: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    result = dict(validation_result)
+    result["available"] = True
+    result["status"] = "available"
+    result["unavailable_reasons"] = []
+    result["evidence"] = dict(evidence)
+    result["parsed"] = parsed
+    return _redact_parser_result(result)
+
+
+def _read_parser_payload_rows(
+    manifest: Mapping[str, Any],
+    store: LocalObjectStore,
+    reasons: list[dict[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    package = _normalize_package_dir_key(store, manifest.get("forcing_package_uri"), reasons)
+    if package is None:
+        return {}
+    package_key, package_components = package
+    if not _validate_package_path_identity(package_components, manifest, reasons):
+        return {}
+
+    payloads = manifest.get("payloads")
+    if not isinstance(payloads, Mapping):
+        for role in PAYLOAD_TABLES:
+            reasons.append(_reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}", role=role))
+        return {}
+
+    payload_rows: dict[str, list[Mapping[str, Any]]] = {}
+    for role, table in PAYLOAD_TABLES.items():
+        payload = payloads.get(role)
+        if not isinstance(payload, Mapping):
+            reasons.append(_reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}", role=role))
+            continue
+
+        declared_table = payload.get("table")
+        if declared_table != table:
+            reasons.append(
+                _reason(REASON_ROW_COUNT_MISMATCH, field=f"payloads.{role}.table", role=role, table=table)
+            )
+
+        row_count = _positive_int(payload.get("row_count"))
+        if row_count is None:
+            reasons.append(_reason(REASON_ROW_COUNT_MISSING, field=f"payloads.{role}.row_count", role=role))
+
+        checksum = payload.get("checksum_sha256")
+        if not _present_text(checksum) or not _valid_checksum(str(checksum)):
+            reasons.append(
+                _reason(REASON_PAYLOAD_CHECKSUM_MISSING, field=f"payloads.{role}.checksum_sha256", role=role)
+            )
+
+        payload_key = _normalize_object_key(
+            store,
+            payload.get("uri"),
+            reasons,
+            REASON_PAYLOAD_PATH_UNSAFE,
+            f"payloads.{role}.uri",
+            role=role,
+        )
+        if payload_key is None:
+            continue
+        if not payload_key.startswith(f"{package_key}/payloads/"):
+            reasons.append(
+                _reason(
+                    REASON_PAYLOAD_OUTSIDE_PACKAGE,
+                    field=f"payloads.{role}.uri",
+                    role=role,
+                    table=table,
+                )
+            )
+            continue
+        if not _present_text(checksum) or not _valid_checksum(str(checksum)):
+            continue
+
+        try:
+            content = store.read_bytes_limited(payload_key, max_bytes=MAX_HANDOFF_PAYLOAD_BYTES)
+        except Exception as error:
+            reasons.append(
+                _reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}.uri", role=role, detail=str(error))
+            )
+            continue
+        actual_checksum = sha256_bytes(content)
+        if actual_checksum != checksum:
+            reasons.append(
+                _reason(
+                    REASON_PAYLOAD_CHECKSUM_MISMATCH,
+                    field=f"payloads.{role}.checksum_sha256",
+                    role=role,
+                    expected=str(checksum),
+                    actual=actual_checksum,
+                )
+            )
+            continue
+
+        rows = _json_rows(content, role, reasons)
+        actual_row_count = len(rows) if rows is not None else None
+        if row_count is not None and actual_row_count != row_count:
+            reasons.append(
+                _reason(
+                    REASON_ROW_COUNT_MISMATCH,
+                    field=f"payloads.{role}.row_count",
+                    role=role,
+                    table=table,
+                    expected=row_count,
+                    actual=actual_row_count if actual_row_count is not None else "uncountable",
+                )
+            )
+        if rows is not None:
+            payload_rows[role] = [dict(row) for row in rows]
+    return payload_rows
+
+
+def _parsed_handoff_tables(
+    manifest: Mapping[str, Any],
+    payload_rows: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    return {
+        "met.forcing_version": [_forcing_version_row(manifest)],
+        "met.met_station": [dict(row) for row in payload_rows.get("station_inventory", [])],
+        "met.forcing_station_timeseries": [dict(row) for row in payload_rows.get("station_timeseries", [])],
+        "met.interp_weight": [dict(row) for row in payload_rows.get("interpolation_weights", [])],
+    }
+
+
+def _forcing_version_row(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "forcing_version_id": manifest.get("forcing_version_id"),
+        "source_id": manifest.get("source_id"),
+        "cycle_time": manifest.get("cycle_time"),
+        "start_time": manifest.get("start_time"),
+        "end_time": manifest.get("end_time"),
+        "basin_id": manifest.get("basin_id"),
+        "basin_version_id": manifest.get("basin_version_id"),
+        "model_id": manifest.get("model_id"),
+        "station_count": manifest.get("station_count"),
+        "forcing_package_uri": manifest.get("forcing_package_uri"),
+        "forcing_package_manifest_uri": manifest.get(FORCING_PACKAGE_MANIFEST_URI_FIELD),
+        "checksum": manifest.get(FORCING_PACKAGE_MANIFEST_CHECKSUM_FIELD),
+    }
+
+
+def _redact_parser_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    parsed = result.get("parsed")
+    envelope = dict(result)
+    envelope["parsed"] = {}
+    redacted = redact_payload(envelope)
+    redacted["parsed"] = _redact_parsed_tables(parsed) if isinstance(parsed, Mapping) else {}
+    return redacted
+
+
+def _redact_parsed_tables(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for table, rows in parsed.items():
+        table_key = str(table)
+        if isinstance(rows, list):
+            redacted[table_key] = [
+                _redact_parsed_row(row) if isinstance(row, Mapping) else redact_payload(row) for row in rows
+            ]
+        else:
+            redacted[table_key] = redact_payload(rows)
+    return redacted
+
+
+def _redact_parsed_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for key, value in row.items():
+        key_text = str(key)
+        if key_text == "grid_signature":
+            redacted[key_text] = redact_text(value) if isinstance(value, str) else redact_payload(value)
+        else:
+            redacted[key_text] = redact_payload({key_text: value})[key_text]
+    return redacted
 
 
 def _validate_contract_fields(manifest: Mapping[str, Any], reasons: list[dict[str, Any]]) -> None:
