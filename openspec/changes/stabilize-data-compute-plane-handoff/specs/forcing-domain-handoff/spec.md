@@ -7,7 +7,7 @@ enough identity and payload metadata for node-27 ingest to reconstruct display
 forcing readiness without querying an active node-22 database. The handoff MUST
 include or reference `source_id`, `cycle_time`, `start_time`, `end_time`,
 `run_id`, `model_id`, `basin_id`, `basin_version_id`, `forcing_version_id`,
-package URI, package checksum, station inventory payload/checksum,
+package directory URI, package manifest URI/checksum, station inventory payload/checksum,
 station-timeseries payload/checksum,
 interpolation-weight payload/checksum, station count, and per-table row-count
 evidence.

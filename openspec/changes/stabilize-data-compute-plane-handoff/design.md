@@ -193,8 +193,9 @@ exactly one run/model/basin/source/cycle and bind every readiness payload to a
 checksum and expected row-count evidence, or be rejected by a stable reason.
 Source-of-truth identity/contract: `run_id`, `source_id`, `cycle_time`,
 `start_time`, `end_time`, `model_id`, `basin_id`, `basin_version_id`,
-`forcing_version_id`, package URI/checksum, and payload URI/checksum pairs for
-station inventory, station timeseries, and interpolation weights.
+`forcing_version_id`, package directory URI, package manifest URI/checksum, and
+payload URI/checksum pairs for station inventory, station timeseries, and
+interpolation weights.
 Surfaces:
 - Producers: object-store package contract fixtures and existing run/forcing
   manifest examples.
