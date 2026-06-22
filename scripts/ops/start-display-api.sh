@@ -20,9 +20,6 @@ readonly REPO_ROOT
 
 ENV_FILE="${REPO_ROOT}/infra/env/display.env"
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
-UVICORN_HOST="${NHMS_DISPLAY_HOST:-127.0.0.1}"
-UVICORN_PORT="${NHMS_DISPLAY_PORT:-8080}"
-LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"
 UVICORN_PATTERN='\.venv/bin/python -m uvicorn apps\.api\.main:app'
 REQUIRED_KEYS=(DATABASE_URL NHMS_ENABLE_LIVE_POSTGIS_MVT OBJECT_STORE_ROOT)
 
@@ -56,6 +53,11 @@ if (( ${#missing[@]} > 0 )); then
     echo "  (values redacted; fix display.env and rerun)" >&2
     exit 3
 fi
+
+UVICORN_HOST="${NHMS_DISPLAY_HOST:-127.0.0.1}"
+UVICORN_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
+LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"
+
 if [[ ! -d "$OBJECT_STORE_ROOT" || ! -r "$OBJECT_STORE_ROOT" || ! -x "$OBJECT_STORE_ROOT" ]]; then
     echo "ERROR: OBJECT_STORE_ROOT must be an existing readable and traversable directory: $OBJECT_STORE_ROOT" >&2
     echo "       fix display.env or filesystem permissions before restarting; existing uvicorn was not stopped." >&2

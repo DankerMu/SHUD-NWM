@@ -1455,7 +1455,7 @@ def test_static_checker_rejects_display_ambient_overrides(
     ("mutation", "alias_key", "process_value"),
     [
         ("image", "DISPLAY_APP_IMAGE", "ambient-display-app"),
-        ("port", "DISPLAY_PORT", "18000"),
+        ("port", "NHMS_DISPLAY_PORT", "18000"),
         ("aws_secret", "DISPLAY_AWS_SECRET_ACCESS_KEY", "ambient-secret"),
     ],
 )
@@ -1471,7 +1471,7 @@ def test_static_checker_rejects_display_compose_alias_interpolation_keys_absent_
     if mutation == "image":
         service["image"] = "${DISPLAY_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}"
     elif mutation == "port":
-        service["ports"] = ["127.0.0.1:${DISPLAY_PORT:-8000}:8000"]
+        service["ports"] = ["127.0.0.1:${NHMS_DISPLAY_PORT:-8080}:8000"]
     elif mutation == "aws_secret":
         service["environment"]["AWS_SECRET_ACCESS_KEY"] = (
             "${DISPLAY_AWS_SECRET_ACCESS_KEY:-readonly-secret-placeholder}"
@@ -1485,6 +1485,61 @@ def test_static_checker_rejects_display_compose_alias_interpolation_keys_absent_
 
     assert result.status == "FAIL"
     assert _codes(result) >= {"DISPLAY_INTERPOLATION_ENV_MISSING", "DISPLAY_INTERPOLATION_ENV_UNAPPROVED"}
+
+
+def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp_path: Path) -> None:
+    temp_repo = tmp_path / "repo"
+    object_store_root = temp_repo / "object-store"
+    display_env = [
+        "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
+        "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+        f"OBJECT_STORE_ROOT={object_store_root}",
+        "NHMS_DISPLAY_API_PORT=18080",
+        "NHMS_DISPLAY_PORT=19090",
+        f"NHMS_DISPLAY_LOG_PATH={temp_repo / 'display-api.log'}",
+    ]
+    fake_bin, record_dir = _prepare_start_display_api_harness(
+        temp_repo,
+        display_env=display_env,
+        object_store_root=object_store_root,
+    )
+
+    completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    launch_text = (record_dir / "setsid.argv").read_text(encoding="utf-8")
+    launch_args = launch_text.splitlines()
+    assert launch_args[:4] == ["nohup", str(temp_repo / ".venv/bin/python"), "-m", "uvicorn"]
+    assert "--port" in launch_args
+    assert launch_args[launch_args.index("--port") + 1] == "18080"
+    assert "19090" not in launch_text
+    assert "target=127.0.0.1:18080" in completed.stdout
+    assert "19090" not in completed.stdout + completed.stderr
+
+
+def test_start_display_api_invalid_object_store_exits_before_stop_or_relaunch(tmp_path: Path) -> None:
+    temp_repo = tmp_path / "repo"
+    invalid_object_store_root = temp_repo / "missing-object-store"
+    display_env = [
+        "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
+        "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+        f"OBJECT_STORE_ROOT={invalid_object_store_root}",
+        "NHMS_DISPLAY_API_PORT=18080",
+        f"NHMS_DISPLAY_LOG_PATH={temp_repo / 'display-api.log'}",
+    ]
+    fake_bin, record_dir = _prepare_start_display_api_harness(
+        temp_repo,
+        display_env=display_env,
+        object_store_root=None,
+    )
+
+    completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
+
+    assert completed.returncode != 0
+    assert "OBJECT_STORE_ROOT" in completed.stderr
+    assert not (record_dir / "pgrep.argv").exists()
+    assert not (record_dir / "setsid.argv").exists()
+    assert not (record_dir / "curl.argv").exists()
 
 
 @pytest.mark.parametrize(
@@ -1932,7 +1987,7 @@ def test_static_checker_accepts_full_tree_same_key_alternate_when_it_matches_env
     [
         ("image", "evil/${NHMS_APP_IMAGE}:${NHMS_IMAGE_TAG}", "evil/nhms-app:m22-placeholder"),
         ("user", "prefix-${NHMS_CONTAINER_UID}:${NHMS_CONTAINER_GID}", "prefix-1000:1000"),
-        ("ports", "127.0.0.1:1${NHMS_DISPLAY_API_PORT}:8000", "127.0.0.1:18000:8000"),
+        ("ports", "127.0.0.1:1${NHMS_DISPLAY_API_PORT}:8000", "127.0.0.1:18080:8000"),
         ("command", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
         ("entrypoint", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
     ],
@@ -4371,6 +4426,156 @@ def _write_display_compose(tmp_path: Path, compose: dict[str, Any]) -> Path:
     display_compose = tmp_path / "compose.display.yml"
     display_compose.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
     return display_compose
+
+
+def _prepare_start_display_api_harness(
+    temp_repo: Path,
+    *,
+    display_env: list[str],
+    object_store_root: Path | None,
+) -> tuple[Path, Path]:
+    fake_bin = temp_repo / "fake-bin"
+    record_dir = temp_repo / "records"
+    env_dir = temp_repo / "infra" / "env"
+    venv_bin = temp_repo / ".venv" / "bin"
+    env_dir.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    fake_bin.mkdir()
+    record_dir.mkdir()
+    if object_store_root is not None:
+        object_store_root.mkdir(parents=True)
+
+    (env_dir / "display.env").write_text("\n".join(display_env) + "\n", encoding="utf-8")
+    _write_executable(
+        venv_bin / "python",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "printf '%s\\n' \"$@\" >\"$HARNESS_RECORD_DIR/python.argv\"",
+                "exit 0",
+            ]
+        )
+        + "\n",
+    )
+    _write_start_display_api_fake_bin(fake_bin)
+    return fake_bin, record_dir
+
+
+def _write_start_display_api_fake_bin(fake_bin: Path) -> None:
+    _write_executable(
+        fake_bin / "git",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "if [ \"${1:-}\" = \"rev-parse\" ] && [ \"${2:-}\" = \"--show-toplevel\" ]; then",
+                "  printf '%s\\n' \"$HARNESS_REPO_ROOT\"",
+                "  exit 0",
+                "fi",
+                "exit 1",
+            ]
+        )
+        + "\n",
+    )
+    _write_executable(
+        fake_bin / "pgrep",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "printf '%s\\n' \"$@\" >>\"$HARNESS_RECORD_DIR/pgrep.argv\"",
+                "exit 1",
+            ]
+        )
+        + "\n",
+    )
+    _write_executable(
+        fake_bin / "setsid",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "printf '%s\\n' \"$@\" >\"$HARNESS_RECORD_DIR/setsid.argv\"",
+                "exit 0",
+            ]
+        )
+        + "\n",
+    )
+    _write_executable(
+        fake_bin / "curl",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "printf '%s\\n' \"$@\" >>\"$HARNESS_RECORD_DIR/curl.argv\"",
+                "url=",
+                "for arg do",
+                "  url=$arg",
+                "done",
+                "case \"$url\" in",
+                "  *health*)",
+                "    printf 'ok\\n'",
+                "    exit 0",
+                "    ;;",
+                "  *models*)",
+                "    printf '{\"data\":{\"items\":[{\"basin_id\":\"basin-1\"}]}}\\n'",
+                "    exit 0",
+                "    ;;",
+                "esac",
+                "exit 22",
+            ]
+        )
+        + "\n",
+    )
+    _write_executable(
+        fake_bin / "jq",
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "cat >/dev/null",
+                "case \"$*\" in",
+                "  *length*)",
+                "    printf '1\\n'",
+                "    exit 0",
+                "    ;;",
+                "  *basin_id*)",
+                "    printf 'basin-1\\n'",
+                "    exit 0",
+                "    ;;",
+                "esac",
+                "exit 1",
+            ]
+        )
+        + "\n",
+    )
+
+
+def _run_start_display_api_harness(
+    temp_repo: Path,
+    fake_bin: Path,
+    record_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    path_parts = [str(fake_bin)]
+    if os.environ.get("PATH"):
+        path_parts.append(os.environ["PATH"])
+    temp_dir = temp_repo / "tmp"
+    temp_dir.mkdir()
+    clean_env = {
+        "HARNESS_RECORD_DIR": str(record_dir),
+        "HARNESS_REPO_ROOT": str(temp_repo),
+        "HOME": str(temp_repo),
+        "PATH": os.pathsep.join(path_parts),
+        "TMPDIR": str(temp_dir),
+    }
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/ops/start-display-api.sh")],
+        cwd=temp_repo,
+        env=clean_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def _environment_dict_to_list(environment: dict[str, Any]) -> list[str]:
