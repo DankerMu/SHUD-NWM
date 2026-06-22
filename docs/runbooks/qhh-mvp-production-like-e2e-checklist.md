@@ -167,10 +167,13 @@ export WORKSPACE_ROOT="/scratch/<user>/nhms-production"
 export OBJECT_STORE_ROOT="/scratch/<user>/nhms-production/object-store"
 export SLURM_SHARED_LOG_ROOT="/scratch/<user>/nhms-production/slurm-logs"
 export NHMS_RUNTIME_ROOT="/scratch/<user>/nhms-production/runtime"
-set -a
-. infra/env/display.env
-set +a
-export NHMS_API_BASE_URL="http://<api-host>:${NHMS_DISPLAY_API_PORT:-8080}/api/v1"
+DISPLAY_API_PORT="$(
+  set -a
+  . infra/env/display.env
+  set +a
+  printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
+)"
+export NHMS_API_BASE_URL="http://<api-host>:${DISPLAY_API_PORT}/api/v1"
 export NHMS_FRONTEND_BASE_URL="http://<frontend-host>:4173"
 ```
 
@@ -762,11 +765,14 @@ curl -sS "$NHMS_API_BASE_URL/jobs/<job_id>/logs" \
 
 ```bash
 # 后端服务需连接目标 DATABASE_URL，并能访问对象根和日志根。
-set -a
-. infra/env/display.env
-set +a
+DISPLAY_API_PORT="$(
+  set -a
+  . infra/env/display.env
+  set +a
+  printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
+)"
 export NHMS_DISPLAY_LOG_PATH="$MVP_E2E_EVIDENCE_ROOT/api_server.log"
-export NHMS_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}/api/v1"
+export NHMS_API_BASE_URL="http://127.0.0.1:${DISPLAY_API_PORT}/api/v1"
 scripts/ops/start-display-api.sh \
   2>&1 | tee "$MVP_E2E_EVIDENCE_ROOT/api_restart.log"
 

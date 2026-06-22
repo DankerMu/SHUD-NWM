@@ -478,18 +478,18 @@ corepack pnpm check:bundle
 
 ### 7.2 API 服务启动检查
 
-启动 27 API：
+启动 27 API。wrapper 会自行读取 `infra/env/display.env`；先确认该文件中的
+`NHMS_SERVICE_ROLE`、`OBJECT_STORE_ROOT`、DB URL 和 published artifact root
+就是本次 evidence 要验证的值，不要依赖调用前临时 export 覆盖：
 
 ```bash
-set -a
-. infra/env/display.env
-set +a
-export NHMS_SERVICE_ROLE=display_readonly
-export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
-export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
-export NHMS_PUBLISHED_ARTIFACT_ROOT=/path/to/published/artifacts
-export OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-export DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"
+DISPLAY_API_PORT="$(
+  set -a
+  . infra/env/display.env
+  set +a
+  printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
+)"
+export DISPLAY_API_BASE_URL="http://127.0.0.1:${DISPLAY_API_PORT}"
 scripts/ops/start-display-api.sh
 ```
 

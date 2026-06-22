@@ -57,7 +57,7 @@ if (( ${#missing[@]} > 0 )); then
     exit 3
 fi
 
-if [[ -v NHMS_DISPLAY_API_PORT ]]; then
+if [[ -n "${NHMS_DISPLAY_API_PORT+x}" ]]; then
     UVICORN_PORT="$NHMS_DISPLAY_API_PORT"
 else
     UVICORN_PORT="8080"

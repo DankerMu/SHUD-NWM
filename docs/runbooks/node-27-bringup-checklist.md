@@ -87,14 +87,17 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
-- [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：先读取同一份
-  host env，再启动 wrapper。
+- [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：只读派生端口，
+  再启动 wrapper。
 
   ```bash
-  set -a
-  . infra/env/display.env
-  set +a
-  DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"
+  DISPLAY_API_PORT="$(
+    set -a
+    . infra/env/display.env
+    set +a
+    printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
+  )"
+  DISPLAY_API_BASE_URL="http://127.0.0.1:${DISPLAY_API_PORT}"
   scripts/ops/start-display-api.sh
   ```
 
