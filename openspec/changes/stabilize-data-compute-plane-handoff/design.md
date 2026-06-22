@@ -537,3 +537,185 @@ Review focus:
   lon/lat and geometry exist.
 - Apply evidence distinguishes object-store handoff mode from transitional
   node-22 mirror mode.
+
+## Issue #645 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Mandatory expanded triggers:
+- `scripts/node27_autopipeline.py` production control-flow change for per-run
+  ingest policy.
+- Fallback policy between canonical object-store forcing-domain handoff and
+  transitional node-22 mirror compatibility mode.
+- Subprocess orchestration and JSON summary stability across register,
+  forcing-handoff/mirror, parse, and coverage stages. Publish-status remains the
+  existing global post-run phase in #645.
+- Run-level failure isolation: one run's handoff/mirror/parse failure must not
+  abort unrelated runnable runs.
+- Secret-safe operator summaries for no declared handoff material, declared but
+  unavailable/failed handoff material, missing explicit mirror DSN, mirror
+  failures, and parse/coverage failures.
+
+Change surface:
+- `scripts/node27_autopipeline.py` handoff stage policy.
+- Focused tests for autopipeline per-run orchestration and final summary
+  aggregation.
+- OpenSpec `tasks.md` evidence for tasks 1.4 and 1.7.
+
+Must preserve:
+- Basin seed discovery/activation/backfill behavior is out of scope except that
+  per-run failures remain isolated after seed succeeds.
+- #643 parser and #644 DB apply internals are consumed only through public
+  interfaces; #645 must not reinterpret handoff package rows or checksums.
+- Transitional mirror remains available only as explicit compatibility mode and
+  still never reads display runtime configuration.
+- Output parser, coverage refresh, global publish-status behavior, and
+  already-ingested skip semantics remain unchanged except for the recorded
+  forcing stage evidence.
+- No node-27 ingest env/preflight wrapper changes; #646 owns that boundary.
+- No qhh/heihe live receipt; #648 owns live production evidence.
+
+Must add/change:
+- Per-run stage order becomes `register -> object-store forcing handoff ->
+  parse -> refresh coverage` for runs whose object-store package declares an
+  available forcing-domain handoff. The existing `_publish_display_runs()` call
+  remains a global post-run phase and is not converted into a per-run stage in
+  #645.
+- The handoff stage must call the #644 public apply path with the run's declared
+  `runs/<run_id>/input/forcing_domain_handoff.json`, `OBJECT_STORE_ROOT`, and
+  optional `OBJECT_STORE_PREFIX`.
+- A complete handoff apply report with `available=true`/`ready=true` advances
+  to parse without invoking the mirror script.
+- A run whose declared handoff manifest file is absent is a pre-contract or
+  compatibility case. It may use the transitional mirror only when `N22_DSN` is
+  set or the new autopipeline `--node22-url` option is provided; autopipeline
+  must pass `--node22-url` through to `scripts/node27_mirror_forcing.py` when
+  provided. The mirror fallback must be labeled
+  `transitional_node22_forcing_mirror` and recorded as compatibility evidence.
+- A run whose handoff manifest is declared/present but whose parser/apply report
+  is `available=false` or `status=failed` is not a compatibility fallback case.
+  It must stop at `stage=forcing_handoff` without invoking mirror, even when
+  `N22_DSN` or `--node22-url` is configured.
+- If no declared handoff exists and no explicit mirror DSN is configured, the
+  run summary must be `outcome=skipped`, `stage=forcing_handoff`, with a stable
+  reason distinguishing no object-store handoff declaration from missing mirror
+  configuration. It must not call the mirror subprocess just to observe its
+  missing-DSN `rc=2`, and it must not abort unrelated runs.
+- If declared object-store handoff parsing/apply is unavailable or failed, the
+  run summary must be `outcome=failed`, `stage=forcing_handoff`, with redacted
+  stable reasons and no mirror fallback. It must not abort unrelated runs.
+- Mirror rc=2 remains a skipped compatibility outcome only when mirror was
+  explicitly configured and invoked but reported a compatibility skip such as
+  `FORCING_NOT_ON_NODE22`; missing explicit mirror DSN is handled by
+  autopipeline precheck before invoking mirror. Mirror nonzero failures remain
+  run-level failures.
+- Successful run summaries must expose the forcing stage mode, row-count
+  evidence for handoff or mirror, river rows, parse status, and coverage refresh
+  status without leaking DSNs or credential-bearing paths.
+- Final `main()` JSON must add `runs.details[]` while preserving existing
+  aggregate counts. Each processed run detail must contain `run_id`, `outcome`,
+  `stage`, `forcing_stage.mode`, `forcing_stage.status`,
+  `forcing_stage.ready`, `forcing_stage.row_counts`, `forcing_stage.reason_codes`,
+  `river_rows`, `parse_status`, and `coverage_refresh` when applicable. Existing
+  `runs.skipped_runs[]` and `runs.failed_runs[]` may remain as compact
+  compatibility views, but tests must assert the richer `runs.details[]`
+  contract.
+- `forcing_stage.row_counts` must use stable table keys for both handoff and
+  mirror modes: `met.forcing_version`, `met.met_station`,
+  `met.forcing_station_timeseries`, and `met.interp_weight`. Handoff mode may
+  use #644 `row_counts` directly. Mirror mode must normalize
+  `forcing_version`, `met_stations`, `station_timeseries`, and `interp_weight`
+  report shapes into those table keys. `forcing_stage.reason_codes` must be
+  derived from handoff `unavailable_reasons[].code` or mirror `reason` values.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - autopipeline control flow changes.
+- Config / project setup: selected - fallback depends on explicit environment
+  variables but does not introduce new env files.
+- Evidence / JSON / Schema Ingestion: selected - operator summaries are the
+  acceptance surface.
+- Auth / permissions / secrets: selected - DSNs and credential-bearing errors
+  must be redacted in summary evidence.
+- Error handling / rollback / partial outputs: selected - per-run skip/fail must
+  stop before parse when forcing readiness is unavailable.
+- Concurrency / shared state / ordering: selected - stage order and run
+  isolation matter.
+- Legacy compatibility / examples: selected - explicit transitional mirror is
+  retained for compatibility only.
+- Database / transaction / migration: selected only through #644 helper
+  invocation; no schema changes in #645.
+- Hydro-met time series / forcing windows: selected through handoff readiness
+  reports; #645 does not inspect payload internals.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no compute
+  scheduling change.
+- Frontend/display behavior: not selected - display consumes downstream DB
+  readiness later.
+
+Invariant Matrix
+Governing invariant: The autopipeline may proceed to hydro output parse only
+after forcing readiness is provided by a declared canonical object-store handoff
+or, for runs with no declared handoff, by an explicitly configured transitional
+mirror; no implicit historical node-22 DB or display runtime fallback may
+satisfy the forcing stage.
+Source-of-truth identity/contract: run id, object-store root/prefix, declared
+handoff manifest path, #643 parser/#644 apply report, #642 mirror report, and
+per-run JSON summary.
+Surfaces:
+- Producers: object-store run directories and forcing-domain handoff manifests.
+- Validators/preflight: #643 parser availability and #644 apply report.
+- Storage/cache/query: node-27 PostgreSQL writes only through #644 helper or
+  explicit #642 mirror.
+- Public routes/entrypoints: `scripts/node27_autopipeline.py`.
+- Frontend/downstream consumers: parse/coverage/publish stages run only after
+  forcing stage readiness.
+- Failure paths/rollback/stale state: no declared handoff, declared handoff
+  unavailable/failed, missing explicit mirror, mirror skipped/failed, parse
+  failed, coverage failed, and one-run isolation.
+- Evidence/audit/readiness: run summary fields, handoff/mirror mode labels,
+  row counts, stable reasons, and focused tests.
+Regression rows:
+- Complete handoff package -> autopipeline calls object-store apply, does not
+  call mirror, then runs parse/coverage and reports `outcome=ingested`.
+- No declared handoff + explicit mirror configured through `N22_DSN` or
+  autopipeline `--node22-url` -> autopipeline calls transitional mirror, labels
+  compatibility mode, records the mirror DSN source without the DSN value, then
+  proceeds to parse when mirror succeeds.
+- No declared handoff + no explicit mirror configured -> that run is skipped at
+  `forcing_handoff` with stable reason; unrelated runs continue.
+- Declared handoff unavailable (missing required field, malformed payload,
+  checksum mismatch, or parser unavailable) + explicit mirror configured -> that
+  run fails at `forcing_handoff` without invoking mirror; unrelated runs
+  continue.
+- Handoff apply `status=failed` -> that run fails at `forcing_handoff` without
+  mirror fallback; unrelated runs continue.
+- Explicitly configured mirror rc=2 and mirror nonzero rc -> skipped/failed
+  summary preserves stable mirror reason and run isolation; no-DSN compatibility
+  cases are skipped by autopipeline before mirror invocation.
+- Parse failure after forcing readiness -> run fails at `parse` and does not
+  hide the forcing stage evidence.
+- Coverage refresh failure after forcing readiness and parse success -> run
+  detail records a distinct coverage refresh failure/status without being
+  confused with forcing handoff or mirror unavailability; unrelated runs
+  continue.
+- Final `main()` output -> `runs.details[]` preserves per-run forcing mode,
+  status, readiness, row counts, stable reason codes, parse status, river rows,
+  and coverage refresh status for success/skip/fail outcomes.
+- Publish phase -> `_publish_display_runs()` remains one global post-run call
+  after the run loop; it is not represented as a per-run `runs.details[].stage`
+  and is still counted in the existing aggregate `runs.published` field.
+
+Non-goals:
+- No parser/apply implementation changes beyond invoking their public API.
+- No mirror internals changes beyond autopipeline invocation/summary labeling.
+- No node-27 env/preflight wrapper, topology guardrail, or live receipt changes.
+
+Review focus:
+- Fallback policy cannot accidentally resurrect implicit node-22/display-env
+  dependencies.
+- Summary fields let operators distinguish object-store unavailable, explicit
+  mirror unavailable, mirror compatibility, and downstream parse/coverage
+  failures.
+- Tests prove one-run failure isolation and that successful object-store handoff
+  bypasses mirror.
