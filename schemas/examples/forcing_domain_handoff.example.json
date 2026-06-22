@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "contract_id": "nhms.forcing_domain_handoff.v1",
+  "run_id": "fcst_gfs_2026062012_basins_qhh_shud",
+  "source_id": "GFS",
+  "source": "gfs",
+  "cycle_time": "2026-06-20T12:00:00Z",
+  "start_time": "2026-06-20T12:00:00Z",
+  "end_time": "2026-06-20T15:00:00Z",
+  "model_id": "basins_qhh_shud",
+  "basin_id": "qhh",
+  "basin_version_id": "basins_qhh_v2026_06",
+  "model_package_uri": "s3://nhms/models/basins_qhh_shud/v2026_06/package/model_package.json",
+  "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+  "forcing_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/",
+  "forcing_package_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/",
+  "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/forcing_package.json",
+  "forcing_package_manifest_checksum_sha256": "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5",
+  "forcing_domain_package_manifest_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/forcing_domain_package.json",
+  "forcing_domain_package_manifest_checksum_sha256": "3e0762b2d559777102fc7c5e3cd35a7ab0039c06c9a99e8ca3564cec1b5b8510",
+  "scenario_id": "forecast_gfs_deterministic",
+  "run_manifest_uri": "s3://nhms/runs/fcst_gfs_2026062012_basins_qhh_shud/input/manifest.json",
+  "output_uri": "s3://nhms/runs/fcst_gfs_2026062012_basins_qhh_shud/output/",
+  "station_count": 2,
+  "payloads": {
+    "station_inventory": {
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/payloads/station_inventory.json",
+      "checksum_sha256": "c3fe04fb5757b71a48df66930b833ebc1c05abad73bbc3948e8f42f4385c5b1d",
+      "table": "met.met_station",
+      "row_count": 2,
+      "content_type": "application/json"
+    },
+    "station_timeseries": {
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/payloads/station_timeseries.json",
+      "checksum_sha256": "44aee482ee1175ed2fe296402a14e3d63b1c80883817bbbbaed7a9d073869d64",
+      "table": "met.forcing_station_timeseries",
+      "row_count": 8,
+      "content_type": "application/json",
+      "variables": ["PRCP", "TEMP"],
+      "units": {
+        "PRCP": "mm/day",
+        "TEMP": "degC"
+      },
+      "time_lattice": [
+        {
+          "valid_time_start": "2026-06-20T12:00:00Z",
+          "valid_time_end": "2026-06-20T15:00:00Z",
+          "variables": ["PRCP", "TEMP"],
+          "native_resolution": "3h"
+        }
+      ]
+    },
+    "interpolation_weights": {
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/payloads/interp_weights.json",
+      "checksum_sha256": "e10613530de21585eb4b81cec9272581812fe418f7c0e33aaec4c90a2fc4fe20",
+      "table": "met.interp_weight",
+      "row_count": 4,
+      "content_type": "application/json"
+    }
+  },
+  "table_row_counts": {
+    "met.forcing_version": 1,
+    "met.met_station": 2,
+    "met.forcing_station_timeseries": 8,
+    "met.interp_weight": 4
+  }
+}

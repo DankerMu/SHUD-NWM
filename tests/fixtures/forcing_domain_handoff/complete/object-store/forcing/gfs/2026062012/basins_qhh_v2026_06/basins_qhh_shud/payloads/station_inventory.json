@@ -1,0 +1,32 @@
+[
+  {
+    "station_id": "qhh_forc_001",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_name": "QHH forcing station 001",
+    "longitude": 100.125,
+    "latitude": 38.25,
+    "elevation_m": 3280.0,
+    "station_role": "forcing_grid",
+    "active_flag": true,
+    "properties_json": {
+      "forcing_filename": "X100.125Y38.25.csv",
+      "source": "qhh.tsd.forc",
+      "model_id": "basins_qhh_shud"
+    }
+  },
+  {
+    "station_id": "qhh_forc_002",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_name": "QHH forcing station 002",
+    "longitude": 100.25,
+    "latitude": 38.375,
+    "elevation_m": 3295.0,
+    "station_role": "forcing_grid",
+    "active_flag": true,
+    "properties_json": {
+      "forcing_filename": "X100.25Y38.375.csv",
+      "source": "qhh.tsd.forc",
+      "model_id": "basins_qhh_shud"
+    }
+  }
+]

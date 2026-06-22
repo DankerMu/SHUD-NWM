@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "contract_id": "nhms.forcing_domain_handoff.v1",
+  "run_id": "fcst_gfs_2026062012_basins_qhh_shud_incomplete",
+  "source_id": "GFS",
+  "source": "gfs",
+  "cycle_time": "2026-06-20T12:00:00Z",
+  "start_time": "2026-06-20T12:00:00Z",
+  "model_id": "basins_qhh_shud",
+  "basin_id": "qhh",
+  "basin_version_id": "basins_qhh_v2026_06",
+  "model_package_uri": "s3://nhms/models/basins_qhh_shud/v2026_06/package/model_package.json",
+  "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud_incomplete",
+  "forcing_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/",
+  "forcing_package_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/",
+  "forcing_domain_package_manifest_uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/forcing_domain_package.json",
+  "forcing_domain_package_manifest_checksum_sha256": "03066fb281eaa2f99b8fd457600baa40242d2072f31adca476c5e9f896d03268",
+  "scenario_id": "forecast_gfs_deterministic",
+  "run_manifest_uri": "s3://user:pass@nhms/runs/fcst_gfs_2026062012_basins_qhh_shud_incomplete/input/manifest.json?token=secret",
+  "output_uri": "s3://nhms/runs/fcst_gfs_2026062012_basins_qhh_shud_incomplete/output/",
+  "station_count": 2,
+  "payloads": {
+    "station_inventory": {
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/payloads/station_inventory.json",
+      "table": "met.met_station",
+      "row_count": 2,
+      "content_type": "application/json"
+    },
+    "interpolation_weights": {
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/payloads/interp_weights.json",
+      "table": "met.interp_weight",
+      "row_count": 4,
+      "content_type": "application/json"
+    }
+  },
+  "table_row_counts": {
+    "met.forcing_version": 1,
+    "met.met_station": 2,
+    "met.forcing_station_timeseries": 4,
+    "met.interp_weight": 4
+  }
+}

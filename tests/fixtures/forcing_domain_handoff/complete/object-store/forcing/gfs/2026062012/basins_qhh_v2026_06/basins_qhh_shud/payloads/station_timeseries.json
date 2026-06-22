@@ -1,0 +1,98 @@
+[
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_001",
+    "valid_time": "2026-06-20T12:00:00Z",
+    "source_id": "GFS",
+    "variable": "PRCP",
+    "value": 1.2,
+    "unit": "mm/day",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_001",
+    "valid_time": "2026-06-20T12:00:00Z",
+    "source_id": "GFS",
+    "variable": "TEMP",
+    "value": 275.15,
+    "unit": "degC",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_001",
+    "valid_time": "2026-06-20T15:00:00Z",
+    "source_id": "GFS",
+    "variable": "PRCP",
+    "value": 0.9,
+    "unit": "mm/day",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_001",
+    "valid_time": "2026-06-20T15:00:00Z",
+    "source_id": "GFS",
+    "variable": "TEMP",
+    "value": 275.6,
+    "unit": "degC",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_002",
+    "valid_time": "2026-06-20T12:00:00Z",
+    "source_id": "GFS",
+    "variable": "PRCP",
+    "value": 1.0,
+    "unit": "mm/day",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_002",
+    "valid_time": "2026-06-20T12:00:00Z",
+    "source_id": "GFS",
+    "variable": "TEMP",
+    "value": 276.0,
+    "unit": "degC",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_002",
+    "valid_time": "2026-06-20T15:00:00Z",
+    "source_id": "GFS",
+    "variable": "PRCP",
+    "value": 0.8,
+    "unit": "mm/day",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  },
+  {
+    "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "station_id": "qhh_forc_002",
+    "valid_time": "2026-06-20T15:00:00Z",
+    "source_id": "GFS",
+    "variable": "TEMP",
+    "value": 276.4,
+    "unit": "degC",
+    "native_resolution": "3h",
+    "quality_flag": "ok"
+  }
+]

@@ -1,0 +1,308 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://nwm.local/schemas/forcing_domain_handoff.schema.json",
+  "title": "NHMS Forcing-Domain Object-Store Handoff",
+  "description": "Run-scoped object-store handoff contract for reconstructing met.forcing_version, met.met_station, met.forcing_station_timeseries, and met.interp_weight without a node-22 database.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_id",
+    "run_id",
+    "source_id",
+    "source",
+    "cycle_time",
+    "start_time",
+    "end_time",
+    "model_id",
+    "basin_id",
+    "basin_version_id",
+    "model_package_uri",
+    "forcing_version_id",
+    "forcing_uri",
+    "forcing_package_uri",
+    "forcing_package_manifest_uri",
+    "forcing_package_manifest_checksum_sha256",
+    "forcing_domain_package_manifest_uri",
+    "forcing_domain_package_manifest_checksum_sha256",
+    "scenario_id",
+    "run_manifest_uri",
+    "output_uri",
+    "station_count",
+    "payloads",
+    "table_row_counts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "contract_id": {
+      "type": "string",
+      "const": "nhms.forcing_domain_handoff.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cycle_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "start_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "end_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "basin_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "basin_version_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_package_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_version_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_package_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_package_manifest_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_package_manifest_checksum_sha256": {
+      "$ref": "#/definitions/sha256"
+    },
+    "forcing_domain_package_manifest_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forcing_domain_package_manifest_checksum_sha256": {
+      "$ref": "#/definitions/sha256"
+    },
+    "scenario_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_manifest_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "output_uri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "station_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "payloads": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "station_inventory",
+        "station_timeseries",
+        "interpolation_weights"
+      ],
+      "properties": {
+        "station_inventory": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/payload_ref"
+            },
+            {
+              "properties": {
+                "table": {
+                  "const": "met.met_station"
+                }
+              }
+            }
+          ]
+        },
+        "station_timeseries": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/payload_ref"
+            },
+            {
+              "required": [
+                "variables",
+                "units",
+                "time_lattice"
+              ],
+              "properties": {
+                "table": {
+                  "const": "met.forcing_station_timeseries"
+                },
+                "variables": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "units": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "time_lattice": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/definitions/time_lattice_segment"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "interpolation_weights": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/payload_ref"
+            },
+            {
+              "properties": {
+                "table": {
+                  "const": "met.interp_weight"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "table_row_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "met.forcing_version",
+        "met.met_station",
+        "met.forcing_station_timeseries",
+        "met.interp_weight"
+      ],
+      "properties": {
+        "met.forcing_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "met.met_station": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "met.forcing_station_timeseries": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "met.interp_weight": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "definitions": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "payload_ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "uri",
+        "checksum_sha256",
+        "table",
+        "row_count"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checksum_sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_type": {
+          "type": "string"
+        }
+      }
+    },
+    "time_lattice_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid_time_start",
+        "valid_time_end",
+        "native_resolution"
+      ],
+      "properties": {
+        "valid_time_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_time_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "variable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "variables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "native_resolution": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

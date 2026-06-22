@@ -1,7 +1,9 @@
 ## 1. Forcing-Domain Handoff
 
-- [ ] 1.1 Inventory the exact forcing-domain data required by node-27 display readiness, including `met.forcing_version`, `met.met_station`, `met.forcing_station_timeseries`, and `met.interp_weight`, and document the object-store handoff manifest fields/checksums needed to reconstruct them.
-- [ ] 1.2 Add fixture coverage for a complete object-store forcing-domain handoff package and at least one incomplete package with a stable unavailable reason.
+- [x] 1.1 Inventory the exact forcing-domain data required by node-27 display readiness, including `met.forcing_version`, `met.met_station`, `met.forcing_station_timeseries`, and `met.interp_weight`, and document the object-store handoff manifest fields/checksums needed to reconstruct them.
+  Evidence: complete fixture input path validates required identity fields, `start_time`/`end_time`, payload checksums, station count, and per-table row-count output.
+- [x] 1.2 Add fixture coverage for a complete object-store forcing-domain handoff package and at least one incomplete package with a stable unavailable reason.
+  Evidence: missing payload/checksum/temporal fields produce named stable unavailable reasons, traversal/sibling package URIs are rejected without broad root scans, and validation output contains no credential-like values.
 - [ ] 1.3 Harden `scripts/node27_mirror_forcing.py` so transitional mirror mode requires `--node22-url` or `N22_DSN`, never reads `infra/env/display.env`, and returns credential-safe structured evidence.
 - [ ] 1.4 Update `scripts/node27_autopipeline.py` to treat the explicit mirror as transitional compatibility, with skip/fail summaries that preserve run-level failure isolation.
 - [ ] 1.5 Implement the object-store forcing-domain contract parser/fixture reader that reads package manifests and station payloads, returns structured reconstruction evidence, and does not change autopipeline behavior.

@@ -1,0 +1,130 @@
+{
+  "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
+  "model_id": "basins_qhh_shud",
+  "source_id": "GFS",
+  "cycle_time": "2026-06-20T12:00:00Z",
+  "start_time": "2026-06-20T12:00:00Z",
+  "end_time": "2026-06-20T15:00:00Z",
+  "basin_id": "qhh",
+  "basin_version_id": "basins_qhh_v2026_06",
+  "river_network_version_id": "basins_qhh_river_v2026_06",
+  "scheduler_canonical_identity": {
+    "source_id": "GFS",
+    "cycle_time": "2026-06-20T12:00:00Z",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "model_id": "basins_qhh_shud"
+  },
+  "station_count": 2,
+  "timestep_count": 2,
+  "variable_count": 2,
+  "time_range": {
+    "start_time": "2026-06-20T12:00:00Z",
+    "end_time": "2026-06-20T15:00:00Z"
+  },
+  "row_time_range": {
+    "start_time": "2026-06-20T12:00:00Z",
+    "end_time": "2026-06-20T15:00:00Z"
+  },
+  "variable_set": [
+    "PRCP",
+    "TEMP"
+  ],
+  "units": {
+    "PRCP": "mm/day",
+    "TEMP": "degC"
+  },
+  "quality_flags": {
+    "canonical_products": [
+      "ok"
+    ],
+    "station_timeseries": [
+      "ok"
+    ]
+  },
+  "station_order": [
+    "qhh_forc_001",
+    "qhh_forc_002"
+  ],
+  "files": [
+    {
+      "role": "tsd_forc",
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh.tsd.forc",
+      "checksum": "sha256:fixture-tsd-forc"
+    },
+    {
+      "role": "csv_debug",
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/forcing_debug.csv",
+      "checksum": "sha256:fixture-debug-csv"
+    },
+    {
+      "role": "shud_forcing_csv",
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh_forc_001.csv",
+      "checksum": "sha256:fixture-station-001"
+    },
+    {
+      "role": "shud_forcing_csv",
+      "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh_forc_002.csv",
+      "checksum": "sha256:fixture-station-002"
+    }
+  ],
+  "lineage": {
+    "producer_version": "fixture",
+    "source_id": "GFS",
+    "model_id": "basins_qhh_shud",
+    "basin_id": "qhh",
+    "basin_version_id": "basins_qhh_v2026_06",
+    "river_network_version_id": "basins_qhh_river_v2026_06",
+    "station_count": 2,
+    "station_ids": [
+      "qhh_forc_001",
+      "qhh_forc_002"
+    ],
+    "forcing_variables": [
+      "PRCP",
+      "TEMP"
+    ],
+    "variable_set": [
+      "PRCP",
+      "TEMP"
+    ],
+    "units": {
+      "PRCP": "mm/day",
+      "TEMP": "degC"
+    },
+    "variable_count": 2,
+    "time_range": {
+      "start_time": "2026-06-20T12:00:00Z",
+      "end_time": "2026-06-20T15:00:00Z"
+    },
+    "row_time_range": {
+      "start_time": "2026-06-20T12:00:00Z",
+      "end_time": "2026-06-20T15:00:00Z"
+    },
+    "canonical_product_ids": [
+      "gfs_2026062012_prcp",
+      "gfs_2026062012_temp"
+    ],
+    "output_files": [
+      {
+        "role": "tsd_forc",
+        "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh.tsd.forc",
+        "checksum": "sha256:fixture-tsd-forc"
+      },
+      {
+        "role": "csv_debug",
+        "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/forcing_debug.csv",
+        "checksum": "sha256:fixture-debug-csv"
+      },
+      {
+        "role": "shud_forcing_csv",
+        "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh_forc_001.csv",
+        "checksum": "sha256:fixture-station-001"
+      },
+      {
+        "role": "shud_forcing_csv",
+        "uri": "s3://nhms/forcing/gfs/2026062012/basins_qhh_v2026_06/basins_qhh_shud/shud/qhh_forc_002.csv",
+        "checksum": "sha256:fixture-station-002"
+      }
+    ]
+  }
+}
