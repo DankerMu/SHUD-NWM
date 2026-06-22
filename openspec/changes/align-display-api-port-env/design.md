@@ -84,6 +84,8 @@ Required evidence:
 - A shell harness test proving `NHMS_DISPLAY_API_PORT` from sourced
   `infra/env/display.env` controls the launched uvicorn `--port`, and
   `NHMS_DISPLAY_PORT` is ignored.
+- Shell harness tests proving invalid `NHMS_DISPLAY_API_PORT` values fail before
+  any stop/relaunch/probe action.
 - `uv run pytest -q tests/test_two_node_docker_runtime.py`
 - grep proves no active `NHMS_DISPLAY_PORT` usage remains outside tests that
   deliberately mutate the old alias.
@@ -114,3 +116,6 @@ Regression rows:
 - compose uses `${NHMS_DISPLAY_PORT:-...}` -> static checker rejects the alias.
 - missing required `display.env` keys or invalid `OBJECT_STORE_ROOT` -> wrapper
   exits before stopping/relaunching uvicorn, as before.
+- `display.env` contains non-numeric or out-of-range
+  `NHMS_DISPLAY_API_PORT` -> wrapper exits before stopping/relaunching/probing
+  uvicorn and reports `NHMS_DISPLAY_API_PORT`.

@@ -1517,6 +1517,64 @@ def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp
     assert "19090" not in completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("invalid_port", ["notaport", "70000"])
+def test_start_display_api_invalid_display_api_port_exits_before_stop_or_relaunch(
+    tmp_path: Path,
+    invalid_port: str,
+) -> None:
+    temp_repo = tmp_path / "repo"
+    object_store_root = temp_repo / "object-store"
+    display_env = [
+        "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
+        "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+        f"OBJECT_STORE_ROOT={object_store_root}",
+        f"NHMS_DISPLAY_API_PORT={invalid_port}",
+    ]
+    fake_bin, record_dir = _prepare_start_display_api_harness(
+        temp_repo,
+        display_env=display_env,
+        object_store_root=object_store_root,
+    )
+
+    completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
+
+    assert completed.returncode != 0
+    assert "NHMS_DISPLAY_API_PORT" in completed.stderr
+    assert invalid_port in completed.stderr
+    assert not (record_dir / "pgrep.argv").exists()
+    assert not (record_dir / "setsid.argv").exists()
+    assert not (record_dir / "curl.argv").exists()
+
+
+def test_start_display_api_ignores_sourced_host_and_log_path(tmp_path: Path) -> None:
+    temp_repo = tmp_path / "repo"
+    object_store_root = temp_repo / "object-store"
+    display_env = [
+        "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
+        "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+        f"OBJECT_STORE_ROOT={object_store_root}",
+        "NHMS_DISPLAY_API_PORT=18080",
+        "NHMS_DISPLAY_HOST=0.0.0.0",
+        "NHMS_DISPLAY_LOG_PATH=/missing/dir/display.log",
+    ]
+    fake_bin, record_dir = _prepare_start_display_api_harness(
+        temp_repo,
+        display_env=display_env,
+        object_store_root=object_store_root,
+    )
+
+    completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    launch_text = (record_dir / "setsid.argv").read_text(encoding="utf-8")
+    launch_args = launch_text.splitlines()
+    assert "--host" in launch_args
+    assert launch_args[launch_args.index("--host") + 1] == "127.0.0.1"
+    assert "0.0.0.0" not in launch_text
+    assert "target=127.0.0.1:18080  log=/tmp/display-api.log" in completed.stdout
+    assert "/missing/dir/display.log" not in completed.stdout + completed.stderr
+
+
 def test_start_display_api_invalid_object_store_exits_before_stop_or_relaunch(tmp_path: Path) -> None:
     temp_repo = tmp_path / "repo"
     invalid_object_store_root = temp_repo / "missing-object-store"

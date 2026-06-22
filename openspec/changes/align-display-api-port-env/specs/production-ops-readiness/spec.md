@@ -28,3 +28,11 @@ documented env var is unset.
 
 - **WHEN** no explicit display API port env var is configured
 - **THEN** the restart wrapper and compose host bind SHALL default to `8080`
+
+#### Scenario: invalid display API port fails before restart actions
+
+- **WHEN** `infra/env/display.env` contains `NHMS_DISPLAY_API_PORT` with a
+  non-numeric value or a value outside `1` through `65535`
+- **THEN** `scripts/ops/start-display-api.sh` SHALL exit nonzero with an error
+  naming `NHMS_DISPLAY_API_PORT`
+- **AND** it SHALL NOT stop, relaunch, or probe uvicorn

@@ -601,11 +601,14 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_R
 API 边界检查：
 
 ```bash
-curl -i http://127.0.0.1:8000/health
-curl -i http://127.0.0.1:8000/api/v1/runtime/config
-curl -i http://127.0.0.1:8000/api/v1/slurm/health
-curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
-curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
+NHMS_DISPLAY_API_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
+DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT}"
+
+curl -i "${DISPLAY_API_BASE_URL}/health"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/runtime/config"
+curl -i "${DISPLAY_API_BASE_URL}/api/v1/slurm/health"
+curl -i -X POST "${DISPLAY_API_BASE_URL}/api/v1/runs/<run_id>/retry"
+curl -i -X POST "${DISPLAY_API_BASE_URL}/api/v1/runs/<run_id>/cancel"
 
 # 优先从未跟踪 0600 env 文件读取；不存在时交互式静默输入。
 block_operator_auth_source() {
@@ -644,8 +647,8 @@ operator_auth_curl() {
   curl --header "@$OPERATOR_CURL_HEADER" "$@"
 }
 
-operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
-operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
+operator_auth_curl -i -X POST "${DISPLAY_API_BASE_URL}/api/v1/runs/<run_id>/retry"
+operator_auth_curl -i -X POST "${DISPLAY_API_BASE_URL}/api/v1/runs/<run_id>/cancel"
 ```
 
 通过条件：

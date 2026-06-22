@@ -34,6 +34,9 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
     exit 2
 fi
 
+UVICORN_HOST="${NHMS_DISPLAY_HOST:-127.0.0.1}"
+LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"
+
 # -- source env file (export every key) -----------------------------------------
 set -a
 # shellcheck disable=SC1090
@@ -54,9 +57,12 @@ if (( ${#missing[@]} > 0 )); then
     exit 3
 fi
 
-UVICORN_HOST="${NHMS_DISPLAY_HOST:-127.0.0.1}"
 UVICORN_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
-LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"
+if [[ ! "$UVICORN_PORT" =~ ^[0-9]+$ ]] || (( 10#$UVICORN_PORT < 1 || 10#$UVICORN_PORT > 65535 )); then
+    echo "ERROR: NHMS_DISPLAY_API_PORT must be a decimal integer from 1 through 65535; got: ${UVICORN_PORT:-<empty>}" >&2
+    echo "       fix display.env before restarting; existing uvicorn was not stopped." >&2
+    exit 3
+fi
 
 if [[ ! -d "$OBJECT_STORE_ROOT" || ! -r "$OBJECT_STORE_ROOT" || ! -x "$OBJECT_STORE_ROOT" ]]; then
     echo "ERROR: OBJECT_STORE_ROOT must be an existing readable and traversable directory: $OBJECT_STORE_ROOT" >&2

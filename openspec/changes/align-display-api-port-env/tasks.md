@@ -19,6 +19,8 @@
   `NHMS_DISPLAY_PORT` is ignored.
 - [x] 3.3 Shell harness test proves missing required keys or invalid
   `OBJECT_STORE_ROOT` exits before stopping or relaunching uvicorn.
+- [x] 3.3A Shell harness tests prove invalid `NHMS_DISPLAY_API_PORT` values
+  exit before stopping, relaunching, or probing uvicorn.
 - [x] 3.4 `uv run pytest -q tests/test_two_node_docker_runtime.py` PASS.
   - Local macOS run failed in unrelated Docker preflight `/scratch` and `TMPDIR`
     assumptions; focused display-port subset passed.
