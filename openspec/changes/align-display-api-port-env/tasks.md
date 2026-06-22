@@ -20,11 +20,12 @@
 - [x] 3.3 Shell harness test proves missing required keys or invalid
   `OBJECT_STORE_ROOT` exits before stopping or relaunching uvicorn.
 - [x] 3.3A Shell harness tests prove invalid `NHMS_DISPLAY_API_PORT` values
-  exit before stopping, relaunching, or probing uvicorn.
+  (empty, non-numeric, and out-of-range) exit before stopping, relaunching,
+  or probing uvicorn.
 - [x] 3.4 `uv run pytest -q tests/test_two_node_docker_runtime.py` PASS.
   - Local macOS run failed in unrelated Docker preflight `/scratch` and `TMPDIR`
     assumptions; focused display-port subset passed.
   - node-22 `/scratch` oracle: `uv run --no-sync pytest -q tests/test_two_node_docker_runtime.py`
-    PASS, 381 passed.
+    PASS, 385 passed.
 - [x] 3.5 `uv run ruff check .` PASS.
 - [x] 3.6 `openspec validate align-display-api-port-env --strict --no-interactive` PASS.

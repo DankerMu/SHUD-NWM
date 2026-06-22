@@ -481,13 +481,15 @@ corepack pnpm check:bundle
 启动 27 API：
 
 ```bash
+set -a
+. infra/env/display.env
+set +a
 export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 export NHMS_PUBLISHED_ARTIFACT_ROOT=/path/to/published/artifacts
 export OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-export NHMS_DISPLAY_API_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
-export DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT}"
+export DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"
 scripts/ops/start-display-api.sh
 ```
 

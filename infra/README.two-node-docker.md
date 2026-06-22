@@ -601,8 +601,11 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_R
 API 边界检查：
 
 ```bash
-NHMS_DISPLAY_API_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
-DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT}"
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+set -a
+. "$CHECKOUT_ROOT/infra/env/display.env"
+set +a
+DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"
 
 curl -i "${DISPLAY_API_BASE_URL}/health"
 curl -i "${DISPLAY_API_BASE_URL}/api/v1/runtime/config"

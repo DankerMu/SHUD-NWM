@@ -1517,7 +1517,7 @@ def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp
     assert "19090" not in completed.stdout + completed.stderr
 
 
-@pytest.mark.parametrize("invalid_port", ["notaport", "70000"])
+@pytest.mark.parametrize("invalid_port", ["notaport", "70000", ""])
 def test_start_display_api_invalid_display_api_port_exits_before_stop_or_relaunch(
     tmp_path: Path,
     invalid_port: str,
@@ -1540,7 +1540,7 @@ def test_start_display_api_invalid_display_api_port_exits_before_stop_or_relaunc
 
     assert completed.returncode != 0
     assert "NHMS_DISPLAY_API_PORT" in completed.stderr
-    assert invalid_port in completed.stderr
+    assert (invalid_port or "<empty>") in completed.stderr
     assert not (record_dir / "pgrep.argv").exists()
     assert not (record_dir / "setsid.argv").exists()
     assert not (record_dir / "curl.argv").exists()

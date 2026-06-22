@@ -57,7 +57,11 @@ if (( ${#missing[@]} > 0 )); then
     exit 3
 fi
 
-UVICORN_PORT="${NHMS_DISPLAY_API_PORT:-8080}"
+if [[ -v NHMS_DISPLAY_API_PORT ]]; then
+    UVICORN_PORT="$NHMS_DISPLAY_API_PORT"
+else
+    UVICORN_PORT="8080"
+fi
 if [[ ! "$UVICORN_PORT" =~ ^[0-9]+$ ]] || (( 10#$UVICORN_PORT < 1 || 10#$UVICORN_PORT > 65535 )); then
     echo "ERROR: NHMS_DISPLAY_API_PORT must be a decimal integer from 1 through 65535; got: ${UVICORN_PORT:-<empty>}" >&2
     echo "       fix display.env before restarting; existing uvicorn was not stopped." >&2

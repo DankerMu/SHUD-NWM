@@ -87,7 +87,20 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
-- [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：运行 `scripts/ops/start-display-api.sh`，由 `infra/env/display.env` 中的 `NHMS_DISPLAY_API_PORT` 控制 host 端口（默认 `8080`），探测基址为 `DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"`（与容器同一 `apps.api.main:app` 入口和角色守卫，env 含 `NHMS_SERVICE_ROLE=display_readonly`）。快、无镜像构建、无对外容器；用后按 wrapper 输出 PID 停止。
+- [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：先读取同一份
+  host env，再启动 wrapper。
+
+  ```bash
+  set -a
+  . infra/env/display.env
+  set +a
+  DISPLAY_API_BASE_URL="http://127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}"
+  scripts/ops/start-display-api.sh
+  ```
+
+  `NHMS_DISPLAY_API_PORT` 控制 host 端口，未配置时默认 `8080`。wrapper 与容器使用同一
+  `apps.api.main:app` 入口和角色守卫，env 含 `NHMS_SERVICE_ROLE=display_readonly`。
+  开发期启动快、无镜像构建、无对外容器；用后按 wrapper 输出 PID 停止。
 - [ ] 证明 27 无 Slurm CLI/config/socket、无 Docker socket、无禁止 mount/env、`/api/v1/slurm/*` 404、published 只读、`GET /api/v1/runtime/config` 返回 `display_readonly`：`uv run python scripts/validate_two_node_docker_runtime.py static`（**静态校验 compose/env 而不拉起**，对应 §10.1）+ 对本地服务实机探测（`/health`、`/runtime/config`、`/slurm/health`→404）。
 - [ ] **生产部署（非开发期，human-gated）**：`docker compose --env-file infra/env/display.env -f infra/compose.display.yml up -d` 起持久对外容器——难回滚 + 改状态，须显式人工确认/预授权（与 merge 同治理）；`smoke`（镜像构建）归此阶段。
 
