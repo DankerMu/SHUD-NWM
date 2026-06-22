@@ -281,8 +281,11 @@ Must add/change:
   `forcing_package_manifest_uri`, and `checksum`, where `checksum` is populated
   from `forcing_package_manifest_checksum_sha256`.
 - `parsed.met.met_station[*]` must preserve station payload fields including
-  `station_id`, `basin_version_id`, `station_name`, coordinates/elevation,
-  `station_role`, `active_flag`, and `properties_json`.
+  `station_id`, `basin_version_id`, `station_name`, `elevation_m`,
+  `station_role`, `active_flag`, `properties_json`, and coordinate evidence as
+  either `longitude` plus `latitude` or `geometry`. If optional `geometry` is
+  present alongside longitude/latitude, the parser must preserve all declared
+  coordinate evidence.
 - `parsed.met.forcing_station_timeseries[*]` must preserve
   `forcing_version_id`, `basin_version_id`, `station_id`, `valid_time`,
   `source_id`, `variable`, `value`, `unit`, `native_resolution`, and
@@ -315,7 +318,8 @@ Selected risk packs:
   does not interpret CRS, shapefiles, basin geometry, or PostGIS geometries.
 - SHUD numerical runtime / conservation / NaN: not selected - parser does not
   run SHUD, alter numerical model output, or evaluate conservation/runtime
-  behavior; row-level finite numeric checks remain #641 validation behavior.
+  behavior; parser-only DB reconstruction shape checks may reject rows after
+  #641 validation succeeds without changing validator readiness behavior.
 - Slurm production lifecycle / mock-vs-real parity: not selected - parser does
   not touch sbatch, Slurm job state, scheduler lifecycle, or node-22 compute.
 - External hydro-met providers / snapshot reproducibility: not selected - parser
@@ -360,7 +364,8 @@ Surfaces:
 Regression rows:
 - Complete fixture -> parser returns one forcing_version row, two met_station
   rows, eight station_timeseries rows, four interp_weight rows, exact checksums,
-  and expected table row counts.
+  and expected table row counts; met_station rows carry explicit coordinate
+  evidence via longitude/latitude or geometry without losing optional geometry.
 - Missing required field / malformed payload / missing payload / checksum
   mismatch -> unavailable report with stable reason code and no parsed rows.
 - Unsafe traversal or sibling-package payload URI -> validator/parser rejects

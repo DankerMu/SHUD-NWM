@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.redaction import redact_payload, redact_text
+from packages.common.redaction import is_sensitive_key, redact_payload, redact_text
 from packages.common.storage import validate_object_path
 
 CONTRACT_ID = "nhms.forcing_domain_handoff.v1"
@@ -102,6 +102,7 @@ PARSED_PAYLOAD_TABLE_ROW_FIELDS = {
         "station_name",
         "longitude",
         "latitude",
+        "geometry",
         "elevation_m",
         "station_role",
         "active_flag",
@@ -131,6 +132,29 @@ PARSED_PAYLOAD_TABLE_ROW_FIELDS = {
         "grid_signature",
     ),
 }
+PARSER_REQUIRED_PAYLOAD_ROW_FIELDS = {
+    "station_inventory": (
+        "station_id",
+        "basin_version_id",
+        "station_name",
+        "elevation_m",
+        "station_role",
+        "active_flag",
+        "properties_json",
+    ),
+    "station_timeseries": PARSED_PAYLOAD_TABLE_ROW_FIELDS["station_timeseries"],
+    "interpolation_weights": (
+        "source_id",
+        "grid_id",
+        "model_id",
+        "station_id",
+        "variable",
+        "grid_cell_id",
+        "weight",
+        "method",
+    ),
+}
+PARSER_BUSINESS_SIGNATURE_KEYS = frozenset({"grid_signature", "source_grid_signature"})
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -189,6 +213,8 @@ def parse_forcing_domain_handoff_path(
 
     parse_reasons: list[dict[str, Any]] = []
     payload_rows = _read_parser_payload_rows(manifest, store, parse_reasons)
+    if not parse_reasons:
+        _validate_parser_payload_row_shapes(payload_rows, parse_reasons)
     if parse_reasons:
         return _parser_unavailable_result(
             _with_handoff_evidence(
@@ -417,7 +443,7 @@ def _parser_result(
     result["unavailable_reasons"] = []
     result["evidence"] = dict(evidence)
     result["parsed"] = parsed
-    return result
+    return _redact_parser_result(result)
 
 
 def _read_parser_payload_rows(
@@ -548,6 +574,63 @@ def _project_payload_table_rows(
     return [{field: row[field] for field in fields if field in row} for row in rows]
 
 
+def _validate_parser_payload_row_shapes(
+    payload_rows: Mapping[str, list[Mapping[str, Any]]],
+    reasons: list[dict[str, Any]],
+) -> None:
+    row_diagnostics = _RowDiagnostics(reasons)
+    for role in PAYLOAD_TABLES:
+        rows = payload_rows.get(role, [])
+        for index, row in enumerate(rows):
+            if role == "station_inventory":
+                _validate_parser_station_inventory_row_shape(row, index, row_diagnostics)
+            elif role == "station_timeseries":
+                _validate_parser_required_row_fields(row, role, index, row_diagnostics)
+            elif role == "interpolation_weights":
+                _validate_parser_required_row_fields(row, role, index, row_diagnostics)
+    row_diagnostics.flush()
+
+
+def _validate_parser_station_inventory_row_shape(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    _validate_parser_required_row_fields(row, "station_inventory", index, row_diagnostics)
+    if not _has_coordinate_evidence(row):
+        row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude|geometry", index)
+
+
+def _validate_parser_required_row_fields(
+    row: Mapping[str, Any],
+    role: str,
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    for field in PARSER_REQUIRED_PAYLOAD_ROW_FIELDS[role]:
+        if not _parser_field_is_present(row, role, field):
+            row_diagnostics.add(REASON_FIELD_MISSING, role, field, index)
+
+
+def _parser_field_is_present(row: Mapping[str, Any], role: str, field: str) -> bool:
+    if field not in row:
+        return False
+    value = row.get(field)
+    if role == "station_inventory" and field == "elevation_m":
+        return _finite_number(value)
+    if role == "station_inventory" and field == "active_flag":
+        return isinstance(value, bool)
+    if role == "station_inventory" and field == "properties_json":
+        return isinstance(value, Mapping)
+    if role == "station_timeseries" and field == "value":
+        return _finite_number(value)
+    if role == "interpolation_weights" and field == "weight":
+        return _finite_number(value)
+    if isinstance(value, str):
+        return value.strip() != ""
+    return value is not None
+
+
 def _forcing_version_row(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "forcing_version_id": manifest.get("forcing_version_id"),
@@ -591,11 +674,34 @@ def _redact_parsed_row(row: Mapping[str, Any]) -> dict[str, Any]:
     redacted: dict[str, Any] = {}
     for key, value in row.items():
         key_text = str(key)
-        if key_text == "grid_signature":
+        if key_text in PARSER_BUSINESS_SIGNATURE_KEYS:
             redacted[key_text] = redact_text(value) if isinstance(value, str) else redact_payload(value)
         else:
-            redacted[key_text] = redact_payload({key_text: value})[key_text]
+            redacted[key_text] = _redact_parser_business_metadata(value)
     return redacted
+
+
+def _redact_parser_business_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if _is_parser_sensitive_metadata_key(key_text):
+                redacted[key_text] = redact_payload({key_text: nested})[key_text]
+            else:
+                redacted[key_text] = _redact_parser_business_metadata(nested)
+        return redacted
+    if isinstance(value, tuple):
+        return tuple(_redact_parser_business_metadata(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_parser_business_metadata(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def _is_parser_sensitive_metadata_key(key: str) -> bool:
+    return key.lower() not in PARSER_BUSINESS_SIGNATURE_KEYS and is_sensitive_key(key)
 
 
 def _validate_contract_fields(manifest: Mapping[str, Any], reasons: list[dict[str, Any]]) -> None:
@@ -1740,8 +1846,6 @@ def _validate_station_inventory_rows(
         )
         if not _has_coordinate_evidence(row):
             row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude", index)
-        if not _finite_number(row.get("elevation_m")):
-            row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "elevation_m", index)
 
     station_count = _positive_int(manifest.get("station_count"))
     duplicate_station_ids = _duplicate_text_values(

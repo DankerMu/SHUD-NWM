@@ -73,16 +73,21 @@ FORCING_VERSION_ROW_KEYS = {
     "forcing_package_manifest_uri",
     "checksum",
 }
-MET_STATION_ROW_KEYS = {
+MET_STATION_REQUIRED_ROW_KEYS = {
     "station_id",
     "basin_version_id",
     "station_name",
-    "longitude",
-    "latitude",
     "elevation_m",
     "station_role",
     "active_flag",
     "properties_json",
+}
+MET_STATION_LON_LAT_ROW_KEYS = MET_STATION_REQUIRED_ROW_KEYS | {"longitude", "latitude"}
+MET_STATION_GEOMETRY_ROW_KEYS = MET_STATION_REQUIRED_ROW_KEYS | {"geometry"}
+MET_STATION_LON_LAT_GEOMETRY_ROW_KEYS = MET_STATION_REQUIRED_ROW_KEYS | {
+    "longitude",
+    "latitude",
+    "geometry",
 }
 FORCING_STATION_TIMESERIES_ROW_KEYS = {
     "forcing_version_id",
@@ -402,7 +407,7 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
         "met.interp_weight": 4,
     }
     assert [set(row) for row in parsed["met.forcing_version"]] == [FORCING_VERSION_ROW_KEYS]
-    assert [set(row) for row in parsed["met.met_station"]] == [MET_STATION_ROW_KEYS] * 2
+    assert [set(row) for row in parsed["met.met_station"]] == [MET_STATION_LON_LAT_ROW_KEYS] * 2
     assert [set(row) for row in parsed["met.forcing_station_timeseries"]] == [
         FORCING_STATION_TIMESERIES_ROW_KEYS
     ] * 8
@@ -428,7 +433,7 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
     case_root = FIXTURE_ROOT / "complete"
     assert parsed["met.met_station"] == _project_payload_rows(
         _read_payload_rows(case_root, "station_inventory.json"),
-        MET_STATION_ROW_KEYS,
+        MET_STATION_LON_LAT_ROW_KEYS,
     )
     assert parsed["met.forcing_station_timeseries"] == _project_payload_rows(
         _read_payload_rows(case_root, "station_timeseries.json"),
@@ -459,6 +464,51 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
     )
 
 
+def test_parser_preserves_station_geometry_when_declared_with_lon_lat(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    station_rows = _read_payload_rows(case_root, "station_inventory.json")
+    geometry = {"type": "Point", "coordinates": [100.125, 38.25]}
+    station_rows[0]["geometry"] = geometry
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is True
+    parsed = result["parsed"]
+    assert isinstance(parsed, dict)
+    assert set(parsed["met.met_station"][0]) == MET_STATION_LON_LAT_GEOMETRY_ROW_KEYS
+    assert set(parsed["met.met_station"][1]) == MET_STATION_LON_LAT_ROW_KEYS
+    assert parsed["met.met_station"][0]["longitude"] == 100.125
+    assert parsed["met.met_station"][0]["latitude"] == 38.25
+    assert parsed["met.met_station"][0]["geometry"] == geometry
+
+
+def test_geometry_only_station_rows_validate_and_parse_with_coordinate_evidence(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    station_rows = _read_payload_rows(case_root, "station_inventory.json")
+    geometries = [
+        {"type": "Point", "coordinates": [100.125, 38.25]},
+        {"type": "Point", "coordinates": [100.25, 38.375]},
+    ]
+    for row, geometry in zip(station_rows, geometries, strict=True):
+        del row["longitude"]
+        del row["latitude"]
+        row["geometry"] = geometry
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is True
+    parsed = result["parsed"]
+    assert isinstance(parsed, dict)
+    assert [set(row) for row in parsed["met.met_station"]] == [MET_STATION_GEOMETRY_ROW_KEYS] * 2
+    assert [row["geometry"] for row in parsed["met.met_station"]] == geometries
+    assert all("longitude" not in row and "latitude" not in row for row in parsed["met.met_station"])
+
+
 def test_parser_preserves_successful_payload_business_values_without_redacting_grid_signatures(
     tmp_path: Path,
 ) -> None:
@@ -467,10 +517,16 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     for index, row in enumerate(station_rows):
         row["top_level_extra"] = f"station-extra-{index}"
     station_rows[0]["properties_json"]["grid_signature"] = "station-grid-signature"
+    station_rows[0]["properties_json"]["source_grid_signature"] = "station-source-grid-signature"
     station_rows[0]["properties_json"]["mirror_identity"] = {
         "grid_signature": "station-mirror-grid-signature",
-        "source_grid_signature": "station-source-grid-signature",
+        "source_grid_signature": "station-mirror-source-grid-signature",
     }
+    station_rows[0]["properties_json"]["token"] = "station-token-secret"
+    station_rows[0]["properties_json"]["password"] = "station-password-secret"
+    station_rows[0]["properties_json"]["credential_url"] = (
+        "https://station-user:station-pass@example.test/path?token=station-url-token"
+    )
     _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
 
     timeseries_rows = _read_payload_rows(case_root, "station_timeseries.json")
@@ -493,7 +549,14 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     assert result["available"] is True
     parsed = result["parsed"]
     assert isinstance(parsed, dict)
-    assert parsed["met.met_station"] == _project_payload_rows(station_rows, MET_STATION_ROW_KEYS)
+    expected_station_rows = _project_payload_rows(station_rows, MET_STATION_LON_LAT_ROW_KEYS)
+    expected_station_rows[0]["properties_json"] = {
+        **expected_station_rows[0]["properties_json"],
+        "token": "[redacted]",
+        "password": "[redacted]",
+        "credential_url": "[redacted]",
+    }
+    assert parsed["met.met_station"] == expected_station_rows
     assert parsed["met.forcing_station_timeseries"] == _project_payload_rows(
         timeseries_rows,
         FORCING_STATION_TIMESERIES_ROW_KEYS,
@@ -501,18 +564,27 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     assert parsed["met.interp_weight"] == _project_payload_rows(interp_rows, INTERP_WEIGHT_ROW_KEYS)
     assert parsed["met.met_station"][0]["properties_json"]["grid_signature"] == "station-grid-signature"
     assert (
+        parsed["met.met_station"][0]["properties_json"]["source_grid_signature"]
+        == "station-source-grid-signature"
+    )
+    assert (
         parsed["met.met_station"][0]["properties_json"]["mirror_identity"]["grid_signature"]
         == "station-mirror-grid-signature"
     )
     assert (
         parsed["met.met_station"][0]["properties_json"]["mirror_identity"]["source_grid_signature"]
-        == "station-source-grid-signature"
+        == "station-mirror-source-grid-signature"
     )
     assert parsed["met.interp_weight"][0]["grid_signature"] == "interp-grid-signature"
     assert "mirror_identity" not in parsed["met.interp_weight"][0]
     assert all("top_level_extra" not in row for row in parsed["met.met_station"])
     assert all("top_level_extra" not in row for row in parsed["met.forcing_station_timeseries"])
     assert all("top_level_extra" not in row for row in parsed["met.interp_weight"])
+    serialized = json.dumps(result, sort_keys=True)
+    assert "station-token-secret" not in serialized
+    assert "station-password-secret" not in serialized
+    assert "station-user:station-pass" not in serialized
+    assert "station-url-token" not in serialized
 
 
 @pytest.mark.parametrize(
@@ -553,6 +625,45 @@ def test_parser_missing_payload_is_unavailable_without_rows(tmp_path: Path) -> N
     assert result["available"] is False
     assert REASON_PAYLOAD_MISSING in _reason_codes(result)
     assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+@pytest.mark.parametrize(
+    ("role", "filename", "field"),
+    [
+        ("station_inventory", "station_inventory.json", "station_name"),
+        ("station_inventory", "station_inventory.json", "station_role"),
+        ("station_inventory", "station_inventory.json", "active_flag"),
+        ("station_inventory", "station_inventory.json", "properties_json"),
+        ("station_timeseries", "station_timeseries.json", "quality_flag"),
+    ],
+)
+def test_parser_missing_declared_payload_field_is_unavailable_without_changing_validator(
+    tmp_path: Path,
+    role: str,
+    filename: str,
+    field: str,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    rows = _read_payload_rows(case_root, filename)
+    del rows[0][field]
+    _set_payload_rows(case_root, role, filename, rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_FIELD_MISSING in _reason_codes(result)
+    assert result["parsed"] == {}
+    reasons = result["unavailable_reasons"]
+    assert isinstance(reasons, list)
+    assert any(
+        reason["code"] == REASON_FIELD_MISSING and reason.get("field") == f"payloads.{role}.rows.{field}"
+        for reason in reasons
+    )
     _assert_parser_handoff_evidence(result, case_root)
 
 
@@ -1099,6 +1210,10 @@ def test_station_inventory_elevation_m_must_be_finite_before_parser_emits_statio
     else:
         rows[0]["elevation_m"] = elevation_value
     _set_payload_rows(case_root, "station_inventory", "station_inventory.json", rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
 
     result = _parse_case_root(case_root)
 
