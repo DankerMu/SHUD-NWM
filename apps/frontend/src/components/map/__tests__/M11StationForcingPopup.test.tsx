@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
+import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT, HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
@@ -21,8 +22,27 @@ vi.mock('echarts-for-react/lib/core', () => ({
 }))
 vi.mock('@/components/charts/echartsCore', () => ({ echarts: {} }))
 
+const DEFAULT_CYCLE = '2026-05-21T00:00:00Z'
+const RETAINED_OUT_CYCLE = '2026-05-20T00:00:00Z'
+
+const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' }
+
+type SeriesQuery = {
+  forcing_version_id?: unknown
+  model_id?: unknown
+  source_id?: unknown
+  cycle_time?: unknown
+  variables?: unknown
+  limit?: unknown
+}
+
 function success<T>(data: T) {
   return { status: 'success', data }
+}
+
+function forcingVersionFor(source: HydroMetSource, cycle = DEFAULT_CYCLE) {
+  const suffix = cycle === RETAINED_OUT_CYCLE ? 'old' : 'latest'
+  return `forc-${source.toLowerCase()}-${suffix}`
 }
 
 function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
@@ -32,9 +52,9 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
     basin_version_id: 'bv-1',
     river_network_version_id: 'rn-1',
     source_id: 'GFS',
-    cycle_time: '2026-05-21T00:00:00Z',
-    run_id: 'run-1',
-    forcing_version_id: 'forc-1',
+    cycle_time: DEFAULT_CYCLE,
+    run_id: 'run-gfs-latest',
+    forcing_version_id: forcingVersionFor('GFS'),
     station_count: 10,
     expected_station_count: 10,
     segment_count: 20,
@@ -72,10 +92,17 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
   } as QhhLatestProduct
 }
 
+function productFor(source: HydroMetSource, cycle = DEFAULT_CYCLE, issueTimes = [DEFAULT_CYCLE]) {
+  return product({
+    source_id: source,
+    cycle_time: cycle,
+    run_id: `run-${source.toLowerCase()}-${cycle === RETAINED_OUT_CYCLE ? 'old' : 'latest'}`,
+    forcing_version_id: forcingVersionFor(source, cycle),
+    available_issue_times: issueTimes,
+  })
+}
 
-const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' }
-
-function metadata() {
+function metadata(overrides: Record<string, unknown> = {}) {
   return {
     limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     returned_points: 2,
@@ -84,38 +111,73 @@ function metadata() {
     returned_from: '2026-05-21T06:00:00Z',
     returned_to: '2026-05-21T12:00:00Z',
     truncated: false,
+    ...overrides,
   }
 }
 
-function seriesResponse(overrides: Record<string, unknown> = {}) {
+function seriesOverridesFromQuery(query: SeriesQuery) {
+  const overrides: Record<string, unknown> = {}
+  if (typeof query.cycle_time === 'string') overrides.cycle_time = query.cycle_time
+  if (typeof query.forcing_version_id === 'string') overrides.forcing_version_id = query.forcing_version_id
+  if (typeof query.model_id === 'string') overrides.model_id = query.model_id
+  return overrides
+}
+
+function seriesResponseFor(source: HydroMetSource, overrides: Record<string, unknown> = {}) {
+  const cycle = typeof overrides.cycle_time === 'string' ? overrides.cycle_time : DEFAULT_CYCLE
+  const forcingVersion =
+    typeof overrides.forcing_version_id === 'string' ? overrides.forcing_version_id : forcingVersionFor(source, cycle)
+  const modelId = typeof overrides.model_id === 'string' ? overrides.model_id : 'm-1'
   return {
-    station_id: 'qhh_forc_001',
-    station: { station_id: 'qhh_forc_001', basin_version_id: 'bv-1' },
-    forcing_version_id: 'forc-1',
-    model_id: 'm-1',
-    source_id: 'GFS',
-    cycle_time: '2026-05-21T00:00:00Z',
+    station_id: station.station_id,
+    station: { station_id: station.station_id, basin_version_id: 'bv-1' },
+    forcing_version_id: forcingVersion,
+    model_id: modelId,
+    source_id: source,
+    cycle_time: cycle,
     valid_time_start: '2026-05-21T06:00:00Z',
     valid_time_end: '2026-05-21T12:00:00Z',
     limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
     series: HYDRO_MET_STATION_VARIABLES.map((variable) => ({
       variable,
       unit: 'mm',
-      source_id: 'GFS',
-      cycle_time: '2026-05-21T00:00:00Z',
+      source_id: source,
+      cycle_time: cycle,
       truncated: false,
       metadata: metadata(),
       points: [
-        { valid_time: '2026-05-21T06:00:00Z', value: 1.2, quality_flag: 'ok' },
-        { valid_time: '2026-05-21T12:00:00Z', value: 2.4, quality_flag: 'ok' },
+        { valid_time: '2026-05-21T06:00:00Z', value: source === 'GFS' ? 1.2 : 1.6, quality_flag: 'ok' },
+        { valid_time: '2026-05-21T12:00:00Z', value: source === 'GFS' ? 2.4 : 2.8, quality_flag: 'ok' },
       ],
     })),
     ...overrides,
   }
 }
 
-function mockSeries(body: Record<string, unknown>) {
-  vi.mocked(client.GET).mockResolvedValue({ data: success(body), error: undefined } as never)
+function getSeriesQuery(init: unknown) {
+  return (init as { params: { query: SeriesQuery } }).params.query
+}
+
+function sourceFromQuery(query: SeriesQuery): HydroMetSource {
+  return query.source_id === 'IFS' ? 'IFS' : 'GFS'
+}
+
+function mockLatestProducts(issueTimes = [DEFAULT_CYCLE]) {
+  vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) => {
+    const cycle = request.cycle ?? issueTimes[0] ?? DEFAULT_CYCLE
+    return productFor(request.source, cycle, issueTimes)
+  })
+}
+
+function mockSeriesBySource(
+  builder: (source: HydroMetSource, query: SeriesQuery) => Record<string, unknown> = (source, query) =>
+    seriesResponseFor(source, seriesOverridesFromQuery(query)),
+) {
+  vi.mocked(client.GET).mockImplementation(async (_path, init) => {
+    const query = getSeriesQuery(init)
+    const source = sourceFromQuery(query)
+    return { data: success(builder(source, query)), error: undefined } as never
+  })
 }
 
 function stationSeriesDiskMiss() {
@@ -131,9 +193,13 @@ function stationSeriesDiskMiss() {
   }
 }
 
+function prcpSeries(body: Record<string, unknown>) {
+  return (body.series as Record<string, unknown>[]).find((series) => series.variable === 'PRCP') as Record<string, unknown>
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product())
+  mockLatestProducts()
 })
 
 afterEach(() => {
@@ -141,130 +207,113 @@ afterEach(() => {
 })
 
 describe('M11StationForcingPopup', () => {
-  it('renders five public forcing variable charts in a glass popup when identity matches', async () => {
-    mockSeries(seriesResponse())
+  it('renders one selected forcing variable chart with GFS and IFS on the same axis', async () => {
+    mockSeriesBySource()
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(screen.getByTestId('m11-station-popup')).toHaveClass('aspect-video')
     expect(screen.getByTestId('m11-station-popup')).toHaveClass('left-1/2')
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
-      params: expect.objectContaining({
-        query: expect.objectContaining({
-          forcing_version_id: 'forc-1',
-          model_id: 'm-1',
-          source_id: 'GFS',
-          cycle_time: '2026-05-21T00:00:00Z',
-          variables: [...HYDRO_MET_STATION_VARIABLES],
-          limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
-        }),
-      }),
-    }))
-    expect(HYDRO_MET_STATION_VARIABLES).toEqual(['PRCP', 'TEMP', 'RH', 'wind', 'Rn'])
-    for (const variable of HYDRO_MET_STATION_VARIABLES) {
-      expect(screen.getByTestId(`m11-station-variable-${variable}-chart`)).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledTimes(2)
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
+
+    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
+    for (const query of queries) {
+      expect(query).toEqual(expect.objectContaining({
+        model_id: 'm-1',
+        variables: [...HYDRO_MET_STATION_VARIABLES],
+        limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
+      }))
+      const source = sourceFromQuery(query)
+      expect(query.forcing_version_id).toBe(forcingVersionFor(source))
     }
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
-  })
 
-  it('changes the displayed curve set when a variable is toggled off', async () => {
-    const user = userEvent.setup()
-    mockSeries(seriesResponse())
-    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
-
-    await screen.findByTestId('m11-station-popup-loaded')
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
-
-    // 关掉 PRCP → 只显其余四个变量曲线
-    await user.click(screen.getByTestId('m11-station-variable-toggle-PRCP'))
-    expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
-
-    // 重新开启 PRCP → 恢复全部
-    await user.click(screen.getByTestId('m11-station-variable-toggle-PRCP'))
+    expect(HYDRO_MET_STATION_VARIABLES).toEqual(['PRCP', 'TEMP', 'RH', 'wind', 'Rn'])
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
+    for (const variable of HYDRO_MET_STATION_VARIABLES.filter((variable) => variable !== 'PRCP')) {
+      expect(screen.queryByTestId(`m11-station-variable-${variable}-chart`)).not.toBeInTheDocument()
+    }
+
+    const chart = screen.getByTestId('mock-station-echarts')
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(1)
+    expect(chart).toHaveTextContent('"name":"GFS"')
+    expect(chart).toHaveTextContent('"name":"IFS"')
   })
 
-  it('refetches with the new source when the user switches GFS to IFS', async () => {
+  it('switches the selected variable without adding another chart panel', async () => {
     const user = userEvent.setup()
-    mockSeries(seriesResponse())
+    mockSeriesBySource()
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     await screen.findByTestId('m11-station-popup-loaded')
-    expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+    expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(1)
 
-    vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product({ source_id: 'IFS' }))
-    await user.click(screen.getByTestId('m11-popup-source-IFS'))
-    await waitFor(() =>
-      expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
-    )
+    await user.click(screen.getByTestId('m11-station-variable-toggle-TEMP'))
+    expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-TEMP-chart')).toBeInTheDocument()
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(1)
+    expect(screen.getByTestId('m11-station-variable-toggle-TEMP')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('m11-station-variable-toggle-PRCP')).toHaveAttribute('aria-selected', 'false')
   })
 
-  it('marks retained-out issue times unavailable after station-series disk 404 and lets users choose another cycle', async () => {
+  it('keeps the available source plotted when the other source is outside the retained disk window', async () => {
     const user = userEvent.setup()
-    const latestCycle = '2026-05-21T00:00:00Z'
-    const retainedOutCycle = '2026-05-20T00:00:00Z'
-    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) =>
-      product({
-        cycle_time: request.cycle ?? latestCycle,
-        forcing_version_id: request.cycle === retainedOutCycle ? 'forc-old' : 'forc-latest',
-        available_issue_times: [latestCycle, retainedOutCycle],
-      }),
-    )
-    vi.mocked(client.GET)
-      .mockResolvedValueOnce({ data: success(seriesResponse({ cycle_time: latestCycle, forcing_version_id: 'forc-latest' })), error: undefined } as never)
-      .mockResolvedValueOnce({ data: undefined, error: stationSeriesDiskMiss() } as never)
-      .mockResolvedValueOnce({ data: success(seriesResponse({ cycle_time: latestCycle, forcing_version_id: 'forc-latest' })), error: undefined } as never)
+    mockLatestProducts([DEFAULT_CYCLE, RETAINED_OUT_CYCLE])
+    vi.mocked(client.GET).mockImplementation(async (_path, init) => {
+      const query = getSeriesQuery(init)
+      const source = sourceFromQuery(query)
+      if (source === 'GFS' && query.cycle_time === RETAINED_OUT_CYCLE) {
+        return { data: undefined, error: stationSeriesDiskMiss() } as never
+      }
+      return { data: success(seriesResponseFor(source, seriesOverridesFromQuery(query))), error: undefined } as never
+    })
 
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
     await screen.findByTestId('m11-station-popup-loaded')
 
-    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), retainedOutCycle)
-    expect(await screen.findByTestId('m11-station-popup-retention-missing')).toHaveTextContent('磁盘保留窗口')
-    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), RETAINED_OUT_CYCLE)
 
-    const unavailableOption = screen.getByRole('option', { name: /05-20 00:00 UTC · 磁盘保留不可用/ }) as HTMLOptionElement
-    expect(unavailableOption.disabled).toBe(true)
-
-    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), latestCycle)
-    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(client.GET).toHaveBeenLastCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
-      params: expect.objectContaining({
-        query: expect.objectContaining({
-          cycle_time: latestCycle,
-          forcing_version_id: 'forc-latest',
-        }),
-      }),
-    }))
+    await waitFor(() => {
+      expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('GFS：该起报 05-20 00:00 UTC')
+    })
+    expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('磁盘保留窗口')
+    expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
+    const chart = screen.getByTestId('mock-station-echarts')
+    expect(chart).not.toHaveTextContent('"name":"GFS"')
+    expect(chart).toHaveTextContent('"name":"IFS"')
   })
 
-  it('shows identity-mismatch empty state and draws no curve when station_id mismatches', async () => {
-    mockSeries(seriesResponse({ station_id: 'OTHER' }))
+  it('shows an empty state and draws no curve when station_id mismatches for both sources', async () => {
+    mockSeriesBySource((source, query) => seriesResponseFor(source, { ...seriesOverridesFromQuery(query), station_id: 'OTHER' }))
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('station_id=OTHER')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('shows identity-mismatch empty state and draws no curve when model_id mismatches', async () => {
-    mockSeries(seriesResponse({ model_id: 'other-model' }))
+  it('shows an empty state and draws no curve when model_id mismatches for both sources', async () => {
+    mockSeriesBySource((source, query) => seriesResponseFor(source, { ...seriesOverridesFromQuery(query), model_id: 'other-model' }))
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-popup-identity-reasons')).toHaveTextContent('model_id=other-model')
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('model_id=other-model')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('shows identity-mismatch empty state and draws no curve when cycle_time is missing', async () => {
-    const body = seriesResponse() as Record<string, unknown>
-    delete body.cycle_time
-    mockSeries(body)
+  it('shows an empty state and draws no curve when cycle_time is missing for both sources', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      delete body.cycle_time
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-popup-identity-reasons')).toHaveTextContent('cycle_time 元数据格式无效')
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('cycle_time 元数据格式无效')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
@@ -276,84 +325,92 @@ describe('M11StationForcingPopup', () => {
     expect(vi.mocked(fetchHydroMetLatestProduct)).not.toHaveBeenCalled()
   })
 
-  it('rejects the variable (no echarts) when any point is malformed/NaN', async () => {
-    const body = seriesResponse()
-    const series = (body.series as Record<string, unknown>[])[0]
-    series.points = [
-      { valid_time: '2026-05-21T06:00:00Z', value: 1.2, quality_flag: 'ok' },
-      { valid_time: '2026-05-21T12:00:00Z', value: Number.NaN, quality_flag: 'ok' },
-    ]
-    mockSeries(body)
+  it('rejects the selected variable when any point is malformed/NaN for both sources', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      prcpSeries(body).points = [
+        { valid_time: '2026-05-21T06:00:00Z', value: 1.2, quality_flag: 'ok' },
+        { valid_time: '2026-05-21T12:00:00Z', value: Number.NaN, quality_flag: 'ok' },
+      ]
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-invalid')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('value 不是有限数值')
     expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('gates on missing unit (no echarts) when unit is null', async () => {
-    const body = seriesResponse()
-    const series = (body.series as Record<string, unknown>[])[0]
-    series.unit = null
-    mockSeries(body)
+  it('gates the selected variable when unit is null for both sources', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      prcpSeries(body).unit = null
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-missing-unit')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('缺少 unit 元数据')
     expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('rejects the variable (no echarts) when metadata is malformed', async () => {
-    const body = seriesResponse()
-    const series = (body.series as Record<string, unknown>[])[0]
-    series.metadata = { ...metadata(), returned_points: -1, returned_from: 'not-a-time' }
-    mockSeries(body)
+  it('rejects the selected variable when metadata is malformed for both sources', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      prcpSeries(body).metadata = { ...metadata(), returned_points: -1, returned_from: 'not-a-time' }
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-invalid')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-station-popup-empty')).toHaveTextContent('metadata.returned_points')
     expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
+    expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('renders echarts and discloses truncation/cap when series is truncated', async () => {
-    const body = seriesResponse()
-    const series = (body.series as Record<string, unknown>[])[0]
-    series.truncated = true
-    series.metadata = { ...metadata(), returned_points: 1000, truncated: true }
-    mockSeries(body)
+  it('renders echarts and discloses source-specific truncation/cap badges when series is truncated', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      const series = prcpSeries(body)
+      series.truncated = true
+      series.metadata = { ...metadata(), returned_points: 1000, truncated: true }
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-truncated')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-capped')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-GFS-truncated')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-GFS-capped')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-IFS-truncated')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-IFS-capped')).toBeInTheDocument()
   })
 
-  it('locally caps long series without marking API truncation when metadata is complete', async () => {
-    const body = seriesResponse()
-    const series = (body.series as Record<string, unknown>[])[0]
-    const points = Array.from({ length: 280 }, (_, index) => ({
-      valid_time: new Date(Date.UTC(2026, 4, 21, index)).toISOString(),
-      value: index,
-      quality_flag: 'ok',
-    }))
-    series.points = points
-    series.truncated = false
-    series.metadata = {
-      ...metadata(),
-      returned_points: points.length,
-      returned_from: points[0].valid_time,
-      returned_to: points[points.length - 1].valid_time,
-      truncated: false,
-    }
-    mockSeries(body)
+  it('locally caps long selected-variable series without marking API truncation when metadata is complete', async () => {
+    mockSeriesBySource((source, query) => {
+      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
+      const points = Array.from({ length: 280 }, (_, index) => ({
+        valid_time: new Date(Date.UTC(2026, 4, 21, index)).toISOString(),
+        value: source === 'GFS' ? index : index + 0.5,
+        quality_flag: 'ok',
+      }))
+      const series = prcpSeries(body)
+      series.points = points
+      series.truncated = false
+      series.metadata = {
+        ...metadata(),
+        returned_points: points.length,
+        returned_from: points[0].valid_time,
+        returned_to: points[points.length - 1].valid_time,
+        truncated: false,
+      }
+      return body
+    })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-station-variable-PRCP-capped')).toBeInTheDocument()
-    expect(screen.queryByTestId('m11-station-variable-PRCP-truncated')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-GFS-capped')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-PRCP-IFS-capped')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-station-variable-PRCP-GFS-truncated')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-station-variable-PRCP-IFS-truncated')).not.toBeInTheDocument()
   })
 })
