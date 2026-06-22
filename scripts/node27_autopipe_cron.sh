@@ -21,6 +21,7 @@ REPO="${NODE27_AUTOPIPE_REPO:-/home/nwm/NWM}"
 INGEST_ENV="${NODE27_AUTOPIPE_ENV_FILE:-$REPO/infra/env/node27-ingest.env}"
 ALLOW_AMBIENT_ENV="${NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV:-0}"
 BOOTSTRAP_LOG="${NODE27_AUTOPIPE_BOOTSTRAP_LOG:-/home/nwm/autopipe.log}"
+INGEST_ENV_STRICT_SOURCE=0
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
@@ -47,6 +48,16 @@ if [ -f "$INGEST_ENV" ]; then
   ENV_MODE=$(stat -c '%a' "$INGEST_ENV" 2>/dev/null || stat -f '%Lp' "$INGEST_ENV" 2>/dev/null || true)
   if [ "$ENV_MODE" != "600" ]; then
     bootstrap_blocked "INGEST_ENV_MODE_UNSAFE"
+  fi
+  if [ "$ALLOW_AMBIENT_ENV" != "1" ]; then
+    INGEST_ENV_STRICT_SOURCE=1
+    # Env-file mode must not borrow required ingest runtime config from the
+    # invoking shell. A partial file fails closed below or in Python preflight.
+    unset DATABASE_URL
+    unset OBJECT_STORE_ROOT
+    unset BASINS_ROOT
+    unset AUTOPIPE_WORK_ROOT
+    unset AUTOPIPE_LOG_ROOT
   fi
   set -a
   # shellcheck disable=SC1090
@@ -80,6 +91,21 @@ mkdir -p "$AUTOPIPE_LOG_ROOT" 2>/dev/null || bootstrap_blocked "AUTOPIPE_LOG_ROO
 CANONICAL_LOG_ROOT=$(cd "$AUTOPIPE_LOG_ROOT" 2>/dev/null && pwd -P) || bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNWRITABLE"
 if [ "$CANONICAL_LOG_ROOT" = "/" ]; then
   bootstrap_blocked "AUTOPIPE_LOG_ROOT_UNSAFE"
+fi
+
+if [ "$INGEST_ENV_STRICT_SOURCE" = "1" ]; then
+  if [ -z "${DATABASE_URL:-}" ]; then
+    bootstrap_blocked "DATABASE_URL_MISSING"
+  fi
+  if [ -z "${OBJECT_STORE_ROOT:-}" ]; then
+    bootstrap_blocked "OBJECT_STORE_ROOT_MISSING"
+  fi
+  if [ -z "${BASINS_ROOT:-}" ]; then
+    bootstrap_blocked "BASINS_ROOT_MISSING"
+  fi
+  if [ -z "${AUTOPIPE_WORK_ROOT:-}" ]; then
+    bootstrap_blocked "AUTOPIPE_WORK_ROOT_MISSING"
+  fi
 fi
 
 LOG="${AUTOPIPE_LOG_FILE:-$AUTOPIPE_LOG_ROOT/autopipe.log}"

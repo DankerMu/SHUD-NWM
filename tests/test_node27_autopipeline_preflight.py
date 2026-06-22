@@ -321,6 +321,14 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
     assert "postgresql://nhms:nhms_dev" not in script
     assert '. "$REPO/infra/env/display.env"' not in script
     assert "INGEST_ENV_DISPLAY_RUNTIME_FORBIDDEN" in script
+    for required_key in (
+        "DATABASE_URL",
+        "OBJECT_STORE_ROOT",
+        "BASINS_ROOT",
+        "AUTOPIPE_WORK_ROOT",
+        "AUTOPIPE_LOG_ROOT",
+    ):
+        assert f"unset {required_key}" in script
 
 
 def test_direct_script_entry_resolves_repo_imports() -> None:
@@ -360,6 +368,58 @@ def test_wrapper_missing_ingest_env_blocks_before_python_and_backstop(tmp_path: 
     assert "INGEST_ENV_MISSING" in proc.stderr
     assert "INGEST_ENV_MISSING" in log.read_text(encoding="utf-8")
     assert not invocations.exists()
+
+
+def test_wrapper_env_file_missing_database_url_ignores_ambient_without_override(tmp_path: Path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (scripts / "node27_autopipeline.py").write_text("# fake autopipeline\n", encoding="utf-8")
+    (scripts / "node27_refresh_coverage.py").write_text("# fake coverage\n", encoding="utf-8")
+    invocations = tmp_path / "invocations.txt"
+    python_bin.write_text(f"#!/bin/sh\necho \"$@\" >> {invocations}\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                "OBJECT_STORE_PREFIX=s3://nhms",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    bootstrap_log = tmp_path / "bootstrap.log"
+    env = {
+        **os.environ,
+        "NODE27_AUTOPIPE_REPO": str(fake_repo),
+        "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+        "NODE27_AUTOPIPE_BOOTSTRAP_LOG": str(bootstrap_log),
+        "DATABASE_URL": "postgresql://node27_writer:ambient-secret@db.example/nhms",
+    }
+    env.pop("NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV", None)
+
+    proc = subprocess.run(["bash", str(WRAPPER)], env=env, capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 2
+    assert "DATABASE_URL_MISSING" in proc.stderr
+    assert "DATABASE_URL_MISSING" in bootstrap_log.read_text(encoding="utf-8")
+    assert not invocations.exists()
+    assert not (log_root / "autopipe.log").exists()
 
 
 def test_wrapper_rejects_display_env_file_before_source(tmp_path: Path) -> None:
