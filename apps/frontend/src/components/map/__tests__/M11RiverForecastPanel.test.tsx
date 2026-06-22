@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
+import { _clearM11RiverForecastCache, M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
@@ -111,11 +111,13 @@ function mockForecastBySource(opts: { ifsSegmentId?: string } = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  _clearM11RiverForecastCache()
   vi.mocked(fetchHydroMetLatestProduct).mockImplementation((async ({ source }: { source: HydroMetSource }) => product(source)) as never)
 })
 
 afterEach(() => {
   vi.clearAllMocks()
+  _clearM11RiverForecastCache()
 })
 
 describe('M11RiverForecastPanel', () => {
@@ -125,6 +127,7 @@ describe('M11RiverForecastPanel', () => {
 
     expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
     await screen.findByTestId('m11-river-panel-chart')
+    expect(screen.queryByTestId('m11-river-panel-loading')).not.toBeInTheDocument()
     const option = screen.getByTestId('mock-forecast-echarts').textContent ?? ''
     // 双源同图：GFS(3225) 与 IFS(4000) 两条 series 同时渲染
     expect(option).toContain('3225')
@@ -136,6 +139,23 @@ describe('M11RiverForecastPanel', () => {
     // 两源各解析一次 latest-product
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
+  })
+
+  it('reuses cached source results when the same segment panel is reopened', async () => {
+    mockForecastBySource()
+    const { unmount } = render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    await screen.findByTestId('m11-river-panel-chart')
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledTimes(2)
+    expect(client.GET).toHaveBeenCalledTimes(2)
+    unmount()
+
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    await screen.findByTestId('m11-river-panel-chart')
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledTimes(2)
+    expect(client.GET).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId('m11-river-panel-loading')).not.toBeInTheDocument()
   })
 
   it('still draws the valid source and lists the failed one when one source fails validation', async () => {

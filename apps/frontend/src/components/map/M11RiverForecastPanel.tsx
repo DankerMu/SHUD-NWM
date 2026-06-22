@@ -31,6 +31,8 @@ export interface M11RiverPopupSegment {
 const DUAL_SOURCES: HydroMetSource[] = ['GFS', 'IFS']
 // 字面量配色（GFS 青 / IFS 绿）：ForecastSeries.color 是 hex 字面量联合，须用 as const 收窄。
 const SOURCE_COLOR = { GFS: '#22d3ee', IFS: '#34d399' } as const
+const SOURCE_RESULT_CACHE_TTL_MS = 120_000
+const LOADING_COPY_DELAY_MS = 600
 
 interface SourceResult {
   source: HydroMetSource
@@ -46,6 +48,8 @@ interface DualForecast {
   data: ForecastData | null
   results: SourceResult[]
 }
+
+const sourceResultCache = new Map<string, { expiresAt: number; promise: Promise<SourceResult> }>()
 
 function productIdentity(product: QhhLatestProduct): HydroMetRiverForecastProductIdentity {
   return {
@@ -120,6 +124,51 @@ async function loadSource(
   }
 }
 
+function sourceResultCacheKey(
+  basinId: string,
+  source: HydroMetSource,
+  segment: HydroMetRiverForecastSegmentIdentity,
+  cycle: string | null,
+) {
+  return [
+    basinId,
+    source,
+    cycle ?? 'latest',
+    segment.basin_version_id,
+    segment.river_network_version_id,
+    segment.river_segment_id,
+  ].join('|')
+}
+
+function loadSourceCached(
+  basinId: string,
+  source: HydroMetSource,
+  segment: HydroMetRiverForecastSegmentIdentity,
+  cycle: string | null,
+) {
+  const key = sourceResultCacheKey(basinId, source, segment, cycle)
+  const now = Date.now()
+  const cached = sourceResultCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.promise
+
+  const promise = loadSource(basinId, source, segment, cycle)
+    .then((result) => {
+      const entry = sourceResultCache.get(key)
+      if (entry?.promise === promise) entry.expiresAt = Date.now() + SOURCE_RESULT_CACHE_TTL_MS
+      return result
+    })
+    .catch((error) => {
+      if (sourceResultCache.get(key)?.promise === promise) sourceResultCache.delete(key)
+      throw error
+    })
+  sourceResultCache.set(key, { expiresAt: now + SOURCE_RESULT_CACHE_TTL_MS, promise })
+  return promise
+}
+
+export function _clearM11RiverForecastCache() {
+  sourceResultCache.clear()
+}
+
 function buildDualForecast(segment: HydroMetRiverForecastSegmentIdentity, results: SourceResult[]): DualForecast {
   const series = results.map((result) => result.series).filter((value): value is ForecastSeries => value !== null)
   if (series.length === 0) return { data: null, results }
@@ -159,6 +208,7 @@ export function M11RiverForecastPanel({
     [segment.river_segment_id, segment.segment_id, segment.river_network_version_id, segment.basin_version_id, segment.name],
   )
   const [loading, setLoading] = useState(true)
+  const [showLoadingCopy, setShowLoadingCopy] = useState(false)
   const [forecast, setForecast] = useState<DualForecast>({ data: null, results: [] })
   // 起报时间按河段身份绑定：换河段（identity 变）时所选 cycle 自动失效回最新，
   // 派生而非 reset effect —— 规避 setState-in-effect 触发的双重加载。双源时次一致 → 单一选择器同步切换。
@@ -172,6 +222,15 @@ export function M11RiverForecastPanel({
   )
 
   useEffect(() => {
+    if (!loading) {
+      setShowLoadingCopy(false)
+      return
+    }
+    const timer = window.setTimeout(() => setShowLoadingCopy(true), LOADING_COPY_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [loading])
+
+  useEffect(() => {
     if (!basinId) {
       setForecast({ data: null, results: [] })
       setLoading(false)
@@ -179,7 +238,7 @@ export function M11RiverForecastPanel({
     }
     let cancelled = false
     setLoading(true)
-    void Promise.all(DUAL_SOURCES.map((source) => loadSource(basinId, source, identity, selectedCycle))).then((results) => {
+    void Promise.all(DUAL_SOURCES.map((source) => loadSourceCached(basinId, source, identity, selectedCycle))).then((results) => {
       if (cancelled) return
       setForecast(buildDualForecast(identity, results))
       setLoading(false)
@@ -190,6 +249,7 @@ export function M11RiverForecastPanel({
   }, [basinId, identity, selectedCycle])
 
   const failedReasons = forecast.results.filter((result) => result.reason).map((result) => result.reason as string)
+  const showInitialLoading = loading && !forecast.data && showLoadingCopy
 
   return (
     <aside
@@ -245,7 +305,7 @@ export function M11RiverForecastPanel({
         </div>
       ) : null}
 
-      {loading ? (
+      {showInitialLoading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-slate-300" role="status" data-testid="m11-river-panel-loading">
           正在加载 GFS / IFS q_down forecast-series...
         </div>
@@ -272,6 +332,8 @@ export function M11RiverForecastPanel({
             </p>
           ) : null}
         </div>
+      ) : loading ? (
+        <div className="flex flex-1" aria-busy="true" data-testid="m11-river-panel-pending" />
       ) : (
         <div className="m-4 flex-1 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status" data-testid="m11-river-panel-empty">
           {failedReasons.length > 0 ? (
