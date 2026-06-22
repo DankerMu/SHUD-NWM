@@ -338,10 +338,14 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
-  const stationLayerBasinId = useMemo(() => {
-    const forecastBasin = basins.find((basin) => basin.latestForecastTime != null)
-    return forecastBasin?.basinId ?? basins[0]?.basinId ?? null
-  }, [basins])
+  const stationLayerBasinContexts = useMemo(
+    () =>
+      basins.map((basin) => ({
+        basinId: basin.basinId,
+        basinVersionId: basin.selectedBasinVersionId,
+      })),
+    [basins],
+  )
   // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
   // fit 到流域并集会把视野错误地收窄到测试流域（qhh/heihe）区域。
 
@@ -364,7 +368,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         setRiverPopup(null)
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
-          basinId: stationLayerBasinId,
+          basinId: mapFeatureStringProperty(interaction.feature, 'basin_id') ?? stationLayerBasinContexts[0]?.basinId ?? null,
         })
         return
       }
@@ -401,7 +405,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       if (!basin) return
       setBasinFit(bboxToMapFit(basin.bbox))
     },
-    [basins, basinVersionToBasinId, state, stationLayerBasinId, visibleBasinSet],
+    [basins, basinVersionToBasinId, state, stationLayerBasinContexts, visibleBasinSet],
   )
   const handleMapOverlayHover = useCallback(
     (interaction: M11MapOverlayInteraction | null) => {
@@ -426,10 +430,11 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     />
   ) : null
 
-  // 全国总览开代站图层：用当前总览中可展示的流域身份取代站，避免用户必须先钻取流域才能看到点位。
+  // 全国总览开代站图层：按当前总览中的所有可见流域版本取代站点位；
+  // 点位展示不依赖 latest-product ready，避免某个流域 forcing 曲线未就绪时站点也消失。
   const stationLayer = useMetStationLayer({
     active: state.layer === 'met-stations',
-    basinId: stationLayerBasinId,
+    basinContexts: stationLayerBasinContexts,
     resolvedSource: sourceSelection?.resolvedSource ?? null,
     cycle: state.cycle,
   })

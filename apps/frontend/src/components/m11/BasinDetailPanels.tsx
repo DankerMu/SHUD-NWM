@@ -186,7 +186,7 @@ export function useBasinDetailMode({
 
   const stationLayer = useMetStationLayer({
     active: state.layer === 'met-stations',
-    basinId,
+    basinContexts: [{ basinId, basinVersionId: state.basinVersionId }],
     resolvedSource: sourceSelection?.resolvedSource ?? null,
     cycle: state.cycle,
   })

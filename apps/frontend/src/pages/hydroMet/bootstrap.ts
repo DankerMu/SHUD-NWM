@@ -140,6 +140,11 @@ export interface HydroMetStationQuery {
   offset?: number
 }
 
+export interface HydroMetStationIdentity {
+  basinVersionId?: string | null
+  modelId?: string | null
+}
+
 export interface HydroMetRiverSegmentQuery {
   search?: string
   streamOrderMin?: number
@@ -153,19 +158,18 @@ function trimmedOrUndefined(value: string | undefined | null) {
   return trimmed ? trimmed : undefined
 }
 
-/**
- * Station inventory query. All identity (model_id/basin_version_id) is derived from the
- * latest-product so server-side search/variable filtering never breaks strict identity.
- */
-export async function fetchHydroMetStations(product: QhhLatestProduct, query: HydroMetStationQuery = {}) {
+export async function fetchHydroMetStationsByIdentity(identity: HydroMetStationIdentity, query: HydroMetStationQuery = {}) {
+  const basinVersionId = trimmedOrUndefined(identity.basinVersionId)
+  const modelId = trimmedOrUndefined(identity.modelId)
+  if (!basinVersionId && !modelId) throw new Error('站点 inventory 缺少 basin_version_id 或 model_id')
   const search = trimmedOrUndefined(query.search)
   const variables = query.variables?.length ? query.variables : undefined
   const qcStatus = trimmedOrUndefined(query.qcStatus)
   const { data, error } = await client.GET('/api/v1/met/stations', {
     params: {
       query: {
-        model_id: product.model_id,
-        basin_version_id: product.basin_version_id,
+        model_id: modelId,
+        basin_version_id: basinVersionId,
         ...(search ? { search } : {}),
         ...(variables ? { variables } : {}),
         ...(qcStatus ? { qc_status: qcStatus } : {}),
@@ -178,6 +182,17 @@ export async function fetchHydroMetStations(product: QhhLatestProduct, query: Hy
   const page = unwrapApiData<HydroMetStationPage>(data, '站点 inventory 加载失败')
   if (!page || !Array.isArray(page.items)) throw new Error('站点 inventory 响应不完整')
   return { ...page, items: page.items.map((station) => normalizeHydroMetStation(station)) }
+}
+
+/**
+ * Station inventory query. All identity (model_id/basin_version_id) is derived from the
+ * latest-product so server-side search/variable filtering never breaks strict identity.
+ */
+export async function fetchHydroMetStations(product: QhhLatestProduct, query: HydroMetStationQuery = {}) {
+  return fetchHydroMetStationsByIdentity(
+    { modelId: product.model_id, basinVersionId: product.basin_version_id },
+    query,
+  )
 }
 
 /**

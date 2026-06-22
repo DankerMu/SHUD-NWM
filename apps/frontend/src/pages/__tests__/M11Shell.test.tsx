@@ -110,7 +110,7 @@ vi.mock('react-map-gl/maplibre', () => ({
       }
       const stationPointFeature = {
         layer: { id: 'met-stations-point' },
-        properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237' },
+        properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237', basin_id: 'yangtze' },
         geometry: { type: 'Point', coordinates: [100.4, 30.4] },
       }
       const map = {
@@ -1937,12 +1937,12 @@ describe('M11 visual foundation shell', () => {
         {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [100.4, 30.4] as [number, number] },
-          properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237' },
+          properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237', basin_id: 'yangtze' },
         },
         {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [101.6, 30.6] as [number, number] },
-          properties: { station_id: 'HMT-Y2-0238', station_name: 'Station 0238' },
+          properties: { station_id: 'HMT-Y2-0238', station_name: 'Station 0238', basin_id: 'qhh' },
         },
       ],
     }
@@ -2034,20 +2034,30 @@ describe('M11 visual foundation shell', () => {
       expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
     })
 
-    it('loads met-stations on the national overview using an available basin identity', async () => {
+    it('loads met-stations on the national overview using every visible basin identity', async () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)
       useStationLayerDataStore.setState({
         ...useStationLayerDataStore.getInitialState(),
         loadStationLayer,
         clear: vi.fn(),
       })
+      const basinsWithStations: OverviewBasin[] = [
+        overviewBasins[0],
+        {
+          ...overviewBasins[0],
+          basinId: 'qhh',
+          displayName: 'QHH',
+          latestForecastTime: null,
+          selectedBasinVersionId: 'qhh_v2026_01',
+        },
+      ]
       window.history.pushState({}, '', `/?${serializeM11QueryState({ ...state, layer: 'met-stations' })}`)
       const query = parseM11QueryState(window.location.search)
       useOverviewDataStore.setState({
         overview: {
           requestScope: matchedOverviewScope(query),
           bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
-          basins: overviewBasins,
+          basins: basinsWithStations,
           summary: createEmptyOverviewSummary(query),
           layers,
           aggregationDecision: decideAggregationEndpoint({
@@ -2068,7 +2078,14 @@ describe('M11 visual foundation shell', () => {
       )
 
       await waitFor(() => {
-        expect(loadStationLayer).toHaveBeenCalledWith({ basinId: 'yangtze', resolvedSource: 'GFS', cycle: state.cycle })
+        expect(loadStationLayer).toHaveBeenCalledWith({
+          basinContexts: [
+            { basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' },
+            { basinId: 'qhh', basinVersionId: 'qhh_v2026_01' },
+          ],
+          resolvedSource: 'GFS',
+          cycle: state.cycle,
+        })
       })
       expect(screen.queryByText('请选择流域以加载气象代站')).not.toBeInTheDocument()
     })
@@ -2095,7 +2112,7 @@ describe('M11 visual foundation shell', () => {
         clear: vi.fn(),
       })
 
-      render(<Harness active basinId="heihe" resolvedSource="Unknown" cycle={null} />)
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="Unknown" cycle={null} />)
 
       expect(loadStationLayer).not.toHaveBeenCalled()
       expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('Best Available')
@@ -2109,9 +2126,13 @@ describe('M11 visual foundation shell', () => {
         clear: vi.fn(),
       })
 
-      render(<Harness active basinId="heihe" resolvedSource="GFS" cycle={null} />)
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="GFS" cycle={null} />)
 
-      expect(loadStationLayer).toHaveBeenCalledWith({ basinId: 'heihe', resolvedSource: 'GFS', cycle: null })
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }],
+        resolvedSource: 'GFS',
+        cycle: null,
+      })
     })
 
     it('annotates truncation when an oversized basin is capped', () => {
@@ -2121,14 +2142,15 @@ describe('M11 visual foundation shell', () => {
         clear: vi.fn(),
         data: {
           stations: [],
+          stationBasinIds: {},
           total: 12000,
           loaded: 5000,
           truncated: true,
         },
-        requestKey: 'heihe::GFS::latest',
+        requestKey: 'heihe:heihe_v1::GFS::latest',
       })
 
-      render(<Harness active basinId="heihe" resolvedSource="GFS" cycle={null} />)
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="GFS" cycle={null} />)
 
       const harness = screen.getByTestId('harness')
       expect(harness).toHaveAttribute('data-truncated', 'true')

@@ -3,11 +3,10 @@ import { create } from 'zustand'
 import { getApiErrorMessage } from '@/api/response'
 import {
   HYDRO_MET_STATION_LIMIT,
-  fetchHydroMetLatestProduct,
-  fetchHydroMetStations,
+  fetchHydroMetStationsByIdentity,
   type HydroMetStation,
 } from '@/pages/hydroMet/bootstrap'
-import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'
+import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 /**
@@ -19,13 +18,19 @@ export const STATION_PAGE_LIMIT = HYDRO_MET_STATION_LIMIT
 
 export interface StationLayerData {
   stations: HydroMetStation[]
+  stationBasinIds: Record<string, string>
   total: number
   loaded: number
   truncated: boolean
 }
 
-export interface StationLayerRequest {
+export interface StationLayerBasinContext {
   basinId: string
+  basinVersionId: string | null
+}
+
+export interface StationLayerRequest {
+  basinContexts: StationLayerBasinContext[]
   /** 已解析的具体源；store 不接受 best/compare（类型即 GFS/IFS）。 */
   resolvedSource: HydroMetSource
   cycle: string | null
@@ -41,8 +46,26 @@ interface StationLayerDataState {
   clear: () => void
 }
 
-function requestKeyOf(request: StationLayerRequest) {
-  return `${request.basinId}::${request.resolvedSource}::${request.cycle ?? 'latest'}`
+function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
+  const seen = new Set<string>()
+  const normalized: StationLayerBasinContext[] = []
+  for (const context of contexts) {
+    const basinId = context.basinId.trim()
+    const basinVersionId = context.basinVersionId?.trim() || null
+    if (!basinId) continue
+    const key = `${basinId}::${basinVersionId ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    normalized.push({ basinId, basinVersionId })
+  }
+  return normalized
+}
+
+export function stationLayerRequestKey(request: StationLayerRequest) {
+  const basinKey = normalizeBasinContexts(request.basinContexts)
+    .map((context) => `${context.basinId}:${context.basinVersionId ?? 'missing'}`)
+    .join(',')
+  return `${basinKey}::${request.resolvedSource}::${request.cycle ?? 'latest'}`
 }
 
 const inFlight = new Map<string, Promise<StationLayerData>>()
@@ -50,46 +73,68 @@ let requestNonce = 0
 let activeRequestKey: string | null = null
 
 /**
- * 严格身份分页：先取轻量 latest-product identity，再以其 model_id/basin_version_id 取站点，
- * 首页拿 total_count，再 offset 翻页直到 loaded≥total 或 loaded≥STATION_CLIENT_CAP。
+ * 地图点位分页：代站位置本身来自 basin_version_id 站点清单，不依赖 latest-product ready。
+ * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const product = await fetchHydroMetLatestProduct({
-    source: request.resolvedSource,
-    cycle: request.cycle,
-    basinId: request.basinId,
-  })
-  const productCycle = normalizeHydroMetCycle(product.cycle_time)
-  if (request.cycle && productCycle && request.cycle !== productCycle) {
-    throw new Error(`代站起报 ${request.cycle} 已不可用`)
-  }
-  if (product.status !== 'ready' || product.availability?.ready === false) {
-    const reason = product.availability?.unavailable_reasons?.[0]
-    throw new Error(reason ? `${reason.code}: ${reason.message}` : '代站 latest-product 未就绪')
-  }
-  if (!product.model_id || !product.basin_version_id) throw new Error('代站 latest-product 身份不完整')
+  const contexts = normalizeBasinContexts(request.basinContexts).filter((context) => context.basinVersionId)
+  if (contexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
 
-  const firstPage = await fetchHydroMetStations(product, { limit: STATION_PAGE_LIMIT, offset: 0 })
-  const total = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
-  const stations: HydroMetStation[] = [...firstPage.items]
+  const stations: HydroMetStation[] = []
+  const stationBasinIds: Record<string, string> = {}
+  let total = 0
+  let truncated = false
 
-  // 后续页：从首页之后继续翻，直到取全或触顶 client cap。
-  let offset = stations.length
-  while (stations.length < total && stations.length < STATION_CLIENT_CAP) {
-    const remainingCap = STATION_CLIENT_CAP - stations.length
-    const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
-    const page = await fetchHydroMetStations(product, { limit: pageLimit, offset })
-    if (page.items.length === 0) break
-    stations.push(...page.items)
-    offset += page.items.length
+  for (const context of contexts) {
+    if (stations.length >= STATION_CLIENT_CAP) {
+      truncated = true
+      break
+    }
+
+    const firstPage = await fetchHydroMetStationsByIdentity(
+      { basinVersionId: context.basinVersionId },
+      { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
+    )
+    const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
+    total += basinTotal
+
+    appendStations(stations, stationBasinIds, firstPage.items, context.basinId)
+
+    let offset = firstPage.items.length
+    while (offset < basinTotal && stations.length < STATION_CLIENT_CAP) {
+      const remainingCap = STATION_CLIENT_CAP - stations.length
+      const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
+      const page = await fetchHydroMetStationsByIdentity(
+        { basinVersionId: context.basinVersionId },
+        { limit: pageLimit, offset },
+      )
+      if (page.items.length === 0) break
+      appendStations(stations, stationBasinIds, page.items, context.basinId)
+      offset += page.items.length
+    }
+
+    if (offset < basinTotal) truncated = true
   }
 
   const loaded = stations.length
   return {
     stations,
+    stationBasinIds,
     total,
     loaded,
-    truncated: loaded < total,
+    truncated: truncated || loaded < total,
+  }
+}
+
+function appendStations(
+  stations: HydroMetStation[],
+  stationBasinIds: Record<string, string>,
+  items: HydroMetStation[],
+  basinId: string,
+) {
+  for (const station of items) {
+    stations.push(station)
+    if (station.station_id) stationBasinIds[station.station_id] = basinId
   }
 }
 
@@ -105,7 +150,7 @@ export const useStationLayerDataStore = create<StationLayerDataState>((set) => (
     set({ data: null, loading: false, error: null, requestKey: null })
   },
   loadStationLayer: async (request) => {
-    const key = requestKeyOf(request)
+    const key = stationLayerRequestKey(request)
     const existing = inFlight.get(key)
     if (existing && activeRequestKey === key) return existing
 

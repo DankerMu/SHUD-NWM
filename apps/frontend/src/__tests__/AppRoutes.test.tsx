@@ -125,7 +125,7 @@ vi.mock('react-map-gl/maplibre', () => ({
             })
           }
           onContextMenu={(event) => {
-            // 模拟点击单个代站点要素（met-stations-point），feature 带 station_id + 点几何坐标。
+            // 模拟点击单个代站点要素（met-stations-point），feature 带 station_id + basin_id + 点几何坐标。
             event.preventDefault()
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
@@ -133,7 +133,7 @@ vi.mock('react-map-gl/maplibre', () => ({
               features: [
                 {
                   layer: { id: 'met-stations-point' },
-                  properties: { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' },
+                  properties: { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001', basin_id: 'basin-demo' },
                   geometry: { type: 'Point', coordinates: [104.1, 31.2] },
                 },
               ],
@@ -1700,6 +1700,19 @@ describe('App route state', () => {
 
   it('opens the station forcing popup when a met-station map feature is clicked (M26-4)', async () => {
     const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
+      data: {
+        stations: hydroMetStationPage.items,
+        stationBasinIds: { qhh_forc_001: 'basin-demo' },
+        total: 1,
+        loaded: 1,
+        truncated: false,
+      },
+      requestKey: 'basin-demo:bv-001::GFS::latest',
+    })
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&layer=met-stations&basinVersionId=bv-001', 'source=gfs&layer=met-stations&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
       basinLoading: false,

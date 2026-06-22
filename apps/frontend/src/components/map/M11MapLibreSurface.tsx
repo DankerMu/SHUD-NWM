@@ -59,7 +59,7 @@ export interface M11StationFeatureCollection {
   features: Array<{
     type: 'Feature'
     geometry: { type: 'Point'; coordinates: [number, number] }
-    properties: { station_id: string; station_name: string | null }
+    properties: { station_id: string; station_name: string | null; basin_id: string | null }
   }>
 }
 
