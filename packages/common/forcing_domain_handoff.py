@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.redaction import redact_payload
+from packages.common.redaction import is_sensitive_key, redact_payload, redact_text
 from packages.common.storage import validate_object_path
 
 CONTRACT_ID = "nhms.forcing_domain_handoff.v1"
@@ -95,6 +95,66 @@ PAYLOAD_TABLES = {
     "station_timeseries": "met.forcing_station_timeseries",
     "interpolation_weights": "met.interp_weight",
 }
+PARSED_PAYLOAD_TABLE_ROW_FIELDS = {
+    "station_inventory": (
+        "station_id",
+        "basin_version_id",
+        "station_name",
+        "longitude",
+        "latitude",
+        "geometry",
+        "elevation_m",
+        "station_role",
+        "active_flag",
+        "properties_json",
+    ),
+    "station_timeseries": (
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag",
+    ),
+    "interpolation_weights": (
+        "source_id",
+        "grid_id",
+        "model_id",
+        "station_id",
+        "variable",
+        "grid_cell_id",
+        "weight",
+        "method",
+        "grid_signature",
+    ),
+}
+PARSER_REQUIRED_PAYLOAD_ROW_FIELDS = {
+    "station_inventory": (
+        "station_id",
+        "basin_version_id",
+        "station_name",
+        "elevation_m",
+        "station_role",
+        "active_flag",
+        "properties_json",
+    ),
+    "station_timeseries": PARSED_PAYLOAD_TABLE_ROW_FIELDS["station_timeseries"],
+    "interpolation_weights": (
+        "source_id",
+        "grid_id",
+        "model_id",
+        "station_id",
+        "variable",
+        "grid_cell_id",
+        "weight",
+        "method",
+    ),
+}
+PARSER_BUSINESS_SIGNATURE_KEYS = frozenset({"grid_signature", "source_grid_signature"})
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -107,56 +167,74 @@ def validate_forcing_domain_handoff_path(
 ) -> dict[str, Any]:
     """Validate one declared forcing-domain handoff manifest without writing files."""
 
-    root = Path(object_store_root).expanduser()
-    if not root.is_dir():
-        return _result(
-            {},
-            [
-                _reason(
-                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
-                    field="object_store_root",
-                )
-            ],
+    store, manifest, manifest_uri, _manifest_checksum, reasons = _read_handoff_manifest_path(
+        manifest_path,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if reasons or store is None:
+        return _result(manifest, reasons, manifest_uri=manifest_uri)
+    return validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_uri)
+
+
+def parse_forcing_domain_handoff_path(
+    manifest_path: str | Path,
+    *,
+    object_store_root: str | Path,
+    object_store_prefix: str = "",
+) -> dict[str, Any]:
+    """Read a validated forcing-domain handoff package into table-shaped rows.
+
+    The parser is intentionally gated by the existing validator: unavailable
+    validation outcomes are returned with an empty ``parsed`` map and no partial
+    rows.
+    """
+
+    store, manifest, manifest_uri, manifest_checksum, reasons = _read_handoff_manifest_path(
+        manifest_path,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if reasons or store is None:
+        result = _result(manifest, reasons, manifest_uri=manifest_uri)
+        return _with_empty_parsed(
+            _with_handoff_evidence(result, manifest_uri=manifest_uri, manifest_checksum=manifest_checksum)
         )
 
-    try:
-        store = LocalObjectStore(root, object_store_prefix)
-    except Exception as error:
-        return _result(
-            {},
-            [
-                _reason(
-                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
-                    field="object_store_root",
-                    detail=str(error),
-                )
-            ],
-        )
-    try:
-        manifest_key = _manifest_key(manifest_path, root)
-        manifest_bytes = store.read_bytes_limited(manifest_key, max_bytes=MAX_HANDOFF_MANIFEST_BYTES)
-    except Exception as error:
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_UNREADABLE, field="manifest_uri", detail=str(error))],
-            manifest_uri=_safe_manifest_uri(manifest_path),
+    validation_result = validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_uri)
+    if not validation_result.get("available"):
+        return _with_empty_parsed(
+            _with_handoff_evidence(
+                validation_result,
+                manifest_uri=manifest_uri,
+                manifest_checksum=manifest_checksum,
+            )
         )
 
-    try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail=str(error))],
-            manifest_uri=manifest_key,
+    parse_reasons: list[dict[str, Any]] = []
+    payload_rows = _read_parser_payload_rows(manifest, store, parse_reasons)
+    if not parse_reasons:
+        _validate_parser_payload_row_shapes(payload_rows, parse_reasons)
+    if parse_reasons:
+        return _parser_unavailable_result(
+            _with_handoff_evidence(
+                validation_result,
+                manifest_uri=manifest_uri,
+                manifest_checksum=manifest_checksum,
+            ),
+            parse_reasons,
         )
-    if not isinstance(manifest, Mapping):
-        return _result(
-            {},
-            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail="manifest root must be an object")],
-            manifest_uri=manifest_key,
-        )
-    return validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_key)
+
+    parsed = _parsed_handoff_tables(manifest, payload_rows)
+    evidence = dict(validation_result.get("evidence") or {})
+    evidence["handoff"] = redact_payload(
+        {
+            "manifest_uri": manifest_uri,
+            "manifest_checksum_sha256": manifest_checksum,
+        }
+    )
+    evidence["parsed_table_row_counts"] = {table: len(rows) for table, rows in parsed.items()}
+    return _parser_result(validation_result, evidence=evidence, parsed=parsed)
 
 
 def validate_forcing_domain_handoff(
@@ -236,6 +314,440 @@ def validate_forcing_domain_handoff(
         "table_row_counts": table_row_counts,
     }
     return _result(manifest, reasons, evidence=evidence, manifest_uri=manifest_uri)
+
+
+def _read_handoff_manifest_path(
+    manifest_path: str | Path,
+    *,
+    object_store_root: str | Path,
+    object_store_prefix: str = "",
+) -> tuple[LocalObjectStore | None, Mapping[str, Any], str | None, str | None, list[dict[str, Any]]]:
+    root = Path(object_store_root).expanduser()
+    if not root.is_dir():
+        return (
+            None,
+            {},
+            None,
+            None,
+            [_reason(REASON_OBJECT_STORE_ROOT_UNAVAILABLE, field="object_store_root")],
+        )
+
+    try:
+        store = LocalObjectStore(root, object_store_prefix)
+    except Exception as error:
+        return (
+            None,
+            {},
+            None,
+            None,
+            [
+                _reason(
+                    REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
+                    field="object_store_root",
+                    detail=str(error),
+                )
+            ],
+        )
+
+    try:
+        manifest_key = _manifest_key(manifest_path, root)
+        manifest_bytes = store.read_bytes_limited(manifest_key, max_bytes=MAX_HANDOFF_MANIFEST_BYTES)
+    except Exception as error:
+        return (
+            store,
+            {},
+            _safe_manifest_uri(manifest_path),
+            None,
+            [_reason(REASON_MANIFEST_UNREADABLE, field="manifest_uri", detail=str(error))],
+        )
+
+    manifest_checksum = sha256_bytes(manifest_bytes)
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return (
+            store,
+            {},
+            manifest_key,
+            manifest_checksum,
+            [_reason(REASON_MANIFEST_MALFORMED, field="manifest_uri", detail=str(error))],
+        )
+    if not isinstance(manifest, Mapping):
+        return (
+            store,
+            {},
+            manifest_key,
+            manifest_checksum,
+            [
+                _reason(
+                    REASON_MANIFEST_MALFORMED,
+                    field="manifest_uri",
+                    detail="manifest root must be an object",
+                )
+            ],
+        )
+    return store, manifest, manifest_key, manifest_checksum, []
+
+
+def _with_empty_parsed(result: Mapping[str, Any]) -> dict[str, Any]:
+    parser_result = dict(result)
+    parser_result["parsed"] = {}
+    return _redact_parser_result(parser_result)
+
+
+def _with_handoff_evidence(
+    result: Mapping[str, Any],
+    *,
+    manifest_uri: str | None,
+    manifest_checksum: str | None,
+) -> dict[str, Any]:
+    with_evidence = dict(result)
+    if manifest_checksum is None:
+        return with_evidence
+    evidence = dict(with_evidence.get("evidence") or {})
+    evidence["handoff"] = redact_payload(
+        {
+            "manifest_uri": manifest_uri,
+            "manifest_checksum_sha256": manifest_checksum,
+        }
+    )
+    with_evidence["evidence"] = evidence
+    return with_evidence
+
+
+def _parser_unavailable_result(
+    validation_result: Mapping[str, Any],
+    reasons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result = dict(validation_result)
+    result["available"] = False
+    result["status"] = "unavailable"
+    result["unavailable_reasons"] = reasons
+    evidence = dict(result.get("evidence") or {})
+    evidence["payloads"] = {}
+    evidence["table_row_counts"] = {}
+    result["evidence"] = evidence
+    result["parsed"] = {}
+    return _redact_parser_result(result)
+
+
+def _parser_result(
+    validation_result: Mapping[str, Any],
+    *,
+    evidence: Mapping[str, Any],
+    parsed: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    result = dict(validation_result)
+    result["available"] = True
+    result["status"] = "available"
+    result["unavailable_reasons"] = []
+    result["evidence"] = dict(evidence)
+    result["parsed"] = parsed
+    return _redact_parser_result(result)
+
+
+def _read_parser_payload_rows(
+    manifest: Mapping[str, Any],
+    store: LocalObjectStore,
+    reasons: list[dict[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    package = _normalize_package_dir_key(store, manifest.get("forcing_package_uri"), reasons)
+    if package is None:
+        return {}
+    package_key, package_components = package
+    if not _validate_package_path_identity(package_components, manifest, reasons):
+        return {}
+
+    payloads = manifest.get("payloads")
+    if not isinstance(payloads, Mapping):
+        for role in PAYLOAD_TABLES:
+            reasons.append(_reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}", role=role))
+        return {}
+
+    payload_rows: dict[str, list[Mapping[str, Any]]] = {}
+    for role, table in PAYLOAD_TABLES.items():
+        payload = payloads.get(role)
+        if not isinstance(payload, Mapping):
+            reasons.append(_reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}", role=role))
+            continue
+
+        declared_table = payload.get("table")
+        if declared_table != table:
+            reasons.append(
+                _reason(REASON_ROW_COUNT_MISMATCH, field=f"payloads.{role}.table", role=role, table=table)
+            )
+
+        row_count = _positive_int(payload.get("row_count"))
+        if row_count is None:
+            reasons.append(_reason(REASON_ROW_COUNT_MISSING, field=f"payloads.{role}.row_count", role=role))
+
+        checksum = payload.get("checksum_sha256")
+        if not _present_text(checksum) or not _valid_checksum(str(checksum)):
+            reasons.append(
+                _reason(REASON_PAYLOAD_CHECKSUM_MISSING, field=f"payloads.{role}.checksum_sha256", role=role)
+            )
+
+        payload_key = _normalize_object_key(
+            store,
+            payload.get("uri"),
+            reasons,
+            REASON_PAYLOAD_PATH_UNSAFE,
+            f"payloads.{role}.uri",
+            role=role,
+        )
+        if payload_key is None:
+            continue
+        if not payload_key.startswith(f"{package_key}/payloads/"):
+            reasons.append(
+                _reason(
+                    REASON_PAYLOAD_OUTSIDE_PACKAGE,
+                    field=f"payloads.{role}.uri",
+                    role=role,
+                    table=table,
+                )
+            )
+            continue
+        if not _present_text(checksum) or not _valid_checksum(str(checksum)):
+            continue
+
+        try:
+            content = store.read_bytes_limited(payload_key, max_bytes=MAX_HANDOFF_PAYLOAD_BYTES)
+        except Exception as error:
+            reasons.append(
+                _reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}.uri", role=role, detail=str(error))
+            )
+            continue
+        actual_checksum = sha256_bytes(content)
+        if actual_checksum != checksum:
+            reasons.append(
+                _reason(
+                    REASON_PAYLOAD_CHECKSUM_MISMATCH,
+                    field=f"payloads.{role}.checksum_sha256",
+                    role=role,
+                    expected=str(checksum),
+                    actual=actual_checksum,
+                )
+            )
+            continue
+
+        rows = _json_rows(content, role, reasons)
+        actual_row_count = len(rows) if rows is not None else None
+        if row_count is not None and actual_row_count != row_count:
+            reasons.append(
+                _reason(
+                    REASON_ROW_COUNT_MISMATCH,
+                    field=f"payloads.{role}.row_count",
+                    role=role,
+                    table=table,
+                    expected=row_count,
+                    actual=actual_row_count if actual_row_count is not None else "uncountable",
+                )
+            )
+        if rows is not None:
+            payload_rows[role] = [dict(row) for row in rows]
+    return payload_rows
+
+
+def _parsed_handoff_tables(
+    manifest: Mapping[str, Any],
+    payload_rows: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    return {
+        "met.forcing_version": [_forcing_version_row(manifest)],
+        "met.met_station": _project_payload_table_rows(payload_rows.get("station_inventory", []), "station_inventory"),
+        "met.forcing_station_timeseries": _project_payload_table_rows(
+            payload_rows.get("station_timeseries", []),
+            "station_timeseries",
+        ),
+        "met.interp_weight": _project_payload_table_rows(
+            payload_rows.get("interpolation_weights", []),
+            "interpolation_weights",
+        ),
+    }
+
+
+def _project_payload_table_rows(
+    rows: list[Mapping[str, Any]],
+    role: str,
+) -> list[dict[str, Any]]:
+    fields = PARSED_PAYLOAD_TABLE_ROW_FIELDS[role]
+    return [{field: row[field] for field in fields if field in row} for row in rows]
+
+
+def _validate_parser_payload_row_shapes(
+    payload_rows: Mapping[str, list[Mapping[str, Any]]],
+    reasons: list[dict[str, Any]],
+) -> None:
+    row_diagnostics = _RowDiagnostics(reasons)
+    for role in PAYLOAD_TABLES:
+        rows = payload_rows.get(role, [])
+        for index, row in enumerate(rows):
+            if role == "station_inventory":
+                _validate_parser_station_inventory_row_shape(row, index, row_diagnostics)
+            elif role == "station_timeseries":
+                _validate_parser_required_row_fields(row, role, index, row_diagnostics)
+            elif role == "interpolation_weights":
+                _validate_parser_interpolation_weight_row_shape(row, index, row_diagnostics)
+    row_diagnostics.flush()
+
+
+def _validate_parser_station_inventory_row_shape(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    _validate_parser_required_row_fields(row, "station_inventory", index, row_diagnostics)
+    _validate_parser_station_coordinate_evidence(row, index, row_diagnostics)
+
+
+def _validate_parser_station_coordinate_evidence(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    longitude_present = "longitude" in row
+    latitude_present = "latitude" in row
+    has_lon_lat_field = longitude_present or latitude_present
+    lon_lat_valid = _finite_number(row.get("longitude")) and _finite_number(row.get("latitude"))
+    if has_lon_lat_field and not lon_lat_valid:
+        row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude", index)
+
+    geometry_present = "geometry" in row
+    if geometry_present:
+        if not _valid_geojson_point_geometry(row.get("geometry")):
+            row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "geometry", index)
+        return
+
+    if not has_lon_lat_field:
+        row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude|geometry", index)
+
+
+def _valid_geojson_point_geometry(value: Any) -> bool:
+    if not isinstance(value, Mapping) or value.get("type") != "Point":
+        return False
+    coordinates = value.get("coordinates")
+    if not isinstance(coordinates, list) or len(coordinates) != 2:
+        return False
+    return _finite_number(coordinates[0]) and _finite_number(coordinates[1])
+
+
+def _validate_parser_interpolation_weight_row_shape(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    _validate_parser_required_row_fields(row, "interpolation_weights", index, row_diagnostics)
+    method = row.get("method")
+    if not _present_text(method) or str(method).lower() != "direct_grid":
+        return
+    weight = row.get("weight")
+    if _finite_number(weight) and float(weight) != 1.0:
+        row_diagnostics.add(REASON_FIELD_MISSING, "interpolation_weights", "weight", index)
+    if not _present_text(row.get("grid_signature")):
+        row_diagnostics.add(REASON_FIELD_MISSING, "interpolation_weights", "grid_signature", index)
+
+
+def _validate_parser_required_row_fields(
+    row: Mapping[str, Any],
+    role: str,
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    for field in PARSER_REQUIRED_PAYLOAD_ROW_FIELDS[role]:
+        if not _parser_field_is_present(row, role, field):
+            row_diagnostics.add(REASON_FIELD_MISSING, role, field, index)
+
+
+def _parser_field_is_present(row: Mapping[str, Any], role: str, field: str) -> bool:
+    if field not in row:
+        return False
+    value = row.get(field)
+    if role == "station_inventory" and field == "elevation_m":
+        return _finite_number(value)
+    if role == "station_inventory" and field == "active_flag":
+        return isinstance(value, bool)
+    if role == "station_inventory" and field == "properties_json":
+        return isinstance(value, Mapping)
+    if role == "station_timeseries" and field == "value":
+        return _finite_number(value)
+    if role == "interpolation_weights" and field == "weight":
+        return _finite_number(value)
+    if isinstance(value, str):
+        return value.strip() != ""
+    return value is not None
+
+
+def _forcing_version_row(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "forcing_version_id": manifest.get("forcing_version_id"),
+        "source_id": manifest.get("source_id"),
+        "cycle_time": manifest.get("cycle_time"),
+        "start_time": manifest.get("start_time"),
+        "end_time": manifest.get("end_time"),
+        "basin_id": manifest.get("basin_id"),
+        "basin_version_id": manifest.get("basin_version_id"),
+        "model_id": manifest.get("model_id"),
+        "station_count": manifest.get("station_count"),
+        "forcing_package_uri": manifest.get("forcing_package_uri"),
+        "forcing_package_manifest_uri": manifest.get(FORCING_PACKAGE_MANIFEST_URI_FIELD),
+        "checksum": manifest.get(FORCING_PACKAGE_MANIFEST_CHECKSUM_FIELD),
+    }
+
+
+def _redact_parser_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    parsed = result.get("parsed")
+    envelope = dict(result)
+    envelope["parsed"] = {}
+    redacted = redact_payload(envelope)
+    redacted["parsed"] = _redact_parsed_tables(parsed) if isinstance(parsed, Mapping) else {}
+    return redacted
+
+
+def _redact_parsed_tables(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for table, rows in parsed.items():
+        table_key = str(table)
+        if isinstance(rows, list):
+            redacted[table_key] = [
+                _redact_parsed_row(row) if isinstance(row, Mapping) else redact_payload(row) for row in rows
+            ]
+        else:
+            redacted[table_key] = redact_payload(rows)
+    return redacted
+
+
+def _redact_parsed_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for key, value in row.items():
+        key_text = str(key)
+        if key_text in PARSER_BUSINESS_SIGNATURE_KEYS:
+            redacted[key_text] = redact_text(value) if isinstance(value, str) else redact_payload(value)
+        else:
+            redacted[key_text] = _redact_parser_business_metadata(value)
+    return redacted
+
+
+def _redact_parser_business_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if _is_parser_sensitive_metadata_key(key_text):
+                redacted[key_text] = redact_payload({key_text: nested})[key_text]
+            else:
+                redacted[key_text] = _redact_parser_business_metadata(nested)
+        return redacted
+    if isinstance(value, tuple):
+        return tuple(_redact_parser_business_metadata(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_parser_business_metadata(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def _is_parser_sensitive_metadata_key(key: str) -> bool:
+    return key.lower() not in PARSER_BUSINESS_SIGNATURE_KEYS and is_sensitive_key(key)
 
 
 def _validate_contract_fields(manifest: Mapping[str, Any], reasons: list[dict[str, Any]]) -> None:

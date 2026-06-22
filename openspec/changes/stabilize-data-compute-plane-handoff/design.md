@@ -238,3 +238,148 @@ Review focus:
 - The contract is exact enough for #643/#644 without re-interpreting fields.
 - Fixtures are bounded and credential-safe.
 - No runtime behavior or autopipeline control flow sneaks into #641.
+
+## Issue #643 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Mandatory expanded triggers:
+- Parser/reader public helper for forcing-domain handoff packages.
+- File IO/path safety and bounded JSON payload reads from object-store material.
+- Schema/field/unit/time-series payload interpretation for DB reconstruction.
+- Hydro-met station timeseries windows and native-resolution lattice already
+  validated by the #641 contract.
+- Legacy compatibility with #641 validation evidence and future #644 DB apply
+  input shape.
+
+Change surface:
+- `packages/common/forcing_domain_handoff.py` parser/read API and focused tests.
+- Existing #641 validation behavior remains the gate; #643 may reuse it but
+  must not weaken unavailable reasons or readiness evidence.
+
+Must preserve:
+- `validate_forcing_domain_handoff_path(...)` output shape and reason codes for
+  complete, incomplete, unsafe, malformed, checksum-mismatch, and oversized
+  cases.
+- No `scripts/node27_autopipeline.py` behavior changes and no DB writes.
+
+Must add/change:
+- A parser/fixture reader that returns structured reconstruction data for
+  `met.forcing_version`, `met.met_station`,
+  `met.forcing_station_timeseries`, and `met.interp_weight`.
+- The public parser helper must accept the same declared handoff manifest path
+  and object-store root inputs as the validator, and return an envelope with
+  `available`, `status`, `unavailable_reasons`, `evidence`, and `parsed` fields.
+- The parser result must include source/cycle/run/model/basin/forcing identity,
+  handoff manifest URI/checksum, canonical forcing package manifest checksum,
+  payload checksums, station count, and expected per-table row counts.
+- `parsed.met.forcing_version[0]` must include `forcing_version_id`,
+  `source_id`, `cycle_time`, `start_time`, `end_time`, `basin_id`,
+  `basin_version_id`, `model_id`, `station_count`, `forcing_package_uri`,
+  `forcing_package_manifest_uri`, and `checksum`, where `checksum` is populated
+  from `forcing_package_manifest_checksum_sha256`.
+- `parsed.met.met_station[*]` must preserve station payload fields including
+  `station_id`, `basin_version_id`, `station_name`, `elevation_m`,
+  `station_role`, `active_flag`, `properties_json`, and coordinate evidence as
+  either `longitude` plus `latitude` or `geometry`. If optional `geometry` is
+  present alongside longitude/latitude, the parser must preserve all declared
+  coordinate evidence.
+- `parsed.met.forcing_station_timeseries[*]` must preserve
+  `forcing_version_id`, `basin_version_id`, `station_id`, `valid_time`,
+  `source_id`, `variable`, `value`, `unit`, `native_resolution`, and
+  `quality_flag`.
+- `parsed.met.interp_weight[*]` must preserve `source_id`, `grid_id`,
+  `model_id`, `station_id`, `variable`, `grid_cell_id`, `weight`, `method`, and
+  optional `grid_signature`.
+- Unavailable parse outcomes must be credential-safe and stable; incomplete,
+  malformed, missing-payload, and checksum-mismatch inputs must not expose
+  readiness-style parsed rows.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - #643 introduces a shared parser
+  function consumed by #644, though no CLI/autopipeline entrypoint changes.
+- File IO / path safety / overwrite: selected - parser reads manifest and
+  payload paths from object-store metadata; no writes are allowed.
+- Evidence / JSON / Schema Ingestion: selected - parser trusts only validated
+  manifest/payload bytes and must preserve stable unavailable reasons.
+- Resource limits / large input / discovery: selected - parser must keep #641
+  bounded reads and must not scan broad object-store roots.
+- Schema / columns / units / field names: selected - parsed rows become the
+  #644 DB apply contract for `met.*` tables.
+- Hydro-met time series / forcing windows: selected - station-timeseries rows
+  must preserve valid_time, variable, unit, value, and native_resolution.
+- PostGIS / TimescaleDB domain behavior: selected - table identities and row
+  counts are shaped for Timescale/PostGIS-backed `met.*` tables, but no DB write
+  occurs in #643.
+- Geospatial / CRS / basin geometry: not selected - parser preserves station
+  longitude/latitude and optional geometry/properties fields as payload data but
+  does not interpret CRS, shapefiles, basin geometry, or PostGIS geometries.
+- SHUD numerical runtime / conservation / NaN: not selected - parser does not
+  run SHUD, alter numerical model output, or evaluate conservation/runtime
+  behavior; parser-only DB reconstruction shape checks may reject rows after
+  #641 validation succeeds without changing validator readiness behavior.
+- Slurm production lifecycle / mock-vs-real parity: not selected - parser does
+  not touch sbatch, Slurm job state, scheduler lifecycle, or node-22 compute.
+- External hydro-met providers / snapshot reproducibility: not selected - parser
+  preserves `source_id`/cycle/provider identity from the handoff but does not
+  fetch, compare, or reproduce external GFS/IFS/ERA5/provider snapshots.
+- Run manifest / QC provenance: selected - parser binds reconstruction data to
+  exact run/source/cycle/model/basin package identity and checksums.
+- Published NHMS artifacts / display identity: selected - parser output feeds
+  later display readiness apply logic.
+- Config / project setup: not selected - no env or deployment config changes.
+- Auth / permissions / secrets: selected - failure reasons and parse reports
+  must not include credential-bearing URIs or DSNs.
+- Concurrency / shared state / ordering: not selected - no shared mutable state
+  or runtime state machine changes.
+- Legacy compatibility / examples: selected - #641 fixtures/examples remain
+  valid and validator output remains stable.
+- Error handling / rollback / partial outputs: selected - failures must return
+  stable unavailable reports and omit partial parsed rows.
+- Release / packaging / dependency compatibility: not selected - no new runtime
+  dependency or packaging behavior.
+- Documentation / migration notes: selected - `tasks.md` records parser-only
+  evidence and #644 boundary.
+
+Invariant Matrix
+Governing invariant: A parser result may expose DB-reconstruction rows only
+after the exact handoff manifest, package manifests, payload checksums,
+row-count evidence, and time-series lattice validate for one run identity.
+Source-of-truth identity/contract: #641 handoff manifest fields and checksums,
+`validate_forcing_domain_handoff_path(...)`, payload JSON bytes, and the four
+target table names.
+Surfaces:
+- Producers: #641 complete/incomplete/unsafe fixtures and payload JSON files.
+- Validators/preflight: `validate_forcing_domain_handoff_path(...)` and the new
+  parser helper.
+- Storage/cache/query: no DB/storage writes in #643.
+- Public routes/entrypoints: none - no API/CLI/autopipeline changes.
+- Frontend/downstream consumers: #644 DB apply helper only; no frontend changes.
+- Failure paths/rollback/stale state: missing/malformed/checksum-mismatch inputs
+  return unavailable reports with no parsed rows.
+- Evidence/audit/readiness: parser evidence, row-count summary, checksums, and
+  focused tests.
+Regression rows:
+- Complete fixture -> parser returns one forcing_version row, two met_station
+  rows, eight station_timeseries rows, four interp_weight rows, exact checksums,
+  and expected table row counts; met_station rows carry explicit coordinate
+  evidence via longitude/latitude or geometry without losing optional geometry.
+- Missing required field / malformed payload / missing payload / checksum
+  mismatch -> unavailable report with stable reason code and no parsed rows.
+- Unsafe traversal or sibling-package payload URI -> validator/parser rejects
+  without broad root scan or object-store escape.
+- Oversized handoff/package/payload material -> bounded unavailable report
+  rather than unbounded memory read or partial parsed rows.
+- Existing #641 validator tests -> unchanged output shape and reason codes.
+
+Non-goals:
+- No DB apply/upsert/idempotency logic; #644 owns writes.
+- No `node27_autopipeline.py` preference/fallback changes; #645 owns policy.
+- No node-27 live receipt; #648 owns live evidence.
+
+Review focus:
+- Parser output is complete enough for #644 without DB-specific guessing.
+- Failure/unavailable outputs do not leak secrets and do not expose partial rows.
+- #641 validator behavior is preserved rather than forked or weakened.
