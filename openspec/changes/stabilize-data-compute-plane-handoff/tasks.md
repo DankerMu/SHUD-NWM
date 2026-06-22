@@ -4,7 +4,8 @@
   Evidence: complete fixture input path validates required identity fields, `start_time`/`end_time`, payload checksums, station count, and per-table row-count output.
 - [x] 1.2 Add fixture coverage for a complete object-store forcing-domain handoff package and at least one incomplete package with a stable unavailable reason.
   Evidence: missing payload/checksum/temporal fields produce named stable unavailable reasons, traversal/sibling package URIs are rejected without broad root scans, and validation output contains no credential-like values.
-- [ ] 1.3 Harden `scripts/node27_mirror_forcing.py` so transitional mirror mode requires `--node22-url` or `N22_DSN`, never reads `infra/env/display.env`, and returns credential-safe structured evidence.
+- [x] 1.3 Harden `scripts/node27_mirror_forcing.py` so transitional mirror mode requires `--node22-url` or `N22_DSN`, never reads `infra/env/display.env`, and returns credential-safe structured evidence.
+  Evidence: `tests/test_node27_mirror_forcing.py` covers no-DSN rc 2 JSON skip without display-env fallback, explicit CLI/env `N22_DSN` source selection, transitional compatibility/read-only boundary evidence, and redaction of accidental credential-bearing DSN strings.
 - [ ] 1.4 Update `scripts/node27_autopipeline.py` to treat the explicit mirror as transitional compatibility, with skip/fail summaries that preserve run-level failure isolation.
 - [ ] 1.5 Implement the object-store forcing-domain contract parser/fixture reader that reads package manifests and station payloads, returns structured reconstruction evidence, and does not change autopipeline behavior.
 - [ ] 1.6 Implement the object-store forcing-domain DB apply path that idempotently writes or verifies `met.forcing_version`, `met.met_station`, `met.forcing_station_timeseries`, and `met.interp_weight`, covering complete package, missing field, checksum mismatch, and credential-safe failure reasons.

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Mirror one run's forcing domain from the node-22 read-only DB into the local DB.
+"""Mirror one run's forcing domain from an explicit transitional node-22 source.
 
-The object-store only exports run *outputs* (rivqdown CSVs); it does not carry
-the forcing domain (forcing_version checksum, per-cycle station timeseries, or
-the static interpolation weights). The display latest-product readiness path
-requires all three, so we mirror them from node-22 (read-only; never written).
+This is a compatibility-only bridge for historical deployments where an
+operator intentionally provides a node-22 forcing-domain DSN. Current NHMS
+production state does not use node-22 as an active database source: the
+node-22 local PostgreSQL instance on ``:55433`` is historical, do-not-connect
+for current production, and pending removal. New production readiness work
+should prefer contracted object-store forcing-domain handoff packages.
 
 Per ``--run-id`` (reads the object-store manifest for identity), idempotently:
 
@@ -16,9 +18,10 @@ Per ``--run-id`` (reads the object-store manifest for identity), idempotently:
   (c) Ensure ``met.interp_weight`` exists for this run's (model_id, source);
       it is static per model+source, so it is mirrored once and reused.
 
-node-22 DSN resolution order: ``--node22-url`` -> env ``N22_DSN`` ->
-``DATABASE_URL`` in ``infra/env/display.env`` (the read-only replica display
-already uses). Local DSN: ``--database-url`` -> env ``DATABASE_URL``.
+node-22 DSN resolution order: ``--node22-url`` -> env ``N22_DSN``. This
+transitional compatibility mirror never reads display runtime configuration
+(``infra/env/display.env`` or display ``DATABASE_URL``) as the node-22 source.
+Local DSN: ``--database-url`` -> env ``DATABASE_URL``.
 
 Exit / return contract: returns a report dict. If node-22 has no forcing_version
 for this run (object-store has the run but node-22 never registered it), raises
@@ -33,15 +36,26 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
+from packages.common.redaction import redact_payload
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DISPLAY_ENV = REPO_ROOT / "infra" / "env" / "display.env"
 LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
+NODE22_DSN_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_MISSING"
+NODE22_MIRROR_FAILED_REASON = "NODE22_TRANSITIONAL_MIRROR_FAILED"
+TRANSITIONAL_MIRROR_MODE = "transitional_node22_forcing_mirror"
+TRANSITIONAL_MIRROR_PURPOSE = "compatibility_only"
+TRANSITIONAL_MIRROR_SUNSET = (
+    "Remove this mirror after object-store forcing-domain handoff packages and "
+    "the node-27 DB apply path satisfy display readiness without node-22 DB access."
+)
+HISTORICAL_NODE22_PG_STATUS = "historical_do_not_connect_pending_removal"
 
 FST_COLUMNS = (
     "forcing_version_id",
@@ -72,24 +86,112 @@ class ForcingNotOnNode22(RuntimeError):
     """node-22 has no forcing_version for this run; caller should skip + record."""
 
 
-def _read_display_env_database_url() -> str | None:
-    if not DISPLAY_ENV.is_file():
+class Node22MirrorDsnMissing(RuntimeError):
+    """The transitional mirror was requested without an explicit node-22 DSN."""
+
+
+@dataclass(frozen=True)
+class Node22MirrorSource:
+    url: str
+    source: str
+
+
+def _non_empty(value: str | None) -> str | None:
+    if value is None:
         return None
-    for line in DISPLAY_ENV.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line.startswith("DATABASE_URL="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _resolve_node22_source(cli_value: str | None) -> Node22MirrorSource:
+    cli_dsn = _non_empty(cli_value)
+    if cli_dsn:
+        return Node22MirrorSource(url=cli_dsn, source="cli:--node22-url")
+    env_dsn = _non_empty(os.environ.get("N22_DSN"))
+    if env_dsn:
+        return Node22MirrorSource(url=env_dsn, source="env:N22_DSN")
+    raise Node22MirrorDsnMissing("Explicit transitional node-22 mirror DSN is required.")
 
 
 def _resolve_node22_url(cli_value: str | None) -> str:
-    value = cli_value or os.environ.get("N22_DSN") or _read_display_env_database_url()
-    if not value:
-        raise RuntimeError(
-            "node-22 DSN not found (pass --node22-url, set N22_DSN, or provide "
-            f"DATABASE_URL in {DISPLAY_ENV})."
-        )
-    return value
+    return _resolve_node22_source(cli_value).url
+
+
+def _mirror_boundary_evidence(dsn_source: str | None) -> dict[str, Any]:
+    return {
+        "mode": TRANSITIONAL_MIRROR_MODE,
+        "purpose": TRANSITIONAL_MIRROR_PURPOSE,
+        "compatibility_only": True,
+        "dsn": {
+            "source": dsn_source,
+            "printed": False,
+            "dsn_redacted": True,
+        },
+        "forbidden_sources": ["infra/env/display.env", "display runtime DATABASE_URL"],
+        "current_topology": {
+            "node22_role": "compute_and_artifact_producer_only",
+            "node22_local_postgres": {
+                "port": ":55433",
+                "status": HISTORICAL_NODE22_PG_STATUS,
+                "implicit_source_allowed": False,
+            },
+            "node27_role": "active_db_ingest_display_host",
+        },
+        "source_boundary": {
+            "role": "node-22 forcing-domain source",
+            "access": "read_only",
+            "tables": [
+                "met.forcing_version",
+                "met.met_station",
+                "met.forcing_station_timeseries",
+                "met.interp_weight",
+            ],
+        },
+        "destination_boundary": {
+            "role": "node-27 local data-plane",
+            "writes": [
+                "met.forcing_version",
+                "met.met_station",
+                "met.forcing_station_timeseries",
+                "met.interp_weight",
+            ],
+        },
+        "sunset_condition": TRANSITIONAL_MIRROR_SUNSET,
+    }
+
+
+def _with_mirror_boundary(report: dict[str, Any], *, dsn_source: str | None) -> dict[str, Any]:
+    return {**report, "mirror_boundary": _mirror_boundary_evidence(dsn_source)}
+
+
+def _missing_node22_dsn_report(run_id: str) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "skipped": True,
+            "reason": NODE22_DSN_MISSING_REASON,
+            "detail": "Pass --node22-url or set N22_DSN for the transitional node-22 forcing mirror.",
+        },
+        dsn_source=None,
+    )
+
+
+def _failed_node22_mirror_report(run_id: str, error: Exception, *, dsn_source: str) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "failed": True,
+            "reason": NODE22_MIRROR_FAILED_REASON,
+            "detail": str(error),
+            "error_type": type(error).__name__,
+        },
+        dsn_source=dsn_source,
+    )
+
+
+def _dump_json(payload: dict[str, Any]) -> None:
+    json.dump(redact_payload(payload), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
 
 
 def _manifest_identity(object_store_root: Path, run_id: str) -> dict[str, Any]:
@@ -315,6 +417,7 @@ def mirror_forcing(
     object_store_root: Path,
     local_url: str,
     node22_url: str,
+    node22_dsn_source: str = "explicit",
 ) -> dict[str, Any]:
     identity = _manifest_identity(object_store_root, run_id)
     n22 = psycopg2.connect(node22_url, connect_timeout=15)
@@ -333,17 +436,20 @@ def mirror_forcing(
     finally:
         n22.close()
         local.close()
-    return {
-        "run_id": run_id,
-        "forcing_version_id": identity["forcing_version_id"],
-        "model_id": identity["model_id"],
-        "source_id": identity["source_id"],
-        "basin_version_id": identity["basin_version_id"],
-        "forcing_version": forcing_version,
-        "met_stations": met_stations,
-        "station_timeseries": station_ts,
-        "interp_weight": interp_weight,
-    }
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "forcing_version_id": identity["forcing_version_id"],
+            "model_id": identity["model_id"],
+            "source_id": identity["source_id"],
+            "basin_version_id": identity["basin_version_id"],
+            "forcing_version": forcing_version,
+            "met_stations": met_stations,
+            "station_timeseries": station_ts,
+            "interp_weight": interp_weight,
+        },
+        dsn_source=node22_dsn_source,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -355,33 +461,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Object-store filesystem root. Defaults to OBJECT_STORE_ROOT.",
     )
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL") or LOCAL_DEFAULT)
-    parser.add_argument("--node22-url", default=None, help="node-22 read-only DSN; else N22_DSN / display.env.")
+    parser.add_argument(
+        "--node22-url",
+        default=None,
+        help="Explicit node-22 read-only DSN for the transitional mirror; else N22_DSN.",
+    )
     args = parser.parse_args(argv)
+
+    try:
+        node22_source = _resolve_node22_source(args.node22_url)
+    except Node22MirrorDsnMissing:
+        _dump_json(_missing_node22_dsn_report(args.run_id))
+        return 2
 
     if not args.object_store_root:
         parser.error("OBJECT_STORE_ROOT or --object-store-root is required.")
-    node22_url = _resolve_node22_url(args.node22_url)
 
     try:
         report = mirror_forcing(
             run_id=args.run_id,
             object_store_root=Path(args.object_store_root),
             local_url=args.database_url,
-            node22_url=node22_url,
+            node22_url=node22_source.url,
+            node22_dsn_source=node22_source.source,
         )
     except ForcingNotOnNode22 as exc:
-        json.dump(
-            {"run_id": args.run_id, "skipped": True, "reason": "FORCING_NOT_ON_NODE22", "detail": str(exc)},
-            sys.stdout,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
+        _dump_json(
+            _with_mirror_boundary(
+                {"run_id": args.run_id, "skipped": True, "reason": "FORCING_NOT_ON_NODE22", "detail": str(exc)},
+                dsn_source=node22_source.source,
+            )
         )
-        sys.stdout.write("\n")
         return 2
+    except Exception as exc:
+        _dump_json(_failed_node22_mirror_report(args.run_id, exc, dsn_source=node22_source.source))
+        return 1
 
-    json.dump(report, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    _dump_json(_with_mirror_boundary(report, dsn_source=node22_source.source))
     return 0
 
 
