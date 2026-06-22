@@ -33,7 +33,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 ### Requirement: 站点列表筛选
 
-`/hydro-met` 站点列表 SHALL 支持后端 `search` 与变量覆盖筛选，并可查看站点 forcing 六变量（PRCP/TEMP/RH/wind/Rn/Press）或明确 unavailable。QC 状态筛选为可选增强，仅在站点数据含 QC 字段时提供。
+`/hydro-met` 站点列表 SHALL 支持后端 `search` 与变量覆盖筛选，并可查看当前 station-series route 返回的站点 forcing 变量（PRCP/TEMP/RH/wind/Rn）或明确 unavailable。`Press` 若作为 UI 选项出现，MUST 标注为当前 route unavailable/omitted，不得绘制可用曲线。QC 状态筛选为可选增强，仅在站点数据含 QC 字段时提供。
 
 #### Scenario: 站点搜索
 - **WHEN** 用户在站点搜索框输入站点标识
@@ -70,4 +70,3 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 #### Scenario: 请求参数派生自同一产品身份
 - **WHEN** 用户选定流域与产品后查看河段 q_down
 - **THEN** forecast-series 请求的 `basin_version_id` 等参数与该 latest-product 产品身份一致，不手输、不串用其他产品身份
-

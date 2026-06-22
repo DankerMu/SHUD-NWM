@@ -186,7 +186,7 @@ The `/api/v1/met/stations/{station_id}/series` route SHALL serve all series data
 
 ### Requirement: 200 response preserves existing StationSeriesResponse schema
 
-The 200 response body SHALL conform to the existing `StationSeriesResponse` schema in `openapi/nhms.v1.yaml:2873`, with station metadata sourced from `met.met_station` (AD-2) and series content sourced from disk CSV (AD-4).
+The 200 response body SHALL conform to the existing `StationSeriesResponse` component schema in `openapi/nhms.v1.yaml`, with station metadata sourced from `met.met_station` (AD-2) and series content sourced from disk CSV (AD-4).
 
 #### Scenario: station metadata block populated from met.met_station
 
@@ -251,14 +251,14 @@ The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing 
 #### Scenario: OBJECT_STORE_ROOT no longer triggers DISPLAY_BOUNDARY_CONFIG_UNSAFE
 
 - **WHEN** display.env contains `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`
-- **AND** `display_boundary_blockers()` (`apps/api/runtime_mode.py:176-202`) runs at startup
+- **AND** `apps/api/runtime_mode.py:display_boundary_blockers()` runs at startup
 - **THEN** the function SHALL NOT emit a `DISPLAY_BOUNDARY_CONFIG_UNSAFE` blocker for that env key
 
 #### Scenario: tests/test_role_boundary_static.py reflects boundary change
 
 - **WHEN** test `tests/test_role_boundary_static.py` runs after this change
-- **THEN** `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` (line 19-27) SHALL NOT include `OBJECT_STORE_ROOT`
-- **AND** the assertion at line 89 `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` SHALL pass (both sides updated together)
+- **THEN** `tests/test_role_boundary_static.py` `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` SHALL NOT include `OBJECT_STORE_ROOT`
+- **AND** the runtime/static forbidden-set alignment assertion SHALL pass (both sides updated together)
 
 ### Requirement: Variable, time-window, and limit filtering applied in reader
 
@@ -333,7 +333,7 @@ After this change, `/api/v1/met/stations/{station_id}/series` SHALL never return
 
 ### Requirement: forcing_version_id query param silently ignored
 
-The existing `forcing_version_id` query param (`apps/api/routes/data_sources.py:113`) SHALL be silently accepted but unused by the new disk-only path. OpenAPI documentation MUST mark this param deprecated.
+The existing `forcing_version_id` query param on `apps/api/routes/data_sources.py:get_met_station_series` SHALL be silently accepted but unused by the new disk-only path. OpenAPI documentation MUST mark this param deprecated.
 
 #### Scenario: forcing_version_id passed alongside cycle_time is ignored, request succeeds
 

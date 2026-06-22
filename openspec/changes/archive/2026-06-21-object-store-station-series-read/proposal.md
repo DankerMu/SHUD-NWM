@@ -20,19 +20,19 @@ CMFD ingest 已被撤销（commit `ef234f2` revert `1a0c87f`；Epic #614 + 子 #
 
 ## Display role boundary 上下文（本 spec 必须主动调整）
 
-- 现状：`apps/api/runtime_mode.py:27-32` 把 `OBJECT_STORE_ROOT` 列入 `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS`；`display_boundary_blockers()` (`runtime_mode.py:176-202`) 在启动时检查，若 display.env 内含该 key 即 raise `DISPLAY_BOUNDARY_CONFIG_UNSAFE`，display API 拒启动
-- 同等约束在 `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` + line 89 与 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 互锁
+- 现状：`apps/api/runtime_mode.py` 的 `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 把 `OBJECT_STORE_ROOT` 列为 display forbidden；`display_boundary_blockers()` 在启动时检查，若 display.env 内含该 key 即 raise `DISPLAY_BOUNDARY_CONFIG_UNSAFE`，display API 拒启动
+- 同等约束在 `tests/test_role_boundary_static.py` `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` 与 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 互锁
 - 设计原因：早期 display 不应触碰 compute 侧的对象存储路径，避免越权读 compute artifact
 - 本 change 主动从禁用清单移除 `OBJECT_STORE_ROOT`：display 现在合法需要读 forcing CSV（disk-only 路径），属于 display 业务面对外只读输出；同步更新 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` + `tests/test_role_boundary_static.py`，并在 design.md AD-11 文档化该 boundary 调整的理由
 
 ## What Changes
 
 - 新增 reader 模块 `packages/common/object_store_forcing.py` 直读 `${OBJECT_STORE_ROOT}/forcing/{source}/{cycle_compact}/{basin_version_id}/{model_id}/shud/{forcing_filename}` 物理 CSV，按 `Time_Day` 列 + cycle_time 计算 `valid_time`
-- 改造 `apps/api/routes/data_sources.py:111` `/met/stations/{station_id}/series` 路由：切走 `_ensure_forcing_version_finalized()` finalize gate 和 `met.forcing_station_timeseries` 数据读取；station_id → forcing_filename 仍走 `met.met_station` 单表 lookup（这是合法且必要的 DB 查询）
+- 改造 `apps/api/routes/data_sources.py:get_met_station_series` `/met/stations/{station_id}/series` 路由：切走 `_ensure_forcing_version_finalized()` finalize gate 和 `met.forcing_station_timeseries` 数据读取；station_id → forcing_filename 仍走 `met.met_station` 单表 lookup（这是合法且必要的 DB 查询）
 - 移除 `_ensure_forcing_version_finalized` 在 series 路径上的调用（其他端点不动）
 - `met_station.properties_json.forcing_filename` 直接作为文件名解析键（heihe 1709 + qhh 386 = 2095 SHUD per-cell 代站 100% 覆盖；数量级与 0.1° 粒度一致）
 - 修改 `apps/api/runtime_mode.py`：从 `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 移除 `OBJECT_STORE_ROOT`；在 `RuntimeConfig` 加 `object_store_root: Path | None` 字段；`load_runtime_config()` 内校验 env 存在且目录可读，否则 raise `RuntimeModeError`
-- 同步更新 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` + `tests/test_role_boundary_static.py:19-27` 移除 `OBJECT_STORE_ROOT`
+- 同步更新 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` + `tests/test_role_boundary_static.py` `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` 移除 `OBJECT_STORE_ROOT`
 - `infra/env/display.example` 模板新增 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store` 一行（注释式默认值；实际 `display.env` 在 node-27 由 ops 配置，gitignored 不入仓）
 - 新错误码 `STATION_FORCING_FILE_NOT_FOUND` (404) + `STATION_FORCING_FILENAME_MISSING` (500) + `STATION_FORCING_FILE_MALFORMED` (500) —— 加入 OpenAPI examples 列表；旧 `FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 在该路径上不再产生
 - `STATION_NOT_FOUND` (404) + `MISSING_REQUIRED_FILTER` (422) **复用** `packages/common/forecast_store.py:909, 2099-2104, 2132-2146` 已有错误码定义，shape 和 details 不变

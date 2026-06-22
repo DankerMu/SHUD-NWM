@@ -7,7 +7,7 @@
 - [x] 0.5 OQ5: Read `apps/api/main.py` + grep `app.state`/`Depends` 现有注入模式；决定 reader 拿 `object_store_root` 和 `station_lookup` connection 用 `app.state.X` 还是 `Depends(get_X)`；commit 决定到 design.md
 - [x] 0.6 测试 layout 决定：扁平 `tests/test_object_store_forcing*.py`（不开 `tests/packages/common/` 子目录，保持与现有 test 风格一致）
 - [x] 0.7 §0 introspection 全部结论写进**仓内已 commit 文件**——`design.md` 新增 `## Introspection Results` 段，或新建 `openspec/changes/object-store-station-series-read/introspection-findings.md`；**不**写 PR body（PR body 不进 repo history）
-- [x] 0.8 OQ6: grep `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 确认实际位置（`tests/test_role_boundary_static.py:89` import 的源文件）；commit 三处 boundary fix 清单到 design.md AD-11
+- [x] 0.8 OQ6: grep `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 确认实际位置（`tests/test_role_boundary_static.py` import 的 `scripts.validate_two_node_docker_runtime` 源）；commit 三处 boundary fix 清单到 design.md AD-11
 - [x] 0.9 OQ7: 读 `tests/test_forecast_store_product_quality_sql.py` 看现有 psycopg.Connection mock 模式；决定 reader unit test 注入策略选 (a) `Protocol`-typed `StationLookup` (AD-13 推荐) 或 (b) `psycopg.Connection` mock；commit 决定到 design.md
 - [x] 0.10 200 response baseline capture：在 node-27 curl 老 cycle (2026-06-01T00:00:00Z) heihe + IFS 200，把响应 JSON 保存为 `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`（脱敏 request_id 等）作为新 reader 输出 byte-shape 比对 oracle
 
@@ -33,7 +33,7 @@
 - [x] 1.7 `_parse_csv_data(rows: Iterable[str], cycle_time: datetime) -> Iterator[(variable, valid_time, value)]`，按列名映射 (`Precip→PRCP, Temp→TEMP, RH→RH, Wind→wind, RN→Rn`)，按 `int(round(Time_Day*86400))` 算 valid_time（注意 round 不是 int 截断），并拒绝 `NaN` / `inf` / overflow 等非 finite 数值
 - [x] 1.8 `_apply_filters(tuples, variables, from_time, to_time, limit) -> list[tuple]`：variables filter 静默丢弃未知（Press / UnknownVariable 均 drop，不 raise）；from/to inclusive；limit 截断总 tuple count（不是 per-variable）；保持排序 `[PRCP, TEMP, RH, wind, Rn]` 然后 valid_time ascending
 - [x] 1.9 `read_station_forcing_csv(*, station_lookup, object_store_root, station_id, source_id, cycle_time, model_id, variables=None, from_time=None, to_time=None, limit=None) -> StationSeriesResponse` 主入口（Protocol 注入）
-- [x] 1.10 输出符合 `StationSeriesResponse` schema (`openapi/nhms.v1.yaml:2873`)：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.series[].metadata.{returned_points, truncated, returned_from, returned_to}`
+- [x] 1.10 输出符合 `openapi/nhms.v1.yaml` component schema `StationSeriesResponse`：`data.station` (来自 station_lookup) + `data.series[].variable+unit+points[].valid_time+value` (来自 CSV) + `data.series[].metadata.{returned_points, truncated, returned_from, returned_to}`
 - [x] 1.11 每个 series 项的 `unit` 字段按 AD-5 输出：`PRCP="mm/day", TEMP="degC", RH="0-1", wind="m/s", Rn="W/m^2"`
 - [x] 1.12 文件 OPEN 异常（PermissionError / OSError / FileNotFoundError）转 typed error：
   - FileNotFoundError → `StationForcingFileNotFoundError`
@@ -78,8 +78,8 @@
 
 ## 3. Startup env check + boundary fix — `apps/api/runtime_mode.py` + `apps/api/main.py`
 
-- [x] 3.1 在 `RuntimeConfig` (`apps/api/runtime_mode.py:66`) 加字段 `object_store_root: Path | None = None`
-- [x] 3.2 在 `load_runtime_config(env)` (`apps/api/runtime_mode.py:101`) 内对 display_readonly 启动强制要求 `OBJECT_STORE_ROOT`，并对任意已配置路径做可读目录校验；默认 dev_monolith / compute_control 未配置时保持 `object_store_root=None`，保证 `apps/api/main.py` 模块级 `app = create_app()` import path 不被破坏：
+- [x] 3.1 在 `apps/api/runtime_mode.py` `RuntimeConfig` 加字段 `object_store_root: Path | None = None`
+- [x] 3.2 在 `apps/api/runtime_mode.py` `load_runtime_config(env)` 内对 display_readonly 启动强制要求 `OBJECT_STORE_ROOT`，并对任意已配置路径做可读目录校验；默认 dev_monolith / compute_control 未配置时保持 `object_store_root=None`，保证 `apps/api/main.py` 模块级 `app = create_app()` import path 不被破坏：
   ```python
    raw = env.get("OBJECT_STORE_ROOT", "").strip()
    if role == ServiceRole.DISPLAY_READONLY and not raw:
@@ -88,20 +88,20 @@
    if path is not None and (not path.is_dir() or not os.access(path, os.R_OK | os.X_OK)):
        raise RuntimeModeError(f"OBJECT_STORE_ROOT={path} is not a readable and traversable directory")
   ```
-- [x] 3.3 `apps/api/main.py:create_app()` (line 304+) 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
+- [x] 3.3 `apps/api/main.py:create_app()` 把 `runtime_config.object_store_root` 设到 `app.state.object_store_root`（或 `Depends(get_object_store_root)` provider，按 §0.5 决定）
 - [x] 3.4 **AD-11 boundary fix**：从下面三处同步移除 `OBJECT_STORE_ROOT`：
-  - `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
-  - `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
-  - `scripts/validate_two_node_docker_runtime.py:133 DISPLAY_FORBIDDEN_ENV_KEYS`
-  - `scripts/validate_two_node_docker_runtime.py:273 COMPUTE_ONLY_PATH_ENV_KEYS`
+  - `apps/api/runtime_mode.py` `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
+  - `tests/test_role_boundary_static.py` `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
+  - `scripts/validate_two_node_docker_runtime.py` `DISPLAY_FORBIDDEN_ENV_KEYS`
+  - `scripts/validate_two_node_docker_runtime.py` `COMPUTE_ONLY_PATH_ENV_KEYS`
 - [x] 3.4a display runtime allow/require/audit set 同步：`OBJECT_STORE_ROOT` 加入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set；断言 `OBJECT_STORE_ROOT not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS`、`OBJECT_STORE_ROOT not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS`、`OBJECT_STORE_ROOT in docker_runtime.DISPLAY_REQUIRED_ENV`
 - [x] 3.5 unit test (`tests/test_runtime_mode.py` 现有 + 新加)：display_readonly 缺 env → raise `RuntimeModeError`；env 指向不存在路径 → raise；display env 指向真实目录 → 通过 + `RuntimeConfig.object_store_root == Path(...)`；display env 带可读 root 不触发 `DISPLAY_BOUNDARY_CONFIG_UNSAFE`；默认 dev_monolith 未配置 env 仍可 load 且 `object_store_root is None`
 - [x] 3.5a `create_app()` downstream compatibility：保证 `from apps.api.main import app` / module-level `app = create_app()` 在默认 dev env 下仍可 import；更新所有受影响的 display test env helpers（例如 runtime / monitoring / pipeline artifact tests）给非 missing-env 场景传入 readable tmp `OBJECT_STORE_ROOT`，并保留专门的 missing-env failure test；验证 sibling routes/runtime config 行为不变
-- [x] 3.6 `tests/test_role_boundary_static.py` 跑通——同步后 forbidden 集合不再包含 OBJECT_STORE_ROOT，互锁断言 (line 89) 仍 pass
+- [x] 3.6 `tests/test_role_boundary_static.py` 跑通——同步后 forbidden 集合不再包含 OBJECT_STORE_ROOT，runtime/static forbidden-set 互锁断言仍 pass
 
 ## 4. OpenAPI schema — `openapi/nhms.v1.yaml` + `apps/api/main.py:_patch_station_series_openapi`
 
-- [x] 4.1 `_patch_station_series_openapi` (line 564) 把 4 个 error code 加入 4xx/5xx 响应的 examples 列表：`STATION_FORCING_FILENAME_MISSING (500)`, `STATION_FORCING_FILE_NOT_FOUND (404)`, `STATION_FORCING_FILE_MALFORMED (500)`, `MISSING_REQUIRED_FILTER (422)`；保留现有 `STATION_NOT_FOUND` 404 example 不变
+- [x] 4.1 `apps/api/main.py:_patch_station_series_openapi` 把 4 个 error code 加入 4xx/5xx 响应的 examples 列表：`STATION_FORCING_FILENAME_MISSING (500)`, `STATION_FORCING_FILE_NOT_FOUND (404)`, `STATION_FORCING_FILE_MALFORMED (500)`, `MISSING_REQUIRED_FILTER (422)`；保留现有 `STATION_NOT_FOUND` 404 example 不变
 - [x] 4.2 移除（或不再列出）`FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 在 `getMetStationSeries` operation examples 中的出现
 - [x] 4.3 `getMetStationSeries` operation 的 `forcing_version_id` query parameter 加 `deprecated: true` + description 说明新路径下该参数被忽略
 - [x] 4.4 `pnpm run check:api-types`（如存在）PASS — 验证 OpenAPI 改动对前端 type-gen 是 additive（不破坏现有类型）
@@ -169,6 +169,9 @@
 
 - [x] 10.0 重跑 `openspec validate object-store-station-series-read --strict --no-interactive` PASS（archive guard：防止 PR-C 文档/follow-up 编辑后破坏 spec 结构）
 - [x] 10.1 `openspec archive object-store-station-series-read`
-- [ ] 10.2 3 条 `docs/review-loop-log.jsonl` append（每 PR 一行）
-- [x] 10.3 关闭 Epic + 3 子 issue
-- [x] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；如 PR-B receipt 在最近 24h 内已记录 uvicorn pid 变化，PR-C 不必再次重启服务，只做 health probe）
+- [x] 10.2 3 条 `docs/review-loop-log.jsonl` append（每 PR 一行：#627/#628/#632）
+- [ ] 10.3 Epic + 3 子 issue 闭合状态
+  - [x] 10.3a #622/#623 已由 PR #627/#628 merge 闭合
+  - [x] 10.3b #621/#624 已配置为随 PR #632 merge 闭合
+  - [ ] 10.3c PR #632 merge 后确认 #621/#624 实际 closed
+- [x] 10.4 node-27 `/health` 200 check（验证 PR-B 部署仍在运行；PR-C receipt: `docs/runbooks/receipts/object-store-station-series-read-pr-c-health-20260621.md`）

@@ -15,13 +15,15 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 - **WHEN** 河段 forecast-series 缺任一身份字段或 horizon/point 预算不符（`ok:false`）
 - **THEN** popup 显示不可用原因空态，不绘制任何 q_down 曲线
 
-### Requirement: 点击代站弹出六要素 forcing 曲线
+### Requirement: 点击代站弹出当前 station-series forcing 曲线
 
-点击代站点要素 SHALL 弹出 maplibre `Popup`，按 `station_id` 经 `loadHydroMetStationSeries` + `validateHydroMetStationSeriesIdentity` 拉取并校验，渲染六要素 echarts 曲线（PRCP/TEMP/RH/wind/Rn/Press）。身份不符时 MUST 显示空态而非伪造曲线。
+点击代站点要素 SHALL 弹出 maplibre `Popup`，按 `station_id` 经 `loadHydroMetStationSeries` + `validateHydroMetStationSeriesIdentity` 拉取并校验，渲染当前 station-series route 可返回的 echarts 曲线（PRCP/TEMP/RH/wind/Rn）。
+`Press` 不得被当作当前 route 的可用曲线；若 UI 暴露该变量，MUST 显示 unavailable/omitted 状态。身份不符时 MUST 显示空态而非伪造曲线。
 
-#### Scenario: 代站六要素曲线渲染
+#### Scenario: 代站当前变量曲线渲染
 - **WHEN** 点击代站点且其 station-series 通过身份校验
-- **THEN** popup 渲染六个 forcing 变量的 echarts 曲线
+- **THEN** popup 渲染 `PRCP`、`TEMP`、`RH`、`wind`、`Rn` 的 echarts 曲线
+- **AND** popup 不为 `Press` 绘制可用曲线，除非未来 route 明确重新提供该变量
 
 #### Scenario: 代站身份不符空态
 - **WHEN** station-series 的 station_id/forcing_version_id/source/cycle_time 与选中产品身份不一致
@@ -38,4 +40,3 @@ popup 拉曲线 MUST 使用解析后的具体源（`best`/`compare` → `sourceS
 #### Scenario: productReady 门控贯穿 popup
 - **WHEN** 产品整体 `availability.ready` 为 false
 - **THEN** popup 内 return-period 维度按 `productReady` 门控判为不可用，与既有红线一致
-

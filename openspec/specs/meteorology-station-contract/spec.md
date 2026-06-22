@@ -4,7 +4,12 @@
 TBD - created by archiving change m13-meteorology-products-ui. Update Purpose after archive.
 ## Requirements
 ### Requirement: Meteorology station contract
-The system SHALL expose station inventory, basin association, stable station_id, lon/lat/elevation, completeness/QC status, latest data time, forcing version/source provenance, forcing series for PRCP/TEMP/RH/wind/Rn/Press where available, missing/anomalous intervals, and adjacent station relationships.
+The system SHALL expose station inventory, basin association, stable station_id,
+lon/lat/elevation, completeness/QC status, latest data time,
+forcing version/source provenance, current station-series forcing values for
+PRCP/TEMP/RH/wind/Rn where available, explicit unavailable/omitted status for
+Press on the current disk-backed route, missing/anomalous intervals, and
+adjacent station relationships.
 
 #### Scenario: Station list
 WHEN station inventory is available
@@ -25,4 +30,3 @@ THEN the UI can highlight adjacent stations and report their distance or relatio
 #### Scenario: Bounded station inventory and series
 WHEN station inventory, search results, or forcing series exceed advertised page-size, time-range, or sample-count limits
 THEN the system returns paginated, truncated, or validation metadata and the UI renders a bounded empty/truncated/error state instead of unbounded rows or chart samples
-

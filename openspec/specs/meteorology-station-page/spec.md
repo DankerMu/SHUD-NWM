@@ -12,7 +12,8 @@ THEN the station tab restores supported state and displays explicit empty or una
 
 #### Scenario: Station select
 WHEN user selects a station row or marker
-THEN map pans to marker, popup opens, and right panel shows PRCP/TEMP/RH/wind/Press charts where available
+THEN map pans to marker, popup opens, and right panel shows PRCP/TEMP/RH/wind/Rn charts from the current station-series route where available
+AND Press is shown only as unavailable/omitted unless a future route explicitly provides it
 
 #### Scenario: Deep-linked station selection
 WHEN a supported `stationId` exists in the filtered station collection but is outside the default bounded page
@@ -29,4 +30,3 @@ THEN charts and variable summaries mark the affected intervals and show complete
 #### Scenario: Selection cleanup
 WHEN the selected basin, search filter, station, or tab changes
 THEN stale popups, adjacent highlights, and forcing/QC charts from the previous station are cleared or visibly superseded
-

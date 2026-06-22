@@ -94,7 +94,7 @@ Time_Day\tPrecip\tTemp\tRH\tWind\tRN   <- row 2: column names
 
 ### AD-7: 启动期 env check 走 `runtime_mode.load_runtime_config`
 
-`apps/api/main.py` 在 `create_app()` (line 304-336) 之前就调 `load_runtime_config(env)` → `RuntimeConfig` (`apps/api/runtime_mode.py:66, 101`)。这是仓内唯一被复用的"启动期 env 一致性校验"层，已有 `RuntimeModeError` 异常类。
+`apps/api/main.py:create_app()` 在应用组装早期调用 `apps/api/runtime_mode.py:load_runtime_config(env)` → `RuntimeConfig`。这是仓内唯一被复用的"启动期 env 一致性校验"层，已有 `RuntimeModeError` 异常类。
 
 **实现：**
 
@@ -113,7 +113,7 @@ Time_Day\tPrecip\tTemp\tRH\tWind\tRN   <- row 2: column names
 
 fail-fast：display_readonly env 缺失或任何 role 的 env 指向不可读目录 → `RuntimeModeError` 让 process 启动期就 exit，不到第一个 series 请求才报。
 
-兼容性：仓内存在 `apps/api/main.py:1997 app = create_app()` 的模块级 app，以及大量测试 `from apps.api.main import app`。因此默认 `dev_monolith` import path 不要求 `OBJECT_STORE_ROOT`；非 display role 未配置时 `RuntimeConfig.object_store_root` 为 `None`，但 station-series route 若实际被调用仍必须通过 `get_object_store_root` 拿到有效 root（测试可 override provider）。
+兼容性：仓内存在 `apps/api/main.py` 模块级 `app = create_app()`，以及大量测试 `from apps.api.main import app`。因此默认 `dev_monolith` import path 不要求 `OBJECT_STORE_ROOT`；非 display role 未配置时 `RuntimeConfig.object_store_root` 为 `None`，但 station-series route 若实际被调用仍必须通过 `get_object_store_root` 拿到有效 root（测试可 override provider）。
 
 **关键：** AD-7 必须配合 AD-11 boundary 调整，否则 display API 启动失败（详见 AD-11）。
 
@@ -152,14 +152,14 @@ reader 内：
 
 ### AD-11: Display role boundary 调整（必须先做，否则 AD-7 启动检查导致 display API 拒启）
 
-**问题：** `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 当前列入 `OBJECT_STORE_ROOT`；display.env 一旦含该 key 即在 `display_boundary_blockers()` (line 176-202) 被 raise `DISPLAY_BOUNDARY_CONFIG_UNSAFE`。`tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` 与 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` (`tests/test_role_boundary_static.py:89` 断言互锁) 同步列入。
+**问题：** `apps/api/runtime_mode.py` 的 `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 曾列入 `OBJECT_STORE_ROOT`；display.env 一旦含该 key 即在 `display_boundary_blockers()` 被 raise `DISPLAY_BOUNDARY_CONFIG_UNSAFE`。`tests/test_role_boundary_static.py` 的 `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS` 与 `docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS` 断言互锁，也曾同步列入。
 
 **决策：** display 现在合法需要读 forcing CSV（disk-only 路径属于 display 输出业务面），从下面四处同步移除/重分类 `OBJECT_STORE_ROOT`：
 
-1. `apps/api/runtime_mode.py:27-32 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
-2. `tests/test_role_boundary_static.py:19-27 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
-3. `scripts/validate_two_node_docker_runtime.py:133 DISPLAY_FORBIDDEN_ENV_KEYS`
-4. `scripts/validate_two_node_docker_runtime.py:273 COMPUTE_ONLY_PATH_ENV_KEYS`
+1. `apps/api/runtime_mode.py` `_DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS` 元组
+2. `tests/test_role_boundary_static.py` `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
+3. `scripts/validate_two_node_docker_runtime.py` `DISPLAY_FORBIDDEN_ENV_KEYS`
+4. `scripts/validate_two_node_docker_runtime.py` `COMPUTE_ONLY_PATH_ENV_KEYS`
 
 同时把 `OBJECT_STORE_ROOT` 纳入 display required/audited runtime env surfaces（`DISPLAY_REQUIRED_ENV` / `DISPLAY_REQUIRED_RUNTIME_ENV` / `DISPLAY_AUDITED_RUNTIME_ENV` 相关互锁），并更新 `tests/test_role_boundary_static.py` 的 allowed display required set。否则 `COMPUTE_ONLY_PATH_ENV_KEYS <= DISPLAY_FORBIDDEN_ENV_KEYS` 和 `DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(COMPUTE_ONLY_PATH_ENV_KEYS)` 两个静态不变量会把它重新拉回 forbidden。
 
