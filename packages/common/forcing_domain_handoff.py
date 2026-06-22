@@ -95,6 +95,42 @@ PAYLOAD_TABLES = {
     "station_timeseries": "met.forcing_station_timeseries",
     "interpolation_weights": "met.interp_weight",
 }
+PARSED_PAYLOAD_TABLE_ROW_FIELDS = {
+    "station_inventory": (
+        "station_id",
+        "basin_version_id",
+        "station_name",
+        "longitude",
+        "latitude",
+        "elevation_m",
+        "station_role",
+        "active_flag",
+        "properties_json",
+    ),
+    "station_timeseries": (
+        "forcing_version_id",
+        "basin_version_id",
+        "station_id",
+        "valid_time",
+        "source_id",
+        "variable",
+        "value",
+        "unit",
+        "native_resolution",
+        "quality_flag",
+    ),
+    "interpolation_weights": (
+        "source_id",
+        "grid_id",
+        "model_id",
+        "station_id",
+        "variable",
+        "grid_cell_id",
+        "weight",
+        "method",
+        "grid_signature",
+    ),
+}
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -492,10 +528,24 @@ def _parsed_handoff_tables(
 ) -> dict[str, list[Mapping[str, Any]]]:
     return {
         "met.forcing_version": [_forcing_version_row(manifest)],
-        "met.met_station": [dict(row) for row in payload_rows.get("station_inventory", [])],
-        "met.forcing_station_timeseries": [dict(row) for row in payload_rows.get("station_timeseries", [])],
-        "met.interp_weight": [dict(row) for row in payload_rows.get("interpolation_weights", [])],
+        "met.met_station": _project_payload_table_rows(payload_rows.get("station_inventory", []), "station_inventory"),
+        "met.forcing_station_timeseries": _project_payload_table_rows(
+            payload_rows.get("station_timeseries", []),
+            "station_timeseries",
+        ),
+        "met.interp_weight": _project_payload_table_rows(
+            payload_rows.get("interpolation_weights", []),
+            "interpolation_weights",
+        ),
     }
+
+
+def _project_payload_table_rows(
+    rows: list[Mapping[str, Any]],
+    role: str,
+) -> list[dict[str, Any]]:
+    fields = PARSED_PAYLOAD_TABLE_ROW_FIELDS[role]
+    return [{field: row[field] for field in fields if field in row} for row in rows]
 
 
 def _forcing_version_row(manifest: Mapping[str, Any]) -> dict[str, Any]:

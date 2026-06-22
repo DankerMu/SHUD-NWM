@@ -201,6 +201,20 @@ def _read_json(path: Path) -> dict[str, object]:
     return payload
 
 
+def _read_payload_rows(case_root: Path, filename: str) -> list[dict[str, object]]:
+    payload = json.loads(_payload_path(case_root, filename).read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert all(isinstance(row, dict) for row in payload)
+    return payload
+
+
+def _project_payload_rows(
+    rows: list[dict[str, object]],
+    allowed_keys: set[str],
+) -> list[dict[str, object]]:
+    return [{key: value for key, value in row.items() if key in allowed_keys} for row in rows]
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
@@ -411,15 +425,19 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
         "checksum": "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5",
     }
 
-    station = parsed["met.met_station"][0]
-    assert station["station_id"] == "qhh_forc_001"
-    assert station["properties_json"]["forcing_filename"] == "X100.125Y38.25.csv"
-
-    timeseries = parsed["met.forcing_station_timeseries"][0]
-    assert timeseries["value"] == 1.2
-
-    interp_weight = parsed["met.interp_weight"][0]
-    assert interp_weight["grid_signature"] == "gfs-0p25-qhh-fixture"
+    case_root = FIXTURE_ROOT / "complete"
+    assert parsed["met.met_station"] == _project_payload_rows(
+        _read_payload_rows(case_root, "station_inventory.json"),
+        MET_STATION_ROW_KEYS,
+    )
+    assert parsed["met.forcing_station_timeseries"] == _project_payload_rows(
+        _read_payload_rows(case_root, "station_timeseries.json"),
+        FORCING_STATION_TIMESERIES_ROW_KEYS,
+    )
+    assert parsed["met.interp_weight"] == _project_payload_rows(
+        _read_payload_rows(case_root, "interp_weights.json"),
+        INTERP_WEIGHT_ROW_KEYS,
+    )
 
     evidence = result["evidence"]
     assert isinstance(evidence, dict)
@@ -445,7 +463,9 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     tmp_path: Path,
 ) -> None:
     case_root = _copy_complete_case(tmp_path)
-    station_rows = json.loads(_payload_path(case_root, "station_inventory.json").read_text(encoding="utf-8"))
+    station_rows = _read_payload_rows(case_root, "station_inventory.json")
+    for index, row in enumerate(station_rows):
+        row["top_level_extra"] = f"station-extra-{index}"
     station_rows[0]["properties_json"]["grid_signature"] = "station-grid-signature"
     station_rows[0]["properties_json"]["mirror_identity"] = {
         "grid_signature": "station-mirror-grid-signature",
@@ -453,7 +473,14 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     }
     _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
 
-    interp_rows = json.loads(_payload_path(case_root, "interp_weights.json").read_text(encoding="utf-8"))
+    timeseries_rows = _read_payload_rows(case_root, "station_timeseries.json")
+    for index, row in enumerate(timeseries_rows):
+        row["top_level_extra"] = f"timeseries-extra-{index}"
+    _set_payload_rows(case_root, "station_timeseries", "station_timeseries.json", timeseries_rows)
+
+    interp_rows = _read_payload_rows(case_root, "interp_weights.json")
+    for index, row in enumerate(interp_rows):
+        row["top_level_extra"] = f"interp-extra-{index}"
     interp_rows[0]["grid_signature"] = "interp-grid-signature"
     interp_rows[0]["mirror_identity"] = {
         "grid_signature": "interp-mirror-grid-signature",
@@ -466,14 +493,26 @@ def test_parser_preserves_successful_payload_business_values_without_redacting_g
     assert result["available"] is True
     parsed = result["parsed"]
     assert isinstance(parsed, dict)
-    assert parsed["met.met_station"][0] == station_rows[0]
-    assert parsed["met.interp_weight"][0] == interp_rows[0]
+    assert parsed["met.met_station"] == _project_payload_rows(station_rows, MET_STATION_ROW_KEYS)
+    assert parsed["met.forcing_station_timeseries"] == _project_payload_rows(
+        timeseries_rows,
+        FORCING_STATION_TIMESERIES_ROW_KEYS,
+    )
+    assert parsed["met.interp_weight"] == _project_payload_rows(interp_rows, INTERP_WEIGHT_ROW_KEYS)
     assert parsed["met.met_station"][0]["properties_json"]["grid_signature"] == "station-grid-signature"
     assert (
         parsed["met.met_station"][0]["properties_json"]["mirror_identity"]["grid_signature"]
         == "station-mirror-grid-signature"
     )
-    assert parsed["met.interp_weight"][0]["mirror_identity"]["grid_signature"] == "interp-mirror-grid-signature"
+    assert (
+        parsed["met.met_station"][0]["properties_json"]["mirror_identity"]["source_grid_signature"]
+        == "station-source-grid-signature"
+    )
+    assert parsed["met.interp_weight"][0]["grid_signature"] == "interp-grid-signature"
+    assert "mirror_identity" not in parsed["met.interp_weight"][0]
+    assert all("top_level_extra" not in row for row in parsed["met.met_station"])
+    assert all("top_level_extra" not in row for row in parsed["met.forcing_station_timeseries"])
+    assert all("top_level_extra" not in row for row in parsed["met.interp_weight"])
 
 
 @pytest.mark.parametrize(
