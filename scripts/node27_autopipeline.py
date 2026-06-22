@@ -35,6 +35,7 @@ Object-store / DB env (same contract as the per-run scripts)::
     BASINS_ROOT=/home/ghdc/nwm/Basins        # geometry source for registry seed
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -47,6 +48,11 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import psycopg2
 
@@ -62,12 +68,10 @@ from scripts.node27_mirror_forcing import (
     TRANSITIONAL_MIRROR_MODE,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
 RUN_RE = re.compile(r"^fcst_(?P<source>gfs|ifs)_(?P<cycle>\d{10})_basins_(?P<basin>.+)_shud$")
 
-DEFAULT_BASINS_ROOT = "/home/ghdc/nwm/Basins"
 # Auth for import-basins-registry (models.switch_version => model_admin|sys_admin).
 SEED_AUTH_ACTOR = os.environ.get("AUTOPIPE_AUTH_ACTOR", "node27-autopipe")
 SEED_AUTH_ROLE = os.environ.get("AUTOPIPE_AUTH_ROLE", "model_admin")
@@ -77,6 +81,29 @@ SEED_AUTH_ROLE = os.environ.get("AUTOPIPE_AUTH_ROLE", "model_admin")
 # /home is 1.7T) so a multi-GB basin copy never fills /. Scratch is removed
 # after every seed regardless (see _seed_basin).
 WORK_ROOT = os.environ.get("AUTOPIPE_WORK_ROOT") or tempfile.gettempdir()
+
+INGEST_ROLE = "node27_data_plane_ingest"
+INGEST_SUMMARY_SCHEMA = "nhms.node27_ingest.autopipeline.v1"
+INGEST_PREFLIGHT_SCHEMA = "nhms.node27_ingest.preflight.v1"
+PREFLIGHT_BLOCKED_RC = 2
+INGEST_STAGE_SHAPE = (
+    "seed_registry",
+    "register",
+    "object_store_forcing_handoff_or_explicit_mirror",
+    "parse",
+    "refresh_coverage",
+    "publish_status",
+)
+DISPLAY_HEALTH_SEPARATION = "display_api_health_is_readonly_consumer_health_not_ingest_writer_readiness"
+DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
+DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
+    {
+        "application_name",
+        "connect_timeout",
+        "fallback_application_name",
+        "sslmode",
+    }
+)
 
 NO_FORCING_HANDOFF_MODE = "object_store_forcing_domain_handoff_missing"
 NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON = "OBJECT_STORE_HANDOFF_NOT_DECLARED_AND_NODE22_MIRROR_DSN_MISSING"
@@ -89,6 +116,301 @@ FORCING_TABLE_KEYS = (
     "met.forcing_station_timeseries",
     "met.interp_weight",
 )
+
+
+# --------------------------------------------------------------------------- #
+# ingest preflight
+# --------------------------------------------------------------------------- #
+def _preflight_blocker(code: str, env_var: str, message: str) -> dict[str, str]:
+    return {"code": code, "env_var": env_var, "message": message}
+
+
+def _path_preflight(env_var: str, raw_value: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    raw = (raw_value or "").strip()
+    if not raw:
+        return {"env_var": env_var, "configured": False}, [
+            _preflight_blocker(f"{env_var}_MISSING", env_var, f"{env_var} is required for node-27 ingest.")
+        ]
+
+    path = Path(raw)
+    evidence = {"env_var": env_var, "configured": True, "path": str(path)}
+    if not path.is_absolute():
+        return evidence, [
+            _preflight_blocker(
+                f"{env_var}_UNSAFE",
+                env_var,
+                f"{env_var} must be an absolute non-root path.",
+            )
+        ]
+    if not path.is_dir():
+        return evidence, [
+            _preflight_blocker(
+                f"{env_var}_NOT_DIRECTORY",
+                env_var,
+                f"{env_var} must point to an existing directory.",
+            )
+        ]
+    resolved = path.resolve()
+    evidence["resolved_path"] = str(resolved)
+    if resolved == Path("/"):
+        return evidence, [
+            _preflight_blocker(
+                f"{env_var}_UNSAFE",
+                env_var,
+                f"{env_var} must not resolve to the filesystem root.",
+            )
+        ]
+    return evidence, []
+
+
+def _database_username_class(username: str | None) -> str:
+    normalized = (username or "").strip().lower()
+    if not normalized:
+        return "missing"
+    if "display" in normalized or "readonly" in normalized or normalized.endswith("_ro") or normalized.endswith("ro"):
+        return "display_readonly_like"
+    return "writer_candidate"
+
+
+def _database_query_blockers(query: str) -> list[dict[str, str]]:
+    if not query:
+        return []
+    query_keys = {key.strip().lower() for key, _value in parse_qsl(query, keep_blank_values=True)}
+    if query_keys and any(key not in DATABASE_URL_ALLOWED_QUERY_KEYS for key in query_keys):
+        return [
+            _preflight_blocker(
+                DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN,
+                "DATABASE_URL",
+                "DATABASE_URL query parameters must not override the ingest target or credential source.",
+            )
+        ]
+    return []
+
+
+def _database_port(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    raw = (database_url or "").strip()
+    if not raw:
+        return {"configured": False}, [
+            _preflight_blocker("DATABASE_URL_MISSING", "DATABASE_URL", "DATABASE_URL is required for node-27 ingest.")
+        ]
+
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return {"configured": True}, [
+            _preflight_blocker(
+                "DATABASE_URL_INVALID",
+                "DATABASE_URL",
+                "DATABASE_URL must be a valid PostgreSQL URL.",
+            )
+        ]
+
+    query_blockers = _database_query_blockers(parsed.query)
+
+    try:
+        dsn_parameters = psycopg2.extensions.parse_dsn(raw)
+    except psycopg2.Error:
+        if query_blockers:
+            return {"configured": True, "scheme": parsed.scheme or None}, query_blockers
+        return {"configured": True, "scheme": parsed.scheme or None}, [
+            _preflight_blocker(
+                "DATABASE_URL_INVALID",
+                "DATABASE_URL",
+                "DATABASE_URL must be a valid PostgreSQL URL.",
+            )
+        ]
+
+    database = dsn_parameters.get("dbname")
+    username = dsn_parameters.get("user")
+    host = dsn_parameters.get("host")
+    port = _database_port(dsn_parameters.get("port"))
+    username_class = _database_username_class(username)
+    password_present = bool(dsn_parameters.get("password"))
+    identity = {
+        "configured": True,
+        "scheme": parsed.scheme,
+        "host": host,
+        "port": port,
+        "database": database,
+        "username_present": username_class != "missing",
+        "username_class": username_class,
+        "password_present": password_present,
+    }
+    blockers: list[dict[str, str]] = list(query_blockers)
+    invalid_identity = (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not host
+        or not database
+        or (dsn_parameters.get("port") and port is None)
+    )
+    if invalid_identity:
+        return identity, [
+            _preflight_blocker(
+                "DATABASE_URL_INVALID",
+                "DATABASE_URL",
+                "DATABASE_URL must include PostgreSQL scheme, host, and database name.",
+            )
+        ]
+    if identity["username_class"] == "missing":
+        blockers.append(
+            _preflight_blocker(
+                "DATABASE_URL_USERNAME_MISSING",
+                "DATABASE_URL",
+                "DATABASE_URL must include an explicit ingest writer username.",
+            )
+        )
+        return identity, blockers
+    if identity["username_class"] == "display_readonly_like":
+        blockers.append(
+            _preflight_blocker(
+                "DATABASE_URL_READONLY_IDENTITY",
+                "DATABASE_URL",
+                "DATABASE_URL appears to use a display/readonly identity, not an ingest writer.",
+            )
+        )
+    if not password_present:
+        blockers.append(
+            _preflight_blocker(
+                "DATABASE_URL_PASSWORD_MISSING",
+                "DATABASE_URL",
+                "DATABASE_URL must include explicit password material for the ingest writer username.",
+            )
+        )
+    if blockers:
+        return identity, blockers
+    return identity, []
+
+
+def _role_preflight(env: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    service_role = (env.get("NHMS_SERVICE_ROLE") or "").strip().lower()
+    ingest_role = (env.get("NHMS_NODE27_INGEST_ROLE") or "").strip().lower()
+    evidence = {
+        "role": INGEST_ROLE,
+        "ingest_role_env": ingest_role or None,
+        "service_role_env": service_role or None,
+    }
+    blockers: list[dict[str, str]] = []
+    if not ingest_role:
+        blockers.append(
+            _preflight_blocker(
+                "INGEST_ROLE_REQUIRED",
+                "NHMS_NODE27_INGEST_ROLE",
+                "NHMS_NODE27_INGEST_ROLE must be node27_data_plane_ingest for node-27 ingest.",
+            )
+        )
+    if service_role == "display_readonly" or ingest_role == "display_readonly":
+        blockers.append(
+            _preflight_blocker(
+                "INGEST_DISPLAY_READONLY_ROLE_FORBIDDEN",
+                "NHMS_SERVICE_ROLE",
+                "display_readonly runtime evidence cannot satisfy node-27 ingest writer readiness.",
+            )
+        )
+    if ingest_role and ingest_role != INGEST_ROLE:
+        blockers.append(
+            _preflight_blocker(
+                "INGEST_ROLE_UNSUPPORTED",
+                "NHMS_NODE27_INGEST_ROLE",
+                "NHMS_NODE27_INGEST_ROLE must be node27_data_plane_ingest when set.",
+            )
+        )
+    return evidence, blockers
+
+
+def _ingest_config_source(env: dict[str, str]) -> str:
+    return (
+        (env.get("NHMS_NODE27_INGEST_CONFIG_SOURCE") or "").strip()
+        or (env.get("NODE27_AUTOPIPE_CONFIG_SOURCE") or "").strip()
+        or "cli_or_environment"
+    )
+
+
+def _preflight_ingest_config(
+    *,
+    database_url: str | None,
+    object_store_root: str | None,
+    basins_root: str | None,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    blockers: list[dict[str, str]] = []
+    role, role_blockers = _role_preflight(env)
+    blockers.extend(role_blockers)
+
+    database, database_blockers = _database_preflight(database_url)
+    blockers.extend(database_blockers)
+
+    object_store, object_store_blockers = _path_preflight("OBJECT_STORE_ROOT", object_store_root)
+    blockers.extend(object_store_blockers)
+    basins, basins_blockers = _path_preflight("BASINS_ROOT", basins_root)
+    blockers.extend(basins_blockers)
+    work_root, work_root_blockers = _path_preflight("AUTOPIPE_WORK_ROOT", env.get("AUTOPIPE_WORK_ROOT"))
+    blockers.extend(work_root_blockers)
+    log_root, log_root_blockers = _path_preflight("AUTOPIPE_LOG_ROOT", env.get("AUTOPIPE_LOG_ROOT"))
+    blockers.extend(log_root_blockers)
+
+    return redact_payload(
+        {
+            "schema": INGEST_PREFLIGHT_SCHEMA,
+            "status": "blocked" if blockers else "ready",
+            "role": role,
+            "stage_shape": list(INGEST_STAGE_SHAPE),
+            "config_source": _ingest_config_source(env),
+            "display_api_health_separate": True,
+            "display_api_health_note": DISPLAY_HEALTH_SEPARATION,
+            "database": database,
+            "paths": {
+                "object_store_root": object_store,
+                "basins_root": basins,
+                "work_root": work_root,
+                "log_root": log_root,
+            },
+            "blockers": blockers,
+        }
+    )
+
+
+def _ingest_evidence(preflight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": INGEST_ROLE,
+        "stage_shape": list(INGEST_STAGE_SHAPE),
+        "config_source": preflight.get("config_source"),
+        "display_api_health_separate": True,
+        "display_api_health_note": DISPLAY_HEALTH_SEPARATION,
+        "preflight": preflight,
+    }
+
+
+def _empty_seed_summary() -> dict[str, Any]:
+    return {"seeded": [], "already_seeded": [], "failed": [], "details": []}
+
+
+def _empty_runs_summary() -> dict[str, Any]:
+    return {
+        "already_ingested": 0,
+        "published": 0,
+        "processed": 0,
+        "ingested": 0,
+        "skipped": 0,
+        "failed": 0,
+        "ingested_by_source": {},
+        "details": [],
+        "skipped_runs": [],
+        "failed_runs": [],
+    }
+
+
+def _emit_json_summary(summary: dict[str, Any]) -> None:
+    json.dump(redact_payload(summary), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -552,7 +874,6 @@ def _seed_basin(
                 "import-basins-registry",
                 "--inventory", str(inv),
                 "--package-manifest", str(pkg),
-                "--database-url", database_url,
                 "--auth-actor-id", SEED_AUTH_ACTOR,
                 "--auth-role", SEED_AUTH_ROLE,
             ],
@@ -686,10 +1007,12 @@ def _process_run(
 # main
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
+    global WORK_ROOT
+
     parser = argparse.ArgumentParser(description="Basin-agnostic node-27 autopipeline.")
     parser.add_argument("--object-store-root", default=os.environ.get("OBJECT_STORE_ROOT"))
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
-    parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT", DEFAULT_BASINS_ROOT))
+    parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT"))
     parser.add_argument("--sources", default="gfs,ifs", help="Comma list of sources (default gfs,ifs).")
     parser.add_argument("--only-basin", default=None, help="Restrict to a single basin slug (e.g. heihe).")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N runs (smoke).")
@@ -703,17 +1026,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.object_store_root:
-        parser.error("OBJECT_STORE_ROOT or --object-store-root is required.")
-    if not args.database_url:
-        parser.error("DATABASE_URL or --database-url is required.")
+    sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
+
+    env = dict(os.environ)
+    preflight = _preflight_ingest_config(
+        database_url=args.database_url,
+        object_store_root=args.object_store_root,
+        basins_root=args.basins_root,
+        env=env,
+    )
+    if preflight["status"] != "ready":
+        _emit_json_summary(
+            {
+                "schema": INGEST_SUMMARY_SCHEMA,
+                "status": "preflight_blocked",
+                "return_code": PREFLIGHT_BLOCKED_RC,
+                "ingest": _ingest_evidence(preflight),
+                "object_store_root": args.object_store_root,
+                "basins_root": args.basins_root,
+                "sources": list(sources),
+                "discovered_runs": 0,
+                "basins": [],
+                "seed": _empty_seed_summary(),
+                "runs": _empty_runs_summary(),
+            }
+        )
+        return PREFLIGHT_BLOCKED_RC
 
     object_store_root = Path(args.object_store_root)
     basins_root = Path(args.basins_root)
     database_url = args.database_url
-    sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
+    WORK_ROOT = str(Path(env["AUTOPIPE_WORK_ROOT"]))
 
-    env = dict(os.environ)
     env["OBJECT_STORE_ROOT"] = str(object_store_root)
     env.setdefault("OBJECT_STORE_PREFIX", os.environ.get("OBJECT_STORE_PREFIX", ""))
     env["DATABASE_URL"] = database_url
@@ -792,6 +1136,10 @@ def main(argv: list[str] | None = None) -> int:
         return [r for r in run_results if r["outcome"] == outcome]
 
     summary = {
+        "schema": INGEST_SUMMARY_SCHEMA,
+        "status": "completed",
+        "return_code": 0,
+        "ingest": _ingest_evidence(preflight),
         "object_store_root": str(object_store_root),
         "basins_root": str(basins_root),
         "sources": list(sources),
@@ -806,6 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         "runs": {
             "already_ingested": already_count,
             "published": published_count,
+            "processed": len(run_results),
             "ingested": len(by("ingested")),
             "skipped": len(by("skipped")),
             "failed": len(by("failed")),
@@ -819,9 +1168,11 @@ def main(argv: list[str] | None = None) -> int:
             ],
         },
     }
-    json.dump(redact_payload(summary), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
-    return 0 if (not seed_failed and not by("failed")) else 1
+    rc = 0 if (not seed_failed and not by("failed")) else 1
+    summary["status"] = "completed" if rc == 0 else "completed_with_failures"
+    summary["return_code"] = rc
+    _emit_json_summary(summary)
+    return rc
 
 
 if __name__ == "__main__":

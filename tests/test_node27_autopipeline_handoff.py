@@ -47,6 +47,12 @@ def _prepare_autopipe(
     command_handler: Callable[[list[str], dict[str, str]], tuple[int, str, str]] | None = None,
 ) -> tuple[Path, list[list[str]], list[str]]:
     object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    basins_root.mkdir()
+    work_root.mkdir()
+    log_root.mkdir()
     for run_id, has_handoff in runs.items():
         _write_run(object_store_root, run_id, handoff=has_handoff)
 
@@ -55,6 +61,11 @@ def _prepare_autopipe(
 
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: set())
+    monkeypatch.setenv("AUTOPIPE_WORK_ROOT", str(work_root))
+    monkeypatch.setenv("AUTOPIPE_LOG_ROOT", str(log_root))
+    monkeypatch.setenv("NHMS_NODE27_INGEST_ROLE", autopipe.INGEST_ROLE)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", autopipe.INGEST_ROLE)
+    monkeypatch.setenv("NHMS_NODE27_INGEST_CONFIG_SOURCE", "pytest")
 
     def fake_publish(database_url: str) -> int:
         published_calls.append(database_url)
@@ -100,6 +111,8 @@ def _run_main(capsys: pytest.CaptureFixture[str], object_store_root: Path, *extr
         [
             "--object-store-root",
             str(object_store_root),
+            "--basins-root",
+            str(object_store_root.parent / "Basins"),
             "--database-url",
             "postgresql://node27-writer:secret@db.example/nhms",
             *extra,

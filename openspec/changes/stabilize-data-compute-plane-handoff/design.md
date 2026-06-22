@@ -719,3 +719,134 @@ Review focus:
   failures.
 - Tests prove one-run failure isolation and that successful object-store handoff
   bypasses mirror.
+
+## Issue #646 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Mandatory expanded triggers:
+- Production cron/on-demand entrypoint changes on node-27.
+- Writer-capable `DATABASE_URL` and secret-bearing environment handling.
+- Preflight must run before DB writes, object-store mutation, run registration,
+  forcing handoff/mirror, output parse, coverage refresh, and publish-status
+  advancement.
+- Display API `display_readonly` boundary must remain separate from data-plane
+  ingest readiness.
+- Node-27 live receipt is required because this issue changes production
+  wrapper/env behavior.
+
+Change surface:
+- Add a committed ingest env template/contract under `infra/env/` for node-27
+  data-plane ingest, separate from `infra/env/display.example`.
+- Update `scripts/node27_autopipe_cron.sh` to source or validate the ingest
+  env contract, stop using hard-coded writer defaults, never source display env,
+  and pass explicit role/config-source evidence into the Python autopipeline.
+- Update `scripts/node27_autopipeline.py` so preflight happens at the beginning
+  of `main()` and returns structured, redacted JSON with rc=2 before any seed,
+  register, mirror, parse, coverage, or publish work when config is missing or
+  unsafe.
+- Add focused tests for preflight-before-work, wrapper/env separation,
+  credential-safe summaries, basin failure isolation, one-run isolation, and
+  already-ingested skip behavior.
+
+Must preserve:
+- #645 handoff preference and explicit mirror fallback semantics.
+- Existing run discovery, seed/import/activate/backfill, register, parse,
+  coverage, and global publish behavior when preflight passes.
+- Display API startup semantics in `apps/api/runtime_mode.py`: display
+  `display_readonly` health evidence must not become ingest writer evidence.
+- No parser/apply/mirror internals or schema migrations in #646.
+
+Must add/change:
+- Ingest role evidence must identify `node27_data_plane_ingest`, stage shape,
+  config source, object-store root, Basins root, work root, log root, DB
+  host/port/database without password/token material, discovered/processed
+  counts, and final return code.
+- Preflight blockers must use stable codes for missing/unsafe `DATABASE_URL`,
+  display-readonly role leakage, readonly/display-looking DB identity, missing
+  `OBJECT_STORE_ROOT`, missing `BASINS_ROOT`, missing/unsafe work root, and
+  missing/unsafe log root.
+- Preflight failure output must be the only work result; tests must prove that
+  `_basin_seeded`, `_already_ingested_runs`, `_seed_basin`, `_process_run`, and
+  `_publish_display_runs` are not reached. The shell wrapper must also stop
+  immediately on preflight-blocked rc=2 and must not run coverage backstop or
+  any other post-hook after a blocked preflight.
+- The cron wrapper must require an ingest-specific env file or an explicit
+  ambient-env override, export the ingest role/config source, and log blocked
+  config without printing secrets.
+- The node-27 receipt must prove the wrapper/preflight sees writer ingest
+  readiness separately from display API `display_readonly` health.
+
+Selected risk packs:
+- Config / project setup: selected - production env/template and wrapper
+  semantics change.
+- Auth / permissions / secrets: selected - writer DB URL and logs must redact
+  credentials and reject display-readonly leakage.
+- Public API / CLI / script entry: selected - cron wrapper and autopipeline CLI
+  are operational entrypoints.
+- Error handling / rollback / partial outputs: selected - preflight must fail
+  before partial writes and retain existing run/basin isolation after passing.
+- Evidence / JSON / Schema Ingestion: selected - operator receipts and summaries
+  are the acceptance surface.
+- Concurrency / shared state / ordering: selected - flock wrapper behavior and
+  global publish ordering must remain unchanged.
+- Legacy compatibility / examples: selected - existing display env examples must
+  remain readonly-only; transitional mirror config stays explicit.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no compute
+  scheduling change.
+- Frontend/display behavior: not selected except display health separation.
+
+Invariant Matrix
+Governing invariant: Node-27 ingest may perform data-plane writer work only
+after an explicit ingest-role preflight validates writer DB, object-store,
+Basins, work, and log roots; display-readonly runtime evidence never satisfies
+ingest readiness.
+Source-of-truth identity/contract: `infra/env/node27-ingest.example`,
+untracked node-27 ingest env file, `scripts/node27_autopipe_cron.sh`,
+`scripts/node27_autopipeline.py` preflight summary, and node-27 live receipt.
+Surfaces:
+- Producers: node-27 cron/on-demand environment and object-store run dirs.
+- Validators/preflight: ingest env loader and autopipeline preflight.
+- Storage/cache/query: node-27 PostgreSQL writer URL only after preflight; no
+  display env writer derivation.
+- Public routes/entrypoints: shell cron wrapper and autopipeline CLI.
+- Frontend/downstream consumers: display API remains readonly consumer only.
+- Failure paths/rollback/stale state: missing env, unsafe display role, readonly
+  DB identity, missing roots, seed failure, per-run failure, already-ingested
+  skip, publish-status failure visibility.
+- Evidence/audit/readiness: structured preflight JSON, final summary role block,
+  redacted logs, node-27 receipt paths.
+Regression rows:
+- Missing `DATABASE_URL`/root config -> rc=2 preflight JSON with stable blocker
+  codes, no seed/run/publish calls, no wrapper coverage backstop, and no
+  secret-bearing output.
+- `NHMS_SERVICE_ROLE=display_readonly` or readonly/display DB identity in ingest
+  env -> rc=2 with stable blocker; display API runtime tests remain separate.
+- Valid ingest env + no pending runs -> summary reports data-plane role,
+  preflight ready, discovered counts, already-ingested counts, and return_code.
+- Seed failure -> basin failure is recorded and unrelated basins/runs may
+  continue; preflight evidence is still present.
+- One run failure after preflight -> unrelated run continues and global publish
+  remains post-loop.
+- Already-ingested runs -> skipped before per-run work unless `--force`.
+- Cron wrapper missing env file without explicit ambient override -> blocked
+  before invoking Python autopipeline; wrapper never sources display env.
+- Node-27 live receipt -> ingest writer preflight and display readonly health
+  are both visible and explicitly not interchangeable.
+
+Non-goals:
+- No changes to object-store handoff parser/apply/mirror internals.
+- No topology static guardrail/docs cleanup beyond the ingest env/wrapper
+  boundary; #647 owns topology contract work.
+- No qhh/heihe display readiness declaration; #648 owns final production
+  readiness/live evidence beyond the #646 preflight receipt.
+
+Review focus:
+- No fallback path may read `infra/env/display.env` or use display readonly DB
+  credentials for ingest writes.
+- Preflight must happen before every mutating or expensive stage and must be
+  easy to prove in tests.
+- Evidence must be useful to operators without leaking DSNs, tokens, or secret
+  env values.
