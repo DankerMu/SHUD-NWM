@@ -146,6 +146,21 @@ def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings()
     assert summary_counts["by_check_id"].get("apps-api-layer-inversion", 0) == 0
 
 
+def test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT, mode="hard-gate")
+    metadata = report["metadata"]
+    production_topology_findings = [
+        finding
+        for finding in report["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert metadata["hard_gate_status"] == "pass"
+    assert metadata["hard_gate_failing_count"] == 0
+    assert production_topology_findings == []
+    assert audit_repo_entropy._exit_code_for_report(report) == 0
+
+
 def test_entropy_audit_json_report_preserves_repository_baseline() -> None:
     before = _entropy_baseline_snapshot()
 
@@ -1402,6 +1417,32 @@ def test_entropy_audit_topology_guardrails_allow_explicit_negative_node22_db_acc
     assert topology_findings == []
 
 
+def test_entropy_audit_topology_guardrails_do_not_allow_active_claim_after_neighbor_negative(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        Do not use node-22 as the active database writer.
+        node-22 is the active database writer.
+        Do not use node-22 local PostgreSQL on :55433 for current checks.
+        Use node-22 local PostgreSQL on :55433 for current checks.
+        """,
+    )
+
+    writer_findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+    local_pg_findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in writer_findings] == [
+        ("docs/runbooks/current-production-ops.md", 2)
+    ]
+    assert [(finding["evidence_path"], finding["line"]) for finding in local_pg_findings] == [
+        ("docs/runbooks/current-production-ops.md", 4)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(writer_findings[0])
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(local_pg_findings[0])
+
+
 def test_entropy_audit_topology_guardrails_flag_terse_node22_db_writer_text(
     tmp_path: Path,
 ) -> None:
@@ -1411,13 +1452,34 @@ def test_entropy_audit_topology_guardrails_flag_terse_node22_db_writer_text(
         node-22 writes DB state.
         22 写入 met.forcing_version 到 PostgreSQL。
         node-22 hosts active primary PostgreSQL.
+        22 is the active DB writer.
+        22 owns database mutation.
         """,
     )
 
     findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
 
-    assert [finding["line"] for finding in findings] == [1, 2, 3]
+    assert [finding["line"] for finding in findings] == [1, 2, 3, 4, 5]
     assert all(finding["gate_eligible"] is True for finding in findings)
+
+
+def test_entropy_audit_topology_guardrails_flag_wrapped_node22_writer_claim(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "active-topology" / "tasks.md",
+        """
+        node-22 is the active
+        database writer for current NHMS production.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("openspec/changes/active-topology/tasks.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
 def test_entropy_audit_topology_guardrails_flag_display_env_authority_and_indirect_source(
@@ -1456,6 +1518,51 @@ def test_entropy_audit_topology_guardrails_flag_display_env_authority_and_indire
     assert all(finding["gate_eligible"] is True for finding in findings)
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "source_lines", "expected_line"),
+    [
+        (
+            "scripts/source-dot-slash.sh",
+            ["source ./infra/env/display.env"],
+            1,
+        ),
+        (
+            "scripts/source-repo-root.sh",
+            ['source "$REPO_ROOT/infra/env/display.env"'],
+            1,
+        ),
+        (
+            "scripts/source-checkout-root.sh",
+            ['. "${CHECKOUT_ROOT}/infra/env/display.env"'],
+            1,
+        ),
+        (
+            "scripts/source-alias.sh",
+            ['DISPLAY_ENV="$REPO_ROOT/infra/env/display.env"', '. "$DISPLAY_ENV"'],
+            2,
+        ),
+    ],
+)
+def test_entropy_audit_topology_guardrails_normalize_display_env_source_paths(
+    tmp_path: Path,
+    relative_path: str,
+    source_lines: list[str],
+    expected_line: int,
+) -> None:
+    filler = [f"echo step-{index}" for index in range(8)]
+    _write(
+        tmp_path / relative_path,
+        "\n".join([*source_lines, *filler, "uv run python scripts/node27_autopipeline.py\n"]),
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        (relative_path, expected_line)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
 def test_entropy_audit_topology_guardrails_do_not_allow_display_env_source_after_prohibition(
     tmp_path: Path,
 ) -> None:
@@ -1471,7 +1578,7 @@ def test_entropy_audit_topology_guardrails_do_not_allow_display_env_source_after
     findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
 
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
-        ("docs/runbooks/current-production-ops.md", 1)
+        ("docs/runbooks/current-production-ops.md", 2)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
@@ -1491,7 +1598,8 @@ def test_entropy_audit_topology_guardrails_allow_non_current_and_readonly_contex
         tmp_path / "docs/runbooks/display-readonly-live-mvt.md",
         """
         Display API readonly runtime sources infra/env/display.env through
-        scripts/ops/start-display-api.sh and serves display_readonly checks only.
+        scripts/ops/start-display-api.sh, serves display_readonly checks only,
+        and has no writer credentials.
         """,
     )
     _write(
@@ -1590,6 +1698,70 @@ def test_entropy_audit_topology_guardrails_scan_active_openspec_but_skip_archive
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
         ("openspec/changes/active-topology/tasks.md", 1)
     ]
+
+
+def test_entropy_audit_topology_guardrails_do_not_allow_active_openspec_meta_headings(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "active-topology" / "spec.md",
+        """
+        ## MODIFIED Requirements
+        ### Requirement: node-22 is the active database writer.
+        #### Scenario: 22 owns database mutation.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("openspec/changes/active-topology/spec.md", 2),
+        ("openspec/changes/active-topology/spec.md", 3),
+    ]
+    assert all(finding["gate_eligible"] is True for finding in findings)
+
+
+def test_entropy_audit_topology_guardrails_scan_infra_readme_without_non_current_banner(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "infra" / "README.two-node-docker.md",
+        """
+        # Two-node operator runbook
+
+        Current NHMS production says node-22 is the active database writer.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("infra/README.two-node-docker.md", 3)
+    ]
+
+
+def test_entropy_audit_topology_guardrails_skip_infra_readme_with_non_current_banner(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "infra" / "README.two-node-docker.md",
+        """
+        # Two-node Docker runbook
+
+        This document preserves M22 design intent only and is not current
+        production topology. Current deployment facts differ.
+
+        Current NHMS production says node-22 is the active database writer.
+        """,
+    )
+
+    findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert findings == []
 
 
 def test_entropy_audit_topology_guardrails_allow_non_archive_superseded_documents(
