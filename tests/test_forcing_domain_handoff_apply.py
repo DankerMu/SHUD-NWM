@@ -105,6 +105,7 @@ def test_path_apply_writes_four_target_tables_with_row_count_evidence() -> None:
     assert report["row_counts"] == EXPECTED_COUNTS
     assert report["mode"] == apply_module.APPLY_MODE
     assert report["identity"]["run_id"] == COMPLETE_RUN_ID
+    assert report["identity"]["source_id"] == "gfs"
     assert report["identity"]["forcing_version_id"] == "forc_gfs_2026062012_basins_qhh_shud"
     assert report["parser_evidence"]["forcing_version"][FORCING_PACKAGE_MANIFEST_CHECKSUM_FIELD] == (
         "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5"
@@ -116,6 +117,8 @@ def test_path_apply_writes_four_target_tables_with_row_count_evidence() -> None:
     assert connection.tables["met.forcing_version"][0]["checksum"] == (
         "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5"
     )
+    assert connection.tables["met.forcing_version"][0]["source_id"] == "gfs"
+    assert {row["source_id"] for row in connection.tables["met.interp_weight"]} == {"gfs"}
     assert connection.tables["met.met_station"][0]["geom"] == {
         "type": "Point",
         "srid": 4490,
@@ -136,6 +139,26 @@ def test_apply_from_parser_envelope_is_idempotent_for_reapply() -> None:
     assert second["row_counts"] == EXPECTED_COUNTS
     assert connection.commits == 2
     assert {table: len(rows) for table, rows in connection.tables.items()} == EXPECTED_COUNTS
+
+
+def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
+    envelope = _parse_complete()
+    placeholder = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
+    placeholder["source_id"] = "gfs"
+    placeholder["station_count"] = 0
+    placeholder["checksum"] = None
+    placeholder["lineage_json"] = {"seed": "node27_ingest_run"}
+    connection = _FakeConnection()
+    connection.tables["met.forcing_version"].append(placeholder)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    assert len(connection.tables["met.forcing_version"]) == 1
+    assert connection.tables["met.forcing_version"][0]["station_count"] == 2
+    assert connection.tables["met.forcing_version"][0]["checksum"] == (
+        "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5"
+    )
 
 
 @pytest.mark.parametrize(
@@ -191,6 +214,36 @@ def test_station_geometry_only_rows_use_srid_4490_makepoint_coordinates() -> Non
     assert connection.tables["met.met_station"][1]["geom"]["coordinates"] == [100.25, 38.375]
 
 
+def test_caller_owned_cursor_uses_savepoint_without_commit_or_rollback() -> None:
+    connection = _FakeConnection()
+    cursor = connection.cursor()
+
+    report = apply_module.apply_forcing_domain_handoff(_parse_complete(), cursor=cursor)
+
+    assert report["status"] == "applied"
+    assert report["apply_evidence"]["transaction"] == "caller_owned"
+    assert connection.commits == 0
+    assert connection.rollbacks == 0
+    assert {table: len(rows) for table, rows in connection.state.items()} == EXPECTED_COUNTS
+    connection.commit()
+    assert {table: len(rows) for table, rows in connection.tables.items()} == EXPECTED_COUNTS
+
+
+def test_caller_owned_cursor_failure_rolls_back_to_savepoint() -> None:
+    connection = _FakeConnection(fail_after_stage="interp_weight")
+    cursor = connection.cursor()
+
+    report = apply_module.apply_forcing_domain_handoff(_parse_complete(), cursor=cursor)
+
+    assert report["status"] == "failed"
+    assert report["writes_performed"] is False
+    assert connection.commits == 0
+    assert connection.rollbacks == 0
+    assert _all_tables_empty(connection.state)
+    connection.commit()
+    assert _all_tables_empty(connection.tables)
+
+
 def test_lon_lat_and_geojson_point_mismatch_fails_closed_before_writes() -> None:
     envelope = copy.deepcopy(_parse_complete())
     envelope["parsed"]["met.met_station"][0]["geometry"] = {
@@ -242,6 +295,29 @@ def test_existing_global_station_conflict_rolls_back_without_overwrite() -> None
     assert connection.tables["met.forcing_version"] == []
 
 
+def test_station_upsert_returning_shortfall_rolls_back_without_overwrite() -> None:
+    envelope = _parse_complete()
+    existing_station = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
+    existing_station["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing_station["longitude"], existing_station["latitude"]],
+    }
+    connection = _FakeConnection(force_station_upsert_conflict_after_select=True)
+    connection.tables["met.met_station"].append(existing_station)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "failed"
+    assert {reason["code"] for reason in report["unavailable_reasons"]} == {
+        apply_module.REASON_APPLY_STATION_CONFLICT
+    }
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
+    assert len(connection.tables["met.met_station"]) == 1
+    assert connection.tables["met.met_station"][0]["station_name"] == existing_station["station_name"]
+
+
 def test_direct_grid_constraints_from_parser_rows_are_preserved_in_apply_evidence() -> None:
     envelope = copy.deepcopy(_parse_complete())
     for row in envelope["parsed"]["met.interp_weight"]:
@@ -258,6 +334,21 @@ def test_direct_grid_constraints_from_parser_rows_are_preserved_in_apply_evidenc
     assert {row["grid_signature"] for row in connection.tables["met.interp_weight"]} == {
         "direct-grid-signature"
     }
+    assert any("pg_advisory_xact_lock(hashtextextended" in statement for _, statement, _ in connection.executions)
+
+
+def test_direct_grid_method_case_is_canonicalized_before_insert() -> None:
+    envelope = copy.deepcopy(_parse_complete())
+    for row in envelope["parsed"]["met.interp_weight"]:
+        row["method"] = "DIRECT_GRID"
+        row["weight"] = 1.0
+        row["grid_signature"] = "direct-grid-signature"
+    connection = _FakeConnection()
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    assert {row["method"] for row in connection.tables["met.interp_weight"]} == {"direct_grid"}
 
 
 @pytest.mark.parametrize(
@@ -314,7 +405,7 @@ def test_failure_reports_are_credential_safe_for_parser_and_sql_errors() -> None
 
 def test_node27_autopipeline_policy_file_is_unchanged_by_apply_scope() -> None:
     result = subprocess.run(
-        ["git", "diff", "--", "scripts/node27_autopipeline.py"],
+        ["git", "diff", "--exit-code", "origin/master...HEAD", "--", "scripts/node27_autopipeline.py"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -334,6 +425,7 @@ class _FakeConnection:
         *,
         fail_after_stage: str | None = None,
         failure_message: str = "simulated SQL failure",
+        force_station_upsert_conflict_after_select: bool = False,
     ) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {
             "met.forcing_version": [],
@@ -342,8 +434,10 @@ class _FakeConnection:
             "met.interp_weight": [],
         }
         self._transaction_tables: dict[str, list[dict[str, Any]]] | None = None
+        self._savepoints: dict[str, dict[str, list[dict[str, Any]]]] = {}
         self.fail_after_stage = fail_after_stage
         self.failure_message = failure_message
+        self.force_station_upsert_conflict_after_select = force_station_upsert_conflict_after_select
         self.commits = 0
         self.rollbacks = 0
         self.executions: list[tuple[str, str, tuple[Any, ...]]] = []
@@ -356,10 +450,12 @@ class _FakeConnection:
         assert self._transaction_tables is not None
         self.tables = self._transaction_tables
         self._transaction_tables = None
+        self._savepoints.clear()
         self.commits += 1
 
     def rollback(self) -> None:
         self._transaction_tables = None
+        self._savepoints.clear()
         self.rollbacks += 1
 
     @property
@@ -387,6 +483,21 @@ class _FakeCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self.connection.executions.append(("execute", statement, tuple(parameters)))
         normalized = " ".join(statement.lower().split())
+        if normalized.startswith("savepoint "):
+            name = normalized.split()[1]
+            self.connection._savepoints[name] = copy.deepcopy(self.connection.state)
+            return
+        if normalized.startswith("rollback to savepoint "):
+            name = normalized.split()[3]
+            self.connection._transaction_tables = copy.deepcopy(self.connection._savepoints[name])
+            return
+        if normalized.startswith("release savepoint "):
+            name = normalized.split()[2]
+            self.connection._savepoints.pop(name, None)
+            return
+        if normalized.startswith("select pg_advisory_xact_lock"):
+            self._fetchone = {"pg_advisory_xact_lock": None}
+            return
         if normalized.startswith("select station_id") and "from met.met_station" in normalized:
             station_ids = set(parameters[0])
             self._fetchall = [
@@ -394,6 +505,11 @@ class _FakeCursor:
                 for row in self.connection.state["met.met_station"]
                 if row["station_id"] in station_ids
             ]
+            if self.connection.force_station_upsert_conflict_after_select and self._fetchall:
+                row = _find_row(self.connection.state["met.met_station"], "station_id", self._fetchall[0]["station_id"])
+                assert row is not None
+                row["station_name"] = "concurrent conflicting station"
+                self.connection.force_station_upsert_conflict_after_select = False
             return
         if "insert into met.forcing_version" in normalized:
             self._upsert_forcing_version(parameters)
@@ -493,13 +609,13 @@ class _FakeCursor:
                 "cycle_time",
                 "start_time",
                 "end_time",
-                "station_count",
                 "forcing_package_uri",
             )
         ) and existing.get("checksum") in (None, record["checksum"])
         if not compatible:
             self._fetchone = None
             return
+        existing["station_count"] = record["station_count"]
         existing["checksum"] = record["checksum"]
         existing["lineage_json"] = record["lineage_json"]
         self._fetchone = {"forcing_version_id": record["forcing_version_id"]}
@@ -558,10 +674,26 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
         existing = _find_row(table, "station_id", record["station_id"])
         if existing is None:
             table.append(record)
-        else:
+            returned.append((record["station_id"],))
+            continue
+        if _fake_station_compatible(existing, record):
             existing.update(record)
-        returned.append((record["station_id"],))
+            returned.append((record["station_id"],))
     return returned
+
+
+def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
+    existing_select = _station_select_row(existing)
+    return (
+        existing_select["basin_version_id"] == record["basin_version_id"]
+        and existing_select["station_name"] == record["station_name"]
+        and existing_select["longitude"] == record["longitude"]
+        and existing_select["latitude"] == record["latitude"]
+        and existing_select["elevation_m"] == record["elevation_m"]
+        and existing_select["station_role"] == record["station_role"]
+        and existing_select["active_flag"] == record["active_flag"]
+        and existing_select["properties_json"] == record["properties_json"]
+    )
 
 
 def _station_select_row(row: Mapping[str, Any]) -> dict[str, Any]:

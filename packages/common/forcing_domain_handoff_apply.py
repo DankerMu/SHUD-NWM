@@ -13,8 +13,10 @@ from packages.common.forcing_domain_handoff import (
     parse_forcing_domain_handoff_path,
 )
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.source_identity import normalize_source_id
 
 APPLY_MODE = "object_store_forcing_domain_handoff"
+APPLY_SAVEPOINT_NAME = "nhms_forcing_domain_handoff_apply"
 STATION_COORDINATE_TOLERANCE = 1e-9
 
 REASON_APPLY_CONNECTION_MISSING = "HANDOFF_APPLY_CONNECTION_MISSING"
@@ -150,10 +152,15 @@ def apply_forcing_domain_handoff(
                 report = _apply_with_cursor(owned_cursor, prepared, parser_envelope, owns_transaction=True)
             connection.commit()
             return report
-        return _apply_with_cursor(cursor, prepared, parser_envelope, owns_transaction=False)
+        _begin_apply_savepoint(cursor)
+        report = _apply_with_cursor(cursor, prepared, parser_envelope, owns_transaction=False)
+        _release_apply_savepoint(cursor)
+        return report
     except ForcingDomainHandoffApplyError as error:
         if owns_transaction:
             connection.rollback()
+        else:
+            _rollback_apply_savepoint(cursor)
         return _unavailable_report(
             status="failed",
             reasons=[error.reason],
@@ -164,6 +171,8 @@ def apply_forcing_domain_handoff(
     except Exception as error:
         if owns_transaction:
             connection.rollback()
+        else:
+            _rollback_apply_savepoint(cursor)
         return _unavailable_report(
             status="failed",
             reasons=[
@@ -268,7 +277,7 @@ def _prepare_apply_rows(parser_envelope: Mapping[str, Any]) -> tuple[dict[str, A
     forcing_version = _prepare_forcing_version_row(forcing_rows[0], parser_envelope, reasons)
     stations = _prepare_station_rows(table_rows["met.met_station"], reasons)
     timeseries = _prepare_timeseries_rows(table_rows["met.forcing_station_timeseries"], forcing_version, reasons)
-    interp_weights = _prepare_interp_weight_rows(table_rows["met.interp_weight"], reasons)
+    interp_weights = _prepare_interp_weight_rows(table_rows["met.interp_weight"], reasons, forcing_version)
     if reasons:
         return {}, reasons
 
@@ -312,6 +321,7 @@ def _prepare_forcing_version_row(
     for field in FORCING_VERSION_COLUMNS:
         if not _present(prepared.get(field)):
             reasons.append(_reason(REASON_APPLY_FIELD_MISSING, field=f"met.forcing_version.{field}"))
+    _normalize_source_field(prepared, table="met.forcing_version", field="source_id", reasons=reasons)
 
     evidence = parser_envelope.get("evidence")
     forcing_evidence = evidence.get("forcing_version") if isinstance(evidence, Mapping) else None
@@ -388,17 +398,39 @@ def _prepare_timeseries_rows(
     prepared: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     forcing_version_id = forcing_version.get("forcing_version_id")
+    forcing_source_id = forcing_version.get("source_id")
     for index, row in enumerate(rows):
         item = dict(row)
         for field in FORCING_STATION_TIMESERIES_COLUMNS:
             if not _present(item.get(field)):
                 reasons.append(_row_reason(REASON_APPLY_FIELD_MISSING, "met.forcing_station_timeseries", field, index))
+        _normalize_source_field(
+            item,
+            table="met.forcing_station_timeseries",
+            field="source_id",
+            reasons=reasons,
+            row_index=index,
+        )
         if item.get("forcing_version_id") != forcing_version_id:
             reasons.append(
                 _row_reason(
                     REASON_APPLY_SHAPE_CONFLICT,
                     "met.forcing_station_timeseries",
                     "forcing_version_id",
+                    index,
+                )
+            )
+        source_mismatch = (
+            _present(item.get("source_id"))
+            and _present(forcing_source_id)
+            and item.get("source_id") != forcing_source_id
+        )
+        if source_mismatch:
+            reasons.append(
+                _row_reason(
+                    REASON_APPLY_SHAPE_CONFLICT,
+                    "met.forcing_station_timeseries",
+                    "source_id",
                     index,
                 )
             )
@@ -422,9 +454,11 @@ def _prepare_timeseries_rows(
 def _prepare_interp_weight_rows(
     rows: Sequence[Mapping[str, Any]],
     reasons: list[dict[str, Any]],
+    forcing_version: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
+    forcing_source_id = forcing_version.get("source_id")
     for index, row in enumerate(rows):
         item = dict(row)
         for field in INTERP_WEIGHT_COLUMNS:
@@ -432,6 +466,14 @@ def _prepare_interp_weight_rows(
                 continue
             if not _present(item.get(field)):
                 reasons.append(_row_reason(REASON_APPLY_FIELD_MISSING, "met.interp_weight", field, index))
+        _normalize_source_field(item, table="met.interp_weight", field="source_id", reasons=reasons, row_index=index)
+        source_mismatch = (
+            _present(item.get("source_id"))
+            and _present(forcing_source_id)
+            and item.get("source_id") != forcing_source_id
+        )
+        if source_mismatch:
+            reasons.append(_row_reason(REASON_APPLY_SHAPE_CONFLICT, "met.interp_weight", "source_id", index))
         if "grid_signature" not in item:
             item["grid_signature"] = None
 
@@ -449,7 +491,9 @@ def _prepare_interp_weight_rows(
         if not _finite_number(item.get("weight")):
             reasons.append(_row_reason(REASON_APPLY_FIELD_MISSING, "met.interp_weight", "weight", index))
 
-        if str(item.get("method", "")).lower() == "direct_grid":
+        method = str(item.get("method", ""))
+        if method.lower() == "direct_grid":
+            item["method"] = "direct_grid"
             if not _numbers_close(item.get("weight"), 1.0, tolerance=0.0):
                 reasons.append(_row_reason(REASON_APPLY_FIELD_MISSING, "met.interp_weight", "weight", index))
             if not _present(item.get("grid_signature")):
@@ -530,6 +574,7 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (forcing_version_id) DO UPDATE SET
+            station_count = EXCLUDED.station_count,
             checksum = EXCLUDED.checksum,
             lineage_json = EXCLUDED.lineage_json
         WHERE met.forcing_version.model_id = EXCLUDED.model_id
@@ -537,7 +582,6 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
           AND met.forcing_version.cycle_time IS NOT DISTINCT FROM EXCLUDED.cycle_time
           AND met.forcing_version.start_time = EXCLUDED.start_time
           AND met.forcing_version.end_time = EXCLUDED.end_time
-          AND met.forcing_version.station_count = EXCLUDED.station_count
           AND met.forcing_version.forcing_package_uri = EXCLUDED.forcing_package_uri
           AND (
               met.forcing_version.checksum IS NULL
@@ -675,6 +719,7 @@ def _replace_interp_weights(
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
     for source_id, grid_id, model_id in scopes:
+        _lock_interp_weight_scope(cursor, source_id, grid_id, model_id)
         cursor.execute(
             """
             DELETE FROM met.interp_weight
@@ -710,6 +755,15 @@ def _replace_interp_weights(
             tuples,
             page_size=5000,
         )
+
+
+def _lock_interp_weight_scope(cursor: Any, source_id: str, grid_id: str, model_id: str) -> None:
+    cursor.execute(
+        """
+        SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))
+        """,
+        (f"met.interp_weight:{source_id}\x1f{grid_id}\x1f{model_id}",),
+    )
 
 
 def _verify_apply_row_counts(cursor: Any, prepared: Mapping[str, Any]) -> dict[str, int]:
@@ -772,6 +826,19 @@ def _row_to_mapping(row: Any, columns: Sequence[str]) -> dict[str, Any]:
     if isinstance(row, Mapping):
         return dict(row)
     return {column: row[index] for index, column in enumerate(columns)}
+
+
+def _begin_apply_savepoint(cursor: Any) -> None:
+    cursor.execute(f"SAVEPOINT {APPLY_SAVEPOINT_NAME}")
+
+
+def _rollback_apply_savepoint(cursor: Any) -> None:
+    cursor.execute(f"ROLLBACK TO SAVEPOINT {APPLY_SAVEPOINT_NAME}")
+    cursor.execute(f"RELEASE SAVEPOINT {APPLY_SAVEPOINT_NAME}")
+
+
+def _release_apply_savepoint(cursor: Any) -> None:
+    cursor.execute(f"RELEASE SAVEPOINT {APPLY_SAVEPOINT_NAME}")
 
 
 def _row_value(row: Any, key: str, index: int) -> Any:
@@ -926,6 +993,29 @@ def _reason(code: str, **fields: Any) -> dict[str, Any]:
 
 def _row_reason(code: str, table: str, field: str, row_index: int) -> dict[str, Any]:
     return _reason(code, table=table, field=f"{table}.{field}", row_index=row_index)
+
+
+def _normalize_source_field(
+    row: dict[str, Any],
+    *,
+    table: str,
+    field: str,
+    reasons: list[dict[str, Any]],
+    row_index: int | None = None,
+) -> None:
+    if not _present(row.get(field)):
+        return
+    try:
+        row[field] = normalize_source_id(str(row[field]))
+    except ValueError as error:
+        reason_fields: dict[str, Any] = {
+            "table": table,
+            "field": f"{table}.{field}",
+            "detail": redact_text(str(error)),
+        }
+        if row_index is not None:
+            reason_fields["row_index"] = row_index
+        reasons.append(_reason(REASON_APPLY_SHAPE_CONFLICT, **reason_fields))
 
 
 def _present(value: Any) -> bool:
