@@ -35,13 +35,16 @@
 
 | 面 | 位置 | 当前职责 | 关键入口 |
 | --- | --- | --- | --- |
-| 计算控制面 | node-22 / `10.0.2.100` | 调度、写 DB、提交 Slurm、发布到 `/ghdc` | `plan-production --submit --continuous --max-passes 1` |
+| 计算节点 | node-22 / `10.0.2.100` | Slurm/SHUD 计算 wrapper；不连任何活 DB | Slurm job / forcing wrapper |
 | Slurm Gateway | node-22 | 将调度请求转为 Slurm 作业 | `python -m services.slurm_gateway` |
 | Slurm 计算节点 | cnXX | 执行 download/convert/forcing/SHUD/parse/frequency 等 sbatch 阶段 | Slurm job / array task |
-| 展示服务面 | node-27 | 只读展示 `/` 和 `/ops` | FastAPI + frontend，只读 DB 和 published artifacts |
-| DB | `10.0.2.100:55433/nhms` | `met`、`hydro`、`ops`、`core`、`map`、`flood` 状态源 | writer 用于 22，readonly 用于 27 |
+| node-27 服务面 | node-27 | active primary PG、ingest、展示 `/` 和 `/ops` | FastAPI + frontend + 本机 PG |
+| DB | node-27 本机 `:55432/nhms` | `met`、`hydro`、`ops`、`core`、`map`、`flood` 当前状态源 | writer/readonly roles on node-27 |
 
-不要把 `10.0.2.100:55432` 当成当前业务库；当前业务/展示口径是 `10.0.2.100:55433/nhms`。
+当前业务/展示数据库口径以
+[`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"
+段为准：node-27 本机 PostgreSQL `:55432` 是 active primary；node-22
+`:55433` 是 historical/do-not-connect，不再作为当前业务库。
 
 ## 3. 如何拉起和确认服务
 
