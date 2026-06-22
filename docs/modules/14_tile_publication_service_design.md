@@ -5,13 +5,13 @@
 
 ## 1. 模块目标
 
-把全国河网、水文结果、重现期和气象格点发布为可高性能浏览的矢量/栅格瓦片。
+把全国河网、水文结果、重现期和气象代站发布为可高性能浏览的矢量瓦片或地图数据。
 
 ## 2. 上下游关系
 
 | 方向 | 内容 |
 |---|---|
-| 上游 | PostGIS、TimescaleDB、canonical raster/COG、return_period_result。 |
+| 上游 | PostGIS、TimescaleDB、return_period_result、气象代站清单。 |
 | 下游 | 前端地图。 |
 | 主要数据表/存储 | `map.tile_layer`, `map.tile_cache`, `hydro.river_timeseries`, `flood.return_period_result` |
 
@@ -21,7 +21,7 @@
 - 按 run_id/valid_time 生成水文属性瓦片。
 - 本版本洪水重现期地图数据通过 GeoJSON 接口发布；MVT/PBF 需要 PostGIS tile clipping
   和编码能力，作为后续生产级优化。
-- 发布降雨/温度栅格瓦片。
+- 发布气象代站点位 MVT。
 - 维护 tile layer index。
 - 缓存和失效管理。
 

@@ -464,23 +464,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get meteorological raster tile */
-        get: operations["getMetTile"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/pipeline/status": {
         parameters: {
             query?: never;
@@ -1988,11 +1971,6 @@ export interface components {
         /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
         MvtTileY: number;
         MvtTileZ: number;
-        /** @description Web Mercator XYZ tile column. */
-        TileX: number;
-        /** @description Web Mercator XYZ tile row. */
-        TileY: number;
-        TileZ: number;
         ToTime: string;
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
@@ -2007,7 +1985,6 @@ export interface components {
          *     longer advertises the retired layer in the M11 user selector.
          */
         HydroMvtVariable: "q_down";
-        MetTileVariable: string;
         VariableQuery: string;
     };
     requestBodies: never;
@@ -2877,37 +2854,6 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getMetTile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                product_id: components["parameters"]["ProductId"];
-                variable: components["parameters"]["MetTileVariable"];
-                valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["TileZ"];
-                /** @description Web Mercator XYZ tile column. */
-                x: components["parameters"]["TileX"];
-                /** @description Web Mercator XYZ tile row. */
-                y: components["parameters"]["TileY"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Raw PNG raster tile */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "image/png": string;
-                };
-            };
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };

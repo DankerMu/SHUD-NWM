@@ -4,7 +4,6 @@ export type M11Layer =
   | 'flood-return-period'
   | 'warning-level'
   | 'met-stations'
-  | 'met-raster'
 export type M11Basemap = 'terrain' | 'satellite' | 'vector'
 export type M11QueryWarningLevel = 'normal' | 'elevated' | 'watch' | 'warning' | 'major' | 'severe' | 'extreme' | 'orange' | 'red'
 
@@ -25,7 +24,7 @@ export interface M11QueryState {
 export type M11QueryPatch = Partial<Record<keyof M11QueryState, string | null | undefined>>
 
 const sources = ['gfs', 'ifs', 'best', 'compare'] as const
-const layers = ['discharge', 'flood-return-period', 'warning-level', 'met-stations', 'met-raster'] as const
+const layers = ['discharge', 'flood-return-period', 'warning-level', 'met-stations'] as const
 const basemaps = ['terrain', 'satellite', 'vector'] as const
 const warningLevels = ['normal', 'elevated', 'watch', 'warning', 'major', 'severe', 'extreme', 'orange', 'red'] as const
 

@@ -13,7 +13,7 @@
 
 - 发布流域边界和河网矢量瓦片。
 - 按 run_id/valid_time 生成水文属性瓦片。
-- 发布降雨/温度栅格瓦片。
+- 发布气象代站点位 MVT。
 - 维护 tile layer index。
 - 缓存和失效管理。
 
@@ -33,7 +33,7 @@
 ## 3. 输入
 
 ```text
-上游：PostGIS、TimescaleDB、canonical raster/COG、return_period_result。
+上游：PostGIS、TimescaleDB、return_period_result、气象代站清单。
 必要上下文：environment, operator, request_id, trace_id
 配置：config/{env}.yaml + secrets manager
 ```

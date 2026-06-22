@@ -1233,30 +1233,6 @@ paths:
           $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
-  /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png:
-    get:
-      operationId: getMetTile
-      summary: Get meteorological raster tile
-      tags: [tiles]
-      parameters:
-        - $ref: "#/components/parameters/ProductId"
-        - $ref: "#/components/parameters/MetTileVariable"
-        - $ref: "#/components/parameters/ValidTimePath"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
-      responses:
-        "200":
-          description: Raw PNG raster tile
-          content:
-            image/png:
-              schema:
-                type: string
-                format: binary
-        "4XX":
-          $ref: "#/components/responses/Error"
-        "5XX":
-          $ref: "#/components/responses/Error"
   /api/v1/pipeline/status:
     get:
       operationId: getPipelineStatus
@@ -2248,32 +2224,6 @@ components:
         type: integer
         minimum: 0
         maximum: 14
-    TileX:
-      name: x
-      in: path
-      description: Web Mercator XYZ tile column.
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-        maximum: 16777215
-    TileY:
-      name: y
-      in: path
-      description: Web Mercator XYZ tile row.
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-        maximum: 16777215
-    TileZ:
-      name: z
-      in: path
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-        maximum: 24
     ToTime:
       name: to
       in: query
@@ -2324,12 +2274,6 @@ components:
       schema:
         type: string
         enum: [q_down]
-    MetTileVariable:
-      name: variable
-      in: path
-      required: true
-      schema:
-        type: string
     VariableQuery:
       name: variable
       in: query

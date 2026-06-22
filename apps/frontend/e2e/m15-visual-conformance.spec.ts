@@ -43,11 +43,6 @@ const extendedRoutes = [
     stateLabel: 'loaded-segment-forecast',
   },
   {
-    name: 'meteorology-grid',
-    path: '/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&gridQueryLon=114.35&gridQueryLat=30.62',
-    stateLabel: 'loaded-grid-contract',
-  },
-  {
     name: 'meteorology-stations',
     path: '/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237',
     stateLabel: 'loaded-station-contract',
@@ -74,8 +69,6 @@ const stateRoutes = [
   { name: 'monitoring-denied', path: '/monitoring?m15Role=viewer', stateLabel: 'rbac-denied' },
   { name: 'segment-missing', path: '/segments/missing-seg?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg', stateLabel: 'missing-segment' },
   { name: 'segment-chart-error', path: '/segments/seg-009?m15State=segment-chart-error&source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009', stateLabel: 'chart-error' },
-  { name: 'meteorology-grid-unavailable', path: '/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z', stateLabel: 'grid-unavailable' },
-  { name: 'meteorology-restricted', path: '/meteorology?tab=grid&source=CLDAS&variable=PRCP', stateLabel: 'grid-restricted-error' },
   { name: 'meteorology-stations-empty', path: '/meteorology?tab=stations&search=no-such-station', stateLabel: 'empty-stations' },
   { name: 'meteorology-station-error', path: '/meteorology?tab=stations&basin=hanjiang&stationId=HMT-HAN-0081', stateLabel: 'station-detail-error' },
   { name: 'model-assets-denied', path: '/system/model-assets?m15Role=viewer', stateLabel: 'model-assets-rbac-denied' },
@@ -754,21 +747,6 @@ async function assertExtendedRouteOracle(page: Page, routeName: string) {
       await assertVisibleFocus(page.getByRole('button', { name: 'GFS' }))
       await assertVisibleFocus(page.getByRole('button', { name: 'IFS' }))
       break
-    case 'meteorology-grid':
-      await expect(page.getByTestId('meteorology-grid-map')).toBeVisible()
-      await expect(page.getByLabel('气象栅格地图')).toBeVisible()
-      await expect(page.getByTestId('grid-timeline')).toBeVisible()
-      await expect(page.getByLabel('气象有效时间')).toBeVisible()
-      await expect(page.getByRole('tablist', { name: '气象产品标签' })).toBeVisible()
-      await expect(page.getByRole('tab', { name: '空间栅格', selected: true })).toBeVisible()
-      await assertLocatorContainsLocator(page.getByTestId('meteorology-page'), page.getByRole('tablist', { name: '气象产品标签' }))
-      await assertLocatorsDoNotOverlap(page.getByRole('tablist', { name: '气象产品标签' }), page.getByLabel('气象栅格地图'))
-      await assertLocatorsDoNotOverlap(page.getByLabel('气象栅格地图'), page.getByTestId('grid-timeline'))
-      await assertLocatorsDoNotOverlap(page.getByLabel('气象有效时间'), page.getByLabel('气象栅格地图'))
-      await assertVisibleFocus(page.getByRole('tab', { name: '空间栅格' }))
-      await assertVisibleFocus(page.getByRole('tab', { name: '气象代站' }))
-      await assertVisibleFocus(page.getByLabel('气象有效时间'))
-      break
     case 'meteorology-stations':
       await expect(page.getByTestId('station-inventory')).toBeVisible()
       await expect(page.getByLabel('流域')).toBeVisible()
@@ -863,14 +841,6 @@ async function assertStateOracle(page: Page, stateLabel: string) {
     case 'chart-error':
       await expect(page.getByText('forecast chart fixture API error').first()).toBeVisible()
       break
-    case 'grid-unavailable':
-      await expect(page.getByTestId('grid-unavailable')).toContainText('实时栅格瓦片服务尚未接入')
-      await expect(page.getByLabel('气象有效时间')).toBeVisible()
-      break
-    case 'grid-restricted-error':
-      await expect(page.getByTestId('cldas-restricted')).toContainText('CLDAS 数据权限尚未开通')
-      await expect(page.getByLabel('气象有效时间')).toBeDisabled()
-      break
     case 'empty-stations':
       await expect(page.getByTestId('station-empty')).toContainText('搜索无结果')
       await expect(page.getByLabel('流域')).toBeVisible()
@@ -942,11 +912,6 @@ async function assertSharedTokenBaseline(page: Page) {
   expect(dialogStyles.gap).toBe('16px')
   expect(dialogStyles.shadow).not.toBe('none')
   await page.getByRole('button', { name: 'Close' }).click()
-
-  await prepareRoute(page, '/meteorology?tab=grid')
-  const tab = page.getByRole('tab', { name: '空间栅格' })
-  await expect(tab).toBeVisible()
-  await expect(tab).toHaveCSS('border-radius', '4px')
 
   const toastStyles = await page.evaluate(() => {
     const toast = document.createElement('div')

@@ -20,4 +20,3 @@
 | MapLibre GL JS | https://www.maplibre.org/maplibre-gl-js/docs/ | 前端 WebGL 矢量瓦片地图技术依据。 |
 | PostGIS | https://postgis.net/ | 空间数据库选型依据。 |
 | Timescale hypertables | https://www.tigerdata.com/docs/learn/hypertables/understand-hypertables | 时序数据库 hypertable 选型依据。 |
-| TiTiler | https://developmentseed.org/titiler/ | 栅格瓦片服务参考。 |

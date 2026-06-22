@@ -75,7 +75,7 @@ Map layer limits:
 - Basin detail passes real basin boundary context from the loaded basin version when available.
   City and station labels remain explicitly unavailable because M11 currently has no
   city/station label contract or feed.
-- Production MVT/PBF river-network tiles, meteorology grids, DEM, station layers, and city or
+- Production MVT/PBF river-network tiles, DEM, station layers, and city or
   station label feeds are future contracts. Their controls remain unavailable or placeholder
   backed and must not claim rendered data.
 

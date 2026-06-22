@@ -251,4 +251,4 @@ POST /api/v1/hindcast/submit
 
 ## 10. 外部依据摘要
 
-详细链接见 `09_sources.md`。重点依据包括 SHUD 官方文档、rSHUD/AutoSHUD 仓库、NOAA GFS、ECMWF Open Data、ERA5、Slurm、USGS Bulletin 17C / PeakFQ、MapLibre、PostGIS、TimescaleDB、TiTiler。
+详细链接见 `09_sources.md`。重点依据包括 SHUD 官方文档、rSHUD/AutoSHUD 仓库、NOAA GFS、ECMWF Open Data、ERA5、Slurm、USGS Bulletin 17C / PeakFQ、MapLibre、PostGIS、TimescaleDB。

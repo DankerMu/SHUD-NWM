@@ -52,11 +52,6 @@ from packages.common.storage import VALID_PREFIX_PATTERNS, validate_object_path
             {"run_id": "fcst_gfs_2026050100_yangtze_shud_v12", "sub_prefix": "logs"},
         ),
         (
-            "tiles/met/product123/tile.png",
-            "tiles",
-            {"tile_type": "met", "product_id": "product123"},
-        ),
-        (
             "tiles/hydro/run123/tile.pbf",
             "tiles",
             {"tile_type": "hydro", "run_id": "run123"},

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench } from 'lucide-react'
+import { ArrowLeft, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { cn } from '@/lib/cn'
@@ -10,7 +10,7 @@ import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
 const GLASS_PANEL =
   'rounded-lg border border-white/40 bg-white/70 shadow-lg backdrop-blur-md supports-[backdrop-filter]:bg-white/55'
 
-/** 浮层图层切换器可选项：流量（默认）/ 气象栅格（honest 占位）/ 气象代站。 */
+/** 浮层图层切换器可选项：流量（默认）/ 气象代站。 */
 export interface M11FloatingLayerOption {
   value: M11Layer
   label: string
@@ -20,13 +20,11 @@ export interface M11FloatingLayerOption {
 
 export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m3/s', icon: Droplets },
-  { value: 'met-raster', label: '气象栅格', description: '气象格点产品', icon: CloudRain },
   { value: 'met-stations', label: '气象代站', description: '点位代站聚合', icon: MapPin },
 ]
 
 /**
- * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角，三项可点。
- * 「气象栅格」后端无真实产品，选中不画假图层，由 honest 提示与图例诚实降级。
+ * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角。
  */
 export function M11FloatingLayerSwitcher({
   layer,
@@ -135,22 +133,16 @@ function legendTitle(layer: M11Layer) {
   if (layer === 'warning-level') return '预警等级图例'
   if (layer === 'flood-return-period') return '重现期图例'
   if (layer === 'met-stations') return '气象代站图例'
-  if (layer === 'met-raster') return '气象栅格图例'
   return '径流量图例'
 }
 
 /**
  * 浮层图例（M26 单页全屏）。玻璃卡片浮在地图右下角，跟随 active layer 渲染图例。
- * 气象栅格/代站无图例合同 → honest 文案，不伪造色阶。
+ * 气象代站无图例合同 → honest 文案，不伪造色阶。
  */
 export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: LayerState[] }) {
   const entries = resolveM11FloatingLegend(layer, layers)
-  const honestNote =
-    layer === 'met-raster'
-      ? '气象格点产品未注册 / 暂未接入。'
-      : layer === 'met-stations'
-        ? '代站为点位聚合图层，无色阶图例。'
-        : '当前图层暂无图例合同。'
+  const honestNote = layer === 'met-stations' ? '代站为点位聚合图层，无色阶图例。' : '当前图层暂无图例合同。'
 
   return (
     <section
@@ -178,22 +170,6 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
         </p>
       )}
     </section>
-  )
-}
-
-/** 气象栅格 honest 占位提示（选中 met-raster 时浮在地图顶部，诚实说明未接入，不画假栅格）。 */
-export function M11MetRasterNotice() {
-  return (
-    <div
-      className={cn(
-        'absolute left-1/2 top-4 z-[110] max-w-[min(28rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-sm text-neutral-800',
-        GLASS_PANEL,
-      )}
-      role="status"
-      data-testid="m11-met-raster-notice"
-    >
-      气象格点产品未注册 / 暂未接入，地图不绘制气象栅格。
-    </div>
   )
 }
 

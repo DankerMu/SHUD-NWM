@@ -625,14 +625,13 @@ describe('M11 visual foundation shell', () => {
     const user = userEvent.setup()
     // 默认流量（discharge）选中
     expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
-    // 三项可点：流量 / 气象栅格 / 气象代站
-    expect(screen.getByRole('button', { name: /气象栅格/ })).toBeInTheDocument()
+    // 气象栅格已退役，只保留气象代站入口。
+    expect(screen.queryByRole('button', { name: /气象栅格/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
 
-    // 选气象栅格 → honest 未注册占位，不画假图层
-    await user.click(screen.getByRole('button', { name: /气象栅格/ }))
-    await waitFor(() => expect(screen.getByTestId('m11-met-raster-notice')).toBeInTheDocument())
-    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('未注册')
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+    await waitFor(() => expect(window.location.search).toContain('layer=met-stations'))
+    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('点位聚合')
   })
 
   it('keeps default discharge unregistered without basin river geometry while preserving controls and unavailable map status', async () => {
@@ -1806,8 +1805,8 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByText('水文图层')).toBeInTheDocument()
     expect(screen.getByText('气象图层')).toBeInTheDocument()
     expect(screen.getByText('基础图层')).toBeInTheDocument()
-    expect(screen.getByText('降水格点')).toBeInTheDocument()
-    expect(screen.getAllByText('气象格点合同未在 M11 接入')).toHaveLength(2)
+    expect(screen.queryByText('降水格点')).not.toBeInTheDocument()
+    expect(screen.queryByText('气象格点合同未在 M11 接入')).not.toBeInTheDocument()
     expect(screen.getByText('DEM 合同未在 M11 接入')).toBeInTheDocument()
     expect(screen.getByText('Layer has no valid times.')).toBeInTheDocument()
 

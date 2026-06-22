@@ -88,11 +88,6 @@ const sourceOptions: Array<{ value: M11Source; label: string; description: strin
   { value: 'best', label: 'Best Available', description: 'URL 仅写入 source=best' },
 ]
 
-const meteorologyPlaceholders = [
-  ['precipitation-grid', '降水格点', '气象格点合同未在 M11 接入'],
-  ['temperature-grid', '温度格点', '气象格点合同未在 M11 接入'],
-] as const
-
 const basePlaceholders = [
   ['basin-boundaries', '流域边界'],
   ['river-network', '河网'],
@@ -104,7 +99,6 @@ const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   'flood-return-period': getM11LayerLegend('flood-return-period'),
   'warning-level': getM11LayerLegend('warning-level'),
   'met-stations': [],
-  'met-raster': [],
 }
 
 const meteorologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
@@ -281,9 +275,6 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
             </button>
           )
         })}
-        {meteorologyPlaceholders.map(([id, label, reason]) => (
-          <UnavailableLayerRow key={id} label={label} reason={reason} />
-        ))}
       </div>
 
       <LayerGroupTitle title="基础图层" />
@@ -313,9 +304,7 @@ export function LayerLegendPanel({ state, layers = [] }: SharedControlProps) {
         ? '重现期图例'
         : state.layer === 'met-stations'
           ? '气象代站图例'
-          : state.layer === 'met-raster'
-            ? '气象栅格图例'
-            : '径流量图例'
+          : '径流量图例'
 
   return (
     <section className="space-y-2" aria-label="M11 图例">

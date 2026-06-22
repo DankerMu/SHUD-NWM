@@ -58,12 +58,6 @@ VALID_PREFIX_PATTERNS: tuple[ObjectPrefixPattern, ...] = (
         captured_literals={2: "sub_prefix"},
     ),
     ObjectPrefixPattern(
-        "tiles/met/{product_id}/...",
-        "tiles",
-        ("tiles", "met", "{product_id}"),
-        captured_literals={1: "tile_type"},
-    ),
-    ObjectPrefixPattern(
         "tiles/hydro/{run_id}/...",
         "tiles",
         ("tiles", "hydro", "{run_id}"),

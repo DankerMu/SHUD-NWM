@@ -42,17 +42,15 @@ const dischargeLayer: LayerState = {
 }
 
 describe('M11FloatingLayerSwitcher', () => {
-  it('offers discharge/met-raster/met-stations and dispatches layer changes', async () => {
+  it('offers discharge/met-stations and dispatches layer changes', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
     render(<M11FloatingLayerSwitcher layer="discharge" onQueryChange={onQueryChange} />)
 
     expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /气象栅格/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /气象栅格/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /气象栅格/ }))
-    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-raster' })
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
     expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
   })
@@ -92,13 +90,6 @@ describe('M11FloatingLegend', () => {
     expect(resolveM11FloatingLegend('warning-level', []).length).toBeGreaterThan(0)
     render(<M11FloatingLegend layer="warning-level" layers={[]} />)
     expect(screen.getByText('预警等级图例')).toBeInTheDocument()
-  })
-
-  it('shows an honest not-registered note for met-raster (no fabricated color ramp)', () => {
-    render(<M11FloatingLegend layer="met-raster" layers={[]} />)
-    expect(screen.getByText('气象栅格图例')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('未注册')
-    expect(screen.queryByTestId('m11-floating-legend-entries')).not.toBeInTheDocument()
   })
 
   it('shows an honest note for met-stations (point cluster, no color ramp)', () => {

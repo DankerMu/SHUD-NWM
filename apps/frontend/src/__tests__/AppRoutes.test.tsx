@@ -1103,22 +1103,19 @@ describe('App route state', () => {
     await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ layer: 'met-stations' })))
   })
 
-  it('honestly degrades the met-raster layer without drawing a fake grid (M26)', async () => {
-    const user = userEvent.setup()
+  it('normalizes the retired met-raster layer back to the default discharge layer (M26)', async () => {
     useOverviewDataStore.setState({
       overview: overviewSnapshot(m11Layers, ''),
     })
-    window.history.pushState({}, '', '/?source=gfs')
+    window.history.pushState({}, '', '/?source=gfs&layer=met-raster')
 
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /气象栅格/ }))
-    expect(screen.getByTestId('m11-met-raster-notice')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('未注册')
-    // 诚实降级：地图不渲染任何气象栅格叠加层，而是给出"未注册"提示，绝不画假格点
-    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('地图不会渲染该叠加层')
-    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays', 'met-raster')
+    await waitFor(() => expect(window.location.search).not.toContain('met-raster'))
+    expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /气象栅格/ })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-met-raster-notice')).not.toBeInTheDocument()
   })
 
   it('preserves river network version in overview load state and renders the matching snapshot', async () => {

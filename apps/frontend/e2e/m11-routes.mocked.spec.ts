@@ -106,6 +106,59 @@ async function mockSingleMapApis(
     options.calls?.push({ path: url.pathname, query: Object.fromEntries(url.searchParams.entries()) })
 
     if (url.pathname === '/api/v1/runtime/config') return fulfill(route, runtimeConfig)
+    if (url.pathname === '/api/v1/mvp/qhh/latest-product') {
+      const source = (url.searchParams.get('source') ?? 'GFS').toUpperCase()
+      return fulfill(route, {
+        basin_id: url.searchParams.get('basin_id') ?? 'basin-demo',
+        basin_version_id: 'bv-001',
+        river_network_version_id: 'rn-v1',
+        model_id: 'model-demo',
+        source_id: source,
+        cycle_time: '2026-05-18T00:00:00Z',
+        run_id: `run-${source.toLowerCase()}`,
+        forcing_version_id: `forc-${source.toLowerCase()}`,
+        station_count: 1,
+        expected_station_count: 1,
+        segment_count: 2,
+        expected_segment_count: 2,
+        status: 'ready',
+        run_status: 'frequency_done',
+        valid_time_start: '2026-05-18T00:00:00Z',
+        valid_time_end: '2026-05-25T00:00:00Z',
+        river_valid_time_start: '2026-05-18T00:00:00Z',
+        river_valid_time_end: '2026-05-25T00:00:00Z',
+        forcing_valid_time_start: '2026-05-18T00:00:00Z',
+        forcing_valid_time_end: '2026-05-25T00:00:00Z',
+        available_horizon_hours: 168,
+        expected_horizon_hours: 168,
+        shorter_horizon: false,
+        available_issue_times: ['2026-05-18T00:00:00Z'],
+        availability: {
+          ready: true,
+          unavailable_reasons: [],
+          quality_flags: [],
+          quality_notes: [],
+          return_period_status: 'available',
+          return_period_reasons: [],
+        },
+      })
+    }
+    if (url.pathname === '/api/v1/met/stations') {
+      return fulfill(route, {
+        items: [
+          {
+            station_id: 'HMT-DEMO-001',
+            station_name: 'Demo forcing station 001',
+            longitude: 101.2,
+            latitude: 31.2,
+          },
+        ],
+        total_count: 1,
+        limit: Number(url.searchParams.get('limit') ?? 500),
+        offset: Number(url.searchParams.get('offset') ?? 0),
+        filters: {},
+      })
+    }
     if (url.pathname === '/api/v1/basins') {
       if (options.invalidBasin) return fulfill(route, [])
       return fulfill(route, [
@@ -360,7 +413,7 @@ test.describe('M26 single fullscreen map', () => {
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
   })
 
-  test('switches layers through the floating switcher and degrades met-raster honestly', async ({ page }) => {
+  test('switches layers through the floating switcher without the retired met-raster entry', async ({ page }) => {
     await mockSingleMapApis(page)
 
     await page.goto('/?source=gfs')
@@ -368,18 +421,13 @@ test.describe('M26 single fullscreen map', () => {
     // 默认流量图层选中，浮层图例显示径流量。
     await expect(page.getByRole('button', { name: /流量/, pressed: true })).toBeVisible()
     await expect(page.getByTestId('m11-floating-legend')).toContainText('径流量图例')
-
-    // 切气象栅格 → honest 占位，绝不画假格点。
-    await page.getByRole('button', { name: /气象栅格/ }).click()
-    await expect(page).toHaveURL(/layer=met-raster/)
-    await expect(page.getByTestId('m11-met-raster-notice')).toBeVisible()
-    await expect(page.getByTestId('m11-floating-legend-empty')).toContainText('未注册')
-    await expect(page.getByTestId('m11-map-unavailable')).toContainText('地图不会渲染该叠加层')
+    await expect(page.getByRole('button', { name: /气象栅格/ })).toHaveCount(0)
+    await expect(page.getByTestId('m11-met-raster-notice')).toHaveCount(0)
 
     // 切气象代站 → 全国总览未选流域时 honest「请选择流域」，不取假数据。
     await page.getByRole('button', { name: /气象代站/ }).click()
     await expect(page).toHaveURL(/layer=met-stations/)
-    await expect(page.getByTestId('m11-met-station-status')).toBeVisible()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')
   })
 
   test('lands the /flood-alerts redirect on the flood-return-period layer', async ({ page }) => {
@@ -399,7 +447,7 @@ test.describe('M26 single fullscreen map', () => {
     await expect.poll(() => calls.some((call) => call.path === '/api/v1/runs' && call.query.source === 'GFS')).toBe(true)
   })
 
-  test('lands the /meteorology redirect on the met-stations layer with honest empty state', async ({ page }) => {
+  test('lands the /meteorology redirect on the met-stations layer', async ({ page }) => {
     await mockSingleMapApis(page)
 
     // 旧 /meteorology → /?layer=met-stations（LegacyRedirect extraParams）。
@@ -407,8 +455,7 @@ test.describe('M26 single fullscreen map', () => {
     await expect(page).toHaveURL(/layer=met-stations/)
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
     await expect(page.getByRole('button', { name: /气象代站/, pressed: true })).toBeVisible()
-    // 全国总览无 basinId → honest 提示，不绘制空图层冒充完整。
-    await expect(page.getByTestId('m11-met-station-status')).toBeVisible()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')
   })
 
   test('renders the national overview map surface and floating controls', async ({ page }) => {

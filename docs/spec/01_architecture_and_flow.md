@@ -50,7 +50,7 @@
 | Output Parser | 解析 `.rivqdown`、`.rivystage` 等输出。 |
 | Flood Frequency Engine | 计算频率曲线与预报期重现期。 |
 | API Service | 对前端和外部系统提供查询接口。 |
-| Tile Publisher | 发布河网矢量瓦片和气象栅格瓦片。 |
+| Tile Publisher | 发布河网、水文预报与气象代站矢量瓦片。 |
 | Web Frontend | 地图、曲线、scenario、时间轴交互。 |
 
 ## 3. Forecast 流程
@@ -184,7 +184,6 @@ states/{model_id}/{valid_time}/
 runs/{run_id}/input/
 runs/{run_id}/output/
 runs/{run_id}/logs/
-tiles/met/{product_id}/
 tiles/hydro/{run_id}/
 ```
 

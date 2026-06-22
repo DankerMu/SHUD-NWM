@@ -14,7 +14,6 @@ import {
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
   M11FloatingNotice,
-  M11MetRasterNotice,
   M11OpsLink,
 } from '@/components/map/M11FloatingControls'
 import { bboxToMapFit, mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
@@ -49,7 +48,7 @@ const OPERATOR_ROLES = ['operator', 'model_admin', 'sys_admin']
 /**
  * 单页全屏地图展示端（M26）：整个展示端 = 一张铺满视口的地图 + 玻璃质感浮层。
  * 删去左/右/底所有边栏；按 query 内 basinId 双模式：null=全国总览 / 非null=流域详情。
- * 图层切换（含气象栅格 honest 占位）走左上浮层；图例走右下浮层；河段/代站详情走玻璃弹窗。
+ * 图层切换走左上浮层；图例走右下浮层；河段/代站详情走玻璃弹窗。
  */
 export function OverviewPage() {
   const location = useLocation()
@@ -97,7 +96,7 @@ export function OverviewPage() {
 }
 
 /**
- * 全屏地图外壳：地图铺满视口，浮层切换器/图例/运维链接/气象栅格 honest 占位 + 自定义浮层。
+ * 全屏地图外壳：地图铺满视口，浮层切换器/图例/运维链接 + 自定义浮层。
  */
 function M11FullscreenMap({
   state,
@@ -174,7 +173,6 @@ function M11FullscreenMap({
       <M11FloatingLayerSwitcher layer={state.layer} onQueryChange={onQueryChange} />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11OpsLink visible={opsVisible} />
-      {state.layer === 'met-raster' ? <M11MetRasterNotice /> : null}
       {children}
       <M11FloatingLegend layer={state.layer} layers={layers} />
       </section>

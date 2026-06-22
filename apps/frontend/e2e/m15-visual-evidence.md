@@ -45,7 +45,6 @@ The required loaded routes are captured at `1920x1080`, `1440x900`, and `1280x90
 The same command also captures deterministic extended routes:
 
 - `/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009`
-- `/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&gridQueryLon=114.35&gridQueryLat=30.62`
 - `/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237`
 - `/system/model-assets?modelId=model-demo`
 
@@ -57,7 +56,6 @@ retain the full three-viewport coverage above. The canonical state matrix covers
 - flood alerts empty alerts, warning levels, and API error.
 - monitoring empty jobs, failed job/error, and RBAC denied/restricted.
 - segment detail missing segment and chart/error state.
-- meteorology grid unavailable plus CLDAS restricted/error with disabled timeline.
 - meteorology stations empty stations and station detail/forcing unavailable state.
 - model assets restricted role denied, loading, and redacted error.
 

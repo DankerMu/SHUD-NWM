@@ -12,7 +12,7 @@ THEN loaded, loading, empty, error, restricted or RBAC-denied, and partial-data 
 
 #### Scenario: Extended state matrix
 WHEN completed segment detail, meteorology, or model asset routes are included in M15 evidence
-THEN missing segment, chart/error, grid unavailable/restricted, empty stations, station detail unavailable, model-assets denied, loading, and redacted-error states are covered or explicitly narrowed in governance documentation
+THEN missing segment, chart/error, empty stations, station detail unavailable, model-assets denied, loading, and redacted-error states are covered or explicitly narrowed in governance documentation
 
 #### Scenario: Restricted data
 WHEN a data source is unavailable or restricted
@@ -29,4 +29,3 @@ THEN navigation and direct-route behavior show the documented denied state witho
 #### Scenario: Time and fixture-field compatibility
 WHEN visual state fixtures exercise forecast, flood, overview, or meteorology pages
 THEN existing route query fields, API fixture field names, unit labels, and valid-time controls keep their documented behavior without backend schema changes
-

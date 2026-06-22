@@ -138,7 +138,6 @@ states/{model_id}/{valid_time}/
 runs/{run_id}/input/
 runs/{run_id}/output/
 runs/{run_id}/logs/
-tiles/met/{product_id}/
 tiles/hydro/{run_id}/
 ```
 

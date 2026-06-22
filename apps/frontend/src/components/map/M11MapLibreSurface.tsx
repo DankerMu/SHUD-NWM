@@ -254,7 +254,7 @@ export function M11MapLibreSurface({
   )
   const renderableOverlay = overlay && (overlay.source.type === 'vector' || overlayData) ? overlay : null
   // 动态 mesh 河网层（详情 GeoJSON 河段 / 流量 MVT 线层）激活的流域，其静态河流要从 national 底图剔除，
-  // 避免「平滑静态线 + 阶梯 mesh 线」双线叠画；非线叠加层（如气象栅格）不触发剔除，保留诚实降级。
+  // 避免「平滑静态线 + 阶梯 mesh 线」双线叠画；非线叠加层不触发剔除，保留诚实降级。
   const overlayIsRiverLine = renderableOverlay?.layer.type === 'line'
   const dynamicRiverActive = basinRiverFeatureCollection.features.length > 0 || overlayIsRiverLine
   const renderedNationalRiver = useMemo<FeatureCollection | null>(() => {
