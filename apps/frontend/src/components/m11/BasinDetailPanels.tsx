@@ -130,9 +130,9 @@ export function useBasinDetailMode({
 
   const resolvedSource = concreteSource(sourceSelection?.resolvedSource)
 
-  // 两类 popup 互斥状态：river 与 station 各持选中要素 + 经纬度锚点。
+  // 两类曲线面板互斥状态：river 与 station 各持选中要素；窗口统一居中呈现。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number] } | null>(null)
-  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; lngLat: [number, number] } | null>(null)
+  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation } | null>(null)
 
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
   const handleMapOverlayClick = useCallback(
@@ -140,12 +140,9 @@ export function useBasinDetailMode({
       if (interaction.layerId === 'met-stations') {
         const stationId = mapFeatureStringProperty(interaction.feature, 'station_id')
         if (!stationId) return
-        const lngLat = popupAnchorFromInteraction(interaction)
-        if (!lngLat) return
         setRiverPopup(null)
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
-          lngLat,
         })
         return
       }
@@ -211,25 +208,13 @@ export function useBasinDetailMode({
     lastConcretePopupSourceRef.current = resolvedSource
   }, [resolvedSource])
 
-  // 代站详情仍走地图锚定 popup（小弹窗）；河段流量预报移到右侧 16:9 面板（见 riverPanel）。
-  const popup: M11MapPopupSlot | null = stationPopup
-    ? {
-        longitude: stationPopup.lngLat[0],
-        latitude: stationPopup.lngLat[1],
-        onClose: () => setStationPopup(null),
-        content: (
-          <M11StationForcingPopup
-            basinId={basinId}
-            initialSource={resolvedSource}
-            station={stationPopup.station}
-            onClose={() => setStationPopup(null)}
-          />
-        ),
-      }
-    : null
+  const popup: M11MapPopupSlot | null = null
 
   const riverPanel = riverPopup ? (
     <M11RiverForecastPanel basinId={basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
+  ) : null
+  const stationPanel = stationPopup ? (
+    <M11StationForcingPopup basinId={basinId} initialSource={resolvedSource} station={stationPopup.station} onClose={() => setStationPopup(null)} />
   ) : null
 
   return {
@@ -246,7 +231,12 @@ export function useBasinDetailMode({
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
     stationFeatureCollection: stationLayer.featureCollection,
     popup,
-    riverPanel,
+    riverPanel: (
+      <>
+        {riverPanel}
+        {stationPanel}
+      </>
+    ),
     onMapOverlayHover: handleMapOverlayHover,
     onMapOverlayClick: handleMapOverlayClick,
     backToOverview,

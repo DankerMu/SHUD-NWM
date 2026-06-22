@@ -41,7 +41,7 @@ export function M11PopupHeader({
   onClose?: () => void
 }) {
   return (
-    <div className="flex items-start justify-between gap-2.5 border-b border-white/10 px-4 py-3">
+    <div className="flex shrink-0 items-start justify-between gap-2.5 border-b border-white/10 px-4 py-3">
       <div className="flex min-w-0 items-start gap-2.5">
         <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-cyan-400/10 text-cyan-300 ring-1 ring-inset ring-cyan-400/30 shadow-[0_0_16px_rgba(34,211,238,0.2)]">
           <Icon className="h-4 w-4" aria-hidden="true" />
@@ -88,7 +88,7 @@ export function M11PopupSourceControls({
 }) {
   const unavailableSet = new Set(unavailableIssueTimes)
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
+    <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
       <div className="inline-flex items-center rounded-lg bg-white/5 p-0.5 ring-1 ring-inset ring-white/10" role="group" aria-label="预报源选择">
         {M11_POPUP_SOURCES.map((option) => (
           <button

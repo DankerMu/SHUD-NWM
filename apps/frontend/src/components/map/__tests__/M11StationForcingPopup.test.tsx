@@ -145,7 +145,8 @@ describe('M11StationForcingPopup', () => {
     mockSeries(seriesResponse())
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
-    expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-popup')).toHaveClass('aspect-video')
+    expect(screen.getByTestId('m11-station-popup')).toHaveClass('left-1/2')
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({

@@ -349,7 +349,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
 
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number]; basinId: string | null } | null>(null)
-  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; lngLat: [number, number]; basinId: string | null } | null>(null)
+  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; basinId: string | null } | null>(null)
   // 点流域 → 相机飞到其 bbox（留在全国总览、不钻取/不锁定）。
   const [basinFit, setBasinFit] = useState<M11MapCameraFit | null>(null)
   // 切图层时清掉残留弹窗（弹窗只属于当前水文图层）。
@@ -363,12 +363,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       if (interaction.layerId === 'met-stations') {
         const stationId = mapFeatureStringProperty(interaction.feature, 'station_id')
         if (!stationId) return
-        const lngLat = popupAnchorFromInteraction(interaction)
-        if (!lngLat) return
         setRiverPopup(null)
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
-          lngLat,
           basinId: stationLayerBasinId,
         })
         return
@@ -422,21 +419,14 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const riverForecastPanel = riverPopup ? (
     <M11RiverForecastPanel basinId={riverPopup.basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
   ) : null
-  const stationPopupSlot: M11MapPopupSlot | null = stationPopup
-    ? {
-        longitude: stationPopup.lngLat[0],
-        latitude: stationPopup.lngLat[1],
-        onClose: () => setStationPopup(null),
-        content: (
-          <M11StationForcingPopup
-            basinId={stationPopup.basinId}
-            initialSource={concreteHydroMetSource(sourceSelection?.resolvedSource)}
-            station={stationPopup.station}
-            onClose={() => setStationPopup(null)}
-          />
-        ),
-      }
-    : null
+  const stationForecastPanel = stationPopup ? (
+    <M11StationForcingPopup
+      basinId={stationPopup.basinId}
+      initialSource={concreteHydroMetSource(sourceSelection?.resolvedSource)}
+      station={stationPopup.station}
+      onClose={() => setStationPopup(null)}
+    />
+  ) : null
 
   // 全国总览开代站图层：用当前总览中可展示的流域身份取代站，避免用户必须先钻取流域才能看到点位。
   const stationLayer = useMetStationLayer({
@@ -479,7 +469,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       meshRiverBasinIds={meshRiverBasinIds}
       stationFeatureCollection={stationLayer.featureCollection}
-      popup={stationPopupSlot}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
       fitTo={basinFit}
@@ -489,6 +478,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       onOverlayClick={handleMapOverlayClick}
     >
       {riverForecastPanel}
+      {stationForecastPanel}
       {state.layer === 'met-stations' && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>

@@ -4,10 +4,10 @@ import { CloudRain } from 'lucide-react'
 
 import { echarts } from '@/components/charts/echartsCore'
 import {
+  M11_POPUP_GLASS,
   M11PopupEmpty,
   M11PopupHeader,
   M11PopupLoading,
-  M11PopupShell,
   M11PopupSourceControls,
 } from '@/components/map/M11PopupChrome'
 import { useHydroMetPopupProduct } from '@/components/map/useHydroMetPopupProduct'
@@ -71,7 +71,7 @@ function retainedDiskMissMessage(cycleTime: string) {
 }
 
 /**
- * 代站五要素 forcing 曲线 popup（M26 全屏单页）。玻璃质感 + 弹窗内 source/起报/变量选择。
+ * 代站五要素 forcing 曲线面板（M26 全屏单页）。与河段流量曲线同样使用居中 16:9 玻璃窗。
  * 变量选择：PRCP/TEMP/RH/wind/Rn 多选切换（默认全显），改选只显所选变量曲线。
  * source 切换 → 以新源重取 latest-product + station-series。
  * honest 红线：身份不符 / 任一无效点 / 缺 unit / 坏 metadata → 空态，绝不渲染 echarts；product=null → honest 空态。
@@ -163,7 +163,14 @@ export function M11StationForcingPopup({
   )
 
   return (
-    <M11PopupShell testId="m11-station-popup">
+    <aside
+      className={cn(
+        'absolute left-1/2 top-1/2 z-[130] flex aspect-video w-[min(44rem,46vw)] max-h-[82vh] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
+        M11_POPUP_GLASS,
+      )}
+      data-testid="m11-station-popup"
+    >
+      <div className="h-px shrink-0 bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
       <M11PopupHeader
         icon={CloudRain}
         title={`${station.station_id}${station.station_name ? ` · ${station.station_name}` : ''}`}
@@ -196,7 +203,7 @@ export function M11StationForcingPopup({
           selectedVariables={selectedVariables}
         />
       ) : null}
-    </M11PopupShell>
+    </aside>
   )
 }
 
@@ -209,7 +216,7 @@ function StationVariableSelector({
 }) {
   return (
     <div
-      className="flex flex-wrap items-center gap-1.5 border-b border-white/10 px-4 py-2"
+      className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-white/10 px-4 py-2"
       role="group"
       aria-label="代站变量选择"
       data-testid="m11-station-variable-selector"
@@ -269,7 +276,7 @@ function StationForcingBody({
   }
 
   return (
-    <div className="max-h-[60vh] space-y-3 overflow-auto px-4 py-3" data-testid="m11-station-popup-loaded">
+    <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-2.5" data-testid="m11-station-popup-loaded">
       {HYDRO_MET_STATION_VARIABLES.filter((variable) => selectedVariables.has(variable)).map((variable) => (
         <StationVariableChart key={variable} variable={variable} series={byVariable.get(variable)} />
       ))}
