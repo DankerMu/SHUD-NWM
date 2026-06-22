@@ -9,11 +9,20 @@ import {
   releaseFloodRankingOnDemand,
   useOverviewDataStore,
 } from '@/stores/overviewData'
+import { useMonitoringStore, type RuntimeConfig } from '@/stores/monitoring'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import { filterBasinSegmentRows, m11BasinRiverCollectionBudget, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
 
 const RIVER_SEGMENT_RETAINED_ITEM_CAP = 10_000
+
+const displayRuntimeConfig: RuntimeConfig = {
+  service_role: 'display_readonly',
+  control_mutations_enabled: false,
+  slurm_routes_enabled: false,
+  queue_depth_mode: 'display_readonly_unavailable',
+  display_readonly: true,
+}
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -191,6 +200,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   clearOverviewDataCache()
   useOverviewDataStore.setState(useOverviewDataStore.getInitialState(), true)
+  useMonitoringStore.setState(useMonitoringStore.getInitialState(), true)
 })
 
 describe('useOverviewDataStore', () => {
@@ -4191,6 +4201,41 @@ describe('useOverviewDataStore', () => {
       expect(calls.filter((p) => p === '/api/v1/layers/{layer_id}/valid-times')).toEqual([])
       // 同时确认 ranking 也未被请求（防 PR 5/7 rebase 时回归）。
       expect(calls.filter((p) => p === '/api/v1/flood-alerts/ranking')).toEqual([])
+    })
+
+    it('skips overview queue depth enrichment when runtime config is display_readonly', async () => {
+      const calls: string[] = []
+      useMonitoringStore.setState({ runtimeConfig: displayRuntimeConfig })
+
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        calls.push(path)
+        if (path === '/api/v1/basins') return success([basin]) as never
+        if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') {
+          return success([
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: [],
+              metadata: { valid_times: ['2026-05-18T06:00:00Z'] },
+            },
+          ]) as never
+        }
+        if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+        if (path === '/api/v1/flood-alerts/summary') {
+          return success({ run_id: run.run_id, total_segments: 0, usable_curves: 0, unavailable_count: 0, levels: [] }) as never
+        }
+        if (path === '/api/v1/queue/depth') throw new Error('queue depth must not be called for display_readonly')
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      await useOverviewDataStore.getState().loadOverview(query)
+
+      expect(calls).not.toContain('/api/v1/queue/depth')
+      expect(useOverviewDataStore.getState().overview?.summary.partialErrors).not.toEqual(expect.arrayContaining(['queue: 暂不可用']))
     })
   })
 

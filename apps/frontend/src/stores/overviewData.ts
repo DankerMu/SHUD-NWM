@@ -41,6 +41,7 @@ import {
   type SelectedSegmentDetail,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
+import { isDisplayReadonlyRuntimeConfig, useMonitoringStore } from '@/stores/monitoring'
 
 export interface M11SnapshotRequestScope {
   queryKey: string
@@ -834,7 +835,17 @@ async function fetchPipelineStatus(query: M11QueryState, run: ApiHydroRun | null
 }
 
 async function fetchQueueDepth() {
+  if (await isOverviewQueueDepthUnavailable()) return null
   return cached(cacheKey('/api/v1/queue/depth'), () => getApi<ApiQueueDepth>('/api/v1/queue/depth', undefined, '获取队列深度失败'))
+}
+
+async function isOverviewQueueDepthUnavailable() {
+  const monitoring = useMonitoringStore.getState()
+  if (isDisplayReadonlyRuntimeConfig(monitoring.runtimeConfig)) return true
+  if (!monitoring.runtimeConfig && !monitoring.runtimeConfigError) {
+    await monitoring.fetchRuntimeConfig()
+  }
+  return isDisplayReadonlyRuntimeConfig(useMonitoringStore.getState().runtimeConfig)
 }
 
 async function fetchLayers(runId?: string | null) {
