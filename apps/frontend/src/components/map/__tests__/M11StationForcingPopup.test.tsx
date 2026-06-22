@@ -213,6 +213,8 @@ describe('M11StationForcingPopup', () => {
 
     expect(screen.getByTestId('m11-station-popup')).toHaveClass('aspect-video')
     expect(screen.getByTestId('m11-station-popup')).toHaveClass('left-1/2')
+    expect(screen.getByText('QHH 代站 1')).toBeInTheDocument()
+    expect(screen.getByText('站点 ID qhh_forc_001')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()

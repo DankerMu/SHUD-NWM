@@ -4,6 +4,7 @@ import { Waves, X } from 'lucide-react'
 import { ForecastChart } from '@/components/charts/ForecastChart'
 import { formatIssueTime, M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
+import { formatRiverSegmentDisplayName } from '@/lib/hydroMet/displayNames'
 import {
   formatHydroMetRiverForecastMessage,
   formatHydroMetRiverForecastUiString,
@@ -159,6 +160,14 @@ export function M11RiverForecastPanel({
     () => segmentIdentity(segment),
     [segment.river_segment_id, segment.segment_id, segment.river_network_version_id, segment.basin_version_id, segment.name],
   )
+  const displayName = useMemo(
+    () => formatRiverSegmentDisplayName({
+      riverSegmentId: identity.river_segment_id,
+      segmentName: segment.name,
+      basinId,
+    }),
+    [basinId, identity.river_segment_id, segment.name],
+  )
   const [loading, setLoading] = useState(true)
   const [showLoadingCopy, setShowLoadingCopy] = useState(false)
   const [forecast, setForecast] = useState<DualForecast>({ data: null, results: [] })
@@ -218,10 +227,11 @@ export function M11RiverForecastPanel({
             <Waves className="h-4 w-4" aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold leading-tight text-slate-50" title={identity.name}>
-              {identity.river_segment_id} · {identity.name}
+            <div className="truncate text-sm font-semibold leading-tight text-slate-50" title={displayName.meta ?? displayName.title}>
+              {displayName.title}
             </div>
             <div className="mt-0.5 text-[11px] uppercase tracking-[0.14em] text-cyan-300/80">河段 q_down 流量预报 · GFS+IFS</div>
+            {displayName.meta ? <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{displayName.meta}</div> : null}
           </div>
         </div>
         {onClose ? (
@@ -276,7 +286,7 @@ export function M11RiverForecastPanel({
             <span className="ml-auto text-[10px] text-slate-500">滚轮缩放时间轴</span>
           </div>
           <div className="min-h-0 flex-1" data-testid="m11-river-panel-chart">
-            <ForecastChart data={forecast.data} segmentName={identity.name} variant="compact" appearance="dark" zoomable fill />
+            <ForecastChart data={forecast.data} segmentName={displayName.title} variant="compact" appearance="dark" zoomable fill />
           </div>
           {failedReasons.length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-river-panel-partial">

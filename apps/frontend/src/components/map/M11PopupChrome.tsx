@@ -33,11 +33,13 @@ export function M11PopupHeader({
   icon: Icon,
   title,
   subtitle,
+  meta,
   onClose,
 }: {
   icon: typeof X
   title: string
   subtitle: string
+  meta?: string | null
   onClose?: () => void
 }) {
   return (
@@ -51,6 +53,7 @@ export function M11PopupHeader({
             {title}
           </div>
           <div className="mt-0.5 text-[11px] uppercase tracking-[0.14em] text-cyan-300/80">{subtitle}</div>
+          {meta ? <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{meta}</div> : null}
         </div>
       </div>
       {onClose ? (

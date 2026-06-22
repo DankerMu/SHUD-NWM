@@ -11,6 +11,7 @@ import {
   M11PopupLoading,
 } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
+import { formatStationDisplayName } from '@/lib/hydroMet/displayNames'
 import {
   HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
@@ -136,6 +137,10 @@ export function M11StationForcingPopup({
   // 起报时间按代站绑定：换站后选中的 cycle 自动失效回最新。
   const [selection, setSelection] = useState<{ key: string; cycle: string } | null>(null)
   const selectedCycle = selection && selection.key === station.station_id ? selection.cycle : null
+  const displayName = useMemo(
+    () => formatStationDisplayName({ stationId: station.station_id, stationName: station.station_name, basinId }),
+    [basinId, station.station_id, station.station_name],
+  )
 
   useEffect(() => {
     if (!basinId) {
@@ -171,8 +176,9 @@ export function M11StationForcingPopup({
       <div className="h-px shrink-0 bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
       <M11PopupHeader
         icon={CloudRain}
-        title={`${station.station_id}${station.station_name ? ` · ${station.station_name}` : ''}`}
+        title={displayName.title}
         subtitle="气象代站五要素 forcing · GFS+IFS"
+        meta={displayName.meta}
         onClose={onClose}
       />
       <StationVariableSelector

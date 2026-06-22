@@ -139,6 +139,26 @@ describe('M11RiverForecastPanel', () => {
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
   })
 
+  it('renders a readable river segment title while preserving the raw segment ID', async () => {
+    const rawSegmentId = 'basins_qhh_shud_shud_riv_000974'
+    mockForecastBySource()
+    render(
+      <M11RiverForecastPanel
+        basinId="basins_qhh"
+        segment={{
+          ...segment,
+          river_segment_id: rawSegmentId,
+          segment_id: rawSegmentId,
+          name: rawSegmentId,
+        }}
+      />,
+    )
+
+    expect(screen.getByText('QHH 河段 974')).toBeInTheDocument()
+    expect(screen.getByText(`河段 ID ${rawSegmentId}`)).toBeInTheDocument()
+    await screen.findByTestId('m11-river-panel-empty')
+  })
+
   it('does not cache segment forecast-series across reopened segment panels', async () => {
     mockForecastBySource()
     const { unmount } = render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
