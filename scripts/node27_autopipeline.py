@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Basin-agnostic autopipeline: discover object-store runs, seed missing basin
-registries, then register -> mirror -> parse -> refresh-coverage every run.
+registries, then register -> object-store forcing handoff (or explicit
+transitional mirror) -> parse -> refresh-coverage every run.
 
 Generalises the earlier qhh-hardcoded ingest into a basin-agnostic pipeline so
 node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/runs/``:
@@ -16,7 +17,9 @@ node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/ru
   3. For every run, run the per-run pipeline (each step a subprocess so one
      run's failure never aborts the batch):
        register -> scripts/node27_ingest_run.py
-       mirror   -> scripts/node27_mirror_forcing.py   (node-22 read-only)
+       forcing  -> object-store forcing-domain handoff DB apply
+                  or scripts/node27_mirror_forcing.py when explicitly configured
+                  for compatibility runs with no declared handoff
        parse    -> workers.output_parser.cli parse
        refresh  -> scripts/node27_refresh_coverage.py  (Mission-4; skipped if absent)
 
@@ -47,6 +50,18 @@ from typing import Any
 
 import psycopg2
 
+from packages.common.forcing_domain_handoff_apply import (
+    APPLY_MODE as OBJECT_STORE_HANDOFF_MODE,
+)
+from packages.common.forcing_domain_handoff_apply import (
+    apply_forcing_domain_handoff_path,
+)
+from packages.common.redaction import redact_payload, redact_text
+from scripts.node27_mirror_forcing import (
+    NODE22_MIRROR_FAILED_REASON,
+    TRANSITIONAL_MIRROR_MODE,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
@@ -62,6 +77,18 @@ SEED_AUTH_ROLE = os.environ.get("AUTOPIPE_AUTH_ROLE", "model_admin")
 # /home is 1.7T) so a multi-GB basin copy never fills /. Scratch is removed
 # after every seed regardless (see _seed_basin).
 WORK_ROOT = os.environ.get("AUTOPIPE_WORK_ROOT") or tempfile.gettempdir()
+
+NO_FORCING_HANDOFF_MODE = "object_store_forcing_domain_handoff_missing"
+NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON = "OBJECT_STORE_HANDOFF_NOT_DECLARED_AND_NODE22_MIRROR_DSN_MISSING"
+FORCING_HANDOFF_UNAVAILABLE_REASON = "OBJECT_STORE_FORCING_HANDOFF_UNAVAILABLE"
+FORCING_HANDOFF_FAILED_REASON = "OBJECT_STORE_FORCING_HANDOFF_FAILED"
+FORCING_STAGE = "forcing_handoff"
+FORCING_TABLE_KEYS = (
+    "met.forcing_version",
+    "met.met_station",
+    "met.forcing_station_timeseries",
+    "met.interp_weight",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +283,200 @@ def _last_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _reason_codes(reasons: Any) -> list[str]:
+    if not isinstance(reasons, list):
+        return []
+    codes: list[str] = []
+    for reason in reasons:
+        if isinstance(reason, dict) and reason.get("code"):
+            codes.append(str(reason["code"]))
+    return codes
+
+
+def _stable_reason_codes(
+    *values: Any,
+    default: str = FORCING_HANDOFF_UNAVAILABLE_REASON,
+) -> list[str]:
+    codes = [str(value) for value in values if value]
+    return codes or [default]
+
+
+def _handoff_manifest_path(object_store_root: Path, run_id: str) -> Path:
+    return object_store_root / "runs" / run_id / "input" / "forcing_domain_handoff.json"
+
+
+def _explicit_mirror_configured(node22_url: str | None, env: dict[str, str]) -> bool:
+    return bool((node22_url or "").strip() or (env.get("N22_DSN") or "").strip())
+
+
+def _extract_local_rows(value: Any) -> int | None:
+    if isinstance(value, dict):
+        for key in ("local_rows", "rows"):
+            raw = value.get(key)
+            if raw is not None:
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def _mirror_row_counts(report: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    forcing_version_rows = _extract_local_rows(report.get("forcing_version"))
+    counts["met.forcing_version"] = forcing_version_rows if forcing_version_rows is not None else 1
+    met_station_rows = _extract_local_rows(report.get("met_stations"))
+    if met_station_rows is not None:
+        counts["met.met_station"] = met_station_rows
+    station_ts_rows = _extract_local_rows(report.get("station_timeseries"))
+    if station_ts_rows is not None:
+        counts["met.forcing_station_timeseries"] = station_ts_rows
+    interp_rows = _extract_local_rows(report.get("interp_weight"))
+    if interp_rows is not None:
+        counts["met.interp_weight"] = interp_rows
+    return {key: counts.get(key, 0) for key in FORCING_TABLE_KEYS}
+
+
+def _forcing_stage_from_handoff(report: dict[str, Any]) -> dict[str, Any]:
+    return redact_payload(
+        {
+            "mode": report.get("mode") or OBJECT_STORE_HANDOFF_MODE,
+            "status": report.get("status"),
+            "ready": bool(report.get("ready")),
+            "row_counts": dict(report.get("row_counts") or {}),
+            "reason_codes": _reason_codes(report.get("unavailable_reasons")),
+        }
+    )
+
+
+def _forcing_stage_from_mirror(report: dict[str, Any], *, status: str = "mirrored") -> dict[str, Any]:
+    reason = report.get("reason")
+    boundary = report.get("mirror_boundary") if isinstance(report.get("mirror_boundary"), dict) else {}
+    default_reason = NODE22_MIRROR_FAILED_REASON if status == "failed" else "FORCING_NOT_ON_NODE22"
+    return redact_payload(
+        {
+            "mode": (boundary or {}).get("mode") or TRANSITIONAL_MIRROR_MODE,
+            "status": status,
+            "ready": status == "mirrored",
+            "row_counts": _mirror_row_counts(report) if status == "mirrored" else {},
+            "reason_codes": _stable_reason_codes(reason, default=default_reason) if status != "mirrored" else [],
+            "mirror_boundary": boundary,
+        }
+    )
+
+
+def _forcing_stage_missing_mirror() -> dict[str, Any]:
+    return {
+        "mode": NO_FORCING_HANDOFF_MODE,
+        "status": "skipped",
+        "ready": False,
+        "row_counts": {},
+        "reason_codes": [NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON],
+    }
+
+
+def _apply_object_store_forcing_handoff(
+    handoff_manifest: Path,
+    *,
+    object_store_root: Path,
+    object_store_prefix: str,
+    database_url: str,
+) -> dict[str, Any]:
+    connection = psycopg2.connect(database_url)
+    try:
+        return apply_forcing_domain_handoff_path(
+            handoff_manifest,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            connection=connection,
+        )
+    finally:
+        connection.close()
+
+
+def _process_forcing_stage(
+    *,
+    run_id: str,
+    object_store_root: Path,
+    database_url: str,
+    object_store_prefix: str,
+    node22_url: str | None,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    handoff_manifest = _handoff_manifest_path(object_store_root, run_id)
+    if handoff_manifest.is_file():
+        try:
+            report = _apply_object_store_forcing_handoff(
+                handoff_manifest,
+                object_store_root=object_store_root,
+                object_store_prefix=object_store_prefix,
+                database_url=database_url,
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad run and continue the batch
+            forcing_stage = {
+                "mode": OBJECT_STORE_HANDOFF_MODE,
+                "status": "failed",
+                "ready": False,
+                "row_counts": {},
+                "reason_codes": [FORCING_HANDOFF_FAILED_REASON],
+            }
+            return {
+                "outcome": "failed",
+                "stage": FORCING_STAGE,
+                "forcing_stage": forcing_stage,
+                "error": f"{FORCING_HANDOFF_FAILED_REASON}: {redact_text(str(exc))}",
+            }
+        forcing_stage = _forcing_stage_from_handoff(report)
+        if report.get("available") is True and report.get("ready") is True:
+            return {"outcome": "ready", "forcing_stage": forcing_stage}
+        status = str(report.get("status") or "unavailable")
+        fallback_code = FORCING_HANDOFF_FAILED_REASON if status == "failed" else FORCING_HANDOFF_UNAVAILABLE_REASON
+        forcing_stage["reason_codes"] = _stable_reason_codes(
+            *forcing_stage.get("reason_codes", []),
+            default=fallback_code,
+        )
+        return {
+            "outcome": "failed",
+            "stage": FORCING_STAGE,
+            "forcing_stage": forcing_stage,
+            "error": ",".join(forcing_stage["reason_codes"]),
+        }
+
+    if not _explicit_mirror_configured(node22_url, env):
+        return {
+            "outcome": "skipped",
+            "stage": FORCING_STAGE,
+            "forcing_stage": _forcing_stage_missing_mirror(),
+            "reason": NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON,
+        }
+
+    mirror = [PY, str(REPO_ROOT / "scripts" / "node27_mirror_forcing.py"), "--run-id", run_id]
+    if node22_url:
+        mirror.extend(["--node22-url", node22_url])
+    rc, out, err = _run(mirror, env)
+    payload = _last_json(out) or {}
+    if rc == 2:
+        reason = payload.get("reason", "FORCING_NOT_ON_NODE22")
+        return {
+            "outcome": "skipped",
+            "stage": FORCING_STAGE,
+            "forcing_stage": _forcing_stage_from_mirror(payload, status="skipped"),
+            "reason": reason,
+        }
+    if rc != 0:
+        reason = payload.get("reason") or NODE22_MIRROR_FAILED_REASON
+        return {
+            "outcome": "failed",
+            "stage": FORCING_STAGE,
+            "forcing_stage": _forcing_stage_from_mirror(
+                {**payload, "reason": reason},
+                status="failed",
+            ),
+            "error": redact_text((err or out)[-500:]) or reason,
+        }
+    return {"outcome": "ready", "forcing_stage": _forcing_stage_from_mirror(payload)}
+
+
 # --------------------------------------------------------------------------- #
 # generic registry seed
 # --------------------------------------------------------------------------- #
@@ -297,7 +518,12 @@ def _seed_basin(
             cli + ["discover-basins", "--basins-root", str(only_root), "--output", str(inv)], env
         )
         if rc != 0:
-            return {"basin": basin, "outcome": "seed_failed", "stage": "discover", "error": (err or out)[-600:]}
+            return {
+                "basin": basin,
+                "outcome": "seed_failed",
+                "stage": "discover",
+                "error": redact_text((err or out)[-600:]),
+            }
 
         pub_env = dict(env)
         pub_env["OBJECT_STORE_ROOT"] = str(obj_store)
@@ -313,7 +539,12 @@ def _seed_basin(
             pub_env,
         )
         if rc != 0:
-            return {"basin": basin, "outcome": "seed_failed", "stage": "publish", "error": (err or out)[-600:]}
+            return {
+                "basin": basin,
+                "outcome": "seed_failed",
+                "stage": "publish",
+                "error": redact_text((err or out)[-600:]),
+            }
 
         rc, out, err = _run(
             cli
@@ -328,7 +559,12 @@ def _seed_basin(
             env,
         )
         if rc != 0:
-            return {"basin": basin, "outcome": "seed_failed", "stage": "import", "error": (err or out)[-600:]}
+            return {
+                "basin": basin,
+                "outcome": "seed_failed",
+                "stage": "import",
+                "error": redact_text((err or out)[-600:]),
+            }
         import_report = _last_json(out) or {}
 
         rnv_id = import_report.get("river_network_version_id")
@@ -360,30 +596,63 @@ def _refresh_coverage_script() -> Path | None:
     return path if path.is_file() else None
 
 
-def _process_run(run_id: str, env: dict[str, str]) -> dict[str, Any]:
+def _process_run(
+    run_id: str,
+    env: dict[str, str],
+    *,
+    object_store_root: Path,
+    database_url: str,
+    object_store_prefix: str,
+    node22_url: str | None = None,
+) -> dict[str, Any]:
     register = [PY, str(REPO_ROOT / "scripts" / "node27_ingest_run.py"), "--run-id", run_id]
     rc, out, err = _run(register, env)
     if rc != 0:
-        return {"run_id": run_id, "outcome": "failed", "stage": "register", "rc": rc, "error": (err or out)[-500:]}
+        return {
+            "run_id": run_id,
+            "outcome": "failed",
+            "stage": "register",
+            "rc": rc,
+            "error": redact_text((err or out)[-500:]),
+        }
 
-    mirror = [PY, str(REPO_ROOT / "scripts" / "node27_mirror_forcing.py"), "--run-id", run_id]
-    rc, out, err = _run(mirror, env)
-    if rc == 2:
-        payload = _last_json(out) or {}
+    forcing = _process_forcing_stage(
+        run_id=run_id,
+        object_store_root=object_store_root,
+        database_url=database_url,
+        object_store_prefix=object_store_prefix,
+        node22_url=node22_url,
+        env=env,
+    )
+    forcing_stage = forcing.get("forcing_stage")
+    if forcing["outcome"] == "skipped":
         return {
             "run_id": run_id,
             "outcome": "skipped",
-            "stage": "mirror",
-            "reason": payload.get("reason", "FORCING_NOT_ON_NODE22"),
+            "stage": forcing.get("stage", FORCING_STAGE),
+            "reason": forcing.get("reason"),
+            "forcing_stage": forcing_stage,
         }
-    if rc != 0:
-        return {"run_id": run_id, "outcome": "failed", "stage": "mirror", "rc": rc, "error": (err or out)[-500:]}
-    mirror_payload = _last_json(out) or {}
+    if forcing["outcome"] == "failed":
+        return {
+            "run_id": run_id,
+            "outcome": "failed",
+            "stage": forcing.get("stage", FORCING_STAGE),
+            "error": forcing.get("error"),
+            "forcing_stage": forcing_stage,
+        }
 
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
     rc, out, err = _run(parse, env)
     if rc != 0:
-        return {"run_id": run_id, "outcome": "failed", "stage": "parse", "rc": rc, "error": (err or out)[-500:]}
+        return {
+            "run_id": run_id,
+            "outcome": "failed",
+            "stage": "parse",
+            "rc": rc,
+            "error": redact_text((err or out)[-500:]),
+            "forcing_stage": forcing_stage,
+        }
     parse_payload = _last_json(out) or {}
 
     refresh_status = "skipped_no_script"
@@ -404,7 +673,9 @@ def _process_run(run_id: str, env: dict[str, str]) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "outcome": "ingested",
-        "station_rows": (mirror_payload.get("station_timeseries") or {}).get("local_rows"),
+        "stage": "coverage",
+        "forcing_stage": forcing_stage,
+        "station_rows": (forcing_stage or {}).get("row_counts", {}).get("met.forcing_station_timeseries"),
         "river_rows": parse_payload.get("rows_written"),
         "parse_status": parse_payload.get("status"),
         "coverage_refresh": refresh_status,
@@ -425,6 +696,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed-only", action="store_true", help="Only seed basin registries; skip run ingest.")
     parser.add_argument("--force", action="store_true", help="Re-ingest even already-parsed runs.")
     parser.add_argument("--progress", action="store_true", help="Per-step progress to stderr.")
+    parser.add_argument(
+        "--node22-url",
+        default=None,
+        help="Explicit node-22 read-only DSN for transitional forcing mirror fallback.",
+    )
     args = parser.parse_args(argv)
 
     if not args.object_store_root:
@@ -438,8 +714,10 @@ def main(argv: list[str] | None = None) -> int:
     sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
 
     env = dict(os.environ)
-    env.setdefault("OBJECT_STORE_ROOT", str(object_store_root))
+    env["OBJECT_STORE_ROOT"] = str(object_store_root)
+    env.setdefault("OBJECT_STORE_PREFIX", os.environ.get("OBJECT_STORE_PREFIX", ""))
     env["DATABASE_URL"] = database_url
+    object_store_prefix = env.get("OBJECT_STORE_PREFIX", "")
 
     runs = _discover_runs(object_store_root, sources)
     if args.only_basin:
@@ -453,7 +731,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             identity = _basin_identity(object_store_root, first_run)
         except Exception as exc:  # noqa: BLE001 - record + continue, isolate failure
-            seed_results.append({"basin": basin, "outcome": "seed_failed", "stage": "identity", "error": str(exc)})
+            seed_results.append(
+                {"basin": basin, "outcome": "seed_failed", "stage": "identity", "error": redact_text(str(exc))}
+            )
             continue
         if _basin_seeded(database_url, identity["basin_id"]):
             seed_results.append({"basin": basin, "outcome": "already_seeded", "basin_id": identity["basin_id"]})
@@ -484,7 +764,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.limit is not None:
             pending = pending[: args.limit]
         for idx, run in enumerate(pending, start=1):
-            result = _process_run(run["run_id"], env)
+            result = _process_run(
+                run["run_id"],
+                env,
+                object_store_root=object_store_root,
+                database_url=database_url,
+                object_store_prefix=object_store_prefix,
+                node22_url=args.node22_url,
+            )
             run_results.append(result)
             if args.progress:
                 tail = f" ({result.get('stage')})" if result["outcome"] != "ingested" else ""
@@ -525,13 +812,14 @@ def main(argv: list[str] | None = None) -> int:
             "ingested_by_source": {
                 src: len([r for r in by("ingested") if r["run_id"].startswith(f"fcst_{src}_")]) for src in sources
             },
+            "details": run_results,
             "skipped_runs": [{"run_id": r["run_id"], "reason": r.get("reason")} for r in by("skipped")],
             "failed_runs": [
                 {"run_id": r["run_id"], "stage": r.get("stage"), "error": r.get("error")} for r in by("failed")
             ],
         },
     }
-    json.dump(summary, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+    json.dump(redact_payload(summary), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0 if (not seed_failed and not by("failed")) else 1
 
