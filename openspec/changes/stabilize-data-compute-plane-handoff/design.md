@@ -383,3 +383,157 @@ Review focus:
 - Parser output is complete enough for #644 without DB-specific guessing.
 - Failure/unavailable outputs do not leak secrets and do not expose partial rows.
 - #641 validator behavior is preserved rather than forked or weakened.
+
+## Issue #644 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Mandatory expanded triggers:
+- Database mutation path for `met.forcing_version`, `met.met_station`,
+  `met.forcing_station_timeseries`, and `met.interp_weight`.
+- PostGIS/Timescale-backed table shape, FK ordering, idempotency, and
+  replacement semantics.
+- Failure handling must preserve parser unavailable reports and avoid partial
+  writes.
+- This helper feeds node-27 ingest/autopipeline in later issues but does not
+  switch production policy in #644.
+
+Change surface:
+- A shared object-store forcing-domain DB apply helper that consumes #643 parser
+  output.
+- Focused unit tests with SQL/row-count evidence for complete, duplicate,
+  missing-field, checksum-mismatch, and credential-safe failure paths.
+- OpenSpec `tasks.md` evidence for task 1.6.
+
+Must preserve:
+- `parse_forcing_domain_handoff_path(...)` and
+  `validate_forcing_domain_handoff_path(...)` public behavior.
+- No `scripts/node27_autopipeline.py` preference/fallback switch; #645 owns
+  production policy.
+- No node-27 live qhh/heihe receipt; #648 owns live evidence.
+- Existing DB schema and migration constraints remain the authority; #644 must
+  not add or relax migrations.
+
+Must add/change:
+- A public apply helper that accepts a parser envelope or a declared handoff
+  manifest path + object-store root, and writes only when parser result is
+  available.
+- The apply helper must upsert/verify `met.forcing_version`, upsert
+  `met.met_station`, replace the target `met.forcing_station_timeseries` rows
+  for one `forcing_version_id`, and replace/verify the parsed
+  `met.interp_weight` source/grid/model scopes.
+- The four target table mutations must run inside one apply transaction owned
+  by the helper unless the caller explicitly passes an already-open transaction
+  context. A failure after any intermediate step must roll back the whole apply
+  and must not leave a row-count report that can be read as readiness.
+- `met.met_station` writes must use safe-update semantics for the global
+  `station_id` primary key: inserting new handoff stations is allowed; updating
+  an existing station is allowed only when it is the same basin/version and the
+  existing row is compatible with the same handoff-derived station identity.
+  Conflicting station metadata, basin ownership, station role, geometry, or
+  incompatible `properties_json` MUST fail closed before overwriting the row.
+- Station geometry must be converted from parser coordinate evidence into
+  `geometry(Point, 4490)` using either longitude/latitude or GeoJSON Point
+  geometry without guessing missing coordinates.
+- When both longitude/latitude and GeoJSON Point geometry are present for a
+  station, #644 must verify they identify the same point within a tiny numeric
+  tolerance before writing. Inconsistent coordinate evidence MUST fail closed;
+  consistent evidence may use the longitude/latitude pair as the canonical
+  `ST_MakePoint` input while preserving the original geometry in
+  `properties_json`/lineage evidence if needed.
+- `met.forcing_version.checksum` must use the canonical
+  `forcing_package_manifest_checksum_sha256`; handoff/package/payload checksums
+  remain in apply evidence/lineage rather than being substituted for the
+  canonical checksum.
+- Complete apply reports must include mode, run/source/cycle/model/basin
+  identity, row counts by table, parser/apply evidence, and whether writes were
+  performed.
+- Unavailable parser outcomes, missing declared fields, checksum mismatch,
+  station conflicts, coordinate-evidence conflicts, SQL exceptions, or shape
+  conflicts must fail closed with credential-safe reports, no fabricated
+  readiness, and transaction rollback of the whole apply transaction.
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - #644 introduces a reusable apply
+  entrypoint consumed by later node-27 automation.
+- Database / transaction / migration: selected - helper mutates four `met.*`
+  tables and must respect existing constraints.
+- PostGIS / TimescaleDB domain behavior: selected - station geometry and
+  hypertable timeseries replacement are central.
+- Schema / columns / units / field names: selected - parser rows become DB
+  rows; row shape drift must fail before writes.
+- Evidence / JSON / Schema Ingestion: selected - reports must bind writes to
+  parser evidence and checksums.
+- Auth / permissions / secrets: selected - SQL failure/fallback reports must
+  not print DSNs or credential-bearing payload values.
+- Error handling / rollback / partial outputs: selected - unavailable apply
+  must not leave partial DB writes, even when failure is injected after an
+  earlier table mutation.
+- Concurrency / shared state / ordering: selected - idempotent re-apply,
+  global station-id safe-update rules, and FK ordering matter.
+- File IO / path safety / overwrite: selected only for the manifest-path
+  convenience wrapper that delegates to #643 parser; no new object-store scan.
+- Hydro-met time series / forcing windows: selected - station-timeseries rows
+  are replaced by forcing version and must preserve units/native resolution.
+- Legacy compatibility / examples: selected - transitional mirror remains
+  available and unchanged until #645.
+
+Invariant Matrix
+Governing invariant: A DB apply report may claim forcing-domain readiness only
+after the exact #643 parser envelope is available and the same rows are written
+or verified in the four target `met.*` tables under one forcing/run identity.
+Source-of-truth identity/contract: #643 parser envelope, parser evidence,
+canonical forcing package checksum, existing DB schema/migrations, and
+transaction outcome.
+Surfaces:
+- Producers: #643 parser output and object-store handoff fixtures.
+- Validators/preflight: parser availability, declared row shape, and DB apply
+  preflight before writes.
+- Storage/cache/query: node-27 PostgreSQL `met.*` tables.
+- Public routes/entrypoints: none in #644; later autopipeline policy consumes
+  the helper.
+- Frontend/downstream consumers: display readiness reads from DB after later
+  ingest integration.
+- Failure paths/rollback/stale state: parser unavailable, missing fields,
+  checksum mismatch, station conflicts, coordinate conflicts, FK/constraint
+  conflicts, and SQL exceptions return stable reports without partial readiness
+  or partial table mutations.
+- Evidence/audit/readiness: apply report row counts, mode, identity, checksum
+  lineage, and focused tests.
+Regression rows:
+- Complete parser fixture -> apply writes/verifies one forcing_version row,
+  two station rows, eight timeseries rows, and four interpolation rows with
+  canonical checksum lineage and expected row counts.
+- Re-applying the same parser fixture -> idempotent report with the same final
+  row counts and no duplicated timeseries/interp rows.
+- Parser unavailable for missing required field or checksum mismatch -> helper
+  performs no DB writes and returns credential-safe unavailable evidence.
+- Station geometry and direct-grid constraints -> apply uses parser-proven
+  DB-shaped rows and does not reinterpret invalid coordinate evidence.
+- Existing station conflict -> helper fails closed without overwriting a global
+  `station_id` that belongs to a different basin/role/geometry/identity.
+- Longitude/latitude plus GeoJSON geometry mismatch -> helper fails closed
+  before station write; consistent dual evidence writes one `geometry(Point,
+  4490)` and reports the source of coordinate evidence.
+- Failure injected after `forcing_version`, `met_station`, timeseries, or
+  interpolation-weight stage -> helper rolls back all four table mutations and
+  reports no readiness.
+- `scripts/node27_autopipeline.py` and transitional mirror code -> no behavior
+  change in #644.
+
+Non-goals:
+- No autopipeline preference/fallback switch; #645 owns policy.
+- No node-27 live qhh/heihe receipt; #648 owns live evidence.
+- No schema migration or constraint relaxation.
+
+Review focus:
+- Transaction ordering and rollback prevent partial readiness.
+- Idempotency is explicit, not inferred from lucky row counts.
+- Station upsert safety prevents object-store handoff from clobbering unrelated
+  global station ids.
+- Coordinate conversion has deterministic consistency rules when both
+  lon/lat and geometry exist.
+- Apply evidence distinguishes object-store handoff mode from transitional
+  node-22 mirror mode.
