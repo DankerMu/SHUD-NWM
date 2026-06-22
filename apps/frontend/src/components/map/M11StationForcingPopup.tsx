@@ -175,27 +175,14 @@ export function M11StationForcingPopup({
         subtitle="气象代站五要素 forcing · GFS+IFS"
         onClose={onClose}
       />
-      {issueTimes.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400" data-testid="m11-station-cycle-bar">
-          <span className="shrink-0 uppercase tracking-wide">起报</span>
-          <select
-            aria-label="起报时间选择"
-            data-testid="m11-popup-issue-time"
-            className="h-7 min-w-0 max-w-[12rem] cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            value={selectedCycle && issueTimes.includes(selectedCycle) ? selectedCycle : issueTimes[0]}
-            onChange={(event) => setSelection({ key: station.station_id, cycle: event.target.value })}
-            disabled={state.loading}
-          >
-            {issueTimes.map((time) => (
-              <option key={time} value={time}>
-                {formatIssueTime(time)}
-              </option>
-            ))}
-          </select>
-          <span className="ml-auto text-[10px] text-slate-500">GFS + IFS 同步切换</span>
-        </div>
-      ) : null}
-      <StationVariableSelector selected={selectedVariable} onChange={setSelectedVariable} />
+      <StationVariableSelector
+        issueTimes={issueTimes}
+        selectedCycle={selectedCycle}
+        onCycleChange={(cycle) => setSelection({ key: station.station_id, cycle })}
+        disabled={state.loading}
+        selected={selectedVariable}
+        onChange={setSelectedVariable}
+      />
 
       {!basinId ? (
         <M11PopupEmpty testId="m11-station-popup-no-product">请选择流域</M11PopupEmpty>
@@ -214,41 +201,73 @@ export function M11StationForcingPopup({
 }
 
 function StationVariableSelector({
+  issueTimes,
+  selectedCycle,
+  onCycleChange,
+  disabled,
   selected,
   onChange,
 }: {
+  issueTimes: string[]
+  selectedCycle: string | null
+  onCycleChange: (cycle: string) => void
+  disabled: boolean
   selected: HydroMetStationSeriesVariable
   onChange: (variable: HydroMetStationSeriesVariable) => void
 }) {
   return (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-white/10 px-4 py-2"
-      role="tablist"
-      aria-label="代站变量选择"
-      data-testid="m11-station-variable-selector"
+      className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400"
+      data-testid="m11-station-toolbar"
     >
-      {HYDRO_MET_STATION_VARIABLES.map((variable) => {
-        const active = selected === variable
-        return (
-          <button
-            key={variable}
-            type="button"
-            className={cn(
-              'cursor-pointer rounded-md border px-2 py-0.5 text-xs font-medium transition-colors',
-              active
-                ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
-                : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10',
-            )}
-            aria-selected={active}
-            aria-pressed={active}
-            role="tab"
-            data-testid={`m11-station-variable-toggle-${variable}`}
-            onClick={() => onChange(variable)}
+      {issueTimes.length > 0 ? (
+        <label className="flex shrink-0 items-center gap-2" data-testid="m11-station-cycle-bar">
+          <span className="shrink-0 uppercase tracking-wide">起报</span>
+          <select
+            aria-label="起报时间选择"
+            data-testid="m11-popup-issue-time"
+            className="h-7 min-w-0 max-w-[12rem] cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            value={selectedCycle && issueTimes.includes(selectedCycle) ? selectedCycle : issueTimes[0]}
+            onChange={(event) => onCycleChange(event.target.value)}
+            disabled={disabled}
           >
-            {variable}
-          </button>
-        )
-      })}
+            {issueTimes.map((time) => (
+              <option key={time} value={time}>
+                {formatIssueTime(time)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <div
+        className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5"
+        role="tablist"
+        aria-label="代站变量选择"
+        data-testid="m11-station-variable-selector"
+      >
+        {HYDRO_MET_STATION_VARIABLES.map((variable) => {
+          const active = selected === variable
+          return (
+            <button
+              key={variable}
+              type="button"
+              className={cn(
+                'h-7 cursor-pointer rounded-md border px-2.5 text-xs font-medium leading-none transition-colors',
+                active
+                  ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10',
+              )}
+              aria-selected={active}
+              aria-pressed={active}
+              role="tab"
+              data-testid={`m11-station-variable-toggle-${variable}`}
+              onClick={() => onChange(variable)}
+            >
+              {variable}
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -286,8 +305,8 @@ function StationForcingBody({
       </div>
       {chartResult.series.length > 0 ? (
         <>
-          <div className="min-h-0 flex-1 rounded-lg bg-white/[0.04] p-2 ring-1 ring-inset ring-white/10" data-testid={`m11-station-variable-${selectedVariable}-chart`}>
-            <div className="flex flex-wrap items-start justify-between gap-1">
+          <div className="flex min-h-0 flex-1 flex-col rounded-lg bg-white/[0.04] p-2 ring-1 ring-inset ring-white/10" data-testid={`m11-station-variable-${selectedVariable}-chart`}>
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-1">
               <div className="text-xs font-semibold text-slate-100">
                 {selectedVariable} · {chartResult.unitLabel}
               </div>
@@ -299,7 +318,9 @@ function StationForcingBody({
                 ))}
               </div>
             </div>
-            <StationVariableEcharts variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
+            <div className="min-h-0 flex-1">
+              <StationVariableEcharts variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
+            </div>
           </div>
           {failedReasons.concat(chartResult.reasons).length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-station-popup-partial">
@@ -399,7 +420,7 @@ function StationVariableEcharts({
   const option = useMemo(
     () => ({
       color: series.map((item) => SOURCE_COLOR[item.source]),
-      grid: { left: 48, right: 16, top: 18, bottom: 34 },
+      grid: { left: 48, right: 16, top: 18, bottom: 28 },
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
@@ -425,10 +446,7 @@ function StationVariableEcharts({
         nameTextStyle: { color: '#94a3b8' },
         splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.14)' } },
       },
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
-        { type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 14, bottom: 6, borderColor: 'rgba(148,163,184,0.2)' },
-      ],
+      dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
       series: series.map((item) => ({
         type: 'line',
         name: item.source,
@@ -445,5 +463,5 @@ function StationVariableEcharts({
     [series, unit],
   )
 
-  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate style={{ height: 'calc(100% - 1.75rem)', minHeight: 240, width: '100%' }} />
+  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate style={{ height: '100%', minHeight: 0, width: '100%' }} />
 }
