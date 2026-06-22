@@ -28,7 +28,8 @@ The hydro-met MVP UI SHALL show real station forcing curves and river-segment `q
 
 #### Scenario: Station selection
 - **WHEN** a user selects a station row or map marker
-- **THEN** the right-side chart area requests the station series API for `PRCP`, `TEMP`, `RH`, `wind`, `Rn`, and `Press`
+- **THEN** the right-side chart area requests the current station series API for `PRCP`, `TEMP`, `RH`, `wind`, and `Rn`
+- **AND** `Press` is not required from the current disk-backed station series route; if shown as a UI option, it is rendered as unavailable/omitted rather than as an available curve
 - **AND** charts show values, units, source, cycle, forcing version, valid-time range, and quality flags from the API.
 
 #### Scenario: River segment selection
@@ -61,4 +62,3 @@ The hydro-met MVP UI SHALL have automated coverage for route bootstrap, station 
 #### Scenario: Browser smoke
 - **WHEN** the MVP browser smoke runs with mocked or live QHH data
 - **THEN** it opens `/hydro-met`, verifies station markers and river features are visible, selects at least one station and one river segment from the map or lists, and verifies both chart areas update from API-backed data.
-

@@ -128,7 +128,10 @@ Allowed mutations:
 
 - Serve readonly responses, frontend/static assets, MVT/display data, health,
   runtime config, and fail-closed error responses.
-- Read the readonly database role and readonly published artifacts.
+- Read the readonly database role, readonly published artifacts, and the shared
+  object-store mirror through `OBJECT_STORE_ROOT` for display-only station
+  forcing CSV reads. `OBJECT_STORE_ROOT` is a required/audited display runtime
+  env for that read path and does not grant write or producer capability.
 
 Forbidden capabilities:
 
@@ -136,15 +139,15 @@ Forbidden capabilities:
 - Configuring `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND`,
   `SLURM_GATEWAY_TEMPLATE_DIR`, `SLURM_GATEWAY_WORKSPACE_DIR`,
   `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`, `SHARED_LOG_ROOT`,
-  `OBJECT_STORE_ROOT`, scheduler roots, `NHMS_BASINS_ROOT`,
+  scheduler roots, `NHMS_BASINS_ROOT`,
   `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, or
   `DOCKER_HOST`.
 - Opting into control mutations by setting
   `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=false`.
 - Performing retry/cancel actions or live queue-depth control-plane queries;
   these fail closed with display-specific error codes.
-- Writing business state, scheduler state, Slurm state, workspace roots, or
-  published artifact roots.
+- Writing business state, scheduler state, Slurm state, workspace roots,
+  object-store roots, producer/copyback roots, or published artifact roots.
 
 Current residual / follow-up boundary:
 

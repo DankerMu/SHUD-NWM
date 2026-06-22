@@ -644,6 +644,20 @@ def test_1_13j_variables_filter_single_variable(tmp_path: Path) -> None:
     assert len(response["series"][0]["points"]) == 2
 
 
+@pytest.mark.parametrize("variables", ["", "   ", " , ", ["", "   "]])
+def test_blank_variables_filter_behaves_like_omitted_default_variables(
+    tmp_path: Path, variables: str | list[str]
+) -> None:
+    _write_csv(tmp_path, time_days=[0.0, 0.125])
+
+    omitted = _read(tmp_path, variables=None)
+    response = _read(tmp_path, variables=variables)
+
+    assert [series["variable"] for series in response["series"]] == VARIABLE_ORDER
+    assert response["series"] == omitted["series"]
+    assert _total_points(response) == 5 * 2
+
+
 def test_1_13k_press_request_is_silently_dropped(tmp_path: Path) -> None:
     _write_csv(tmp_path)
 

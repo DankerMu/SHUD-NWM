@@ -137,6 +137,7 @@ NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NHMS_LOG_TAIL_MAX_BYTES=1048576
 NHMS_ARTIFACT_BACKEND=local
 OBJECT_STORE_PREFIX=s3://nhms-prod
@@ -434,7 +435,7 @@ Python modules `apps.api.routes.pipeline` 和 `apps.api.routes.forecast`）。
 对同一个 `source/cycle/model_id/basin_id` 检查：
 
 - `met` canonical/forcing 元数据存在。
-- `met.forcing_station_timeseries` 覆盖 `PRCP/TEMP/RH/wind/Rn/Press`。
+- producer/DB forcing 覆盖 `PRCP/TEMP/RH/wind/Rn/Press`；这只证明生产侧或历史 DB 覆盖，不代表当前 display station-series route 会返回 `Press`。
 - `hydro.river_timeseries` 覆盖 `q_down`。
 - `ops.pipeline_job` / `ops.pipeline_event` 有完整 job/stage 状态。
 - `log_uri` 指向 27 可读取的发布日志位置。
@@ -470,6 +471,8 @@ corepack pnpm check:bundle
 - FastAPI `/health` 通过。
 - 27 配置不包含 Slurm CLI 作为必需项。
 - 27 使用 `NHMS_SERVICE_ROLE=display_readonly` 启动。
+- 27 配置只读 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`，且 display API
+  进程用户可读、可遍历该 object-store mirror。
 - 27 使用只读 DB 账号，或 evidence 中明确标注只读账号尚未补齐。
 - 27 的日志读取指向 published artifacts，不依赖 22 私有 workspace。
 
@@ -482,6 +485,7 @@ export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 export NHMS_PUBLISHED_ARTIFACT_ROOT=/path/to/published/artifacts
+export OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -641,13 +645,15 @@ curl -i 'http://127.0.0.1:8000/api/v1/mvp/qhh/latest-product?source=IFS&cycle_ti
 使用 latest-product 返回的 station、forcing_version、segment、river_network_version 检查：
 
 ```bash
-curl -i '<station-series-url>'
+curl -i '<station-series-url?variables=PRCP,TEMP,RH,wind,Rn>'
+curl -i '<station-series-url?variables=Press>'
 curl -i '<forecast-series-q-down-url>'
 ```
 
 通过条件：
 
-- station series 返回六个 MVP 变量。
+- station series 对当前 disk-backed route 支持的 `PRCP`、`TEMP`、`RH`、`wind`、`Rn` 返回非空或可解释的可用性状态，且每个返回变量的 `valid_time`、`source_id`/`cycle_time` 和 `unit` 语义正确。
+- `Press` 不作为当前 display station-series route 的 PASS 必需变量；当前 object-store CSV-backed path 不 emit `Press`，请求或期待 `Press` 时应记录为 omitted/unavailable，而不是把五变量响应判为失败。
 - forecast series 返回 `q_down`。
 - valid time、issue time、source/scenario 和单位语义正确。
 
