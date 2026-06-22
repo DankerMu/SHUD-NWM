@@ -183,14 +183,15 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
         ]
 
     database = parsed.path.lstrip("/")
+    username_class = _database_username_class(parsed.username)
     identity = {
         "configured": True,
         "scheme": parsed.scheme,
         "host": parsed.hostname,
         "port": port,
         "database": database or None,
-        "username_present": bool(parsed.username),
-        "username_class": _database_username_class(parsed.username),
+        "username_present": username_class != "missing",
+        "username_class": username_class,
     }
     if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or not database:
         return identity, [
@@ -198,6 +199,14 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
                 "DATABASE_URL_INVALID",
                 "DATABASE_URL",
                 "DATABASE_URL must include PostgreSQL scheme, host, and database name.",
+            )
+        ]
+    if identity["username_class"] == "missing":
+        return identity, [
+            _preflight_blocker(
+                "DATABASE_URL_USERNAME_MISSING",
+                "DATABASE_URL",
+                "DATABASE_URL must include an explicit ingest writer username.",
             )
         ]
     if identity["username_class"] == "display_readonly_like":

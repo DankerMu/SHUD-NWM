@@ -54,10 +54,13 @@ if [ -f "$INGEST_ENV" ]; then
     # Env-file mode must not borrow required ingest runtime config from the
     # invoking shell. A partial file fails closed below or in Python preflight.
     unset DATABASE_URL
+    unset NHMS_NODE27_INGEST_ROLE
+    unset NHMS_SERVICE_ROLE
     unset OBJECT_STORE_ROOT
     unset BASINS_ROOT
     unset AUTOPIPE_WORK_ROOT
     unset AUTOPIPE_LOG_ROOT
+    unset N22_DSN
   fi
   set -a
   # shellcheck disable=SC1090
@@ -124,7 +127,6 @@ START=$(date +%s)
 cd "$REPO" || { echo "[$(ts)] autopipe: cannot cd $REPO" >> "$LOG"; exit 1; }
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_autopipeline.py" \
   --object-store-root "${OBJECT_STORE_ROOT:-}" \
-  --database-url "${DATABASE_URL:-}" \
   --basins-root "${BASINS_ROOT:-}" >> "$LOG" 2>&1
 RC=$?
 
