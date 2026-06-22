@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import forcing_domain_handoff as handoff_module
 from packages.common.forcing_domain_handoff import (
     FORCING_DOMAIN_PACKAGE_MANIFEST_CHECKSUM_FIELD,
     FORCING_DOMAIN_PACKAGE_MANIFEST_URI_FIELD,
@@ -18,8 +19,10 @@ from packages.common.forcing_domain_handoff import (
     REASON_IDENTITY_FIELD_MISSING,
     REASON_IDENTITY_MISMATCH,
     REASON_INTERP_WEIGHT_DUPLICATE,
+    REASON_MANIFEST_UNREADABLE,
     REASON_OBJECT_STORE_ROOT_UNAVAILABLE,
     REASON_PACKAGE_CHECKSUM_MISMATCH,
+    REASON_PACKAGE_MISSING,
     REASON_PAYLOAD_CHECKSUM_MISMATCH,
     REASON_PAYLOAD_MALFORMED,
     REASON_PAYLOAD_MISSING,
@@ -55,6 +58,54 @@ PAYLOAD_TABLES = {
     "station_inventory": "met.met_station",
     "station_timeseries": "met.forcing_station_timeseries",
     "interpolation_weights": "met.interp_weight",
+}
+FORCING_VERSION_ROW_KEYS = {
+    "forcing_version_id",
+    "source_id",
+    "cycle_time",
+    "start_time",
+    "end_time",
+    "basin_id",
+    "basin_version_id",
+    "model_id",
+    "station_count",
+    "forcing_package_uri",
+    "forcing_package_manifest_uri",
+    "checksum",
+}
+MET_STATION_ROW_KEYS = {
+    "station_id",
+    "basin_version_id",
+    "station_name",
+    "longitude",
+    "latitude",
+    "elevation_m",
+    "station_role",
+    "active_flag",
+    "properties_json",
+}
+FORCING_STATION_TIMESERIES_ROW_KEYS = {
+    "forcing_version_id",
+    "basin_version_id",
+    "station_id",
+    "valid_time",
+    "source_id",
+    "variable",
+    "value",
+    "unit",
+    "native_resolution",
+    "quality_flag",
+}
+INTERP_WEIGHT_ROW_KEYS = {
+    "source_id",
+    "grid_id",
+    "model_id",
+    "station_id",
+    "variable",
+    "grid_cell_id",
+    "weight",
+    "method",
+    "grid_signature",
 }
 
 
@@ -104,6 +155,23 @@ def _reason_codes(result: dict[str, object]) -> set[str]:
     reasons = result["unavailable_reasons"]
     assert isinstance(reasons, list)
     return {str(reason["code"]) for reason in reasons}
+
+
+def _assert_parser_handoff_evidence(
+    result: dict[str, object],
+    case_root: Path,
+    run_id: str = COMPLETE_RUN_ID,
+) -> None:
+    evidence = result["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["handoff"] == {
+        "manifest_uri": f"runs/{run_id}/input/forcing_domain_handoff.json",
+        "manifest_checksum_sha256": sha256_bytes(_handoff_manifest_path(case_root, run_id).read_bytes()),
+    }
+
+
+def _oversized_json_bytes(limit: int) -> bytes:
+    return json.dumps({"padding": "x" * limit}).encode("utf-8")
 
 
 def _assert_bounded_row_diagnostics(result: dict[str, object], role: str) -> None:
@@ -319,6 +387,12 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
         "met.forcing_station_timeseries": 8,
         "met.interp_weight": 4,
     }
+    assert [set(row) for row in parsed["met.forcing_version"]] == [FORCING_VERSION_ROW_KEYS]
+    assert [set(row) for row in parsed["met.met_station"]] == [MET_STATION_ROW_KEYS] * 2
+    assert [set(row) for row in parsed["met.forcing_station_timeseries"]] == [
+        FORCING_STATION_TIMESERIES_ROW_KEYS
+    ] * 8
+    assert [set(row) for row in parsed["met.interp_weight"]] == [INTERP_WEIGHT_ROW_KEYS] * 4
     assert parsed["met.forcing_version"][0] == {
         "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud",
         "source_id": "GFS",
@@ -338,47 +412,13 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
     }
 
     station = parsed["met.met_station"][0]
-    assert {
-        "station_id",
-        "basin_version_id",
-        "station_name",
-        "longitude",
-        "latitude",
-        "elevation_m",
-        "station_role",
-        "active_flag",
-        "properties_json",
-    } <= set(station)
     assert station["station_id"] == "qhh_forc_001"
     assert station["properties_json"]["forcing_filename"] == "X100.125Y38.25.csv"
 
     timeseries = parsed["met.forcing_station_timeseries"][0]
-    assert {
-        "forcing_version_id",
-        "basin_version_id",
-        "station_id",
-        "valid_time",
-        "source_id",
-        "variable",
-        "value",
-        "unit",
-        "native_resolution",
-        "quality_flag",
-    } <= set(timeseries)
     assert timeseries["value"] == 1.2
 
     interp_weight = parsed["met.interp_weight"][0]
-    assert {
-        "source_id",
-        "grid_id",
-        "model_id",
-        "station_id",
-        "variable",
-        "grid_cell_id",
-        "weight",
-        "method",
-        "grid_signature",
-    } <= set(interp_weight)
     assert interp_weight["grid_signature"] == "gfs-0p25-qhh-fixture"
 
     evidence = result["evidence"]
@@ -389,9 +429,7 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
         "met.forcing_station_timeseries": 8,
         "met.interp_weight": 4,
     }
-    assert evidence["handoff"]["manifest_checksum_sha256"] == sha256_bytes(
-        _manifest_path("complete", COMPLETE_RUN_ID).read_bytes()
-    )
+    _assert_parser_handoff_evidence(result, FIXTURE_ROOT / "complete")
     assert evidence["payloads"]["station_inventory"]["actual_checksum_sha256"] == (
         "c3fe04fb5757b71a48df66930b833ebc1c05abad73bbc3948e8f42f4385c5b1d"
     )
@@ -401,6 +439,41 @@ def test_complete_fixture_parser_returns_table_shaped_rows_and_evidence() -> Non
     assert evidence["payloads"]["interpolation_weights"]["actual_checksum_sha256"] == (
         "e10613530de21585eb4b81cec9272581812fe418f7c0e33aaec4c90a2fc4fe20"
     )
+
+
+def test_parser_preserves_successful_payload_business_values_without_redacting_grid_signatures(
+    tmp_path: Path,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    station_rows = json.loads(_payload_path(case_root, "station_inventory.json").read_text(encoding="utf-8"))
+    station_rows[0]["properties_json"]["grid_signature"] = "station-grid-signature"
+    station_rows[0]["properties_json"]["mirror_identity"] = {
+        "grid_signature": "station-mirror-grid-signature",
+        "source_grid_signature": "station-source-grid-signature",
+    }
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
+
+    interp_rows = json.loads(_payload_path(case_root, "interp_weights.json").read_text(encoding="utf-8"))
+    interp_rows[0]["grid_signature"] = "interp-grid-signature"
+    interp_rows[0]["mirror_identity"] = {
+        "grid_signature": "interp-mirror-grid-signature",
+        "source_grid_signature": "interp-source-grid-signature",
+    }
+    _set_payload_rows(case_root, "interpolation_weights", "interp_weights.json", interp_rows)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is True
+    parsed = result["parsed"]
+    assert isinstance(parsed, dict)
+    assert parsed["met.met_station"][0] == station_rows[0]
+    assert parsed["met.interp_weight"][0] == interp_rows[0]
+    assert parsed["met.met_station"][0]["properties_json"]["grid_signature"] == "station-grid-signature"
+    assert (
+        parsed["met.met_station"][0]["properties_json"]["mirror_identity"]["grid_signature"]
+        == "station-mirror-grid-signature"
+    )
+    assert parsed["met.interp_weight"][0]["mirror_identity"]["grid_signature"] == "interp-mirror-grid-signature"
 
 
 @pytest.mark.parametrize(
@@ -425,6 +498,7 @@ def test_parser_missing_required_top_level_field_is_unavailable_without_rows(
     assert result["available"] is False
     assert expected_reason in _reason_codes(result)
     assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
 
 
 def test_parser_missing_payload_is_unavailable_without_rows(tmp_path: Path) -> None:
@@ -440,6 +514,7 @@ def test_parser_missing_payload_is_unavailable_without_rows(tmp_path: Path) -> N
     assert result["available"] is False
     assert REASON_PAYLOAD_MISSING in _reason_codes(result)
     assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
 
 
 def test_parser_malformed_payload_is_unavailable_without_rows(tmp_path: Path) -> None:
@@ -452,6 +527,7 @@ def test_parser_malformed_payload_is_unavailable_without_rows(tmp_path: Path) ->
     assert result["available"] is False
     assert REASON_PAYLOAD_MALFORMED in _reason_codes(result)
     assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
 
 
 def test_parser_payload_checksum_mismatch_is_unavailable_without_rows(tmp_path: Path) -> None:
@@ -480,6 +556,83 @@ def test_parser_payload_checksum_mismatch_is_unavailable_without_rows(tmp_path: 
     assert result["available"] is False
     assert REASON_PAYLOAD_CHECKSUM_MISMATCH in _reason_codes(result)
     assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_parser_oversized_handoff_manifest_is_unavailable_without_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    limit = 64
+    monkeypatch.setattr(handoff_module, "MAX_HANDOFF_MANIFEST_BYTES", limit)
+    _handoff_manifest_path(case_root).write_bytes(_oversized_json_bytes(limit))
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_MANIFEST_UNREADABLE in _reason_codes(result)
+    assert result["parsed"] == {}
+    evidence = result["evidence"]
+    assert isinstance(evidence, dict)
+    assert "handoff" not in evidence
+
+
+def test_parser_oversized_forcing_domain_package_manifest_is_unavailable_without_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    limit = max(
+        _handoff_manifest_path(case_root).stat().st_size,
+        _forcing_package_manifest_path(case_root).stat().st_size,
+    ) + 64
+    monkeypatch.setattr(handoff_module, "MAX_HANDOFF_MANIFEST_BYTES", limit)
+    _forcing_domain_package_manifest_path(case_root).write_bytes(_oversized_json_bytes(limit))
+    _sync_forcing_domain_package_manifest_checksum(case_root)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_PACKAGE_MISSING in _reason_codes(result)
+    assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_parser_oversized_forcing_package_manifest_is_unavailable_without_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    limit = _handoff_manifest_path(case_root).stat().st_size + 64
+    monkeypatch.setattr(handoff_module, "MAX_HANDOFF_MANIFEST_BYTES", limit)
+    _forcing_package_manifest_path(case_root).write_bytes(_oversized_json_bytes(limit))
+    _sync_forcing_package_manifest_checksum(case_root)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_PACKAGE_MISSING in _reason_codes(result)
+    assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_parser_oversized_payload_is_unavailable_without_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    limit = 64
+    monkeypatch.setattr(handoff_module, "MAX_HANDOFF_PAYLOAD_BYTES", limit)
+    _payload_path(case_root, "station_inventory.json").write_bytes(_oversized_json_bytes(limit))
+    _sync_payload_ref(case_root, "station_inventory", "station_inventory.json")
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_PAYLOAD_MISSING in _reason_codes(result)
+    assert result["parsed"] == {}
+    _assert_parser_handoff_evidence(result, case_root)
 
 
 @pytest.mark.parametrize(
@@ -886,6 +1039,40 @@ def test_station_inventory_duplicate_station_id_and_unique_count_mismatch_are_un
     codes = _reason_codes(result)
     assert REASON_STATION_INVENTORY_DUPLICATE in codes
     assert REASON_STATION_COUNT_MISMATCH in codes
+
+
+@pytest.mark.parametrize(
+    ("case_name", "elevation_value"),
+    [
+        ("missing", None),
+        ("nonfinite", float("inf")),
+    ],
+)
+def test_station_inventory_elevation_m_must_be_finite_before_parser_emits_station_rows(
+    tmp_path: Path,
+    case_name: str,
+    elevation_value: float | None,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    rows = json.loads(_payload_path(case_root, "station_inventory.json").read_text(encoding="utf-8"))
+    if case_name == "missing":
+        del rows[0]["elevation_m"]
+    else:
+        rows[0]["elevation_m"] = elevation_value
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", rows)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is False
+    assert REASON_FIELD_MISSING in _reason_codes(result)
+    assert result["parsed"] == {}
+    reasons = result["unavailable_reasons"]
+    assert isinstance(reasons, list)
+    assert any(
+        reason["code"] == REASON_FIELD_MISSING
+        and reason.get("field") == "payloads.station_inventory.rows.elevation_m"
+        for reason in reasons
+    )
 
 
 def test_station_timeseries_declared_variables_must_be_unique(tmp_path: Path) -> None:

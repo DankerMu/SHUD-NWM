@@ -136,23 +136,41 @@ def parse_forcing_domain_handoff_path(
         object_store_prefix=object_store_prefix,
     )
     if reasons or store is None:
-        return _with_empty_parsed(_result(manifest, reasons, manifest_uri=manifest_uri))
+        result = _result(manifest, reasons, manifest_uri=manifest_uri)
+        return _with_empty_parsed(
+            _with_handoff_evidence(result, manifest_uri=manifest_uri, manifest_checksum=manifest_checksum)
+        )
 
     validation_result = validate_forcing_domain_handoff(manifest, store=store, manifest_uri=manifest_uri)
     if not validation_result.get("available"):
-        return _with_empty_parsed(validation_result)
+        return _with_empty_parsed(
+            _with_handoff_evidence(
+                validation_result,
+                manifest_uri=manifest_uri,
+                manifest_checksum=manifest_checksum,
+            )
+        )
 
     parse_reasons: list[dict[str, Any]] = []
     payload_rows = _read_parser_payload_rows(manifest, store, parse_reasons)
     if parse_reasons:
-        return _parser_unavailable_result(validation_result, parse_reasons)
+        return _parser_unavailable_result(
+            _with_handoff_evidence(
+                validation_result,
+                manifest_uri=manifest_uri,
+                manifest_checksum=manifest_checksum,
+            ),
+            parse_reasons,
+        )
 
     parsed = _parsed_handoff_tables(manifest, payload_rows)
     evidence = dict(validation_result.get("evidence") or {})
-    evidence["handoff"] = {
-        "manifest_uri": manifest_uri,
-        "manifest_checksum_sha256": manifest_checksum,
-    }
+    evidence["handoff"] = redact_payload(
+        {
+            "manifest_uri": manifest_uri,
+            "manifest_checksum_sha256": manifest_checksum,
+        }
+    )
     evidence["parsed_table_row_counts"] = {table: len(rows) for table, rows in parsed.items()}
     return _parser_result(validation_result, evidence=evidence, parsed=parsed)
 
@@ -315,6 +333,26 @@ def _with_empty_parsed(result: Mapping[str, Any]) -> dict[str, Any]:
     return _redact_parser_result(parser_result)
 
 
+def _with_handoff_evidence(
+    result: Mapping[str, Any],
+    *,
+    manifest_uri: str | None,
+    manifest_checksum: str | None,
+) -> dict[str, Any]:
+    with_evidence = dict(result)
+    if manifest_checksum is None:
+        return with_evidence
+    evidence = dict(with_evidence.get("evidence") or {})
+    evidence["handoff"] = redact_payload(
+        {
+            "manifest_uri": manifest_uri,
+            "manifest_checksum_sha256": manifest_checksum,
+        }
+    )
+    with_evidence["evidence"] = evidence
+    return with_evidence
+
+
 def _parser_unavailable_result(
     validation_result: Mapping[str, Any],
     reasons: list[dict[str, Any]],
@@ -343,7 +381,7 @@ def _parser_result(
     result["unavailable_reasons"] = []
     result["evidence"] = dict(evidence)
     result["parsed"] = parsed
-    return _redact_parser_result(result)
+    return result
 
 
 def _read_parser_payload_rows(
@@ -1652,6 +1690,8 @@ def _validate_station_inventory_rows(
         )
         if not _has_coordinate_evidence(row):
             row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude", index)
+        if not _finite_number(row.get("elevation_m")):
+            row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "elevation_m", index)
 
     station_count = _positive_int(manifest.get("station_count"))
     duplicate_station_ids = _duplicate_text_values(
