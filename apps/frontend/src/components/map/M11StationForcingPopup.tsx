@@ -16,6 +16,7 @@ import {
   HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
   formatHydroMetStationSeriesMessage,
+  isHydroMetStationSeriesRetainedDiskMiss,
   loadHydroMetStationSeries,
   mapUniqueHydroMetStationSeries,
   stationSeriesRequestKey,
@@ -41,6 +42,7 @@ type StationSeriesLoadState =
   | { kind: 'loading'; requestKey: string }
   | { kind: 'loaded'; requestKey: string; response: HydroMetStationSeriesResponse }
   | { kind: 'error'; requestKey: string; message: string }
+  | { kind: 'retention-missing'; requestKey: string; message: string; cycleTime: string }
 
 function stationSeriesProductIdentity(product: QhhLatestProduct): HydroMetStationSeriesProductIdentity {
   return {
@@ -58,6 +60,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function seriesByVariable(response: HydroMetStationSeriesResponse) {
   const list = isRecord(response) && Array.isArray(response.series) ? response.series : []
   return mapUniqueHydroMetStationSeries(list)
+}
+
+function unavailableIssueTimeKey(source: string, stationId: string, issueTime: string) {
+  return [source, stationId, issueTime].join('|')
+}
+
+function retainedDiskMissMessage(cycleTime: string) {
+  return `该起报 ${cycleTime} 的 station-series 已不在当前磁盘保留窗口内；请选择其他起报时间或回到最新起报。`
 }
 
 /**
@@ -80,9 +90,14 @@ export function M11StationForcingPopup({
   const popupProduct = useHydroMetPopupProduct({ basinId, initialSource })
   const { product } = popupProduct
   const [state, setState] = useState<StationSeriesLoadState>({ kind: 'idle' })
+  const [unavailableIssueTimeKeys, setUnavailableIssueTimeKeys] = useState<Set<string>>(() => new Set())
   const [selectedVariables, setSelectedVariables] = useState<Set<HydroMetStationSeriesVariable>>(
     () => new Set(HYDRO_MET_STATION_VARIABLES),
   )
+
+  useEffect(() => {
+    setUnavailableIssueTimeKeys(new Set())
+  }, [basinId, station.station_id])
 
   const toggleVariable = (variable: HydroMetStationSeriesVariable) => {
     setSelectedVariables((current) => {
@@ -116,7 +131,21 @@ export function M11StationForcingPopup({
       },
       (error) => {
         if (!cancelled) {
-          setState({ kind: 'error', requestKey, message: formatHydroMetStationSeriesMessage(error, 'station-series 不可用') })
+          if (isHydroMetStationSeriesRetainedDiskMiss(error)) {
+            setUnavailableIssueTimeKeys((current) => {
+              const next = new Set(current)
+              next.add(unavailableIssueTimeKey(identity.source_id, station.station_id, identity.cycle_time))
+              return next
+            })
+            setState({
+              kind: 'retention-missing',
+              requestKey,
+              cycleTime: identity.cycle_time,
+              message: retainedDiskMissMessage(identity.cycle_time),
+            })
+          } else {
+            setState({ kind: 'error', requestKey, message: formatHydroMetStationSeriesMessage(error, 'station-series 不可用') })
+          }
         }
       },
     )
@@ -124,6 +153,14 @@ export function M11StationForcingPopup({
       cancelled = true
     }
   }, [product, station.station_id])
+
+  const unavailableIssueTimes = useMemo(
+    () =>
+      popupProduct.issueTimes.filter((time) =>
+        unavailableIssueTimeKeys.has(unavailableIssueTimeKey(popupProduct.source, station.station_id, time)),
+      ),
+    [popupProduct.issueTimes, popupProduct.source, station.station_id, unavailableIssueTimeKeys],
+  )
 
   return (
     <M11PopupShell testId="m11-station-popup">
@@ -138,6 +175,7 @@ export function M11StationForcingPopup({
         onSourceChange={popupProduct.setSource}
         issueTimes={popupProduct.issueTimes}
         issueTime={popupProduct.issueTime}
+        unavailableIssueTimes={unavailableIssueTimes}
         onIssueTimeChange={popupProduct.setIssueTime}
       />
       <StationVariableSelector selected={selectedVariables} onToggle={toggleVariable} />
@@ -148,6 +186,8 @@ export function M11StationForcingPopup({
         <M11PopupLoading testId="m11-station-popup-loading">正在加载 {station.station_id} 的 station-series...</M11PopupLoading>
       ) : state.kind === 'error' ? (
         <M11PopupEmpty testId="m11-station-popup-error">{state.message}</M11PopupEmpty>
+      ) : state.kind === 'retention-missing' ? (
+        <M11PopupEmpty testId="m11-station-popup-retention-missing">{state.message}</M11PopupEmpty>
       ) : state.kind === 'loaded' ? (
         <StationForcingBody
           product={product}

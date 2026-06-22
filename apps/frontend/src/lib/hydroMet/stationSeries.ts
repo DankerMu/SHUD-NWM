@@ -9,6 +9,7 @@ export const HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT = 1600
 export const HYDRO_MET_STATION_VARIABLES = ['PRCP', 'TEMP', 'RH', 'wind', 'Rn'] as const
 export const HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT = 96
 export const HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT = 180
+export const HYDRO_MET_STATION_SERIES_RETAINED_DISK_MISS_CODE = 'STATION_FORCING_FILE_NOT_FOUND'
 
 const HYDRO_MET_STATION_SERIES_TRUNCATION_MARKER = '...'
 const HYDRO_MET_STATION_SERIES_MESSAGE_TOKEN_LIMIT = 72
@@ -34,6 +35,18 @@ export interface HydroMetStationSeriesRequest {
   product: HydroMetStationSeriesProductIdentity
   station: HydroMetStationSeriesInventoryStation
   limit?: number
+}
+
+export class HydroMetStationSeriesError extends Error {
+  readonly code: string | null
+  readonly details: unknown
+
+  constructor(message: string, options: { code?: string | null; details?: unknown } = {}) {
+    super(message)
+    this.name = 'HydroMetStationSeriesError'
+    this.code = options.code ?? null
+    this.details = options.details
+  }
 }
 
 export interface HydroMetStationSeriesUiStringOptions {
@@ -90,6 +103,28 @@ export function formatHydroMetStationSeriesMessage(value: unknown, fallback = 's
   })
 }
 
+function hydroMetStationSeriesApiErrorRecord(value: unknown) {
+  if (!isRecord(value)) return null
+  const error = value.error
+  return isRecord(error) ? error : value
+}
+
+export function hydroMetStationSeriesErrorCode(value: unknown) {
+  if (value instanceof HydroMetStationSeriesError) return value.code
+  const record = hydroMetStationSeriesApiErrorRecord(value)
+  return typeof record?.code === 'string' ? record.code : null
+}
+
+function hydroMetStationSeriesErrorDetails(value: unknown) {
+  if (value instanceof HydroMetStationSeriesError) return value.details
+  const record = hydroMetStationSeriesApiErrorRecord(value)
+  return isRecord(record) && 'details' in record ? record.details : undefined
+}
+
+export function isHydroMetStationSeriesRetainedDiskMiss(value: unknown) {
+  return hydroMetStationSeriesErrorCode(value) === HYDRO_MET_STATION_SERIES_RETAINED_DISK_MISS_CODE
+}
+
 export function formatHydroMetStationSeriesContractValue(
   value: unknown,
   options: HydroMetStationSeriesUiStringOptions = {},
@@ -133,12 +168,21 @@ export async function loadHydroMetStationSeries({
       },
     })
 
-    if (error) throw new Error(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'))
+    if (error) {
+      throw new HydroMetStationSeriesError(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'), {
+        code: hydroMetStationSeriesErrorCode(error),
+        details: hydroMetStationSeriesErrorDetails(error),
+      })
+    }
     const response = unwrapApiData<HydroMetStationSeriesResponse>(data, 'station-series 不可用')
     if (!isRecord(response) || !Array.isArray(response.series)) throw new Error('station-series 响应不完整')
     return response
   } catch (error) {
-    throw new Error(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'))
+    if (error instanceof HydroMetStationSeriesError) throw error
+    throw new HydroMetStationSeriesError(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'), {
+      code: hydroMetStationSeriesErrorCode(error),
+      details: hydroMetStationSeriesErrorDetails(error),
+    })
   }
 }
 

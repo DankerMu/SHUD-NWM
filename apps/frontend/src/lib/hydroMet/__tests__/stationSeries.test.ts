@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  HydroMetStationSeriesError,
+  HYDRO_MET_STATION_SERIES_RETAINED_DISK_MISS_CODE,
+  isHydroMetStationSeriesRetainedDiskMiss,
   validateHydroMetStationSeriesForChart,
   type HydroMetStationSeriesRecord,
 } from '@/lib/hydroMet/stationSeries'
@@ -35,6 +38,19 @@ function series(overrides: Record<string, unknown> = {}): HydroMetStationSeriesR
 }
 
 describe('validateHydroMetStationSeriesForChart (gold standard)', () => {
+  it('recognizes retained-disk station-series misses by API error code', () => {
+    expect(isHydroMetStationSeriesRetainedDiskMiss(
+      new HydroMetStationSeriesError('missing', { code: HYDRO_MET_STATION_SERIES_RETAINED_DISK_MISS_CODE }),
+    )).toBe(true)
+    expect(isHydroMetStationSeriesRetainedDiskMiss({
+      error: {
+        code: HYDRO_MET_STATION_SERIES_RETAINED_DISK_MISS_CODE,
+        message: 'Station forcing file not found.',
+      },
+    })).toBe(true)
+    expect(isHydroMetStationSeriesRetainedDiskMiss(new Error('Station forcing file not found.'))).toBe(false)
+  })
+
   it('accepts a well-formed series and returns rendered points + unit', () => {
     const result = validateHydroMetStationSeriesForChart(series())
     expect(result.ok).toBe(true)
