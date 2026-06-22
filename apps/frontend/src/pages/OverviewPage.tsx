@@ -264,6 +264,11 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
+  // validTime auto-correction can briefly make the precise data snapshot miss while the
+  // source/layer/cycle metadata is still current. Keep map bootstrap data alive in that
+  // window so basin boundaries and MVT overlays do not disappear.
+  const metadataOverview = overviewMetadataMatchesQuery ? overview : null
+  const mapOverview = currentOverview ?? metadataOverview
   const metadataLayers = overviewMetadataMatchesQuery ? (overview?.layers ?? []) : []
   const layers = currentOverview?.layers ?? metadataLayers
 
@@ -318,13 +323,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // DB 内 basin geom 是 mesh 碎片、被客户端预算拒绝时，用静态 domain 轮廓回填边界/bbox，
   // 恢复边界渲染、点击钻取与相机 fit（honest：静态文件缺失则维持原状）。
   const basins = useMemo(
-    () => withStaticBasinBoundaries(currentOverview?.basins ?? [], nationalGeo.domain),
-    [currentOverview?.basins, nationalGeo.domain],
+    () => withStaticBasinBoundaries(mapOverview?.basins ?? [], nationalGeo.domain),
+    [mapOverview?.basins, nationalGeo.domain],
   )
-  const summary = currentOverview?.summary
+  const summary = currentOverview?.summary ?? mapOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
-  const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? overview?.basinVersionToBasinId ?? {}
+  const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
   // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
@@ -406,8 +411,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         error ??
         (summary?.totalBasins === 0
           ? '暂无可用流域数据'
-          : currentOverview?.aggregationDecision.needsAggregationEndpoint
-            ? currentOverview.aggregationDecision.evidence
+          : mapOverview?.aggregationDecision.needsAggregationEndpoint
+            ? mapOverview.aggregationDecision.evidence
             : '流域清单暂不可用')
       : null
 

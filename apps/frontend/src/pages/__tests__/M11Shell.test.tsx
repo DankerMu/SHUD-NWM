@@ -1524,6 +1524,54 @@ describe('M11 visual foundation shell', () => {
     )
   })
 
+  it('keeps bootstrap basins and MVT overlay during validTime correction before the precise snapshot settles', () => {
+    window.history.pushState({}, '', '/?source=gfs&validTime=2026-05-18T06:00:00.000Z')
+    const query = parseM11QueryState(window.location.search)
+    const preCorrectionQuery = { ...query, validTime: null }
+    const dischargeLayer: LayerState = {
+      layerId: 'discharge',
+      displayName: 'River discharge',
+      group: 'hydrology',
+      available: true,
+      validTimes: ['2026-05-18T06:00:00.000Z'],
+      currentValidTime: '2026-05-18T06:00:00.000Z',
+      validTimeSource: 'api',
+      disabledReason: null,
+      metadata: { ...dischargeNationalMvtMetadata, valid_times: ['2026-05-18T06:00:00.000Z'] },
+      freshness: { ...freshness, runId: null, validTime: '2026-05-18T06:00:00.000Z' },
+      legend: [],
+    }
+    const snapshot: OverviewDataSnapshot = {
+      // queryKey matches because validTime is intentionally excluded there; dataKey differs.
+      requestScope: matchedOverviewScope(preCorrectionQuery),
+      bootstrap: { basins: [], layers: [], layerStates: [dischargeLayer], currentLayerValidTime: '2026-05-18T06:00:00.000Z' },
+      basins: overviewBasins,
+      summary: createEmptyOverviewSummary(preCorrectionQuery),
+      layers: [dischargeLayer],
+      aggregationDecision: decideAggregationEndpoint({
+        initialRequestCount: 1,
+        createsPerBasinNPlusOne: false,
+        missingRequiredFields: [],
+      }),
+      basinVersionToBasinId: {},
+    }
+    useOverviewDataStore.setState({
+      overview: snapshot,
+      mapBootstrapLoading: false,
+      enrichmentLoading: true,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.queryByTestId('m11-overview-empty')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', String(overviewBasins.length))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge')
+  })
+
   // PR #583 round-2 C1：OverviewPage 真接线 loadFloodRankingOnDemand / releaseFloodRankingOnDemand
   // （spec capability "overview-data-contracts" Requirement "Flood ranking is fetched on demand,
   // not on overview bootstrap" 的两个 scenarios：Ranking panel mounted + Ranking fetch is cancelled
