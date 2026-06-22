@@ -587,7 +587,7 @@ def _validate_parser_payload_row_shapes(
             elif role == "station_timeseries":
                 _validate_parser_required_row_fields(row, role, index, row_diagnostics)
             elif role == "interpolation_weights":
-                _validate_parser_required_row_fields(row, role, index, row_diagnostics)
+                _validate_parser_interpolation_weight_row_shape(row, index, row_diagnostics)
     row_diagnostics.flush()
 
 
@@ -597,8 +597,54 @@ def _validate_parser_station_inventory_row_shape(
     row_diagnostics: _RowDiagnostics,
 ) -> None:
     _validate_parser_required_row_fields(row, "station_inventory", index, row_diagnostics)
-    if not _has_coordinate_evidence(row):
+    _validate_parser_station_coordinate_evidence(row, index, row_diagnostics)
+
+
+def _validate_parser_station_coordinate_evidence(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    longitude_present = "longitude" in row
+    latitude_present = "latitude" in row
+    has_lon_lat_field = longitude_present or latitude_present
+    lon_lat_valid = _finite_number(row.get("longitude")) and _finite_number(row.get("latitude"))
+    if has_lon_lat_field and not lon_lat_valid:
+        row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude", index)
+
+    geometry_present = "geometry" in row
+    if geometry_present:
+        if not _valid_geojson_point_geometry(row.get("geometry")):
+            row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "geometry", index)
+        return
+
+    if not has_lon_lat_field:
         row_diagnostics.add(REASON_FIELD_MISSING, "station_inventory", "longitude/latitude|geometry", index)
+
+
+def _valid_geojson_point_geometry(value: Any) -> bool:
+    if not isinstance(value, Mapping) or value.get("type") != "Point":
+        return False
+    coordinates = value.get("coordinates")
+    if not isinstance(coordinates, list) or len(coordinates) != 2:
+        return False
+    return _finite_number(coordinates[0]) and _finite_number(coordinates[1])
+
+
+def _validate_parser_interpolation_weight_row_shape(
+    row: Mapping[str, Any],
+    index: int,
+    row_diagnostics: _RowDiagnostics,
+) -> None:
+    _validate_parser_required_row_fields(row, "interpolation_weights", index, row_diagnostics)
+    method = row.get("method")
+    if not _present_text(method) or str(method).lower() != "direct_grid":
+        return
+    weight = row.get("weight")
+    if _finite_number(weight) and float(weight) != 1.0:
+        row_diagnostics.add(REASON_FIELD_MISSING, "interpolation_weights", "weight", index)
+    if not _present_text(row.get("grid_signature")):
+        row_diagnostics.add(REASON_FIELD_MISSING, "interpolation_weights", "grid_signature", index)
 
 
 def _validate_parser_required_row_fields(

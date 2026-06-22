@@ -175,6 +175,23 @@ def _assert_parser_handoff_evidence(
     }
 
 
+def _assert_parser_unavailable_with_field(
+    result: dict[str, object],
+    field: str,
+) -> None:
+    assert result["available"] is False
+    assert result["parsed"] == {}
+    reasons = result["unavailable_reasons"]
+    assert isinstance(reasons, list)
+    matching_reasons = [
+        reason
+        for reason in reasons
+        if reason["code"] == REASON_FIELD_MISSING and reason.get("field") == field
+    ]
+    assert matching_reasons
+    assert any(sample.get("row_index") == 0 for reason in matching_reasons for sample in reason.get("samples", []))
+
+
 def _oversized_json_bytes(limit: int) -> bytes:
     return json.dumps({"padding": "x" * limit}).encode("utf-8")
 
@@ -507,6 +524,51 @@ def test_geometry_only_station_rows_validate_and_parse_with_coordinate_evidence(
     assert [set(row) for row in parsed["met.met_station"]] == [MET_STATION_GEOMETRY_ROW_KEYS] * 2
     assert [row["geometry"] for row in parsed["met.met_station"]] == geometries
     assert all("longitude" not in row and "latitude" not in row for row in parsed["met.met_station"])
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {"type": "Point", "coordinates": {"longitude": 100.125, "latitude": 38.25}},
+        {"type": "LineString", "coordinates": [[100.125, 38.25], [100.25, 38.375]]},
+    ],
+)
+def test_station_geometry_must_be_db_shaped_before_parser_emits_rows(
+    tmp_path: Path,
+    geometry: dict[str, object],
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    station_rows = _read_payload_rows(case_root, "station_inventory.json")
+    del station_rows[0]["longitude"]
+    del station_rows[0]["latitude"]
+    station_rows[0]["geometry"] = geometry
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
+
+    result = _parse_case_root(case_root)
+
+    _assert_parser_unavailable_with_field(result, "payloads.station_inventory.rows.geometry")
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_station_partial_lon_lat_with_valid_geometry_fails_closed_in_parser(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    station_rows = _read_payload_rows(case_root, "station_inventory.json")
+    del station_rows[0]["latitude"]
+    station_rows[0]["geometry"] = {"type": "Point", "coordinates": [100.125, 38.25]}
+    _set_payload_rows(case_root, "station_inventory", "station_inventory.json", station_rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
+
+    result = _parse_case_root(case_root)
+
+    _assert_parser_unavailable_with_field(result, "payloads.station_inventory.rows.longitude/latitude")
+    _assert_parser_handoff_evidence(result, case_root)
 
 
 def test_parser_preserves_successful_payload_business_values_without_redacting_grid_signatures(
@@ -1227,6 +1289,63 @@ def test_station_inventory_elevation_m_must_be_finite_before_parser_emits_statio
         and reason.get("field") == "payloads.station_inventory.rows.elevation_m"
         for reason in reasons
     )
+
+
+@pytest.mark.parametrize("grid_signature", [None, "  "])
+def test_direct_grid_requires_grid_signature_before_parser_emits_rows(
+    tmp_path: Path,
+    grid_signature: str | None,
+) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    rows = _read_payload_rows(case_root, "interp_weights.json")
+    rows[0]["method"] = "direct_grid"
+    rows[0]["weight"] = 1.0
+    if grid_signature is None:
+        del rows[0]["grid_signature"]
+    else:
+        rows[0]["grid_signature"] = grid_signature
+    _set_payload_rows(case_root, "interpolation_weights", "interp_weights.json", rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
+
+    result = _parse_case_root(case_root)
+
+    _assert_parser_unavailable_with_field(result, "payloads.interpolation_weights.rows.grid_signature")
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_direct_grid_requires_unit_weight_before_parser_emits_rows(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    rows = _read_payload_rows(case_root, "interp_weights.json")
+    rows[0]["method"] = "direct_grid"
+    rows[0]["weight"] = 0.5
+    _set_payload_rows(case_root, "interpolation_weights", "interp_weights.json", rows)
+
+    validation_result = _validate_case_root(case_root)
+    assert validation_result["available"] is True
+    assert validation_result["unavailable_reasons"] == []
+
+    result = _parse_case_root(case_root)
+
+    _assert_parser_unavailable_with_field(result, "payloads.interpolation_weights.rows.weight")
+    _assert_parser_handoff_evidence(result, case_root)
+
+
+def test_non_direct_grid_signature_remains_optional_for_parser(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    rows = _read_payload_rows(case_root, "interp_weights.json")
+    del rows[0]["grid_signature"]
+    assert rows[0]["method"] == "idw"
+    _set_payload_rows(case_root, "interpolation_weights", "interp_weights.json", rows)
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is True
+    parsed = result["parsed"]
+    assert isinstance(parsed, dict)
+    assert "grid_signature" not in parsed["met.interp_weight"][0]
 
 
 def test_station_timeseries_declared_variables_must_be_unique(tmp_path: Path) -> None:
