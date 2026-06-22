@@ -1025,6 +1025,12 @@ class PsycopgForecastStore:
         to_time: datetime | str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
+        """Legacy/internal DB-backed station-series helper.
+
+        The public display route now reads retained object-store CSV files via
+        `read_station_forcing_csv`. Keep this helper only for historical DB
+        contract tests and future #631 archival API design work.
+        """
         station_id = _required_text(station_id, "station_id")
         requested_variables = _station_variable_tokens(variables)
         selected_limit = _station_series_limit(limit)

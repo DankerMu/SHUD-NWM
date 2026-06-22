@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from apps.api.routes import data_sources
 from apps.api.routes.data_sources import get_station_lookup
 from packages.common.object_store_forcing import StationMetadata, raise_station_not_found
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 STATION_ID = "heihe_forc_001"
 MODEL_ID = "basins_heihe_shud"
 SOURCE_ID = "IFS"
@@ -231,6 +233,23 @@ def test_station_series_route_does_not_call_db_store_or_finalize_gate(
 
     assert response.status_code == 200
     assert calls == []
+
+
+def test_legacy_db_station_series_helper_has_no_production_callers() -> None:
+    assert "Legacy/internal DB-backed" in inspect.getdoc(data_sources.PsycopgForecastStore.station_series)
+    production_roots = ["apps", "packages", "services", "workers"]
+    forbidden_callers: list[str] = []
+
+    for root_name in production_roots:
+        for path in (REPO_ROOT / root_name).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr == "station_series":
+                        forbidden_callers.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+
+    assert forbidden_callers == []
 
 
 def test_station_series_route_missing_database_url_dependency_returns_api_envelope(
