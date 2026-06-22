@@ -44,6 +44,7 @@ series values and SHALL NOT treat `met.forcing_station_timeseries` or
 #### Scenario: Variable and time filtering
 - **WHEN** a client supplies `variables`, `from`, `to`, or `limit`
 - **THEN** the API applies those filters before returning chart points
+- **AND** omitted, empty, or blank-only `variables` behaves like the default request and returns `PRCP`, `TEMP`, `RH`, `wind`, and `Rn`
 - **AND** unknown or unsupported variables, including `Press`, are silently dropped from this route's result set
 - **AND** `from > to` returns HTTP 200 with `data.series=[]`
 - **AND** syntactically invalid times or invalid limits still produce validation errors rather than broad unbounded queries.

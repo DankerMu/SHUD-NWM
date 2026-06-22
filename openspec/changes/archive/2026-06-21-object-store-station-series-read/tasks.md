@@ -72,9 +72,9 @@
 - [x] 2.2 `get_met_station_series` 函数体替换：不再调 `store.station_series()`，改调 `read_station_forcing_csv(station_lookup=..., object_store_root=app.state.object_store_root, ...)`
 - [x] 2.3 reader 异常 → API HTTP error mapping：`StationForcingFileNotFoundError → 404`、`StationForcingFilenameMissingError → 500`、`StationForcingFileMalformedError → 500`；已有 `STATION_NOT_FOUND` / `MISSING_REQUIRED_FILTER` 维持原 `ForecastStoreError` 路径
 - [x] 2.4 保留 query params 解析（不动 signature）
-- [x] 2.5 `forcing_version_id` query param 在新路径下：与 cycle_time 同时传时静默忽略；单独传（无 cycle_time/model_id/source_id）触发 `MISSING_REQUIRED_FILTER` 422
+- [x] 2.5 `forcing_version_id` query param 在新路径下：只有与完整 `model_id`/`source_id`/`cycle_time` tuple 同时传时才静默忽略；单独传或 tuple 不完整时触发 `MISSING_REQUIRED_FILTER` 422
 - [x] 2.6 旧 `ForecastStoreError(FORCING_VERSION_NOT_FINALIZED)` / `FORCING_VERSION_NOT_FOUND` 的 try-except 块在该路由上不再出现（reader 不会 raise 这两个）
-- [x] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series` + 显式 case `forcing_version_id=X` 单独传（无 `cycle_time`/`model_id`/`source_id`）→ 422 `MISSING_REQUIRED_FILTER` + `forcing_version_id=X` 与 `cycle_time` 同时传 → 200（静默忽略）
+- [x] 2.7 API-level mocked test 在 `tests/test_forecast_api.py` 或新文件 `tests/test_forecast_api_met_station_series.py`：通过 `FastAPI TestClient` + `Depends` override 注入 `FakeStationLookup` + tmp_path fixture 文件，验证 4 个 typed error 的 HTTP 映射 + 验证 route 不再 import 或调用 `_ensure_forcing_version_finalized` / `station_series` + 显式 case `forcing_version_id=X` 单独传（无 `cycle_time`/`model_id`/`source_id`）→ 422 `MISSING_REQUIRED_FILTER` + `forcing_version_id=X` 与完整 `model_id`/`source_id`/`cycle_time` tuple 同时传 → 200（静默忽略）
 
 ## 3. Startup env check + boundary fix — `apps/api/runtime_mode.py` + `apps/api/main.py`
 

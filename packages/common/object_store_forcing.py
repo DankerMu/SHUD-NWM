@@ -793,11 +793,18 @@ def _station_variable_tokens(values: Sequence[str] | str | None) -> list[str]:
         raw_values = values
     aliases = {variable.lower(): variable for variable in FORCING_VARIABLES}
     tokens: list[str] = []
+    saw_nonblank = False
     for value in raw_values:
         for token in str(value).split(","):
-            canonical = aliases.get(token.strip().lower())
+            normalized = token.strip().lower()
+            if not normalized:
+                continue
+            saw_nonblank = True
+            canonical = aliases.get(normalized)
             if canonical is not None and canonical not in tokens:
                 tokens.append(canonical)
+    if not saw_nonblank:
+        return list(FORCING_VARIABLES)
     return tokens
 
 

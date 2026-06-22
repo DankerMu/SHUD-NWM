@@ -137,6 +137,7 @@ NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NHMS_LOG_TAIL_MAX_BYTES=1048576
 NHMS_ARTIFACT_BACKEND=local
 OBJECT_STORE_PREFIX=s3://nhms-prod
@@ -470,6 +471,8 @@ corepack pnpm check:bundle
 - FastAPI `/health` 通过。
 - 27 配置不包含 Slurm CLI 作为必需项。
 - 27 使用 `NHMS_SERVICE_ROLE=display_readonly` 启动。
+- 27 配置只读 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`，且 display API
+  进程用户可读、可遍历该 object-store mirror。
 - 27 使用只读 DB 账号，或 evidence 中明确标注只读账号尚未补齐。
 - 27 的日志读取指向 published artifacts，不依赖 22 私有 workspace。
 
@@ -482,6 +485,7 @@ export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 export NHMS_PUBLISHED_ARTIFACT_ROOT=/path/to/published/artifacts
+export OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 ```
 

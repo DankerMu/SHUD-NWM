@@ -73,6 +73,7 @@ Time_Day\tPrecip\tTemp\tRH\tWind\tRN   <- row 2: column names
 
 `Press` 不在 shud/CSV 内：
 
+- 省略 `variables`、传 `variables=`、或只传空白/逗号空段 → 等同未过滤，返回默认五变量 `PRCP/TEMP/RH/wind/Rn`
 - 请求 `variables=Press` 单独传 → response 不含任何 series（200 OK，`data.series=[]`）
 - 请求 `variables=PRCP,Press` 混合 → Press 从过滤集合中**静默丢弃**，response 仅含 PRCP series（不带 Press 的 empty list，不带 warning）
 - 请求 `variables=Press,UnknownVariable` → Press 静默丢弃，UnknownVariable 静默丢弃，response `data.series=[]` (200 OK)
@@ -369,7 +370,7 @@ Risk packs considered:
 - Auth / permissions / secrets: selected narrowly - display boundary permits a new read env without exposing secrets or compute mutation knobs; receipts must not leak env values beyond paths already documented.
 - Concurrency / shared state / ordering: not selected - object root is immutable startup config and reader remains stateless/no-cache.
 - Resource limits / large input / discovery: selected - route must use the bounded PR-A reader and real-disk tests must not scan broad object-store roots.
-- Legacy compatibility / examples: selected - `forcing_version_id` is accepted but ignored with `cycle_time`; alone it now returns existing 422 shape.
+- Legacy compatibility / examples: selected - `forcing_version_id` is accepted but ignored only with the full `model_id/source_id/cycle_time` tuple; alone or with an incomplete tuple it now returns the existing 422 shape.
 - Error handling / rollback / partial outputs: selected - typed reader errors map to stable HTTP envelopes; no fallback DB and no partial write/rollback path.
 - Release / packaging / dependency compatibility: selected narrowly - no dependency changes, but node-27 env/restart receipt is a release gate.
 - Documentation / migration notes: selected narrowly - env example plus runbook env-section placeholder are required; full docs/follow-up issues stay PR-C.
@@ -396,7 +397,7 @@ Invariant Matrix:
 - Evidence/audit/readiness: API mocked tests, runtime/boundary static tests, real-disk node-27 tests, curl receipt, ruff, OpenSpec validation, CI, draft-to-ready gate evidence.
 - Regression rows:
   - Latest cycle heihe/qhh x IFS/gfs with disk file present -> HTTP 200 non-empty disk series, no 409 finalize error.
-  - `forcing_version_id` alone -> HTTP 422 existing `MISSING_REQUIRED_FILTER`; with `cycle_time/model_id/source_id` -> HTTP 200 identical disk response.
+  - `forcing_version_id` alone -> HTTP 422 existing `MISSING_REQUIRED_FILTER`; with full `cycle_time/model_id/source_id` tuple -> HTTP 200 identical disk response.
   - Missing/unreadable/untraversable `OBJECT_STORE_ROOT` -> startup `RuntimeModeError`; display env with readable + traversable root -> no `DISPLAY_BOUNDARY_CONFIG_UNSAFE`.
   - Module import `from apps.api.main import app` with default dev env -> succeeds; explicit display startup without root -> `RuntimeModeError`; display startup with readable tmp root -> prior runtime route inventory and non-series API tests still pass.
   - Old cycle present in DB but absent on disk -> HTTP 404 `STATION_FORCING_FILE_NOT_FOUND`, no DB fallback.

@@ -262,12 +262,18 @@ The display API SHALL fail to start when `OBJECT_STORE_ROOT` env var is missing 
 
 ### Requirement: Variable, time-window, and limit filtering applied in reader
 
-The reader SHALL accept optional `variables`, `from_time`, `to_time`, and `limit` parameters and apply them after CSV parse before returning the series. `limit` truncates total tuples (not per-variable). Unknown or unsupported variables are silently dropped from the filter.
+The reader SHALL accept optional `variables`, `from_time`, `to_time`, and `limit` parameters and apply them after CSV parse before returning the series. `limit` truncates total tuples (not per-variable). Empty or blank-only `variables` input SHALL behave the same as an omitted filter and return the default five variables. Unknown or unsupported nonblank variables are silently dropped from the filter.
 
 #### Scenario: variables filter restricts emitted variables
 
 - **WHEN** API request includes `variables=PRCP,TEMP`
 - **THEN** the response SHALL contain only `PRCP` and `TEMP` variables, no `RH/wind/Rn`
+
+#### Scenario: blank variables filter is treated as omitted
+
+- **WHEN** API request omits `variables` or includes `variables=` / blank-only variable tokens
+- **THEN** the response SHALL contain the default variables `[PRCP, TEMP, RH, wind, Rn]`
+- **AND** this blank-filter behavior SHALL be distinct from nonblank unsupported variables being silently dropped
 
 #### Scenario: from_time / to_time restrict emitted valid_times inclusive
 
@@ -333,11 +339,11 @@ After this change, `/api/v1/met/stations/{station_id}/series` SHALL never return
 
 ### Requirement: forcing_version_id query param silently ignored
 
-The existing `forcing_version_id` query param on `apps/api/routes/data_sources.py:get_met_station_series` SHALL be silently accepted but unused by the new disk-only path. OpenAPI documentation MUST mark this param deprecated.
+The existing `forcing_version_id` query param on `apps/api/routes/data_sources.py:get_met_station_series` SHALL be silently accepted but unused by the new disk-only path only when the full `model_id`, `source_id`, and `cycle_time` tuple is present. OpenAPI documentation MUST mark this param deprecated.
 
-#### Scenario: forcing_version_id passed alongside cycle_time is ignored, request succeeds
+#### Scenario: forcing_version_id passed alongside full disk tuple is ignored, request succeeds
 
-- **WHEN** API request includes both `forcing_version_id=forc_ifs_2026062012_basins_heihe_shud` and `cycle_time=2026-06-20T12:00:00Z`
+- **WHEN** API request includes `forcing_version_id=forc_ifs_2026062012_basins_heihe_shud`, `model_id=basins_heihe_shud`, `source_id=ifs`, and `cycle_time=2026-06-20T12:00:00Z`
 - **THEN** the response SHALL be identical to the same request without `forcing_version_id` (no 422, no 200 with different body)
 
 #### Scenario: forcing_version_id alone without cycle_time returns 422

@@ -16,7 +16,8 @@ GET /api/v1/met/stations/{station_id}/series?model_id=...&source_id=...&cycle_ti
 
 - `met.met_station` 仍是站点元数据来源；API 用它查 `basin_version_id`、坐标、高程、角色、active flag 和 `properties_json.forcing_filename`。
 - 序列值不再读取 `met.forcing_station_timeseries`，也不再经过 `met.forcing_version` finalize gate。
-- `forcing_version_id` 参数保留兼容形状；新路径需要 `model_id + source_id + cycle_time`，单独只传 `forcing_version_id` 会返回 `MISSING_REQUIRED_FILTER`。
+- `forcing_version_id` 参数保留兼容形状；只有与完整 `model_id + source_id + cycle_time` tuple 同传时才会被接受并忽略。单独只传 `forcing_version_id` 会返回 `MISSING_REQUIRED_FILTER`。
+- `variables` 省略、空字符串或纯空白时等同于默认变量集，返回 `PRCP`、`TEMP`、`RH`、`wind`、`Rn`；非空但不支持的变量名（例如 `Press` 或未知变量）会被静默丢弃。
 - disk 缺文件即返回 `STATION_FORCING_FILE_NOT_FOUND`；不会 fallback 到 DB。
 
 ## Required Runtime Config
@@ -92,6 +93,14 @@ station-series reader 只读 forcing producer 已发布到共享 object-store mi
 | 500 | `STATION_FORCING_FILE_MALFORMED` | 文件存在但不可安全读取或 CSV 不满足契约，例如 unsafe path segment、symlink/no-follow 拒绝、header/列数/数值非法、超过 bounded-read 限制 |
 
 旧 DB-backed 路径上的 `FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 不应再从该 station-series route 产生。新路径不查 `met.forcing_version` readiness，所以不要用这些 code 排查 disk 读问题。
+
+## Variable Filter Semantics
+
+`variables` 的空值语义和不支持变量语义不同：
+
+- 未传 `variables`、`variables=` 或只包含空白/逗号空段时，按未过滤处理，返回当前 SHUD CSV 支持的默认五个变量。
+- 传入非空变量名时，只返回支持的变量；`Press` 和未知变量不会报错，但会被从结果集中省略。
+- 例如 `variables=Press` 返回 200 且 `data.series=[]`，`variables=PRCP,Press` 只返回 `PRCP`。
 
 ## Disk Retention Window
 
