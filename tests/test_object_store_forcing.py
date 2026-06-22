@@ -454,6 +454,38 @@ def test_malformed_csv_extra_rows_reads_bounded_mismatch_probe(
     assert bytes_read < len(content.encode("utf-8"))
 
 
+def test_chunked_csv_reader_handles_valid_lines_split_across_tiny_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_csv(tmp_path, time_days=[0.0, 0.125])
+    tiny_chunk_size = 7
+    original_read = object_store_forcing.os.read
+    requested_lengths: list[int] = []
+    read_sizes: list[int] = []
+
+    def spy_read(fd: int, length: int) -> bytes:
+        requested_lengths.append(length)
+        chunk = original_read(fd, length)
+        read_sizes.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(object_store_forcing, "STATION_FORCING_CSV_READ_CHUNK_BYTES", tiny_chunk_size)
+    monkeypatch.setattr(object_store_forcing.os, "read", spy_read)
+
+    response = _read(tmp_path)
+
+    assert _total_points(response) == 10
+    assert [series["variable"] for series in response["series"]] == VARIABLE_ORDER
+    assert [point["valid_time"] for point in response["series"][0]["points"]] == [
+        "2026-06-20T12:00:00Z",
+        "2026-06-20T15:00:00Z",
+    ]
+    assert len(requested_lengths) > 1
+    assert max(requested_lengths) <= tiny_chunk_size
+    assert all(size <= tiny_chunk_size for size in read_sizes)
+    assert max(read_sizes) < path.stat().st_size
+
+
 def test_malformed_csv_large_nrow_rejects_before_data_expansion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
