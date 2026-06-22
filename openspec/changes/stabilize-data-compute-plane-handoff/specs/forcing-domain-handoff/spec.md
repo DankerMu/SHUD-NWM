@@ -5,9 +5,10 @@
 The system SHALL define an object-store forcing-domain handoff that contains
 enough identity and payload metadata for node-27 ingest to reconstruct display
 forcing readiness without querying an active node-22 database. The handoff MUST
-include or reference `source_id`, `cycle_time`, `run_id`, `model_id`,
-`basin_version_id`, `forcing_version_id`, package URI, package checksum, station
-inventory payload/checksum, station-timeseries payload/checksum,
+include or reference `source_id`, `cycle_time`, `start_time`, `end_time`,
+`run_id`, `model_id`, `basin_id`, `basin_version_id`, `forcing_version_id`,
+package URI, package checksum, station inventory payload/checksum,
+station-timeseries payload/checksum,
 interpolation-weight payload/checksum, station count, and per-table row-count
 evidence.
 
@@ -19,12 +20,13 @@ evidence.
   `met.met_station`, `met.forcing_station_timeseries`, and `met.interp_weight`
   for that run from object-store package material and manifests
 - **AND** the ingest report records the handoff manifest URI, checksum, source,
-  cycle, model identity, basin version identity, station count, and row counts
+  cycle, forcing time window, model identity, basin version identity, station
+  count, and row counts
 
 #### Scenario: Incomplete handoff fails with a stable reason
 
-- **WHEN** required forcing-domain handoff fields or payloads are missing,
-  malformed, or checksum-mismatched
+- **WHEN** required forcing-domain handoff fields, temporal bounds, or payloads
+  are missing, malformed, or checksum-mismatched
 - **THEN** node-27 ingest MUST NOT silently fabricate forcing readiness or fall
   back to historical latest data
 - **AND** the run summary includes a stable unavailable reason that names the

@@ -1,0 +1,46 @@
+[
+  {
+    "source_id": "GFS",
+    "grid_id": "gfs_0p25_2026062012",
+    "model_id": "basins_qhh_shud",
+    "station_id": "qhh_forc_001",
+    "variable": "PRCP",
+    "grid_cell_id": "gfs_cell_100_38",
+    "weight": 0.75,
+    "method": "idw",
+    "grid_signature": "gfs-0p25-qhh-fixture"
+  },
+  {
+    "source_id": "GFS",
+    "grid_id": "gfs_0p25_2026062012",
+    "model_id": "basins_qhh_shud",
+    "station_id": "qhh_forc_001",
+    "variable": "TEMP",
+    "grid_cell_id": "gfs_cell_100_38",
+    "weight": 0.75,
+    "method": "idw",
+    "grid_signature": "gfs-0p25-qhh-fixture"
+  },
+  {
+    "source_id": "GFS",
+    "grid_id": "gfs_0p25_2026062012",
+    "model_id": "basins_qhh_shud",
+    "station_id": "qhh_forc_002",
+    "variable": "PRCP",
+    "grid_cell_id": "gfs_cell_101_38",
+    "weight": 0.82,
+    "method": "idw",
+    "grid_signature": "gfs-0p25-qhh-fixture"
+  },
+  {
+    "source_id": "GFS",
+    "grid_id": "gfs_0p25_2026062012",
+    "model_id": "basins_qhh_shud",
+    "station_id": "qhh_forc_002",
+    "variable": "TEMP",
+    "grid_cell_id": "gfs_cell_101_38",
+    "weight": 0.82,
+    "method": "idw",
+    "grid_signature": "gfs-0p25-qhh-fixture"
+  }
+]

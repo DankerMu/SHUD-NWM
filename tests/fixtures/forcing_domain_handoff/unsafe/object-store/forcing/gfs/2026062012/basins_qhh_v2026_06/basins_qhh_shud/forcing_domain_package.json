@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "contract_id": "nhms.forcing_domain_handoff.package.v1",
+  "run_id": "fcst_gfs_2026062012_basins_qhh_shud_unsafe",
+  "forcing_version_id": "forc_gfs_2026062012_basins_qhh_shud_unsafe",
+  "payloads": {},
+  "table_row_counts": {
+    "met.forcing_version": 1,
+    "met.met_station": 2,
+    "met.forcing_station_timeseries": 4,
+    "met.interp_weight": 4
+  }
+}
