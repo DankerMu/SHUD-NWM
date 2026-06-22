@@ -434,7 +434,7 @@ Python modules `apps.api.routes.pipeline` 和 `apps.api.routes.forecast`）。
 对同一个 `source/cycle/model_id/basin_id` 检查：
 
 - `met` canonical/forcing 元数据存在。
-- `met.forcing_station_timeseries` 覆盖 `PRCP/TEMP/RH/wind/Rn/Press`。
+- producer/DB forcing 覆盖 `PRCP/TEMP/RH/wind/Rn/Press`；这只证明生产侧或历史 DB 覆盖，不代表当前 display station-series route 会返回 `Press`。
 - `hydro.river_timeseries` 覆盖 `q_down`。
 - `ops.pipeline_job` / `ops.pipeline_event` 有完整 job/stage 状态。
 - `log_uri` 指向 27 可读取的发布日志位置。
@@ -641,13 +641,15 @@ curl -i 'http://127.0.0.1:8000/api/v1/mvp/qhh/latest-product?source=IFS&cycle_ti
 使用 latest-product 返回的 station、forcing_version、segment、river_network_version 检查：
 
 ```bash
-curl -i '<station-series-url>'
+curl -i '<station-series-url?variables=PRCP,TEMP,RH,wind,Rn>'
+curl -i '<station-series-url?variables=Press>'
 curl -i '<forecast-series-q-down-url>'
 ```
 
 通过条件：
 
-- station series 返回六个 MVP 变量。
+- station series 对当前 disk-backed route 支持的 `PRCP`、`TEMP`、`RH`、`wind`、`Rn` 返回非空或可解释的可用性状态，且每个返回变量的 `valid_time`、`source_id`/`cycle_time` 和 `unit` 语义正确。
+- `Press` 不作为当前 display station-series route 的 PASS 必需变量；当前 object-store CSV-backed path 不 emit `Press`，请求或期待 `Press` 时应记录为 omitted/unavailable，而不是把五变量响应判为失败。
 - forecast series 返回 `q_down`。
 - valid time、issue time、source/scenario 和单位语义正确。
 
