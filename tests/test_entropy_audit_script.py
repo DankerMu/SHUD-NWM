@@ -613,6 +613,107 @@ def test_compatibility_facade_guard_reports_async_non_forwarding_implementation(
     assert "new_async_chain_policy" in str(signals[0]["detail"])
 
 
+def test_compatibility_facade_guard_reports_existing_sync_forwarder_changed_to_non_forwarding_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    forwarding_function = (
+        "\n"
+        "def unlisted_existing_chain_forwarder(value: object) -> object:\n"
+        "    return chain_manifests.unlisted_existing_chain_forwarder(value)\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + forwarding_function)
+    _commit_all(tmp_path, "add unlisted existing chain forwarding facade")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            forwarding_function,
+            "\n"
+            "def unlisted_existing_chain_forwarder(value: object) -> dict[str, str]:\n"
+            "    normalized = str(value).strip()\n"
+            "    return {\"value\": normalized}\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_chain_forwarder",
+        "unlisted_existing_chain_forwarder",
+    ]
+    assert "changed to non-forwarding facade implementation" in str(signals[0]["detail"])
+    assert "unlisted_existing_chain_forwarder" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_chain_forwarder local implementation retained with removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_existing_async_forwarder_changed_to_non_forwarding_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    forwarding_function = (
+        "\n"
+        "async def unlisted_existing_async_chain_forwarder(value: object) -> object:\n"
+        "    return await chain_manifests.unlisted_existing_async_chain_forwarder(value)\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + forwarding_function)
+    _commit_all(tmp_path, "add unlisted existing async chain forwarding facade")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            forwarding_function,
+            "\n"
+            "async def unlisted_existing_async_chain_forwarder(value: object) -> dict[str, str]:\n"
+            "    normalized = str(value).strip()\n"
+            "    return {\"value\": normalized}\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_async_chain_forwarder",
+        "unlisted_existing_async_chain_forwarder",
+    ]
+    assert "changed to non-forwarding facade implementation" in str(signals[0]["detail"])
+    assert "unlisted_existing_async_chain_forwarder" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_async_chain_forwarder local implementation retained with removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
 def test_compatibility_facade_guard_reports_chain_import_family_growth_until_inventory_updates(
     tmp_path: Path,
 ) -> None:

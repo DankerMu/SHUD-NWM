@@ -73,8 +73,9 @@
   coverage. `tests/test_entropy_audit_script.py` covers current-repo zero
   signals, scheduler owner-module re-export, scheduler imported symbol,
   scheduler private monkeypatch alias, guard-hook-only inventory matching,
-  chain non-forwarding local implementation, async local implementation, chain
-  project import-family growth, and inventory-update pass-through.
+  chain non-forwarding local implementation, sync/async forwarding-to-local
+  implementation transitions, async local implementation, chain project
+  import-family growth, and inventory-update pass-through.
 
 ## 3. Production Closure Lane Decomposition
 

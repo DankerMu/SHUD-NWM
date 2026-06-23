@@ -3885,9 +3885,24 @@ def _compatibility_facade_signals(
         if not _compatibility_inventory_covers_signal(inventory_text, signal):
             signals.append(signal)
 
-    base_definition_keys = {item.key for item in base_surface.definitions}
+    base_definitions_by_key = {item.key: item for item in base_surface.definitions}
     for item in current_surface.definitions:
-        if item.key in base_definition_keys:
+        base_item = base_definitions_by_key.get(item.key)
+        if base_item is not None:
+            if not (base_item.forwarding and not item.forwarding):
+                continue
+            signal = _compatibility_facade_signal(
+                config,
+                signal_type="new-non-forwarding-implementation",
+                inventory_tokens=(item.qualified_name, item.simple_name),
+                line=item.line,
+                detail=(
+                    "existing forwarding facade path changed to non-forwarding "
+                    f"facade implementation `{item.qualified_name}` in `{config.relative_path}`"
+                ),
+            )
+            if not _compatibility_inventory_covers_signal(inventory_text, signal):
+                signals.append(signal)
             continue
         signal_type = (
             _compatibility_symbol_signal_type(item.simple_name, item.simple_name)
