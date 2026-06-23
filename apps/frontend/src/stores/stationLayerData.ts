@@ -13,6 +13,8 @@ import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
  * 不让"看似完整"的图层掩盖缺失（spec: 诚实标注 truncation）。
  */
 export const STATION_CLIENT_CAP = 5000
+/** 国家级 overview 守卫：最多请求前 N 个已解析流域版本，避免空/稀疏流域扇出无界首页请求。 */
+export const STATION_CONTEXT_CAP = 50
 export const STATION_PAGE_LIMIT = HYDRO_MET_STATION_LIMIT
 
 export interface StationLayerData {
@@ -73,14 +75,15 @@ let activeRequestKey: string | null = null
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const contexts = normalizeBasinContexts(request.basinContexts)
-  if (contexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
+  const normalizedContexts = normalizeBasinContexts(request.basinContexts)
+  if (normalizedContexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
+  const contexts = normalizedContexts.slice(0, STATION_CONTEXT_CAP)
 
   const stations: HydroMetStation[] = []
   const stationBasinIds: Record<string, string> = {}
   let total = 0
-  let totalKnown = true
-  let truncated = false
+  let totalKnown = normalizedContexts.length <= contexts.length
+  let truncated = normalizedContexts.length > contexts.length
 
   for (const context of contexts) {
     if (stations.length >= STATION_CLIENT_CAP) {

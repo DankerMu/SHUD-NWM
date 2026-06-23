@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import {
   STATION_CLIENT_CAP,
+  STATION_CONTEXT_CAP,
   STATION_PAGE_LIMIT,
   stationLayerRequestKey,
   useStationLayerDataStore,
@@ -162,6 +163,28 @@ describe('stationLayerData store (M26-3)', () => {
       { basinVersionId: 'bv-second' },
       expect.anything(),
     )
+  })
+
+  it('caps empty visible basin contexts and reports unknown total coverage', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage([], 0))
+    const basinContexts = Array.from({ length: STATION_CONTEXT_CAP + 3 }, (_, index) => ({
+      basinId: `basin-${index}`,
+      basinVersionId: `bv-${index}`,
+    }))
+
+    const data = await useStationLayerDataStore.getState().loadStationLayer({ basinContexts })
+
+    expect(data.total).toBe(0)
+    expect(data.loaded).toBe(0)
+    expect(data.totalKnown).toBe(false)
+    expect(data.truncated).toBe(true)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(STATION_CONTEXT_CAP)
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual(
+      basinContexts.slice(0, STATION_CONTEXT_CAP).map((context) => ({ basinVersionId: context.basinVersionId })),
+    )
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).not.toContainEqual({
+      basinVersionId: `bv-${STATION_CONTEXT_CAP}`,
+    })
   })
 
   it('loads a single page basin without truncation', async () => {

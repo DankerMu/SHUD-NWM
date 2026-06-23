@@ -46,7 +46,7 @@ import {
   type M11OverviewRequestScope,
   type OverviewDataSnapshot,
 } from '@/stores/overviewData'
-import { stationLayerRequestKey, useStationLayerDataStore } from '@/stores/stationLayerData'
+import { STATION_CONTEXT_CAP, stationLayerRequestKey, useStationLayerDataStore } from '@/stores/stationLayerData'
 import { client } from '@/api/client'
 
 // 让 PR 4/7 wire-up 的 loadFloodRankingOnDemand / releaseFloodRankingOnDemand 可观测：
@@ -2568,6 +2568,38 @@ describe('M11 visual foundation shell', () => {
       expect(status).toContain('已加载 5000 个代站')
       expect(status).toContain('总数未完全统计')
       expect(status).not.toContain('5000/5000')
+    })
+
+    it('reports context-cap truncation even when no stations were loaded', () => {
+      const basinContexts = Array.from({ length: STATION_CONTEXT_CAP + 1 }, (_, index) => ({
+        basinId: `basin-${index}`,
+        basinVersionId: `basin-${index}_v1`,
+      }))
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 0,
+          totalKnown: false,
+          loaded: 0,
+          truncated: true,
+        },
+        requestKey: stationLayerRequestKey({ basinContexts }),
+      })
+
+      render(<Harness active basinContexts={basinContexts} />)
+
+      const harness = screen.getByTestId('harness')
+      const status = harness.getAttribute('data-status') ?? ''
+      expect(harness).toHaveAttribute('data-truncated', 'true')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
+      expect(status).toContain('已加载 0 个代站')
+      expect(status).toContain('总数未完全统计')
+      expect(status).toContain('截断')
+      expect(status).not.toContain('暂无可渲染气象代站')
     })
 
     it('reports an honest no-renderable state when the current inventory is empty', () => {
