@@ -1669,12 +1669,12 @@ describe('App route state', () => {
       clear: vi.fn(),
     })
     useOverviewDataStore.setState({
-      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey),
       basinLoading: false,
       basinError: null,
     })
 
-    await renderAppAtBasinDetail('/?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+    await renderAppAtBasinDetail('/?source=gfs&validTime=2026-05-18T06%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     // 浮层切换器在详情模式同样可用；不再有水文图层侧栏
     expect(screen.queryByText('数据源与情景')).not.toBeInTheDocument()
@@ -1684,9 +1684,11 @@ describe('App route state', () => {
     expect(window.location.search).toContain('metStations=1')
     expect(new URLSearchParams(window.location.search).get('layer')).toBeNull()
     await waitFor(() => expect(screen.getByRole('button', { name: /气象代站/, pressed: true })).toBeInTheDocument())
-    expect(loadStationLayer).toHaveBeenCalledWith({
-      basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }],
-    })
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }],
+      }),
+    )
     expect(overviewAsync).not.toHaveBeenCalled()
   })
 

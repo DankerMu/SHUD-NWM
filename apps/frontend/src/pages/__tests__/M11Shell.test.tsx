@@ -1908,6 +1908,75 @@ describe('M11 visual foundation shell', () => {
     expect(window.location.search).toContain('basinId=qhh')
   })
 
+  it('waits for the resolved basin-detail station identity instead of using a mismatched URL version', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    const staleQuery = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_old&metStations=1')
+    const staleSnapshot = matchedBasinSnapshot('qhh', staleQuery)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...staleSnapshot,
+        detail: {
+          ...staleSnapshot.detail,
+          selectedBasinVersionId: 'qhh_old',
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('qhh', expect.objectContaining({ basinVersionId: 'heihe_v1' })))
+    expect(await screen.findByTestId('m11-met-station-status')).toHaveTextContent('暂无可用流域版本')
+    expect(loadStationLayer).not.toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
+    })
+
+    const resolvedQuery = parseM11QueryState('?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+    const resolvedSnapshot = matchedBasinSnapshot('qhh', resolvedQuery)
+    await act(async () => {
+      useOverviewDataStore.setState({
+        basinDetail: {
+          ...resolvedSnapshot,
+          detail: {
+            ...resolvedSnapshot.detail,
+            selectedBasinVersionId: 'qhh_v2026_01',
+          },
+        },
+        basinLoading: false,
+        basinError: null,
+      })
+    })
+
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+    expect(loadStationLayer).not.toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
+    })
+  })
+
   it('loads basin-detail station overlay from the resolved detail basin version when the URL omits it', async () => {
     const loadStationLayer = vi.fn().mockResolvedValue(undefined)
     const query = parseM11QueryState('?basinId=qhh&metStations=1')
@@ -1962,7 +2031,17 @@ describe('M11 visual foundation shell', () => {
       loadStationLayer: vi.fn().mockResolvedValue(stationSnapshot.data),
       clear: vi.fn(),
     })
-    useOverviewDataStore.setState({ basinDetail: matchedBasinSnapshot('qhh', query), basinLoading: false })
+    const basinSnapshot = matchedBasinSnapshot('qhh', query)
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot,
+        detail: {
+          ...basinSnapshot.detail,
+          selectedBasinVersionId: 'qhh_v1',
+        },
+      },
+      basinLoading: false,
+    })
     window.history.pushState({}, '', '/')
 
     render(
