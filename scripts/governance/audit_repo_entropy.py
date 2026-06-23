@@ -4664,7 +4664,7 @@ def _structural_ownership_growth_signals(
             _structural_growth_signal(
                 record,
                 "new-import-family",
-                "new import families: " + ", ".join(new_import_families),
+                _structural_import_family_detail(new_import_families),
             )
         )
     current_public_tokens = _structural_current_public_surface_tokens(root, record.relative_path)
@@ -4748,6 +4748,26 @@ def _structural_public_surface_detail(public_tokens: tuple[str, ...]) -> str:
         + ", ".join(shown)
         + f" (+{remaining} more)"
     )
+
+
+def _structural_import_family_detail(import_families: list[str]) -> str:
+    tokens = tuple(_structural_import_family_detail_token(family) for family in import_families)
+    if len(tokens) <= STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT:
+        return "new import family tokens: " + ", ".join(tokens)
+    shown = tokens[:STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT]
+    remaining = len(tokens) - len(shown)
+    return (
+        f"new import family tokens ({len(tokens)} total): "
+        + ", ".join(shown)
+        + f" (+{remaining} more)"
+    )
+
+
+def _structural_import_family_detail_token(import_family: str) -> str:
+    digest = hashlib.sha256(import_family.encode("utf-8", errors="replace")).hexdigest()[
+        :STRUCTURAL_TOKEN_HASH_HEX_CHARS
+    ]
+    return f"import-sha256-{digest}"
 
 
 def _structural_python_current_context_public_surface_tokens(

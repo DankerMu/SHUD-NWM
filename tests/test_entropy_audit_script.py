@@ -1118,15 +1118,15 @@ def test_structural_ownership_growth_route_detail_hashes_long_path_literal(
     assert len(details[0]) < 120
 
 
-def test_structural_ownership_growth_import_detail_hashes_long_import_family(
+def test_structural_ownership_growth_import_detail_hashes_import_family(
     tmp_path: Path,
 ) -> None:
     _init_git(tmp_path)
     relative_path = "services/api/large.py"
     source_path = tmp_path / relative_path
-    long_module = "sk_live_import_" + ("x" * 200)
+    import_module = "sk_live_short_secret"
     base_text = _structural_python_fixture(1001)
-    changed_text = _structural_python_fixture(1001, f"import {long_module}")
+    changed_text = _structural_python_fixture(1001, f"import {import_module}")
     _write(source_path, base_text)
     _commit_all(tmp_path, "base oversized source")
     base_ref = _git_rev_parse(tmp_path, "HEAD")
@@ -1135,9 +1135,9 @@ def test_structural_ownership_growth_import_detail_hashes_long_import_family(
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
     details = _structural_growth_signal_details(budget, relative_path, "new-import-family")
 
-    expected_import_token = audit_repo_entropy._structural_import_family(long_module)
-    assert details == [f"new import families: {expected_import_token}"]
-    assert "sk_live_import" not in details[0]
+    expected_import_token = audit_repo_entropy._structural_import_family_detail_token(import_module)
+    assert details == [f"new import family tokens: {expected_import_token}"]
+    assert "sk_live_short_secret" not in details[0]
     assert len(details[0]) < 120
 
 
@@ -1546,11 +1546,16 @@ def test_structural_growth_detects_multiline_and_indented_imports_in_huge_source
         and signal["signal_type"] == "new-import-family"
     ]
 
+    expected_tokens = {
+        audit_repo_entropy._structural_import_family_detail_token("importlib"),
+        audit_repo_entropy._structural_import_family_detail_token("pathlib"),
+    }
+
     assert "new-import-family" in _structural_growth_signal_types(
         budget,
         "services/api/large.py",
     )
-    assert any("pathlib" in detail and "importlib" in detail for detail in signal_details)
+    assert any(all(token in detail for token in expected_tokens) for detail in signal_details)
 
 
 def test_structural_ownership_growth_details_do_not_leak_added_source_literals(
