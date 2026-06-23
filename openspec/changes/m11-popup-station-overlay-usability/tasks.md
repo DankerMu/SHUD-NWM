@@ -74,4 +74,4 @@ Issue #659 evidence rows:
 - [x] 5.1 Run targeted frontend tests for query state, overview data contracts, station layer store/hook, floating controls, MapLibre surface, river forecast panel, station forcing popup, and M11 routes.
 - [x] 5.2 Run `cd apps/frontend && corepack pnpm test` and `cd apps/frontend && corepack pnpm build`.
 - [x] 5.3 Run `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`.
-- [ ] 5.4 After deployment to node-27, capture live display evidence that `/`, `/meteorology`, river click, station click, dual-window comparison, drag movement, and dark issue-time selector behavior work against `https://test.nwm.ac.cn/`.
+- [x] 5.4 After deployment to node-27, capture live display evidence that `/`, `/meteorology`, river click, station click, dual-window comparison, drag movement, and dark issue-time selector behavior work against `https://test.nwm.ac.cn/`.
