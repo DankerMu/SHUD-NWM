@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -54,6 +55,7 @@ READONLY_DB_URL_ENVS = (
     "NHMS_DISPLAY_READONLY_DATABASE_URL",
     "NHMS_READONLY_DB_VALIDATION_DATABASE_URL",
 )
+DISPLAY_OBJECT_STORE_ROOT_ENVS = ("OBJECT_STORE_ROOT", "NHMS_PRODUCTION_OBJECT_STORE_ROOT")
 VALIDATION_ENV_PREFIX = "NHMS_READONLY_DB_VALIDATION_"
 VALIDATION_CONNECT_TIMEOUT_SECONDS = 5
 VALIDATION_STATEMENT_TIMEOUT_MS = 10_000
@@ -3294,6 +3296,7 @@ def _display_app_env() -> dict[str, str]:
         "NHMS_SERVICE_ROLE": "display_readonly",
         "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "true",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+        "OBJECT_STORE_ROOT": _display_object_store_root(),
     }
 
 
@@ -3306,6 +3309,22 @@ def _display_validation_env(*, database_url: str | None = None) -> dict[str, str
     if database_url is not None:
         env["DATABASE_URL"] = _bounded_database_url(database_url)
     return env
+
+
+def _display_object_store_root() -> str:
+    for env_var in DISPLAY_OBJECT_STORE_ROOT_ENVS:
+        raw_value = os.environ.get(env_var, "").strip()
+        if raw_value:
+            return str(Path(raw_value).expanduser())
+    fallback_root = Path(tempfile.gettempdir()).expanduser() / "nhms-display-readonly-object-store"
+    try:
+        fallback_root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ReadonlyDbValidationError(
+            "DISPLAY_OBJECT_STORE_ROOT_UNAVAILABLE",
+            f"Failed to prepare display readonly object-store root {fallback_root}: {error}",
+        ) from error
+    return str(fallback_root)
 
 
 def _validation_auth_env() -> dict[str, str | None]:

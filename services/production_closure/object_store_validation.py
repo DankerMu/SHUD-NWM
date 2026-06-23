@@ -26,6 +26,7 @@ from packages.common.safe_fs import (
     unlink_no_follow,
 )
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
+from workers.model_registry.basins_geometry import RIVER_SHP_REQUIRED_DBF_FIELDS
 from workers.model_registry.basins_package import (
     BasinsPackageError,
     publish_basins_package,
@@ -495,8 +496,8 @@ def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None 
     gis_dir = input_dir / "gis"
     _safe_fixture_dir(gis_dir, containment_root=containment_root)
     _write_domain_shapefile(gis_dir / "domain", containment_root=containment_root)
-    _write_line_shapefile(gis_dir / "river", containment_root=containment_root)
-    _write_line_shapefile(gis_dir / "seg", containment_root=containment_root)
+    _write_river_shapefile(gis_dir / "river", containment_root=containment_root)
+    _write_segment_crosswalk_shapefile(gis_dir / "seg", containment_root=containment_root)
     forcing_dir = model_dir / "forcing"
     _safe_fixture_dir(forcing_dir, containment_root=containment_root)
     _safe_fixture_write_text(
@@ -563,7 +564,7 @@ def _write_domain_shapefile(base: Path, *, containment_root: Path | None = None)
             temp_dir.cleanup()
 
 
-def _write_line_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
+def _write_river_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
     import shapefile
 
     target_base = base
@@ -573,14 +574,41 @@ def _write_line_shapefile(base: Path, *, containment_root: Path | None = None) -
     else:
         temp_dir = None
     writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYLINE)
-    writer.field("SEG_ID", "N")
-    writer.field("ORDER", "N")
-    writer.field("DOWN_ID", "N")
-    writer.field("LENGTH_M", "F", decimal=3)
+    for name in RIVER_SHP_REQUIRED_DBF_FIELDS:
+        if name in {"Index", "Down", "Type", "BC"}:
+            writer.field(name, "N")
+        else:
+            writer.field(name, "F", decimal=6)
     writer.line([[[100.1, 30.1], [100.5, 30.4]]])
-    writer.record(1, 1, 2, 50000.0)
+    writer.record(1, 2, 1, 0.001, 50_000.0, 0, 2.5, 0.5, 30.0, 1.1, 0.035, 0.2, 0.00001, 1.0)
     writer.line([[[100.5, 30.4], [100.8, 30.8]]])
-    writer.record(2, 2, 0, 60000.0)
+    writer.record(2, 0, 1, 0.001, 60_000.0, 0, 2.8, 0.5, 32.0, 1.1, 0.035, 0.2, 0.00001, 1.0)
+    writer.close()
+    _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
+    if temp_dir is not None:
+        try:
+            _copy_fixture_shapefile_outputs(target_base, base, containment_root=containment_root)
+        finally:
+            temp_dir.cleanup()
+
+
+def _write_segment_crosswalk_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
+    import shapefile
+
+    target_base = base
+    if containment_root is not None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="nhms-synthetic-basins-shp-")
+        target_base = Path(temp_dir.name) / base.name
+    else:
+        temp_dir = None
+    writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYLINE)
+    writer.field("iRiv", "N")
+    writer.field("iEle", "N")
+    writer.field("Length", "F", decimal=3)
+    writer.line([[[100.1, 30.1], [100.5, 30.4]]])
+    writer.record(1, 1, 100.0)
+    writer.line([[[100.5, 30.4], [100.8, 30.8]]])
+    writer.record(2, 2, 120.0)
     writer.close()
     _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
     if temp_dir is not None:
@@ -652,7 +680,7 @@ def _write_raw_worker_output(
     producer: Callable[[Path], Any],
 ) -> tuple[Any, bytes]:
     _validate_lane_path_contained(config, raw_path, path_kind=path_kind)
-    with tempfile.TemporaryDirectory(prefix="nhms-object-store-validation-") as temp_dir_name:
+    with tempfile.TemporaryDirectory(prefix="nhms-object-store-validation-", dir=config.lane_dir) as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         temp_path = temp_dir / raw_path.name
         producer_succeeded = False

@@ -739,7 +739,10 @@ def test_retry_api_rejects_terminal_hydro_status_without_mutation() -> None:
         assert _events(store) == []
 
 
-def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(monkeypatch: Any) -> None:
+def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     with _store() as store:
         _insert_hydro_run(store, "run_display_retry_state", status="failed")
@@ -753,7 +756,7 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
             error_code="NODE_FAILURE",
         )
         gateway = _MockGateway()
-        app = create_app(_display_env())
+        app = create_app(_display_env(tmp_path / "display-object-store"))
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
 
@@ -832,7 +835,10 @@ def test_cancel_preserves_terminal_hydro_run() -> None:
         assert response.json()["data"]["hydro_run"]["preserved"] is True
 
 
-def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state(monkeypatch: Any) -> None:
+def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     with _store() as store:
         _insert_hydro_run(store, "run_display_cancel_state", status="running")
@@ -846,7 +852,7 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
             slurm_job_id="slurm_display_cancel",
         )
         gateway = _MockGateway()
-        app = create_app(_display_env())
+        app = create_app(_display_env(tmp_path / "display-object-store"))
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
 
@@ -1076,10 +1082,12 @@ class _MockGateway:
         return {"job_id": job_id, "status": "cancelled"}
 
 
-def _display_env() -> dict[str, str]:
+def _display_env(object_store_root: Path) -> dict[str, str]:
+    object_store_root.mkdir(parents=True, exist_ok=True)
     return {
         "NHMS_REQUIRE_SERVICE_ROLE": "true",
         "NHMS_SERVICE_ROLE": "display_readonly",
+        "OBJECT_STORE_ROOT": str(object_store_root),
     }
 
 

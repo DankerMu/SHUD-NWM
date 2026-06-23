@@ -28,10 +28,27 @@ from services.production_closure.object_store_validation import (
     validate_object_store,
     write_synthetic_basins_fixture,
 )
+from workers.model_registry.basins_geometry import parse_seg_shp_crosswalk
 
 
 def _assert_summary_files_match_lane_json(summary: dict[str, object], lane_dir: Path) -> None:
     assert sorted(summary["files"]) == sorted(path.name for path in lane_dir.glob("*.json") if path.is_file())
+
+
+def test_synthetic_basins_fixture_seg_shp_matches_crosswalk_contract(tmp_path: Path) -> None:
+    import shapefile
+
+    write_synthetic_basins_fixture(tmp_path / "Basins")
+    reader = shapefile.Reader(str(tmp_path / "Basins" / "basin-a" / "input" / "alias-a" / "gis" / "seg.shp"))
+    try:
+        rows = parse_seg_shp_crosswalk(reader)
+    finally:
+        reader.close()
+
+    assert [(row.iRiv, row.iEle, row.segment_order, row.length_m) for row in rows] == [
+        (1, 1, 0, 100.0),
+        (2, 2, 1, 120.0),
+    ]
 
 
 def test_validate_object_store_synthetic_copied_root_success(
