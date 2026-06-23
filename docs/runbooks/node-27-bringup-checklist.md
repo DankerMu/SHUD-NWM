@@ -6,7 +6,7 @@
 
 ## 开发流程衔接（2026-06-07）
 
-- **验证 oracle 路由**：后端代码/DB pytest 在 **node-22**；display API / 前端生产化 / 只读边界（本清单 C1–C4）在 **node-27**——node-22 的 pytest **不**闭合 C1–C4。详见 `CLAUDE.md`「验证 oracle 路由」+ `dual-end-issue-workflow` skill。
+- **验证 oracle 路由**：本地跑 lint/unit/OpenSpec/前端构建；真实 DB、ingest、display API、前端生产化和只读边界（本清单 C1–C4）在 **node-27** 产 live receipt；只有 sbatch、Slurm gateway、SHUD runtime 或调度行为变更才走 **node-22** Slurm scheduling oracle。node-22 检查和本地检查都不闭合 C1–C4。
 - **27 前端生产化的功能性开发走 m25 change**：`openspec/changes/m25-multibasin-frontend-production/`（多流域选择器、latest-product 去硬编码/basin_id、洪水重现期独立 `return_period_status`、/ops·/monitoring display 降级）；并行起点 issue #310/#311/#313/#317。本清单聚焦"上线 live receipt"，m25 聚焦"功能交付"，二者互补。
 - **m25 功能已交付（2026-06-07，#310–#317 已合并，#318 收尾）**：多流域展示（数据驱动选择器 +
   `basin_id` 参数化 + `has_display_product` 动态发现，**无硬编码白名单**）、`/ops`+`/monitoring` 按
@@ -40,16 +40,18 @@
 - **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live receipt 闭合 #343；`NHMS_ENABLE_LIVE_POSTGIS_MVT=true`
   后 `/api/v1/layers` 返回 live layers，`hydro-national/q_down` tile 200。原 river-network 424 / hydro 409 根因是
   display readonly 未启用 live PostGIS MVT 和图层未注册。
-- **解耦平行 issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-22 oracle）仍 open；**#389** 承接 bbox/framing/点击自动化/popup live click 浏览器证据缺口；二者均独立于 #351/#343 的 live MVT closure。
+- **解耦平行 issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-27/display API oracle，除非改 Slurm/SHUD 调度）仍 open；**#389** 承接 bbox/framing/点击自动化/popup live click 浏览器证据缺口；二者均独立于 #351/#343 的 live MVT closure。
 
 ## 拓扑回顾
 
 | 节点 | 角色 | 能力 |
 |---|---|---|
-| node-22 | `compute_control` | 调度/Slurm/SHUD/发布/retry-cancel（已业务化） |
-| node-27 | `display_readonly` | 只读消费 DB + published artifacts，`/` 单页地图 + `/ops`；无 Slurm/Docker socket/控制面写 |
+| node-22 | compute/artifact producer | Slurm gateway、Slurm/SHUD compute、forcing/run artifacts 写入 shared NFS；不连当前活 DB |
+| node-27 | active DB + ingest + display | 本机 PostgreSQL `:55432`、node-27 ingest writer、display API、前端；display runtime 为 `display_readonly` |
 
-published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm/published`。DB：27 用只读账号（如 `nhms_display_ro`）。
+shared NFS 路径：node-22 视图为 `/ghdc/data/nwm/...`，node-27 视图为
+`/home/ghdc/nwm/...`。node-22 本地 PG `:55433` 是 historical/do-not-connect/
+pending removal；当前 active DB 和 display/frontend oracle 都在 node-27。
 
 ---
 
@@ -130,14 +132,14 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 #### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
 
 > 三类证据严格分离，不得互相冒充：**live MVT closure**（#351→#343，已闭合）/ **station-MVT 端点**
-> （#342，node-22 oracle，open）/ **bbox·framing·popup live click 浏览器自动化**（#389，本节）。
+> （#342，node-27/display API oracle，open；不含 Slurm/SHUD 调度）/ **bbox·framing·popup live click 浏览器自动化**（#389，本节）。
 
 要让 #389 可靠自动化 river/station popup 的 live 点击，需先补齐以下**可被自动化消费的**证据，缺一则
 popup live click 只能人工截图、无法纳入 C4 自动 receipt：
 
 - [ ] **basin/河网 framing bbox**：`/api/v1/basins`（及河段/代站列表响应）当前**不返回 geo bbox**，
   浏览器无法据此 `map.fitBounds` 自动定位到要素再点击。定义所需：列表/详情响应附带要素 bbox（或
-  提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-22/display API 侧**，
+  提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-27/display API 侧**，
   与 #342 station-MVT 协同，非本前端 issue 单独可闭合。
 - [ ] **WebGL 要素命中坐标**：MapLibre WebGL canvas 内要素无 DOM 句柄，CLI/Playwright 难以稳定命中
   点击。定义所需：暴露确定性「测试钩子」（如按 id 触发 popup 的 `window.__m11SelectFeature(id)` 调试入口，

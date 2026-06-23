@@ -29,6 +29,9 @@ from typing import Iterable, Literal
 AXES = ("structure", "semantics", "behavior", "context", "protocol", "control")
 CHECK_FAMILIES = (
     "role-env-boundary",
+    "production-topology-node22-db-writer",
+    "production-topology-node22-local-postgres",
+    "production-topology-display-env-writer",
     "qhh-diagnostic-token",
     "paused-workflow-condition",
     "broad-e2e-api-mock",
@@ -61,6 +64,9 @@ HARD_GATE_CHECK_IDS = (
     "makefile-toolchain-discipline",
     "openapi-frontend-types-presence",
     "paused-workflow-condition",
+    "production-topology-display-env-writer",
+    "production-topology-node22-db-writer",
+    "production-topology-node22-local-postgres",
     "qhh-diagnostic-token",
     "role-env-boundary",
     "slurm-gateway-route-leakage",
@@ -160,6 +166,18 @@ MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3
 MARKDOWN_LIST_ITEM_PATTERN = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
 MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN = re.compile(r"^\s{0,3}>\s?")
+TOPOLOGY_DISPLAY_ENV_PATH_PATTERN = re.compile(
+    r"(?<![a-z0-9_.-])"
+    r"/?"
+    r"(?:(?:['\"]?\$\{?[a-z_][a-z0-9_]*\}?['\"]?|~|\.{1,2}|[a-z0-9_.-]+)\/)*"
+    r"infra/env/display\.env"
+    r"(?![a-z0-9_.-])"
+)
+TOPOLOGY_DISPLAY_ENV_SOURCE_TO_WRITER_MAX_LINES = 120
+TOPOLOGY_PSQL_HEREDOC_MAX_LOOKAHEAD = 80
+TOPOLOGY_SQL_MUTATION_VERB_PATTERN = re.compile(
+    r"\b(?:insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|merge)\b"
+)
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
 AuditMode = Literal["report", "hard-gate"]
@@ -234,6 +252,24 @@ class _StaleRouteMentionContext:
 class _StaleRouteStructuralContext:
     governing_text: str
     redirect_governing_text: str
+
+
+@dataclass(frozen=True)
+class _TopologyDisplayEnvSource:
+    line_no: int
+    line: str
+
+
+@dataclass(frozen=True)
+class _TopologyDisplayEnvWriterUse:
+    line_no: int
+    line: str
+
+
+@dataclass(frozen=True)
+class _TopologyDisplayEnvFacts:
+    sources: tuple[_TopologyDisplayEnvSource, ...]
+    writer_uses: tuple[_TopologyDisplayEnvWriterUse, ...]
 
 
 @dataclass(frozen=True)
@@ -680,6 +716,7 @@ def _exit_code_for_report(report: dict[str, object]) -> int:
 def _collect_findings(root: Path) -> list[FindingSpec]:
     findings: list[FindingSpec] = []
     findings.extend(_check_display_env_boundaries(root))
+    findings.extend(_check_production_topology_drift(root))
     findings.extend(_check_qhh_diagnostic_tokens(root))
     findings.extend(_check_paused_workflows(root))
     findings.extend(_check_broad_e2e_mocks(root))
@@ -859,6 +896,1181 @@ def _line_has_display_env_section(lines: list[str], line_no: int) -> bool:
         if "compute" in stripped or "slurm" in stripped or "backend" in stripped:
             return False
         if "display" in stripped or "frontend" in stripped or "web-ui" in stripped or "webui" in stripped:
+            return True
+    return False
+
+
+def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
+    findings: list[FindingSpec] = []
+    for path in _production_topology_scan_files(root):
+        rel = _rel(root, path)
+        if _topology_path_is_archive_or_generated(rel):
+            continue
+        text = _read_repo_text(root, path)
+        if not text:
+            continue
+        lines = text.splitlines()
+        if _topology_document_is_non_current(rel, lines):
+            continue
+        display_env_facts = _topology_display_env_facts(lines)
+        emitted_writer_claims: set[str] = set()
+        emitted_display_contexts: set[str] = set()
+        for index, line in enumerate(lines, start=1):
+            if _topology_line_may_start_node22_db_writer_claim(line):
+                writer_context = _topology_node22_writer_claim_context(lines, index)
+                if (
+                    _topology_line_has_node22_db_writer_drift(line, writer_context)
+                    and not _topology_node22_db_writer_context_is_allowed(line, writer_context)
+                    and writer_context not in emitted_writer_claims
+                ):
+                    emitted_writer_claims.add(writer_context)
+                    findings.append(
+                        _topology_finding(
+                            root,
+                            path,
+                            line=index,
+                            check_id="production-topology-node22-db-writer",
+                            title="Active topology text assigns DB writer responsibility to node-22",
+                            description=(
+                                "An active topology surface describes node-22 as the current NHMS active DB writer."
+                            ),
+                            recommendation=(
+                                "State that node-22 is compute/Slurm/artifact producer only; route active DB writes "
+                                "and ingest validation to node-27."
+                            ),
+                        )
+                    )
+            if _topology_line_has_node22_local_postgres_or_mirror_drift(line):
+                contract_context = _topology_contract_context(lines, index)
+                claim_context = _topology_forward_claim_context(lines, index, after=4)
+                if _topology_local_postgres_context_is_allowed(
+                    line,
+                    contract_context,
+                    claim_context=claim_context,
+                ):
+                    continue
+                findings.append(
+                    _topology_finding(
+                        root,
+                        path,
+                        line=index,
+                        check_id="production-topology-node22-local-postgres",
+                        title="Node-22 local PostgreSQL or transitional mirror lacks non-current boundary",
+                        description=(
+                            "An active topology surface mentions node-22 local PostgreSQL, port :55433, or a "
+                            "transitional node-22 mirror without the required non-current compatibility wording."
+                        ),
+                        recommendation=(
+                            "Mark node-22 local PostgreSQL as historical and do-not-connect, and keep any "
+                            "transitional mirror explicit-DSN, compatibility-only, and sunset-bound."
+                        ),
+                    )
+                )
+        for display_env_source in display_env_facts.sources:
+            display_context = _topology_display_env_context(lines, display_env_source.line_no)
+            associated_writer = _topology_display_env_associated_writer(
+                display_env_facts,
+                display_env_source.line_no,
+                allow_file_level=_topology_display_env_file_allows_file_level_association(rel),
+            )
+            if associated_writer is None:
+                continue
+            association_context = _topology_display_env_association_context(
+                lines,
+                display_env_source.line_no,
+                associated_writer.line_no,
+            )
+            display_allow_context = _topology_normalized(f"{display_context}\n{association_context}")
+            if association_context in emitted_display_contexts:
+                continue
+            if _topology_display_env_context_is_allowed(display_allow_context):
+                continue
+            emitted_display_contexts.add(association_context)
+            findings.append(
+                _topology_finding(
+                    root,
+                    path,
+                    line=display_env_source.line_no,
+                    check_id="production-topology-display-env-writer",
+                    title="Display runtime env is reused for data-plane writer or mirror authority",
+                    description=(
+                        "An active script or runbook sources infra/env/display.env for a data-plane writer or "
+                        "transitional mirror path."
+                    ),
+                    recommendation=(
+                        "Use the node-27 ingest env for writer work and an explicit mirror DSN for "
+                        "compatibility-only mirror work; keep display.env limited to display_readonly runtime."
+                    ),
+                )
+            )
+    return findings
+
+
+def _production_topology_scan_files(root: Path) -> Iterable[Path]:
+    roots = [
+        root / "scripts",
+        root / "infra" / "env",
+        root / "instructions" / "agents",
+        root / "docs" / "governance",
+        root / "docs" / "runbooks",
+        root / "openspec" / "changes",
+        root / "openspec" / "specs",
+    ]
+    files = [
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        root / "infra" / "README.two-node-docker.md",
+        root / "openspec" / "project-profile.md",
+    ]
+    yield from _iter_text_files(root, [*roots, *files])
+
+
+def _topology_finding(
+    root: Path,
+    path: Path,
+    *,
+    line: int,
+    check_id: str,
+    title: str,
+    description: str,
+    recommendation: str,
+) -> FindingSpec:
+    return FindingSpec(
+        check_id=check_id,
+        title=title,
+        axis="context",
+        governance_face="production topology",
+        role="shared_contract",
+        evidence_path=_rel(root, path),
+        line=line,
+        severity="high",
+        priority="P1",
+        owner_area="production topology",
+        module=_module_for_path(root, path),
+        description=description,
+        recommendation=recommendation,
+    )
+
+
+def _topology_path_is_archive_or_generated(relative_path: str) -> bool:
+    parts = tuple(part.lower() for part in Path(relative_path).parts)
+    if any(part in {"archived", "archive", "receipts", "receipt"} for part in parts):
+        return True
+    return relative_path.startswith("scripts/governance/")
+
+
+def _topology_document_is_non_current(relative_path: str, lines: list[str]) -> bool:
+    if relative_path in {
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/governance/ROLE_BOUNDARY.md",
+        "docs/runbooks/current-production-ops.md",
+        "openspec/project-profile.md",
+    }:
+        return False
+    top_context = _topology_normalized("\n".join(lines[:80]))
+    if "current production operations" in top_context or "当前生产值守" in top_context:
+        return False
+    top_lines = tuple(_topology_normalized(line) for line in lines[:80] if line.strip())
+    if _topology_top_context_declares_whole_document_non_current(top_context, top_lines):
+        return True
+    return False
+
+
+def _topology_top_context_declares_whole_document_non_current(
+    top_context: str,
+    top_lines: tuple[str, ...],
+) -> bool:
+    whole_document_terms = (
+        "this document",
+        "this file",
+        "this runbook",
+        "entire document",
+        "document preserves",
+        "本文",
+        "本文件",
+        "本 runbook",
+        "本runbook",
+    )
+    non_current_terms = (
+        "not current",
+        "non-current",
+        "non current",
+        "not current topology",
+        "not current production topology",
+        "not current production runbook",
+        "不反映当前",
+        "不作为当前",
+        "不用于当前",
+        "不是当前",
+        "不是 current",
+        "非当前",
+        "当前部署事实不同",
+        "当前物理部署不同",
+    )
+    design_or_superseded_terms = (
+        "design intent",
+        "设计意图",
+        "historical",
+        "history",
+        "superseded",
+        "deprecated",
+        "archived",
+        "历史",
+        "已弃用",
+    )
+    has_whole_document_subject = any(term in top_context for term in whole_document_terms)
+    has_non_current_marker = any(term in top_context for term in non_current_terms)
+    has_design_or_superseded_marker = any(term in top_context for term in design_or_superseded_terms)
+    if has_whole_document_subject and has_non_current_marker and has_design_or_superseded_marker:
+        return True
+    if "首跑" in top_context and "已迁移" in top_context and ("本文保留" in top_context or "保留" in top_context):
+        return True
+    return any(_topology_line_declares_document_superseded(line) for line in top_lines[:12])
+
+
+def _topology_line_declares_document_superseded(line: str) -> bool:
+    if not any(token in line for token in ("superseded", "deprecated", "archived", "historical", "历史")):
+        return False
+    return any(
+        token in line
+        for token in (
+            "not current topology",
+            "not current production topology",
+            "not current production runbook",
+            "retained for audit evidence",
+            "audit evidence",
+            "保留",
+            "审计证据",
+            "不用于当前",
+            "不是当前",
+        )
+    )
+
+
+def _topology_line_context(lines: list[str], line_no: int, *, before: int = 7, after: int = 7) -> str:
+    start = max(0, line_no - before - 1)
+    end = min(len(lines), line_no + after)
+    return _topology_normalized("\n".join(lines[start:end]))
+
+
+def _topology_forward_claim_context(lines: list[str], line_no: int, *, after: int) -> str:
+    start = line_no - 1
+    end = min(len(lines), line_no + after)
+    return _topology_normalized("\n".join(lines[start:end]))
+
+
+def _topology_node22_writer_claim_context(lines: list[str], line_no: int) -> str:
+    line = lines[line_no - 1]
+    line_ends_claim = line.rstrip().endswith((".", "。", "!", "！", "?", "？"))
+    after = 0 if _topology_line_may_have_node22_db_writer_drift(line) and line_ends_claim else 2
+    return _topology_line_context(lines, line_no, before=0, after=after)
+
+
+def _topology_contract_context(lines: list[str], line_no: int) -> str:
+    return _topology_local_block_context(lines, line_no, before=6, after=10)
+
+
+def _topology_display_env_context(lines: list[str], line_no: int) -> str:
+    return _topology_local_block_context(lines, line_no, before=6, after=6)
+
+
+def _topology_local_block_context(lines: list[str], line_no: int, *, before: int, after: int) -> str:
+    index = line_no - 1
+    start = index
+    before_remaining = before
+    while start > 0 and before_remaining and lines[start - 1].strip():
+        start -= 1
+        before_remaining -= 1
+    end = index + 1
+    after_remaining = after
+    while end < len(lines) and after_remaining and lines[end].strip():
+        end += 1
+        after_remaining -= 1
+    return _topology_normalized("\n".join(lines[start:end]))
+
+
+def _topology_normalized(text: str) -> str:
+    normalized = text.lower().replace("—", "-").replace("–", "-")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _topology_line_may_start_node22_db_writer_claim(line: str) -> bool:
+    if any(
+        _topology_mentions_node22(clause)
+        and (
+            _topology_mentions_writer(clause)
+            or "active primary" in clause
+            or "current primary" in clause
+            or re.search(r"\b(?:is|as|host|hosts|hosted|own|owns|owned)\s+(?:the\s+)?active\b", clause)
+            or "主库" in clause
+        )
+        for clause in _topology_relation_clauses(line)
+    ):
+        return True
+    return _topology_line_is_standalone_node22_anchor(line)
+
+
+def _topology_line_is_standalone_node22_anchor(line: str) -> bool:
+    normalized = _topology_normalized(line)
+    return bool(re.fullmatch(r"(?:[#>*+\-\d.)\s|`]*\|?\s*)?node[-_ ]?22\s*\|?\s*:?", normalized))
+
+
+def _topology_line_may_have_node22_db_writer_drift(line: str) -> bool:
+    return any(
+        _topology_mentions_node22(clause)
+        and _topology_mentions_database(clause)
+        and (
+            _topology_mentions_writer(clause)
+            or _topology_mentions_active_primary_database_authority(clause)
+        )
+        for clause in _topology_relation_clauses(line)
+    )
+
+
+def _topology_line_has_node22_db_writer_drift(line: str, context: str) -> bool:
+    candidate = _topology_normalized(context or line)
+    return any(
+        not _topology_node22_db_writer_clause_is_allowed(clause)
+        for clause in _topology_node22_db_writer_drift_clauses(candidate)
+    )
+
+
+def _topology_node22_db_writer_context_is_allowed(line: str, context: str) -> bool:
+    candidate = _topology_normalized(context or line)
+    drift_clauses = _topology_node22_db_writer_drift_clauses(candidate)
+    if not drift_clauses:
+        return False
+    return _topology_context_is_guardrail_or_test_meta(candidate) or all(
+        _topology_node22_db_writer_clause_is_allowed(clause)
+        for clause in drift_clauses
+    )
+
+
+def _topology_node22_db_writer_drift_clauses(text: str) -> tuple[str, ...]:
+    return tuple(
+        clause
+        for clause in _topology_relation_clauses(text)
+        if _topology_mentions_node22(clause)
+        and _topology_mentions_database(clause)
+        and (
+            _topology_mentions_writer(clause)
+            or _topology_mentions_active_primary_database_authority(clause)
+        )
+    )
+
+
+def _topology_node22_db_writer_clause_is_allowed(clause: str) -> bool:
+    normalized = _topology_normalized(clause)
+    return (
+        _topology_context_is_non_current(normalized)
+        or _topology_context_has_negative_node22_writer_boundary(normalized)
+    )
+
+
+def _topology_relation_clauses(text: str) -> tuple[str, ...]:
+    normalized = _topology_normalized(text)
+    return tuple(
+        clause.strip()
+        for clause in re.split(
+            r"\s*(?:[,;，；。]|\.(?:\s+|$)|\s+-\s+|\s+while\s+|\s+whereas\s+|\s+but\s+|\s+and\s+display\s+|\s+and\s+node-27\s+)\s*",
+            normalized,
+        )
+        if clause.strip()
+    )
+
+
+def _topology_mentions_node22(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return bool(
+        re.search(
+            r"\bnode[-_ ]?22\b|(?:^|[|:]\s*|^(?:[-*+]|\d+[.)])\s+)22(?!\d)\s*"
+            r"(?:is|as|own|owns|owned|host|hosts|node|节点|写入|写|拥有|postgres|postgresql|pg|db|数据库)",
+            lowered,
+        )
+    )
+
+
+def _topology_mentions_database(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return bool(re.search(r"\b(?:db|pg)\b", lowered)) or any(
+        token in lowered
+        for token in (
+            "database",
+            "postgres",
+            "postgresql",
+            "数据库",
+            "主库",
+            "55433",
+        )
+    )
+
+
+def _topology_mentions_writer(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return any(
+        token in lowered
+        for token in (
+            "active primary",
+            "host active",
+            "hosts active",
+            "hosted active",
+            "host primary",
+            "hosts primary",
+            "writer",
+            "writes",
+            "writing",
+            "writable",
+            "hosted writer",
+            "mutation",
+            "mutate",
+            "owns database",
+            "owns db",
+            "db mutation",
+            "写入",
+            "写 db",
+            "db 写",
+            "读写",
+            "拥有",
+        )
+    )
+
+
+def _topology_mentions_active_primary_database_authority(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return _topology_mentions_database(lowered) and (
+        "active primary" in lowered
+        or "current primary" in lowered
+        or "primary postgresql" in lowered
+        or "primary postgres" in lowered
+        or "主库" in lowered
+    )
+
+
+def _topology_context_has_negative_node22_writer_boundary(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if _topology_context_has_negative_node22_db_access(normalized):
+        return True
+    return any(
+        token in normalized
+        for token in (
+            "does not connect",
+            "does not use",
+            "do not connect",
+            "do not copy",
+            "do not treat",
+            "do not use",
+            "not as current",
+            "not current",
+            "not through",
+            "must not be treated",
+            "must not read",
+            "shall not instruct",
+            "shall not present",
+            "not instruct",
+            "not present",
+            "no active",
+            "no implicit",
+            "not expose",
+            "without relying",
+            "without invoking",
+            "out of current",
+            "outside current",
+            "不连",
+            "不作为",
+            "不要把",
+            "不要连",
+            "不要复制",
+            "不应连接",
+            "不使用",
+            "禁止",
+        )
+    )
+
+
+def _topology_context_has_negative_node22_db_access(context: str) -> bool:
+    node22_db = r"node[-_ ]?22\s+(?:active\s+primary\s+)?(?:db|database|postgres|postgresql)"
+    access_verb = (
+        r"(?:(?:querying|reading|using|accessing)\s+(?:an?\s+)?(?:active\s+)?"
+        r"|connecting\s+to\s+(?:an?\s+)?(?:active\s+)?"
+        r"|relying\s+on\s+(?:an?\s+)?(?:active\s+)?"
+        r")?"
+    )
+    return bool(
+        re.search(
+            rf"\b(?:without|no)\s+{access_verb}(?:an?\s+)?(?:active\s+)?{node22_db}"
+            r"(?:\s+(?:access|query|queries|connection|read|reads|writer))?\b",
+            context,
+        )
+    )
+
+
+def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
+    lowered = _topology_normalized(line)
+    if ":55433" in lowered or " 55433" in lowered:
+        return True
+    if _topology_mentions_node22(lowered) and any(
+        token in lowered
+        for token in (
+            "local postgres",
+            "local postgresql",
+            "local pg",
+            "本地 pg",
+            "本机 pg",
+            "本地 postgresql",
+            "本机 postgresql",
+        )
+    ):
+        return True
+    if ("n22_dsn" in lowered or "node22-url" in lowered) and _topology_line_mentions_mirror(lowered):
+        return True
+    return (
+        _topology_mentions_node22(lowered)
+        and _topology_line_mentions_mirror(lowered)
+        and ("transitional" in lowered or "fallback" in lowered or "compatibility" in lowered)
+    )
+
+
+def _topology_line_mentions_mirror(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return "mirror" in lowered or "镜像" in lowered
+
+
+def _topology_local_postgres_context_is_allowed(
+    line: str,
+    context: str,
+    *,
+    claim_context: str | None = None,
+) -> bool:
+    local_claim_context = _topology_normalized(claim_context or line)
+    line_context = _topology_normalized(f"{line}\n{context}")
+    if _topology_context_is_non_current(local_claim_context):
+        return True
+    if _topology_context_has_negative_node22_writer_boundary(local_claim_context):
+        return True
+    if _topology_context_is_guardrail_or_test_meta(local_claim_context):
+        return True
+    if _topology_context_is_guardrail_or_test_meta(line_context):
+        return True
+    if _topology_context_is_historical_receipt_evidence(line_context):
+        return True
+    if _topology_context_is_explicit_mirror_implementation(line_context):
+        return True
+    compatibility_context = _topology_normalized(f"{local_claim_context}\n{line_context}")
+    if _topology_line_has_non_current_or_compatibility_marker(line) and (
+        _topology_context_is_compatibility_mirror_contract(compatibility_context)
+    ):
+        return True
+    return _topology_context_is_structured_node22_local_pg_boundary(line_context)
+
+
+def _topology_context_is_non_current(context: str) -> bool:
+    if ("design intent" in context or "设计意图" in context) and (
+        "wording" in context
+        or "phrase" in context
+        or "措辞" in context
+    ):
+        return True
+    if ("design intent" in context or "design-time role contract" in context or "设计意图" in context) and (
+        "physical host assignment may differ" in context
+        or "不反映当前" in context
+        or "current deployment" in context
+        or "当前物理部署不同" in context
+        or "当前与设计" in context
+    ):
+        return True
+    has_historical = any(
+        token in context
+        for token in (
+            "design intent",
+            "design-time role contract",
+            "historical",
+            "history",
+            "legacy",
+            "old local",
+            "retired",
+            "superseded",
+            "deprecated",
+            "历史",
+            "旧",
+            "已弃用",
+            "历史排障",
+            "设计意图",
+        )
+    )
+    has_do_not_connect = any(
+        token in context
+        for token in (
+            "do-not-connect",
+            "do_not_connect",
+            "do not connect",
+            "do not use",
+            "not current",
+            "non-current",
+            "not current topology",
+            "out of current",
+            "outside current",
+            "不要连",
+            "不应连接",
+            "不作为当前",
+            "不用于当前",
+            "不是当前",
+        )
+    )
+    has_sunset = any(
+        token in context
+        for token in (
+            "pending removal",
+            "pending_removal",
+            "sunset",
+            "removal",
+            "remove",
+            "delete",
+            "待删",
+            "待删除",
+            "删除",
+            "迁移",
+        )
+    )
+    return (has_historical and (has_do_not_connect or has_sunset)) or (
+        has_do_not_connect and has_sunset
+    )
+
+
+def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
+    combined = _topology_normalized(context)
+    has_mirror = "mirror" in combined or "镜像" in combined
+    has_compatibility = any(token in combined for token in ("compatibility", "compatibility-only", "兼容"))
+    has_explicit_dsn = any(
+        token in combined
+        for token in (
+            "explicit dsn",
+            "explicit-dsn",
+            "explicit mirror dsn",
+            "explicit node-22 dsn",
+            "explicit transitional",
+            "--node22-url",
+            "n22_dsn",
+            "显式",
+        )
+    )
+    has_sunset = any(
+        token in combined
+        for token in (
+            "sunset",
+            "removal",
+            "remove this mirror",
+            "remove the mirror",
+            "pending removal",
+            "after object-store",
+            "declared handoff",
+            "handoff manifest",
+            "handoff packages",
+            "pre-contract",
+            "移除",
+            "待删除",
+        )
+    )
+    return has_mirror and has_compatibility and has_explicit_dsn and has_sunset
+
+
+def _topology_line_has_non_current_or_compatibility_marker(line: str) -> bool:
+    normalized = _topology_normalized(line)
+    return any(
+        token in normalized
+        for token in (
+            "compatibility",
+            "compatibility-only",
+            "historical",
+            "do-not-connect",
+            "do not connect",
+            "not current",
+            "non-current",
+            "pending removal",
+            "sunset",
+            "removal",
+            "explicit",
+            "n22_dsn",
+            "--node22-url",
+            "兼容",
+            "历史",
+            "已弃用",
+            "不要连",
+            "待删除",
+            "显式",
+        )
+    )
+
+
+def _topology_context_is_structured_node22_local_pg_boundary(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return (
+        (
+            "node22_local_postgres" in normalized
+            or "historical_node22_pg_status" in normalized
+            or "node-22 local postgresql" in normalized
+        )
+        and ":55433" in normalized
+        and (
+            _topology_context_is_non_current(normalized)
+            or "historical_node22_pg_status" in normalized
+        )
+    )
+
+
+def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return any(
+        token in normalized
+        for token in (
+            "static checks should flag",
+            "static governance checks",
+            "static guard positive fixture",
+            "guard positive fixture",
+            "guard reports",
+            "reports a finding",
+            "checks that flag active",
+            "static guardrails flag",
+            "assumptions are flagged",
+            "marked do-not-connect",
+            "must be marked historical",
+            "guardrail tests",
+            "guardrails flag",
+            "guardrails so",
+            "reports topology drift",
+            "reports display-env writer drift",
+            "production-topology-node22-db-writer",
+            "production-topology-display-env-writer",
+            "focused tests cover",
+            "regression rows",
+            "drift in current operational surfaces",
+            "while allowing clearly historical evidence",
+            "positive fixtures",
+            "negative fixtures",
+        )
+    )
+
+
+def _topology_context_is_historical_receipt_evidence(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", normalized):
+        return False
+    if not any(token in normalized for token in ("receipt", "historical", "history", "当时", "历史")):
+        return False
+    return not any(
+        token in normalized
+        for token in (
+            "current production says",
+            "current production state",
+            "current checks",
+            "active database writer",
+            "active db writer",
+            "当前生产",
+            "当前检查",
+            "当前主库",
+        )
+    )
+
+
+def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    has_explicit_mirror = (
+        _topology_line_mentions_mirror(normalized)
+        and any(token in normalized for token in ("explicit", "--node22-url", "n22_dsn"))
+    )
+    return has_explicit_mirror and any(
+        token in normalized
+        for token in (
+            "node22mirrorsource",
+            "_resolve_node22_source",
+            "mirror.extend",
+            "parser.add_argument",
+            "node22mirrordsnmissing",
+            "node22_dsn_missing_reason",
+            "source=\"cli:--node22-url\"",
+            "source=\"env:n22_dsn\"",
+            "help=\"explicit node-22",
+        )
+    )
+
+
+def _topology_display_env_facts(lines: list[str]) -> _TopologyDisplayEnvFacts:
+    aliases: set[str] = set()
+    sources: list[_TopologyDisplayEnvSource] = []
+    writer_uses: list[_TopologyDisplayEnvWriterUse] = []
+    for line_no, line in enumerate(lines, start=1):
+        normalized = _topology_normalized(line)
+        if _topology_line_is_comment_only(normalized):
+            continue
+        alias = _topology_line_display_env_alias_name(normalized)
+        if alias is not None:
+            aliases.add(alias)
+        if _topology_line_sources_display_env(normalized, aliases):
+            sources.append(_TopologyDisplayEnvSource(line_no=line_no, line=line))
+        if _topology_line_has_unnegated_data_plane_writer_or_mirror_use(
+            normalized
+        ) or _topology_line_has_psql_context_mutation_command(lines, line_no - 1):
+            writer_uses.append(_TopologyDisplayEnvWriterUse(line_no=line_no, line=line))
+    return _TopologyDisplayEnvFacts(sources=tuple(sources), writer_uses=tuple(writer_uses))
+
+
+def _topology_display_env_associated_writer(
+    facts: _TopologyDisplayEnvFacts,
+    source_line: int,
+    *,
+    allow_file_level: bool,
+) -> _TopologyDisplayEnvWriterUse | None:
+    for writer_use in facts.writer_uses:
+        if writer_use.line_no < source_line:
+            continue
+        if writer_use.line_no - source_line <= 6:
+            return writer_use
+    if not allow_file_level:
+        return None
+    for writer_use in facts.writer_uses:
+        if writer_use.line_no < source_line:
+            continue
+        if writer_use.line_no - source_line <= TOPOLOGY_DISPLAY_ENV_SOURCE_TO_WRITER_MAX_LINES:
+            return writer_use
+    return None
+
+
+def _topology_display_env_file_allows_file_level_association(relative_path: str) -> bool:
+    path = Path(relative_path)
+    return relative_path.startswith("scripts/") or path.suffix in {".sh", ".py"}
+
+
+def _topology_display_env_association_context(
+    lines: list[str],
+    source_line: int,
+    writer_line: int,
+) -> str:
+    start = max(0, min(source_line, writer_line) - 1)
+    end = min(len(lines), max(source_line, writer_line))
+    return _topology_normalized("\n".join(lines[start:end]))
+
+
+def _topology_line_may_source_display_env(line: str) -> bool:
+    lowered = _topology_normalized(line)
+    return _topology_line_sources_display_env(lowered, set())
+
+
+def _topology_context_sources_display_env(context: str) -> bool:
+    lowered = _topology_normalized(context)
+    if not _topology_context_references_display_env_path(lowered):
+        return False
+    if _topology_context_has_direct_display_env_source(lowered):
+        return True
+    if _topology_context_has_indirect_display_env_source(lowered):
+        return True
+    return _topology_context_has_display_env_authority_prose(lowered)
+
+
+def _topology_context_has_direct_display_env_source(context: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?:^|[;&|]\s*|\bthen\s+)(?:source|\.)\s+['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?",
+            context,
+        )
+        or "--env-file" in context
+        and _topology_context_references_display_env_path(context)
+        or re.search(
+            rf"(?:\b(?:source|sources|sourcing)|\.)\s+['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}",
+            context,
+        )
+        or "加载 infra/env/display.env" in context
+    )
+
+
+def _topology_context_has_indirect_display_env_source(context: str) -> bool:
+    assignment = re.search(
+        rf"\b(?P<name>[a-z_][a-z0-9_]*)\s*=\s*['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?",
+        context,
+    )
+    if assignment is None:
+        return False
+    variable = re.escape(assignment.group("name"))
+    return bool(
+        re.search(
+            rf"(?:^|[;&|]\s*|\s+|\bthen\s+)(?:source|\.)\s+"
+            rf"['\"]?\$({variable}|\{{{variable}\}})['\"]?",
+            context,
+        )
+    )
+
+
+def _topology_context_has_display_env_authority_prose(context: str) -> bool:
+    if not _topology_context_references_display_env_path(context):
+        return False
+    if not any(token in context for token in ("database_url", "db url", "dsn", "writer", "ingest")):
+        return False
+    return any(
+        token in context
+        for token in (
+            " from ",
+            " in ",
+            "来自 ",
+            "authority",
+            "权威",
+        )
+    )
+
+
+def _topology_line_has_shell_source_command(line: str) -> bool:
+    lowered = _topology_normalized(line)
+    return bool(
+        re.search(
+            r"(?:^|[;&|]\s*|\bthen\s+)(?:source|\.)\s+"
+            rf"(?:['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?|['\"]?\$\{{?[a-z_][a-z0-9_]*\}}?['\"]?)",
+            lowered,
+        )
+    )
+
+
+def _topology_line_sources_display_env(line: str, aliases: set[str]) -> bool:
+    normalized = _topology_normalized(line)
+    if _topology_line_has_unnegated_direct_display_env_source(normalized):
+        return True
+    if _topology_line_sources_display_env_alias(normalized, aliases):
+        return True
+    return _topology_context_has_display_env_authority_prose(normalized)
+
+
+def _topology_line_display_env_alias_name(line: str) -> str | None:
+    match = re.search(
+        rf"\b(?:export\s+)?(?P<name>[a-z_][a-z0-9_]*)\s*=\s*['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?",
+        line,
+    )
+    return match.group("name") if match else None
+
+
+def _topology_line_sources_display_env_alias(line: str, aliases: set[str]) -> bool:
+    for alias in aliases:
+        variable = re.escape(alias)
+        if re.search(
+            rf"(?:^|[;&|]\s*|\bthen\s+)(?:source|\.)\s+['\"]?\$({variable}|\{{{variable}\}})['\"]?",
+            line,
+        ):
+            return True
+    return False
+
+
+def _topology_line_has_unnegated_direct_display_env_source(line: str) -> bool:
+    if not _topology_context_references_display_env_path(line):
+        return False
+    if "--env-file" in line:
+        return True
+    source_pattern = re.compile(
+        rf"(?:\b(?:source|sources|sourcing)|\.)\s+['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?"
+    )
+    for match in source_pattern.finditer(line):
+        prefix = line[max(0, match.start() - 28) : match.start()]
+        if not _topology_prefix_has_display_env_source_negation(prefix):
+            return True
+    return "加载 infra/env/display.env" in line and "不要加载" not in line
+
+
+def _topology_context_references_display_env_path(context: str) -> bool:
+    return bool(TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.search(_topology_normalized(context)))
+
+
+def _topology_prefix_has_display_env_source_negation(prefix: str) -> bool:
+    return any(
+        token in prefix
+        for token in (
+            "do not ",
+            "never ",
+            "not ",
+            "no ",
+            "不要",
+            "不得",
+        )
+    )
+
+
+def _topology_line_has_unnegated_data_plane_writer_or_mirror_use(line: str) -> bool:
+    normalized = _topology_normalized(line)
+    command = _topology_strip_shell_comment(normalized)
+    if _topology_line_has_data_plane_writer_command(command):
+        return True
+    if _topology_line_has_psql_mutation_command(command):
+        return True
+    if _topology_context_has_negative_writer_or_mirror_terms(normalized):
+        return False
+    weak_writer_terms = (
+        "data-plane",
+        "database_url",
+        "db url",
+        "dsn",
+        "ingest",
+        "mirror",
+        "writer",
+        "write",
+        "writes",
+        "writing",
+        "写入",
+    )
+    return any(
+        any(token in clause for token in weak_writer_terms)
+        and (
+            _topology_context_has_display_env_authority_prose(clause)
+            or "authority" in clause
+            or "权威" in clause
+        )
+        for clause in _topology_relation_clauses(normalized)
+    )
+
+
+def _topology_strip_shell_comment(line: str) -> str:
+    return re.split(r"\s+#", line, maxsplit=1)[0].strip()
+
+
+def _topology_line_is_comment_only(line: str) -> bool:
+    return _topology_normalized(line).startswith("#")
+
+
+def _topology_line_has_data_plane_writer_command(line: str) -> bool:
+    strong_command_terms = (
+        "autopipe",
+        "autopipeline",
+        "node27_autopipeline",
+        "node27_autopipe",
+        "node27_mirror_forcing",
+        "node27_ingest_run.py",
+        "node27_refresh_coverage.py",
+        "scripts.node27_autopipeline",
+        "scripts.node27_mirror_forcing",
+        "scripts.node27_ingest_run",
+        "scripts.node27_refresh_coverage",
+        "n22_dsn",
+    )
+    if any(token in line for token in strong_command_terms):
+        return True
+    return "import-basins-registry" in line and (
+        "workers.model_registry.cli" in line or "nhms-model" in line
+    )
+
+
+def _topology_line_has_psql_mutation_command(line: str) -> bool:
+    if not _topology_line_invokes_psql(line):
+        return False
+    return bool(
+        TOPOLOGY_SQL_MUTATION_VERB_PATTERN.search(line)
+        or re.search(r"(?:^|[\s;&|])(?:-f|--file)(?:\s|=)", line)
+    )
+
+
+def _topology_line_has_psql_context_mutation_command(lines: list[str], index: int) -> bool:
+    line = _topology_strip_shell_comment(_topology_normalized(lines[index]))
+    if not _topology_line_invokes_psql(line):
+        return False
+    if _topology_line_has_psql_mutation_command(line):
+        return True
+    heredoc_token = _topology_psql_heredoc_token(line)
+    if heredoc_token is None:
+        return False
+    end = min(len(lines), index + TOPOLOGY_PSQL_HEREDOC_MAX_LOOKAHEAD + 1)
+    for body_line in lines[index + 1 : end]:
+        body = _topology_strip_shell_comment(_topology_normalized(body_line))
+        if not body:
+            continue
+        if body == heredoc_token:
+            return False
+        if TOPOLOGY_SQL_MUTATION_VERB_PATTERN.search(body):
+            return True
+    return False
+
+
+def _topology_line_invokes_psql(line: str) -> bool:
+    return bool(re.search(r"(?:^|[\s;&|])psql(?:\s|$)", line))
+
+
+def _topology_psql_heredoc_token(line: str) -> str | None:
+    match = re.search(r"<<-?\s*['\"]?(?P<token>[a-z_][a-z0-9_]*)['\"]?", line)
+    return match.group("token") if match else None
+
+
+def _topology_context_has_negative_writer_or_mirror_terms(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return any(
+        token in normalized
+        for token in (
+            "no writer credentials",
+            "without writer",
+            "without a writer",
+            "not writer",
+            "not a writer",
+            "no data-plane writer",
+            "not for ingest",
+            "do not source",
+            "instead of deriving",
+            "not derive",
+            "without deriving",
+            "must not fall back",
+            "never reads",
+            "never read",
+            "不要 source",
+            "不要加载",
+            "不得 source",
+        )
+    )
+
+
+def _topology_context_has_data_plane_writer_or_mirror_terms(context: str) -> bool:
+    return _topology_line_has_unnegated_data_plane_writer_or_mirror_use(context)
+
+
+def _topology_display_env_context_is_allowed(context: str) -> bool:
+    if _topology_context_is_guardrail_or_test_meta(context):
+        return True
+    if _topology_context_has_display_env_prohibition(context) and not (
+        _topology_context_has_unnegated_display_env_source(context)
+    ):
+        return True
+    readonly_terms = (
+        "display api",
+        "display_readonly",
+        "readonly",
+        "read-only",
+        "start-display-api",
+        "compose.display",
+        "display runtime",
+        "只读",
+        "展示",
+    )
+    return any(token in context for token in readonly_terms) and not (
+        _topology_context_has_data_plane_writer_or_mirror_terms(context)
+    )
+
+
+def _topology_context_has_display_env_prohibition(context: str) -> bool:
+    return any(
+        token in context
+        for token in (
+            "do not source",
+            "never reads",
+            "never read",
+            "not for ingest",
+            "forbidden_sources",
+            "不要 source",
+            "不要加载",
+            "不得 source",
+        )
+    )
+
+
+def _topology_context_has_unnegated_display_env_source(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if "--env-file" in normalized and _topology_context_references_display_env_path(normalized):
+        return True
+    if _topology_context_has_indirect_display_env_source(normalized):
+        return True
+    source_pattern = re.compile(
+        rf"(?:\b(?:source|sources|sourcing)|\.)\s+['\"]?{TOPOLOGY_DISPLAY_ENV_PATH_PATTERN.pattern}['\"]?"
+    )
+    for match in source_pattern.finditer(normalized):
+        prefix = normalized[max(0, match.start() - 24) : match.start()]
+        if not _topology_prefix_has_display_env_source_negation(prefix):
             return True
     return False
 

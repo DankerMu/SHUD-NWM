@@ -42,6 +42,12 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - SHUD smoke run on a small example basin
 - JSON-schema validation for changed pipeline evidence
 - Frontend contract: `cd apps/frontend && corepack pnpm test && corepack pnpm build`
+- Live data/display receipts for active DB, ingest, display API, frontend, and
+  cross-plane identity run on node-27.
+- Slurm scheduling/runtime receipts run on node-22 only when sbatch, Slurm
+  gateway, SHUD compute, or scheduler behavior changes.
+- Local lint/unit/OpenSpec checks are necessary but do not substitute for
+  required node-27 live DB/display receipts.
 
 ## Domain risk packs
 

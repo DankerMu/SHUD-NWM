@@ -35,8 +35,8 @@
 
 | 面 | 位置 | 当前职责 | 关键入口 |
 | --- | --- | --- | --- |
-| node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | `DATABASE_URL` in `/home/nwm/NWM/infra/env/display.env` and node-27 ingest env |
-| node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | cron -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
+| node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | writer `DATABASE_URL` from node-27 ingest env; display uses readonly `display.env` only |
+| node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
 | node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、Slurm/SHUD compute wrapper | `python -m services.slurm_gateway`, Slurm jobs |
@@ -172,7 +172,7 @@ tail -n 200 /home/nwm/autopipe.log
 
 cd /home/nwm/NWM
 set -a
-. infra/env/display.env
+. infra/env/node27-ingest.env
 set +a
 psql "$DATABASE_URL" -P pager=off -F $'\t' -Atc "
 select run_id, source_id, cycle_time, model_id, status,
@@ -181,6 +181,10 @@ from hydro.hydro_run
 order by updated_at desc nulls last
 limit 30;"
 ```
+
+If the host-provisioned `infra/env/node27-ingest.env` is absent, treat ingest
+writer checks as blocked and fix the ingest env. Do not fall back to
+`infra/env/display.env`; that file is display_readonly runtime config only.
 
 node-22 compute 侧优先看 Slurm queue、Gateway、shared NFS 输出：
 
@@ -221,8 +225,8 @@ run discovery.
 ### 5.1 数据库
 
 当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。display API uses a
-readonly role; cron ingest uses writer credentials in its environment defaults
-or host env.
+readonly role from `infra/env/display.env`; cron ingest uses writer credentials
+from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 
 Secret-safe DB checks:
 
@@ -230,7 +234,7 @@ Secret-safe DB checks:
 ssh -p 32099 nwm@210.77.77.27
 cd /home/nwm/NWM
 set -a
-. infra/env/display.env
+. infra/env/node27-ingest.env
 set +a
 
 psql "$DATABASE_URL" -P pager=off -Atc "
@@ -516,14 +520,16 @@ uses GIS segment ids directly, some segments can appear to have no flow.
 
 ## 9. 值守 SQL 片段
 
-Run these on node-27 after sourcing `infra/env/display.env` or another
-secret-safe env file:
+Run these on node-27 after sourcing the ingest writer env
+(`infra/env/node27-ingest.env` on the host, or an equivalent secret-safe
+operator env). Do not source `infra/env/display.env` for writer/ingest SQL:
+that file belongs to the display_readonly runtime.
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
 cd /home/nwm/NWM
 set -a
-. infra/env/display.env
+. infra/env/node27-ingest.env
 set +a
 ```
 

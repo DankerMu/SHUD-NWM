@@ -27,21 +27,31 @@ full API and is not a production deployment category.
 **Design-time role contract (preserved below) describes capability boundaries
 that the codebase still enforces; physical host assignment may differ.**
 
-node-22 runs `compute_control` services and may also run the standalone
-`slurm_gateway`. The `compute_control` role owns scheduler execution, Slurm
-submission, writable workspace/object-store roots, database mutation, and
-publication of display artifacts. The `display_readonly` role serves the
-display API/frontend and reads the readonly database plus published artifacts.
-
-> Note: in the current deployment the `compute_control` writes happen on
-> node-27, not node-22. The role contract is what the code enforces; the host
-> assignment is what ops has rolled out.
+`compute_control` is a logical role for scheduler execution, Slurm submission,
+writable workspace/object-store roots, database mutation, and publication of
+display artifacts. In the current physical deployment, those active database
+writes happen through node-27 ingest, not through node-22. node-22 currently
+hosts compute/Slurm/artifact production only and may run the standalone
+`slurm_gateway`; it must not be treated as the active NHMS database writer.
+The `display_readonly` role serves the display API/frontend and reads the
+readonly database plus published artifacts.
 
 Shared contracts are not "node-22 code" or "node-27 code". Paths such as
 `packages/common`, `openapi/nhms.v1.yaml`, `db/migrations`, `schemas`, and
-generated API types define contracts used by both nodes. node-22 may produce or
-apply those contracts during controlled deployment/publish flows, and node-27
-may consume them, but the contracts remain `shared_contract`.
+generated API types define contracts used by both nodes. node-22 may produce
+compute artifacts that conform to those contracts, and node-27 may consume or
+apply them during ingest/display flows, but the contracts remain
+`shared_contract`.
+
+Current verification oracle route:
+
+- Local: lint, unit tests, frontend type/build checks, and OpenSpec validation.
+- node-27: live active DB, ingest, display API, frontend, readonly boundary, and
+  cross-plane identity receipts.
+- node-22: Slurm scheduling/SHUD compute behavior only when sbatch, Slurm
+  gateway, SHUD runtime, or scheduler behavior changes.
+
+Local checks are required but do not replace node-27 live DB/display receipts.
 
 ## `compute_control`
 

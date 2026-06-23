@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Basin-agnostic autopipeline: discover object-store runs, seed missing basin
 registries, then register -> object-store forcing handoff (or explicit
-transitional mirror) -> parse -> refresh-coverage every run.
+compatibility-only transitional mirror while pre-contract packages sunset) ->
+parse -> refresh-coverage every run.
 
 Generalises the earlier qhh-hardcoded ingest into a basin-agnostic pipeline so
 node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/runs/``:
@@ -19,7 +20,8 @@ node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/ru
        register -> scripts/node27_ingest_run.py
        forcing  -> object-store forcing-domain handoff DB apply
                   or scripts/node27_mirror_forcing.py when explicitly configured
-                  for compatibility runs with no declared handoff
+                  for compatibility runs with no declared handoff; remove after
+                  object-store handoff packages cover live display readiness
        parse    -> workers.output_parser.cli parse
        refresh  -> scripts/node27_refresh_coverage.py  (Mission-4; skipped if absent)
 
@@ -1022,7 +1024,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--node22-url",
         default=None,
-        help="Explicit node-22 read-only DSN for transitional forcing mirror fallback.",
+        help=(
+            "Explicit node-22 read-only DSN for compatibility-only transitional forcing mirror fallback; "
+            "sunset after object-store handoff packages cover live readiness."
+        ),
     )
     args = parser.parse_args(argv)
 

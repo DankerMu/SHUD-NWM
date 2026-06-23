@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mirror one run's forcing domain from an explicit transitional node-22 source.
+"""Mirror one run's forcing domain from an explicit-DSN, compatibility-only,
+sunset-bound transitional node-22 source.
 
 This is a compatibility-only bridge for historical deployments where an
 operator intentionally provides a node-22 forcing-domain DSN. Current NHMS

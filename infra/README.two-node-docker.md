@@ -3,6 +3,19 @@
 最后更新：2026-05-29
 适用范围：M22 两节点 Docker skeleton，22 `compute_control` + 27 `display_readonly`
 
+> **2026-06-22 当前部署事实 vs 本文档设计意图的差异**：
+>
+> 本文档保留 M22 Docker skeleton 的 **design intent**，不是 current
+> production topology。当前物理部署已偏离：node-22 是纯计算 / Slurm /
+> SHUD / artifact producer，不连任何活 DB；node-27 同机运行 active
+> primary PostgreSQL (`:55432`)、data-plane ingest、display API (`:8080`)
+> 和前端。当前操作入口见
+> [`docs/runbooks/current-production-ops.md`](../docs/runbooks/current-production-ops.md)，
+> role/source-of-truth 见
+> [`docs/governance/ROLE_BOUNDARY.md`](../docs/governance/ROLE_BOUNDARY.md)。
+> 下文关于 22 writer DB / 27 readonly display 的描述是 design-time role
+> contract 背景，**not current host assignment**。
+
 ## 1. 结论
 
 生产两节点部署只使用 `infra/compose.compute.yml` 和 `infra/compose.display.yml`。`infra/docker-compose.dev.yml` 只用于本地开发依赖栈，不是生产两节点部署文件，不能拿它声明 22/27 Docker 验收通过。

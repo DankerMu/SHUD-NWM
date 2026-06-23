@@ -15,6 +15,9 @@ from services.slurm_gateway.config import SlurmGatewaySettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROLE_BOUNDARY_DOC = REPO_ROOT / "docs/governance/ROLE_BOUNDARY.md"
+CURRENT_PRODUCTION_OPS_DOC = REPO_ROOT / "docs/runbooks/current-production-ops.md"
+TWO_NODE_DEPLOYMENT_OVERVIEW_DOC = REPO_ROOT / "docs/runbooks/two-node-deployment-overview.md"
+PROJECT_PROFILE_DOC = REPO_ROOT / "openspec/project-profile.md"
 
 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS = frozenset(
     {
@@ -322,6 +325,28 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
     )
     for section in required_section_titles:
         assert text.count(section) >= 4, section
+
+
+def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() -> None:
+    role_boundary = ROLE_BOUNDARY_DOC.read_text(encoding="utf-8")
+    current_ops = CURRENT_PRODUCTION_OPS_DOC.read_text(encoding="utf-8")
+    two_node_overview = TWO_NODE_DEPLOYMENT_OVERVIEW_DOC.read_text(encoding="utf-8")
+    project_profile = PROJECT_PROFILE_DOC.read_text(encoding="utf-8")
+
+    assert "node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers" in role_boundary
+    assert "display API (`:8080`), and the frontend" in role_boundary
+    assert "node-27 是当前 active production service host" in current_ops
+    assert "本机 PostgreSQL `:55432`" in current_ops
+    assert "cron-driven ingest、display API 和前端公网入口都在 27" in current_ops
+
+    assert "node-22 runs the Slurm/SHUD compute wrapper" in role_boundary
+    assert "node-22 currently\nhosts compute/Slurm/artifact production only" in role_boundary
+    assert "node-22 是纯计算 / Slurm / SHUD / artifact producer" in two_node_overview
+    assert "Slurm scheduling/runtime receipts run on node-22 only when sbatch" in project_profile
+
+    assert "Local checks are required but do not replace node-27 live DB/display receipts." in role_boundary
+    assert "Local lint/unit/OpenSpec checks are necessary but do not substitute for" in project_profile
+    assert "required node-27 live DB/display receipts" in project_profile
 
 
 def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
