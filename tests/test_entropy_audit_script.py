@@ -1284,6 +1284,10 @@ def test_structural_ts_import_families_ignore_many_nonmatching_import_lines_quic
         ("\n".join("module.exports = {" for _ in range(4_800)), 0),
         ("\n".join(f"export class C{index} {{" for index in range(2_400)), 2_400),
     ],
+    ids=[
+        "many-cjs-unmatched-braces",
+        "many-exported-classes-unmatched-braces",
+    ],
 )
 def test_structural_ts_public_surface_handles_many_unmatched_braces_quickly(
     text: str,
