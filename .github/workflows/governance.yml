@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - uses: actions/setup-python@v5
@@ -32,9 +32,22 @@ jobs:
 
       - name: Generate entropy reports
         env:
-          STRUCTURAL_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/master' }}
+          STRUCTURAL_REQUESTED_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/master' }}
         run: |
+          set -eu
           mkdir -p artifacts/governance
+          STRUCTURAL_BASE_REF="$STRUCTURAL_REQUESTED_BASE_REF"
+          ZERO_SHA=0000000000000000000000000000000000000000
+          if [ "$STRUCTURAL_BASE_REF" = "origin/master" ]; then
+            git fetch --no-tags --depth=1 origin master
+            STRUCTURAL_BASE_REF=FETCH_HEAD
+          elif [ -n "$STRUCTURAL_BASE_REF" ] && [ "$STRUCTURAL_BASE_REF" != "$ZERO_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$STRUCTURAL_BASE_REF"
+            STRUCTURAL_BASE_REF=FETCH_HEAD
+          else
+            git fetch --no-tags --depth=1 origin master
+            STRUCTURAL_BASE_REF=FETCH_HEAD
+          fi
           uv run python scripts/governance/audit_repo_entropy.py --format json \
             --structural-base-ref "$STRUCTURAL_BASE_REF" \
             > artifacts/governance/entropy-report.json

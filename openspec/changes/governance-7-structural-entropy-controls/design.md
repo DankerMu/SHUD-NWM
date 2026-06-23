@@ -60,6 +60,8 @@ Change surface:
 - `scripts/governance/audit_repo_entropy.py` report construction, metadata,
   Markdown rendering, and helper classification functions.
 - `tests/test_entropy_audit_script.py` focused structural-budget fixtures.
+- `.github/workflows/governance.yml` report-only structural base-ref wiring for
+  the governance entropy audit.
 
 Must preserve:
 
@@ -67,8 +69,10 @@ Must preserve:
   gate-eligible semantics remain compatible.
 - Report-only and explicit hard-gate audit commands never create or update
   `.entropy-baseline/latest.json`.
-- Default and CI-facing behavior stays report-only; #667 does not enable or
-  modify a hard gate.
+- Default and CI-facing behavior stays report-only; #667 allows the minimal
+  `.github/workflows/governance.yml` base-ref fetch/config touch needed for the
+  report-only structural comparison contract, but does not enable or modify a
+  hard gate.
 - Generated/data/fixture-like large files are reported separately, not treated
   as ungoverned oversized implementation files.
 
@@ -86,7 +90,9 @@ Risk packs considered:
 
 - Public API / CLI / script entry: selected - audit CLI JSON/Markdown output
   gains a structural-budget section without changing existing exit semantics.
-- Config / project setup: not selected - no workflow, env, or CI config changes.
+- Config / project setup: selected - the only workflow/config touch is the
+  report-only governance workflow's structural base-ref checkout/fetch wiring;
+  no hard gate, secret, dependency, or production environment behavior changes.
 - File IO / path safety / overwrite: selected - audit reads tracked files and
   must preserve no-write baseline policy.
 - Schema / columns / units / field names: selected - report metadata/summary
@@ -133,6 +139,8 @@ Required #667 evidence:
   no ownership-growth signal.
 - oversized fixture with new import family, public entrypoint, parser/validator
   lane, or compatibility symbol -> ownership-growth signal.
+- governance workflow -> remains report-only while resolving a non-HEAD
+  structural comparison base through shallow checkout plus targeted base fetch.
 - report-only and hard-gate audit commands leave `.entropy-baseline/latest.json`
   unchanged.
 - existing entropy finding schema, summary counts, and exit-code semantics stay

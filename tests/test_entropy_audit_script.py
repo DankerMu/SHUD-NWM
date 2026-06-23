@@ -662,6 +662,44 @@ def test_structural_ownership_growth_detects_partial_python_import_diff(
     )
 
 
+def test_structural_growth_detects_multiline_and_indented_imports_in_huge_source(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    huge_line = "VALUE = '0123456789abcdef'\n"
+    repeat_count = audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES // len(huge_line) + 100
+    base_text = "import os\n" + (huge_line * repeat_count)
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base huge oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        source_path,
+        "import os\n"
+        "from pathlib import (\n"
+        "    Path,\n"
+        ")\n"
+        "if True:\n"
+        "    import importlib\n"
+        + (huge_line * repeat_count),
+    )
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    signal_details = [
+        str(signal["detail"])
+        for signal in budget["ownership_growth_signals"]
+        if isinstance(signal, dict)
+        and signal["path"] == "services/api/large.py"
+        and signal["signal_type"] == "new-import-family"
+    ]
+
+    assert "new-import-family" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+    assert any("pathlib" in detail and "importlib" in detail for detail in signal_details)
+
+
 def test_structural_ownership_growth_details_do_not_leak_added_source_literals(
     tmp_path: Path,
 ) -> None:

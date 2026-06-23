@@ -23,8 +23,9 @@
     `budget_counted_count`, `gate_eligible_count`, and exit-code semantics.
   - Markdown output includes the structural budget summary without changing the
     existing heatmap, high-spread, or prioritized-target sections.
-  - no workflow or CI configuration is changed, and hard-gate mode remains
-    explicit opt-in only.
+  - `.github/workflows/governance.yml` remains report-only; its CI config touch
+    is limited to shallow checkout plus targeted structural base-ref fetch for
+    the report contract, and hard-gate mode remains explicit opt-in only.
 - [x] 1.3 Add ownership-surface growth detection for oversized files.
   Evidence: focused tests cover bugfix edits that do not add surface, new import
   family/public entrypoint/parser/validation lane detection, generated/data/
@@ -32,6 +33,8 @@
   - oversized source changed only by a local bugfix-like edit -> no
     ownership-growth signal.
   - oversized source gaining a new import family -> ownership-growth signal.
+  - oversized Python source gaining a multiline `from ... import (...)` block
+    or an indented import -> ownership-growth signal.
   - oversized source gaining a public entrypoint or compatibility symbol ->
     ownership-growth signal.
   - oversized source gaining parser or validator responsibility -> ownership-

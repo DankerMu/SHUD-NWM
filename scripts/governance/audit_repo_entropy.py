@@ -19,6 +19,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import textwrap
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
@@ -3761,6 +3762,10 @@ def _structural_python_import_families(text: str) -> tuple[str, ...]:
         tree = ast.parse(text)
     except SyntaxError:
         return ()
+    return _structural_python_import_families_from_tree(tree)
+
+
+def _structural_python_import_families_from_tree(tree: ast.AST) -> tuple[str, ...]:
     families: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -3799,27 +3804,62 @@ def _structural_python_added_import_families(
     added_lines: tuple[_StructuralAddedLine, ...],
 ) -> tuple[str, ...]:
     families: set[str] = set()
-    for added_line in added_lines:
-        text = added_line.text
-        if text != text.lstrip():
-            continue
-        stripped = text.strip()
+    index = 0
+    while index < len(added_lines):
+        stripped = added_lines[index].text.strip()
         if not (stripped.startswith("import ") or stripped.startswith("from ")):
+            index += 1
             continue
-        try:
-            parsed = ast.parse(stripped)
-        except SyntaxError:
-            continue
-        for node in parsed.body:
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    families.add(_structural_import_family(alias.name))
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    families.add("relative")
-                elif node.module:
-                    families.add(_structural_import_family(node.module))
+        block_lines = [added_lines[index].text]
+        paren_balance = _structural_python_import_paren_balance(added_lines[index].text)
+        continued = stripped.endswith("\\") or paren_balance > 0
+        index += 1
+        while continued and index < len(added_lines):
+            block_lines.append(added_lines[index].text)
+            paren_balance += _structural_python_import_paren_balance(added_lines[index].text)
+            continued = added_lines[index].text.rstrip().endswith("\\") or paren_balance > 0
+            index += 1
+        families.update(_structural_python_import_block_families(block_lines))
     return tuple(sorted(family for family in families if family))
+
+
+def _structural_python_import_paren_balance(text: str) -> int:
+    return text.count("(") - text.count(")")
+
+
+def _structural_python_import_block_families(lines: list[str]) -> tuple[str, ...]:
+    source = textwrap.dedent("\n".join(lines)).strip()
+    if not source:
+        return ()
+    try:
+        parsed = ast.parse(source)
+    except SyntaxError:
+        return ()
+    families: set[str] = set()
+    for node in parsed.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                families.add(_structural_import_family(alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                families.add("relative")
+            elif node.module:
+                families.add(_structural_import_family(node.module))
+    return tuple(sorted(family for family in families if family))
+
+
+def _structural_current_import_families(root: Path, relative_path: str) -> tuple[str, ...] | None:
+    text = _read_structural_analysis_text(root / relative_path)
+    if text is None:
+        return None
+    suffix = Path(relative_path).suffix
+    if suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return None
+        return _structural_python_import_families_from_tree(tree)
+    return _structural_import_families(relative_path, text)
 
 
 def _structural_import_family(module: str) -> str:
@@ -3909,9 +3949,14 @@ def _structural_ownership_growth_signals(
     added_text = "\n".join(line.text for line in added_lines)
     base_text = _git_blob_text(root, comparison_base_ref, record.relative_path) or ""
     base_import_families = set(_structural_import_families(record.relative_path, base_text))
-    added_import_families = set(_structural_added_import_families(record.relative_path, added_lines))
+    current_import_families = _structural_current_import_families(root, record.relative_path)
+    detected_import_families = (
+        set(current_import_families)
+        if current_import_families is not None
+        else set(_structural_added_import_families(record.relative_path, added_lines))
+    )
     signals: list[_StructuralOwnershipGrowthSignal] = []
-    new_import_families = sorted(added_import_families - base_import_families)
+    new_import_families = sorted(detected_import_families - base_import_families)
     if new_import_families:
         signals.append(
             _structural_growth_signal(
