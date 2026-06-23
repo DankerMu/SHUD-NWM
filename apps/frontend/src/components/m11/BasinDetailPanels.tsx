@@ -262,8 +262,9 @@ export function useBasinDetailMode({
     basinSegments: currentBasinData?.segments ?? [],
     nationalRiverGeo: basinRiverGeo,
     meshRiverBasinIds,
-    selectedSegmentId,
+    selectedSegmentId: riverPopup?.segment.river_segment_id ?? selectedSegmentId,
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
+    selectedStationId: stationPopup?.station.station_id ?? null,
     stationFeatureCollection: stationLayer.featureCollection,
     popup,
     riverPanel: (

@@ -59,6 +59,7 @@ interface M11MapSurfaceProps extends SharedControlProps {
     | components['schemas']['GeoJsonLineString']
     | components['schemas']['GeoJsonMultiLineString']
     | null
+  selectedStationId?: string | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   loading?: boolean
@@ -109,6 +110,7 @@ export function M11MapSurface({
   meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
+  selectedStationId = null,
   stationFeatureCollection = null,
   popup = null,
   loading = false,
@@ -131,6 +133,7 @@ export function M11MapSurface({
         meshRiverBasinIds={meshRiverBasinIds}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
+        selectedStationId={selectedStationId}
         stationFeatureCollection={stationFeatureCollection}
         popup={popup}
         loading={loading}

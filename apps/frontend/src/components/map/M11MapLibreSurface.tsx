@@ -101,6 +101,7 @@ interface M11MapLibreSurfaceProps {
     | components['schemas']['GeoJsonLineString']
     | components['schemas']['GeoJsonMultiLineString']
     | null
+  selectedStationId?: string | null
   metStations?: boolean
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
@@ -212,6 +213,7 @@ export function M11MapLibreSurface({
   meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
+  selectedStationId = null,
   metStations,
   stationFeatureCollection = null,
   popup = null,
@@ -274,7 +276,7 @@ export function M11MapLibreSurface({
     [selectedSegmentGeometry, selectedSegmentId],
   )
   const selectedSegmentMapState = selectedSegmentId
-    ? selectedSegmentFeatureCollection.features.length > 0
+    ? selectedSegmentFeatureCollection.features.length > 0 || renderableOverlay || basinRiverFeatureCollection.features.length > 0
       ? 'selected-layer'
       : 'unavailable'
     : 'idle'
@@ -437,6 +439,7 @@ export function M11MapLibreSurface({
       data-selected-segment-id={selectedSegmentId ?? ''}
       data-segment-highlight-hook={selectedSegmentMapState}
       data-selected-segment-map-state={selectedSegmentMapState}
+      data-selected-station-id={selectedStationId ?? ''}
       data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
@@ -477,12 +480,12 @@ export function M11MapLibreSurface({
             subdued={Boolean(renderableOverlay)}
           />
         ) : null}
-        {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
+        {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} selectedSegmentId={selectedSegmentId} /> : null}
         {selectedSegmentFeatureCollection.features.length > 0 ? (
           <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
         ) : null}
         {showStationLayer && stationFeatureCollection ? (
-          <M11StationClusterPrimitive collection={stationFeatureCollection} />
+          <M11StationClusterPrimitive collection={stationFeatureCollection} selectedStationId={selectedStationId} />
         ) : null}
         {/* popup anchor 不指定 → maplibre 按可用空间自动选边，高弹窗在视口边缘不被裁切。 */}
         {popup ? (
@@ -721,9 +724,11 @@ function dischargeTileLayerPaint(): LayerProps['paint'] {
 function M11OverlayPrimitive({
   overlay,
   data,
+  selectedSegmentId,
 }: {
   overlay: M11RegisteredOverlay
   data: FloodReturnPeriodFeatureCollection | null
+  selectedSegmentId?: string | null
 }) {
   // line 叠加层渲染三层（z 序自下而上）：白色光晕底衬 → 彩色主线 → 透明加宽点击热区。
   // 热区 id 带 -hit 后缀，是唯一进 interactiveLayerIds 的层，让细河段也好点中。
@@ -750,6 +755,36 @@ function M11OverlayPrimitive({
       }
     : null
   const mainLayer = isLine ? { ...overlay.layer, layout: M11_ROUND_LINE_LAYOUT } : overlay.layer
+  const selectedHaloLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-selected-halo`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        filter: segmentFilter(selectedSegmentId),
+        paint: {
+          'line-color': '#FFFFFF',
+          'line-width': 10,
+          'line-opacity': 0.78,
+        },
+      }
+    : null
+  const selectedLineLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-selected-line`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        filter: segmentFilter(selectedSegmentId),
+        paint: {
+          'line-color': '#F97316',
+          'line-width': 6,
+          'line-opacity': 1,
+        },
+      }
+    : null
   if (overlay.source.type === 'vector') {
     return (
       <Source
@@ -764,6 +799,8 @@ function M11OverlayPrimitive({
         {casingLayer ? <Layer {...casingLayer} /> : null}
         <Layer {...mainLayer} />
         {hitLayer ? <Layer {...hitLayer} /> : null}
+        {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
+        {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
       </Source>
     )
   }
@@ -773,6 +810,8 @@ function M11OverlayPrimitive({
       {casingLayer ? <Layer {...casingLayer} /> : null}
       <Layer {...mainLayer} />
       {hitLayer ? <Layer {...hitLayer} /> : null}
+      {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
+      {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
     </Source>
   )
 }
@@ -1090,7 +1129,13 @@ function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegme
  * 代站 clustered-GeoJSON primitive：以 layerId/source 抽象组织（id 集中常量），未来切换到后端
  * station-MVT 点图层瓦片端点时仅替换 <Source> 实现即可，无需重写交互/popup 分发。
  */
-function M11StationClusterPrimitive({ collection }: { collection: M11StationFeatureCollection }) {
+function M11StationClusterPrimitive({
+  collection,
+  selectedStationId,
+}: {
+  collection: M11StationFeatureCollection
+  selectedStationId?: string | null
+}) {
   return (
     <Source
       id={MET_STATION_SOURCE_ID}
@@ -1137,6 +1182,32 @@ function M11StationClusterPrimitive({ collection }: { collection: M11StationFeat
           'circle-opacity': 0.92,
           'circle-stroke-color': '#FFFFFF',
           'circle-stroke-width': 1.5,
+        }}
+      />
+      <Layer
+        id="met-stations-selected-halo"
+        type="circle"
+        source={MET_STATION_SOURCE_ID}
+        filter={stationFilter(selectedStationId)}
+        paint={{
+          'circle-color': '#FFFFFF',
+          'circle-radius': 12,
+          'circle-opacity': 0.82,
+          'circle-stroke-color': '#111827',
+          'circle-stroke-width': 1,
+        }}
+      />
+      <Layer
+        id="met-stations-selected-point"
+        type="circle"
+        source={MET_STATION_SOURCE_ID}
+        filter={stationFilter(selectedStationId)}
+        paint={{
+          'circle-color': '#FACC15',
+          'circle-radius': 7.5,
+          'circle-opacity': 1,
+          'circle-stroke-color': '#111827',
+          'circle-stroke-width': 2,
         }}
       />
     </Source>
@@ -1315,6 +1386,14 @@ function segmentFilter(segmentId?: string | null): FilterSpecification {
     'any',
     ['==', ['get', 'river_segment_id'], segmentId ?? ''],
     ['==', ['get', 'segment_id'], segmentId ?? ''],
+  ] as FilterSpecification
+}
+
+function stationFilter(stationId?: string | null): FilterSpecification {
+  return [
+    'all',
+    ['!', ['has', 'point_count']],
+    ['==', ['get', 'station_id'], stationId ?? ''],
   ] as FilterSpecification
 }
 

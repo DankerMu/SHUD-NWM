@@ -1171,11 +1171,20 @@ describe('App route state', () => {
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter', shiftKey: true })
     const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
     expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-001')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
+    expect(screen.getAllByTestId('mock-m11-map-layer').map((layer) => layer.getAttribute('data-layer-id'))).toEqual(
+      expect.arrayContaining(['m11-discharge-line-selected-halo', 'm11-discharge-line-selected-line']),
+    )
 
     fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
     const stationPanel = await screen.findByTestId('m11-station-popup')
     expect(riverPanel).toBeInTheDocument()
     expect(stationPanel).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', 'qhh_forc_001')
+    expect(screen.getAllByTestId('mock-m11-map-layer').map((layer) => layer.getAttribute('data-layer-id'))).toEqual(
+      expect.arrayContaining(['met-stations-selected-halo', 'met-stations-selected-point']),
+    )
     await waitFor(() => expect(riverPanel.style.left).not.toEqual(stationPanel.style.left))
     expect(stationPanel.style.zIndex).toBe('142')
     expect(riverPanel.style.zIndex).toBe('132')
@@ -1186,6 +1195,7 @@ describe('App route state', () => {
 
     fireEvent.click(within(stationPanel).getByLabelText('关闭弹窗'))
     await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', '')
     expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
   })
 
@@ -1221,16 +1231,19 @@ describe('App route state', () => {
     fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
     const stationPanel = await screen.findByTestId('m11-station-popup')
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', 'qhh_forc_001')
 
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter', shiftKey: true })
     const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
     expect(stationPanel).toBeInTheDocument()
     expect(riverPanel).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-001')
     expect(riverPanel.style.zIndex).toBe('142')
     expect(stationPanel.style.zIndex).toBe('132')
 
     fireEvent.click(within(riverPanel).getByLabelText('关闭面板'))
     await waitFor(() => expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', '')
     expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
   })
 
@@ -1904,11 +1917,13 @@ describe('App route state', () => {
     expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-009')
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-009')
 
     fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
     const stationPanel = await screen.findByTestId('m11-station-popup')
     expect(riverPanel).toBeInTheDocument()
     expect(stationPanel).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', 'qhh_forc_001')
     await waitFor(() => expect(riverPanel.style.left).not.toEqual(stationPanel.style.left))
     expect(stationPanel.style.zIndex).toBe('142')
     expect(riverPanel.style.zIndex).toBe('132')
@@ -1919,6 +1934,7 @@ describe('App route state', () => {
 
     fireEvent.click(within(stationPanel).getByLabelText('关闭弹窗'))
     await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', '')
     expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
   })
 
@@ -1956,16 +1972,19 @@ describe('App route state', () => {
 
     const stationPanel = await screen.findByTestId('m11-station-popup')
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', 'qhh_forc_001')
 
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
     const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
     expect(stationPanel).toBeInTheDocument()
     expect(riverPanel).toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-001')
     expect(riverPanel.style.zIndex).toBe('142')
     expect(stationPanel.style.zIndex).toBe('132')
 
     fireEvent.click(within(riverPanel).getByLabelText('关闭面板'))
     await waitFor(() => expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', '')
     expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
   })
 

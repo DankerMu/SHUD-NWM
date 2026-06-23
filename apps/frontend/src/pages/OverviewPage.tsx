@@ -108,6 +108,7 @@ function M11FullscreenMap({
   meshRiverBasinIds,
   selectedSegmentId,
   selectedSegmentGeometry,
+  selectedStationId,
   stationFeatureCollection,
   popup,
   loading,
@@ -131,6 +132,7 @@ function M11FullscreenMap({
     | import('@/api/types').components['schemas']['GeoJsonLineString']
     | import('@/api/types').components['schemas']['GeoJsonMultiLineString']
     | null
+  selectedStationId?: string | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   loading?: boolean
@@ -162,6 +164,7 @@ function M11FullscreenMap({
         meshRiverBasinIds={meshRiverBasinIds}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
+        selectedStationId={selectedStationId}
         stationFeatureCollection={stationFeatureCollection}
         popup={popup}
         loading={loading}
@@ -202,6 +205,7 @@ function BasinDetailMode({
       meshRiverBasinIds={detail.meshRiverBasinIds}
       selectedSegmentId={detail.selectedSegmentId}
       selectedSegmentGeometry={detail.selectedSegmentGeometry}
+      selectedStationId={detail.selectedStationId}
       stationFeatureCollection={detail.stationFeatureCollection}
       popup={detail.popup}
       loading={detail.surfaceSettling}
@@ -510,6 +514,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       visibleBasinIds={visibleBasinIdList}
       nationalRiverGeo={nationalGeo.river}
       meshRiverBasinIds={meshRiverBasinIds}
+      selectedSegmentId={riverPopup?.segment.river_segment_id ?? null}
+      selectedStationId={stationPopup?.station.station_id ?? null}
       stationFeatureCollection={stationLayer.featureCollection}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}

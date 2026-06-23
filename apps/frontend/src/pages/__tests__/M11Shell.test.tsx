@@ -1281,6 +1281,27 @@ describe('M11 visual foundation shell', () => {
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
   })
 
+  it('renders selected hydrology MVT highlight layers when a segment id is selected', async () => {
+    const layersWithDischargeMvt = layers.map((layer) =>
+      layer.layerId === 'discharge' ? { ...layer, metadata: dischargeNationalMvtMetadata } : layer,
+    )
+
+    render(
+      <M11MapSurface
+        state={{ ...state, validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layersWithDischargeMvt}
+        selectedSegmentId="seg-1"
+      />,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge'))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
+    expect(mapLayers.map((layer) => layer.id)).toEqual(
+      expect.arrayContaining(['m11-discharge-line-selected-halo', 'm11-discharge-line-selected-line']),
+    )
+  })
+
   it('dispatches the river-segment overlay over basin-fill when both are under the click (#508)', async () => {
     const onOverlayClick = vi.fn()
     const layersWithMvt = layers.map((layer) =>
@@ -2384,17 +2405,35 @@ describe('M11 visual foundation shell', () => {
     }
     const metState = { ...state, metStations: true }
 
-    it('registers a clustered-GeoJSON source with three layers and interactive ids when the met-station layer is on', () => {
+    it('registers a clustered-GeoJSON source with point, cluster, and selected highlight layers when the met-station layer is on', () => {
       render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
 
       const source = mapSources.find((entry) => entry.id === 'm11-met-stations-source')
       expect(source).toMatchObject({ id: 'm11-met-stations-source', type: 'geojson', cluster: true, promoteId: 'station_id' })
       const layerIds = mapLayers.map((layer) => layer.id)
-      expect(layerIds).toEqual(expect.arrayContaining(['clusters', 'cluster-count', 'met-stations-point']))
+      expect(layerIds).toEqual(
+        expect.arrayContaining(['clusters', 'cluster-count', 'met-stations-point', 'met-stations-selected-halo', 'met-stations-selected-point']),
+      )
       expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '2')
       expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute(
         'data-interactive-layer-ids',
         'met-stations-point,clusters',
+      )
+    })
+
+    it('marks the selected station id and renders selected station highlight layers', () => {
+      render(
+        <M11MapSurface
+          state={metState}
+          layers={layers}
+          stationFeatureCollection={stationFeatureCollection}
+          selectedStationId="HMT-Y2-0237"
+        />,
+      )
+
+      expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-station-id', 'HMT-Y2-0237')
+      expect(mapLayers.map((layer) => layer.id)).toEqual(
+        expect.arrayContaining(['met-stations-selected-halo', 'met-stations-selected-point']),
       )
     })
 
