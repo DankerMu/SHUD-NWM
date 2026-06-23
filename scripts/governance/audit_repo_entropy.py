@@ -270,6 +270,10 @@ STRUCTURAL_PUBLIC_TS_PATTERN = re.compile(
     r"(?:function|class|const|let|var|interface|type|enum)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\b",
     re.MULTILINE,
 )
+STRUCTURAL_TS_EXPORTED_CLASS_PATTERN = re.compile(
+    r"^\s*export\s+(?:default\s+)?class\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\b",
+    re.MULTILINE,
+)
 STRUCTURAL_TS_NAMED_EXPORT_PATTERN = re.compile(
     r"^\s*export\s*{\s*(?P<body>[^}]+)\s*}(?:\s+from\s+['\"][^'\"]+['\"])?\s*;?",
     re.MULTILINE,
@@ -288,7 +292,9 @@ STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN = re.compile(
     re.MULTILINE,
 )
 STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN = re.compile(
-    r"^\s*@(?:app|router)\.(?:get|post|put|patch|delete|options|head)\s*\(",
+    r"^\s*@(?:app|router)\."
+    r"(?P<method>get|post|put|patch|delete|options|head)"
+    r"\s*\(\s*(?P<quote>['\"])(?P<path>[^'\"]*)(?P=quote)",
     re.MULTILINE,
 )
 STRUCTURAL_COMPATIBILITY_PATTERN = re.compile(
@@ -3979,6 +3985,12 @@ def _structural_ts_ignored_spans(text: str) -> tuple[tuple[int, int], ...]:
             index = min(index + 2, length)
             spans.append((start, index))
             continue
+        if char == "/" and next_char not in {"/", "*"}:
+            regex_end = _structural_ts_regex_literal_end(text, index)
+            if regex_end is not None:
+                spans.append((index, regex_end))
+                index = regex_end
+                continue
         if char in {"'", '"', "`"}:
             quote = char
             start = index
@@ -3995,6 +4007,71 @@ def _structural_ts_ignored_spans(text: str) -> tuple[tuple[int, int], ...]:
             continue
         index += 1
     return tuple(spans)
+
+
+def _structural_ts_regex_literal_end(text: str, start: int) -> int | None:
+    if not _structural_ts_regex_literal_allowed_at(text, start):
+        return None
+    index = start + 1
+    length = len(text)
+    in_character_class = False
+    saw_pattern_char = False
+    while index < length:
+        char = text[index]
+        if char in "\r\n":
+            return None
+        if char == "\\":
+            index += 2
+            saw_pattern_char = True
+            continue
+        if char == "[":
+            in_character_class = True
+            saw_pattern_char = True
+            index += 1
+            continue
+        if char == "]" and in_character_class:
+            in_character_class = False
+            index += 1
+            continue
+        if char == "/" and not in_character_class:
+            if not saw_pattern_char:
+                return None
+            index += 1
+            while index < length and (text[index].isalpha() or text[index].isdigit() or text[index] in {"_", "$"}):
+                index += 1
+            return index
+        saw_pattern_char = True
+        index += 1
+    return None
+
+
+def _structural_ts_regex_literal_allowed_at(text: str, start: int) -> bool:
+    index = start - 1
+    while index >= 0 and text[index].isspace():
+        index -= 1
+    if index < 0:
+        return True
+    previous = text[index]
+    if previous in "({[=,:;!&|?+-*~^<>":
+        return True
+    if previous == "}":
+        return False
+    word_end = index + 1
+    while index >= 0 and (text[index].isalpha() or text[index] in {"_", "$"}):
+        index -= 1
+    previous_word = text[index + 1 : word_end]
+    return previous_word in {
+        "await",
+        "case",
+        "delete",
+        "instanceof",
+        "new",
+        "return",
+        "throw",
+        "typeof",
+        "void",
+        "yield",
+    }
 
 
 def _structural_ts_position_is_ignored(
@@ -4171,8 +4248,7 @@ def _structural_public_surface_tokens(
         tokens.update(_structural_python_public_surface_tokens(text, partial=python_partial))
     elif suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
         tokens.update(_structural_ts_public_surface_tokens(text))
-    if STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.search(text):
-        tokens.add("route:http-route")
+    tokens.update(_structural_route_entrypoint_tokens(text))
     return tuple(sorted(token for token in tokens if token))
 
 
@@ -4257,7 +4333,117 @@ def _structural_ts_public_surface_tokens(text: str) -> tuple[str, ...]:
     for match in STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN.finditer(text):
         if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
             tokens.add("export:default")
+    tokens.update(_structural_ts_exported_class_method_tokens(text, ignored_spans))
     return tuple(sorted(token for token in tokens if token))
+
+
+def _structural_route_entrypoint_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.finditer(text):
+        method = match.group("method").lower()
+        path = match.group("path")
+        tokens.add(f"route:{method}:{path}")
+    return tokens
+
+
+def _structural_ts_exported_class_method_tokens(
+    text: str,
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> set[str]:
+    tokens: set[str] = set()
+    for match in STRUCTURAL_TS_EXPORTED_CLASS_PATTERN.finditer(text):
+        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            continue
+        class_name = match.group("name")
+        body_start = _structural_next_nonignored_char(text, "{", match.end(), ignored_spans)
+        if body_start is None:
+            continue
+        body = _structural_balanced_brace_body(text, body_start, ignored_spans)
+        if body is None:
+            continue
+        for method_name in _structural_ts_class_method_names(body):
+            tokens.add(f"method:{class_name}.{method_name}")
+    return tokens
+
+
+def _structural_next_nonignored_char(
+    text: str,
+    char: str,
+    start: int,
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> int | None:
+    index = start
+    span_index = 0
+    while index < len(text):
+        while span_index < len(ignored_spans) and ignored_spans[span_index][1] <= index:
+            span_index += 1
+        if span_index < len(ignored_spans):
+            span_start, span_end = ignored_spans[span_index]
+            if span_start <= index < span_end:
+                index = span_end
+                continue
+        if text[index] == char:
+            return index
+        index += 1
+    return None
+
+
+def _structural_ts_class_method_names(body: str) -> set[str]:
+    ignored_spans = _structural_ts_ignored_spans(body)
+    names: set[str] = set()
+    brace_depth = 0
+    bracket_depth = 0
+    paren_depth = 0
+    span_index = 0
+    for line_start, line in _structural_line_spans(body):
+        if not (brace_depth or bracket_depth or paren_depth):
+            method_match = _structural_ts_class_method_line_match(line)
+            if method_match is not None:
+                names.add(method_match.group("name"))
+        line_end = line_start + len(line)
+        index = line_start
+        while index < line_end:
+            while span_index < len(ignored_spans) and ignored_spans[span_index][1] <= index:
+                span_index += 1
+            if span_index < len(ignored_spans):
+                span_start, span_end = ignored_spans[span_index]
+                if span_start <= index < span_end:
+                    index = min(span_end, line_end)
+                    continue
+            char = body[index]
+            if char == "{":
+                brace_depth += 1
+            elif char == "}" and brace_depth:
+                brace_depth -= 1
+            elif char == "[":
+                bracket_depth += 1
+            elif char == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif char == "(":
+                paren_depth += 1
+            elif char == ")" and paren_depth:
+                paren_depth -= 1
+            index += 1
+    return names
+
+
+def _structural_ts_class_method_line_match(line: str) -> re.Match[str] | None:
+    match = re.match(
+        r"^\s*"
+        r"(?P<modifiers>(?:(?:public|protected|private|static|async|override|abstract|declare)\s+)*)"
+        r"(?:get\s+|set\s+)?"
+        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+        r"\s*(?:<[^>{}\n]*>)?\s*\(",
+        line,
+    )
+    if match is None:
+        return None
+    modifiers = set(match.group("modifiers").split())
+    if modifiers & {"private", "protected"}:
+        return None
+    if match.group("name") in {"constructor", "if", "for", "while", "switch", "catch", "function"}:
+        return None
+    return match
 
 
 def _structural_ts_named_export_tokens(body: str) -> set[str]:
@@ -4549,7 +4735,7 @@ def _structural_python_current_context_public_surface_tokens(
         return ()
     ranges = [
         (
-            max(1, line_number - STRUCTURAL_PYTHON_CONTEXT_MAX_LINES),
+            1,
             line_number,
         )
         for line_number in target_lines
