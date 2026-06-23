@@ -50,11 +50,12 @@
 
 ## 2. Compatibility Facade Governance
 
-- [ ] 2.1 Create a compatibility inventory for
+- [x] 2.1 Create a compatibility inventory for
   `services/orchestrator/scheduler.py`.
   Evidence: inventory records compatibility export groups, real owner modules,
   known callers/tests, retention reasons, removal conditions, and verification
-  commands.
+  commands. See
+  `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`.
 - [ ] 2.2 Create a compatibility inventory for
   `services/orchestrator/chain.py`.
   Evidence: inventory records stage/manifest/reservation/retry/tile-publisher/
