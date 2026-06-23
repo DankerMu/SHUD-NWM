@@ -57,9 +57,9 @@ Issue #659 evidence rows:
 
 ## 3. Map Layer Ordering And Hit Behavior
 
-- [ ] 3.1 Render station cluster/point layers above hydrology layers when the overlay is enabled, while keeping discharge and other hydrology MVT layers registered and visible.
-- [ ] 3.2 Change map hover/click hit ordering so station clusters/points win on overlapped pixels, clusters expand on click, and exposed river lines still open river forecast.
-- [ ] 3.3 Update MapLibre surface tests for overlay render order, interactive layer ids, cluster expansion, station-over-river hit priority, and exposed-river clickability.
+- [x] 3.1 Render station cluster/point layers above hydrology layers when the overlay is enabled, while keeping discharge and other hydrology MVT layers registered and visible.
+- [x] 3.2 Change map hover/click hit ordering so station clusters/points win on overlapped pixels, clusters expand on click, and exposed river lines still open river forecast.
+- [x] 3.3 Update MapLibre surface tests for overlay render order, interactive layer ids, cluster expansion, station-over-river hit priority, and exposed-river clickability.
 
 ## 4. Draggable Coexisting Curve Windows
 
