@@ -1,18 +1,46 @@
 ## 1. Structural File Budget
 
-- [ ] 1.1 Add a report-only structural file-budget check for tracked source
+- [x] 1.1 Add a report-only structural file-budget check for tracked source
   files with `>1000` mandatory-governance and `500-1000` review-zone
   classification.
   Evidence: focused tests cover hard-budget, yellow-zone, generated/data/fixture
-  exemption, and no baseline write.
-- [ ] 1.2 Add the structural budget summary to governance reporting without
+  exemption, and no baseline write:
+  - tracked source with `1001` physical lines and no exemption -> appears in the
+    structural budget as mandatory-governance with path, module, line count, and
+    owner action.
+  - tracked source with `500` to `1000` physical lines -> appears as yellow-zone
+    review-only unless mixed-ownership signals are present.
+  - generated, data-table, fixture, or protocol-like tracked source above the
+    thresholds -> appears under governed exemptions, not ungoverned oversized
+    implementation files.
+  - report-only and explicit hard-gate commands -> do not create or modify
+    `.entropy-baseline/latest.json`.
+- [x] 1.2 Add the structural budget summary to governance reporting without
   enabling a CI hard gate.
   Evidence: report output includes oversized source files, yellow-zone files,
-  governed exemptions, and top modules; existing entropy counts remain stable.
-- [ ] 1.3 Add ownership-surface growth detection for oversized files.
+  governed exemptions, and top modules; existing entropy counts remain stable:
+  - JSON metadata/summary preserves existing finding schema, `summary_counts`,
+    `budget_counted_count`, `gate_eligible_count`, and exit-code semantics.
+  - Markdown output includes the structural budget summary without changing the
+    existing heatmap, high-spread, or prioritized-target sections.
+  - `.github/workflows/governance.yml` remains report-only; its CI config touch
+    is limited to shallow checkout plus targeted structural base-ref fetch for
+    the report contract, and hard-gate mode remains explicit opt-in only.
+- [x] 1.3 Add ownership-surface growth detection for oversized files.
   Evidence: focused tests cover bugfix edits that do not add surface, new import
   family/public entrypoint/parser/validation lane detection, generated/data/
-  fixture exemptions, trend-safe reporting, and no baseline write.
+  fixture exemptions, trend-safe reporting, and no baseline write:
+  - oversized source changed only by a local bugfix-like edit -> no
+    ownership-growth signal.
+  - oversized source gaining a new import family -> ownership-growth signal.
+  - oversized Python source gaining a multiline `from ... import (...)` block
+    or an indented import -> ownership-growth signal.
+  - oversized source gaining a public entrypoint or compatibility symbol ->
+    ownership-growth signal.
+  - oversized source gaining parser or validator responsibility -> ownership-
+    growth signal.
+  - every ownership-growth signal is report-only and points to inventory/update
+    action rather than requiring immediate file splitting.
 - [ ] 1.4 Record current oversized source-file dispositions.
   Evidence: inventory covers at least `scheduler.py`, `chain.py`,
   `two_node_e2e_evidence.py`, `readiness_validation.py`, `apps/api/main.py`,
