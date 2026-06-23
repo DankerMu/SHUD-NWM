@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "grill-me",
+  "displayName": "Grill Me",
+  "description": "对已有 plan/design 做对抗式压测：沿决策树逐分支追问，一次只问一个问题且每问附推荐答案，能从 codebase 查到就不问用户，直到达成共同理解。Use to stress-test a plan or get grilled on a design before implementation.",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "productivity"
+  ],
+  "tags": [
+    "stress-test",
+    "interrogation",
+    "design-review",
+    "planning",
+    "clarification",
+    "one-question-at-a-time"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": false,
+    "filesystemRead": true,
+    "filesystemWrite": false
+  }
+}

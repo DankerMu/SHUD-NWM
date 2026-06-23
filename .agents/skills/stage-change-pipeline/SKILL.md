@@ -8,7 +8,7 @@ description: >
 license: MIT
 metadata:
   author: danker
-  version: "0.8.0"
+  version: "0.8.1"
 ---
 
 # Stage Change Pipeline
@@ -392,9 +392,9 @@ gh issue create --title "..." --label "..." --body "..."
 ```
 
 **依赖**：
-- `full-pipeline.workflow.js` — **推荐入口**，Stage 3→5.5 单次调用链式编排（Claude Code Workflow），调用：`Workflow({ scriptPath: "<dir>/full-pipeline.workflow.js", args: { changeName: "<name>", designDocs: [...], skillDir: "<dir>" } })`
-- `review-loop.workflow.js` — Stage 3→4→4.5 回环（由 full-pipeline 内部 `workflow()` 调用，或单独使用）
-- `issue-alignment.workflow.js` — Stage 5.5 对齐审核（由 full-pipeline 内部 `workflow()` 调用，或单独使用）
+- `full-pipeline.workflow.js` — **推荐入口**，Stage 3→5.5 全逻辑 inline（无 `workflow()` 嵌套，可安全作为顶层或子 workflow 调用），调用：`Workflow({ scriptPath: "<dir>/full-pipeline.workflow.js", args: { changeName: "<name>", designDocs: ["..."] } })`
+- `review-loop.workflow.js` — Stage 3→4→4.5 回环（独立使用，不需要 full-pipeline 时调用）
+- `issue-alignment.workflow.js` — Stage 5.5 对齐审核（独立使用，不需要 full-pipeline 时调用）
 - `grill-me` skill — Stage 1→2 之间的设计压测（可选）
 - `reviewer` subagent — Stage 3 三路并行审核执行（由 workflow 脚本 spawn）
 - `verifier` subagent — Stage 4.5 独立验证门核销（由 workflow 脚本 spawn，不得复用修复者）

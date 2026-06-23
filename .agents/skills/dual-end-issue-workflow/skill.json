@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "dual-end-issue-workflow",
+  "displayName": "Dual-End Issue Workflow (本地编辑 + 远端测试)",
+  "description": "NHMS/NWM project workflow for implementing or finishing a GitHub issue under the local-edit + remote-test model across TWO role nodes: node-22 (compute_control) is the backend/real-DB pytest oracle; node-27 (display_readonly) is the display/frontend-production/read-only-boundary live-receipt oracle. Claude Code orchestrates; fixes and reviews are delegated to dispatched subagents; backend iteration is driven by node-22 real-DB results, display/frontend live-operationalization by node-27 receipts, while CI is the final merge gate. Instantiates codex-codeagent-workflow and reuses its review vocabulary.",
+  "version": "0.2.0",
+  "maturity": "experimental",
+  "categories": ["workflow", "coding", "review"],
+  "tags": ["github-issues", "dual-end", "subagents", "remote-testing", "node-22", "node-27", "display-readonly", "live-receipt", "openspec", "risk-review", "ci"],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": ["git", "gh", "ssh", "openspec"],
+    "network": "required"
+  },
+  "capabilities": {
+    "shell": true,
+    "network": true,
+    "filesystemRead": true,
+    "filesystemWrite": true,
+    "subagents": true
+  }
+}

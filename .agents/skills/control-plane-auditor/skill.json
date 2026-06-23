@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "name": "control-plane-auditor",
+  "displayName": "Control Plane Auditor",
+  "description": "Audit a repository's control plane health across seven layers (memory, invariant, protocol, permission, sensorium, evaluation, governance) and produce an actionable improvement report. Covers instruction-file completeness, rule enforcement coverage, doc freshness, test infrastructure, and agent readiness.",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "documentation",
+    "review"
+  ],
+  "tags": [
+    "entropy",
+    "control-plane",
+    "audit",
+    "agents-md",
+    "repo-health",
+    "invariant",
+    "governance"
+  ],
+  "authors": [
+    {
+      "name": "Qiongyu Li"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": [
+      "git"
+    ]
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": false
+  }
+}

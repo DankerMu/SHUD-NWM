@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "improve-codebase-architecture",
+  "displayName": "Improve Codebase Architecture",
+  "description": "基于“深模块”哲学寻找架构改进点：用 explorer subagent 扫描 codebase，对照 openspec/glossary.md 术语与 docs/adr/ 决策，找出 shallow modules 并提出 deepening 重构（提升 testability 与 AI 可导航性），产出可视化 HTML 评审并进入 grill 对话逐个落地。Use to improve architecture, find refactoring opportunities, consolidate tightly-coupled modules, or make a codebase more testable.",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "refactoring",
+    "design",
+    "coding"
+  ],
+  "tags": [
+    "architecture",
+    "deep-modules",
+    "refactoring",
+    "testability",
+    "seams",
+    "html-report"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}
