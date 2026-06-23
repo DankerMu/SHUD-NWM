@@ -1454,12 +1454,14 @@ def test_entropy_audit_topology_guardrails_flag_terse_node22_db_writer_text(
         node-22 hosts active primary PostgreSQL.
         22 is the active DB writer.
         22 owns database mutation.
+        node-22 writes PG state.
+        node-22 是当前主库。
         """,
     )
 
     findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
 
-    assert [finding["line"] for finding in findings] == [1, 2, 3, 4, 5]
+    assert [finding["line"] for finding in findings] == [1, 2, 3, 4, 5, 6, 7]
     assert all(finding["gate_eligible"] is True for finding in findings)
 
 
@@ -1480,6 +1482,29 @@ def test_entropy_audit_topology_guardrails_flag_wrapped_node22_writer_claim(
         ("openspec/changes/active-topology/tasks.md", 1)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_flag_standalone_node22_wrapped_claims(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        node-22
+        is the active database writer for current NHMS production.
+
+        | node-22 |
+        | is the active database writer for current NHMS production |
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1),
+        ("docs/runbooks/current-production-ops.md", 4),
+    ]
+    assert all(finding["gate_eligible"] is True for finding in findings)
 
 
 def test_entropy_audit_topology_guardrails_flag_display_env_authority_and_indirect_source(
@@ -1532,13 +1557,33 @@ def test_entropy_audit_topology_guardrails_flag_display_env_authority_and_indire
             1,
         ),
         (
+            "scripts/source-split-quoted-repo-root.sh",
+            ['source "${REPO_ROOT}"/infra/env/display.env'],
+            1,
+        ),
+        (
             "scripts/source-checkout-root.sh",
             ['. "${CHECKOUT_ROOT}/infra/env/display.env"'],
             1,
         ),
         (
+            "scripts/source-absolute.sh",
+            ["source /home/nwm/NWM/infra/env/display.env"],
+            1,
+        ),
+        (
+            "scripts/source-parent-relative.sh",
+            ["source ../NWM/infra/env/display.env"],
+            1,
+        ),
+        (
             "scripts/source-alias.sh",
             ['DISPLAY_ENV="$REPO_ROOT/infra/env/display.env"', '. "$DISPLAY_ENV"'],
+            2,
+        ),
+        (
+            "scripts/source-split-quoted-alias.sh",
+            ['DISPLAY_ENV="${REPO_ROOT}"/infra/env/display.env', '. "$DISPLAY_ENV"'],
             2,
         ),
     ],
@@ -1559,6 +1604,80 @@ def test_entropy_audit_topology_guardrails_normalize_display_env_source_paths(
 
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
         (relative_path, expected_line)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_do_not_suppress_writer_command_with_negative_comment(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "scripts/run-ingest.sh",
+        """
+        source infra/env/display.env
+        uv run python scripts/node27_autopipeline.py # must not fall back to display.env
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/run-ingest.sh", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+@pytest.mark.parametrize(
+    "writer_command",
+    [
+        "uv run python scripts/node27_ingest_run.py",
+        "uv run python scripts/node27_refresh_coverage.py",
+        "uv run python -m workers.model_registry.cli import-basins-registry",
+        "nhms-model import-basins-registry",
+    ],
+)
+def test_entropy_audit_topology_guardrails_flag_node27_writer_entrypoints_after_display_env_source(
+    tmp_path: Path,
+    writer_command: str,
+) -> None:
+    _write(
+        tmp_path / "scripts/run-writer.sh",
+        f"""
+        source infra/env/display.env
+        {writer_command}
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/run-writer.sh", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_flag_psql_mutation_after_display_env_source(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "scripts/psql-mutation.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" -c "insert into met.forcing_version(version_id) values ('demo')"
+        """,
+    )
+    _write(
+        tmp_path / "scripts/psql-select.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" -c "select * from met.forcing_version limit 1"
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/psql-mutation.sh", 1)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
@@ -1618,6 +1737,40 @@ def test_entropy_audit_topology_guardrails_allow_non_current_and_readonly_contex
     ]
 
     assert topology_findings == []
+
+
+def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical_banner(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/display-readonly-live-mvt.md",
+        """
+        # display_readonly Live PostGIS MVT Runbook
+
+        > Current topology warning: this runbook preserves historical receipt context;
+        > do not treat node-22 `210.77.77.22:55433` as current display DB config.
+        > Current active primary PostgreSQL is node-27 local `:55432`.
+
+        ## Current operator steps
+
+        Current NHMS production says node-22 is the active database writer.
+        """,
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert [(finding["check_id"], finding["evidence_path"], finding["line"]) for finding in topology_findings] == [
+        (
+            "production-topology-node22-db-writer",
+            "docs/runbooks/display-readonly-live-mvt.md",
+            9,
+        )
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(topology_findings[0])
 
 
 @pytest.mark.parametrize(
@@ -1780,6 +1933,39 @@ def test_entropy_audit_topology_guardrails_allow_non_archive_superseded_document
     topology_findings = [
         finding
         for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+
+
+def test_entropy_audit_topology_guardrails_scan_instruction_agent_sources(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "instructions" / "agents" / "shared.md",
+        "Current NHMS production says node-22 is the active database writer.\n",
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("instructions/agents/shared.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_do_not_treat_iso_date_suffix_as_bare_node22(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        "2026-06-22 is when node-27 hosts active primary PostgreSQL :55432 for display readiness.\n",
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
         if str(finding["check_id"]).startswith("production-topology-")
     ]
 

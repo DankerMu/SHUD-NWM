@@ -167,7 +167,11 @@ MARKDOWN_LIST_ITEM_PATTERN = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
 MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN = re.compile(r"^\s{0,3}>\s?")
 TOPOLOGY_DISPLAY_ENV_PATH_PATTERN = re.compile(
-    r"(?:\./|\$\{?[a-z_][a-z0-9_]*\}?/)*infra/env/display\.env"
+    r"(?<![a-z0-9_.-])"
+    r"/?"
+    r"(?:(?:['\"]?\$\{?[a-z_][a-z0-9_]*\}?['\"]?|~|\.{1,2}|[a-z0-9_.-]+)\/)*"
+    r"infra/env/display\.env"
+    r"(?![a-z0-9_.-])"
 )
 TOPOLOGY_DISPLAY_ENV_SOURCE_TO_WRITER_MAX_LINES = 120
 
@@ -1002,6 +1006,7 @@ def _production_topology_scan_files(root: Path) -> Iterable[Path]:
     roots = [
         root / "scripts",
         root / "infra" / "env",
+        root / "instructions" / "agents",
         root / "docs" / "governance",
         root / "docs" / "runbooks",
         root / "openspec" / "changes",
@@ -1061,23 +1066,74 @@ def _topology_document_is_non_current(relative_path: str, lines: list[str]) -> b
     top_context = _topology_normalized("\n".join(lines[:80]))
     if "current production operations" in top_context or "当前生产值守" in top_context:
         return False
-    if ("design intent" in top_context or "设计意图" in top_context) and (
-        "not current" in top_context
-        or "不反映当前" in top_context
-        or "当前部署事实" in top_context
-    ):
-        return True
-    if ("historical" in top_context or "历史" in top_context or "superseded" in top_context) and (
-        "not current" in top_context
-        or "non current" in top_context
-        or "已迁移" in top_context
-        or "保留" in top_context
-        or "not current topology" in top_context
-    ):
-        return True
-    if "首跑" in top_context and "已迁移" in top_context and "保留" in top_context:
+    top_lines = tuple(_topology_normalized(line) for line in lines[:80] if line.strip())
+    if _topology_top_context_declares_whole_document_non_current(top_context, top_lines):
         return True
     return False
+
+
+def _topology_top_context_declares_whole_document_non_current(
+    top_context: str,
+    top_lines: tuple[str, ...],
+) -> bool:
+    whole_document_terms = (
+        "this document",
+        "this file",
+        "this runbook",
+        "entire document",
+        "document preserves",
+        "本文",
+        "本文件",
+        "本 runbook",
+        "本runbook",
+    )
+    non_current_terms = (
+        "not current",
+        "non-current",
+        "non current",
+        "not current topology",
+        "not current production topology",
+        "不反映当前",
+        "不作为当前",
+        "不用于当前",
+        "非当前",
+        "当前部署事实不同",
+        "当前物理部署不同",
+    )
+    design_or_superseded_terms = (
+        "design intent",
+        "设计意图",
+        "historical",
+        "history",
+        "superseded",
+        "deprecated",
+        "archived",
+        "历史",
+        "已弃用",
+    )
+    has_whole_document_subject = any(term in top_context for term in whole_document_terms)
+    has_non_current_marker = any(term in top_context for term in non_current_terms)
+    has_design_or_superseded_marker = any(term in top_context for term in design_or_superseded_terms)
+    if has_whole_document_subject and has_non_current_marker and has_design_or_superseded_marker:
+        return True
+    if "首跑" in top_context and "已迁移" in top_context and ("本文保留" in top_context or "保留" in top_context):
+        return True
+    return any(_topology_line_declares_document_superseded(line) for line in top_lines[:12])
+
+
+def _topology_line_declares_document_superseded(line: str) -> bool:
+    if not any(token in line for token in ("superseded", "deprecated", "archived", "historical", "历史")):
+        return False
+    return any(
+        token in line
+        for token in (
+            "not current topology",
+            "not current production topology",
+            "retained for audit evidence",
+            "保留",
+            "不用于当前",
+        )
+    )
 
 
 def _topology_line_context(lines: list[str], line_no: int, *, before: int = 7, after: int = 7) -> str:
@@ -1128,7 +1184,7 @@ def _topology_normalized(text: str) -> str:
 
 
 def _topology_line_may_start_node22_db_writer_claim(line: str) -> bool:
-    return any(
+    if any(
         _topology_mentions_node22(clause)
         and (
             _topology_mentions_writer(clause)
@@ -1138,7 +1194,14 @@ def _topology_line_may_start_node22_db_writer_claim(line: str) -> bool:
             or "主库" in clause
         )
         for clause in _topology_relation_clauses(line)
-    )
+    ):
+        return True
+    return _topology_line_is_standalone_node22_anchor(line)
+
+
+def _topology_line_is_standalone_node22_anchor(line: str) -> bool:
+    normalized = _topology_normalized(line)
+    return bool(re.fullmatch(r"(?:[#>*+\-\d.)\s|`]*\|?\s*)?node[-_ ]?22\s*\|?\s*:?", normalized))
 
 
 def _topology_line_may_have_node22_db_writer_drift(line: str) -> bool:
@@ -1209,7 +1272,7 @@ def _topology_mentions_node22(text: str) -> bool:
     lowered = _topology_normalized(text)
     return bool(
         re.search(
-            r"\bnode[-_ ]?22\b|(?<!\d)22(?!\d)\s*"
+            r"\bnode[-_ ]?22\b|(?:^|[|:]\s*|^(?:[-*+]|\d+[.)])\s+)22(?!\d)\s*"
             r"(?:is|as|own|owns|owned|host|hosts|node|节点|写入|写|拥有|postgres|postgresql|pg|db|数据库)",
             lowered,
         )
@@ -1218,15 +1281,14 @@ def _topology_mentions_node22(text: str) -> bool:
 
 def _topology_mentions_database(text: str) -> bool:
     lowered = _topology_normalized(text)
-    return any(
+    return bool(re.search(r"\b(?:db|pg)\b", lowered)) or any(
         token in lowered
         for token in (
             "database",
             "postgres",
             "postgresql",
-            "db ",
-            " db",
             "数据库",
+            "主库",
             "55433",
         )
     )
@@ -1283,6 +1345,8 @@ def _topology_context_has_negative_node22_writer_boundary(context: str) -> bool:
             "does not connect",
             "does not use",
             "do not connect",
+            "do not copy",
+            "do not treat",
             "do not use",
             "not as current",
             "not current",
@@ -1302,7 +1366,9 @@ def _topology_context_has_negative_node22_writer_boundary(context: str) -> bool:
             "outside current",
             "不连",
             "不作为",
+            "不要把",
             "不要连",
+            "不要复制",
             "不应连接",
             "不使用",
             "禁止",
@@ -1373,6 +1439,8 @@ def _topology_local_postgres_context_is_allowed(
     if _topology_context_is_guardrail_or_test_meta(local_claim_context):
         return True
     if _topology_context_is_guardrail_or_test_meta(line_context):
+        return True
+    if _topology_context_is_historical_receipt_evidence(line_context):
         return True
     if _topology_context_is_explicit_mirror_implementation(line_context):
         return True
@@ -1558,12 +1626,35 @@ def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
             "guardrails so",
             "reports topology drift",
             "reports display-env writer drift",
+            "production-topology-node22-db-writer",
+            "production-topology-display-env-writer",
             "focused tests cover",
             "regression rows",
             "drift in current operational surfaces",
             "while allowing clearly historical evidence",
             "positive fixtures",
             "negative fixtures",
+        )
+    )
+
+
+def _topology_context_is_historical_receipt_evidence(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", normalized):
+        return False
+    if not any(token in normalized for token in ("receipt", "historical", "history", "当时", "历史")):
+        return False
+    return not any(
+        token in normalized
+        for token in (
+            "current production says",
+            "current production state",
+            "current checks",
+            "active database writer",
+            "active db writer",
+            "当前生产",
+            "当前检查",
+            "当前主库",
         )
     )
 
@@ -1782,18 +1873,13 @@ def _topology_prefix_has_display_env_source_negation(prefix: str) -> bool:
 
 def _topology_line_has_unnegated_data_plane_writer_or_mirror_use(line: str) -> bool:
     normalized = _topology_normalized(line)
+    command = _topology_strip_shell_comment(normalized)
+    if _topology_line_has_data_plane_writer_command(command):
+        return True
+    if _topology_line_has_psql_mutation_command(command):
+        return True
     if _topology_context_has_negative_writer_or_mirror_terms(normalized):
         return False
-    command_terms = (
-        "autopipe",
-        "autopipeline",
-        "node27_autopipeline",
-        "node27_autopipe",
-        "node27_mirror_forcing",
-        "n22_dsn",
-    )
-    if any(token in normalized for token in command_terms):
-        return True
     weak_writer_terms = (
         "data-plane",
         "database_url",
@@ -1816,6 +1902,34 @@ def _topology_line_has_unnegated_data_plane_writer_or_mirror_use(line: str) -> b
         )
         for clause in _topology_relation_clauses(normalized)
     )
+
+
+def _topology_strip_shell_comment(line: str) -> str:
+    return re.split(r"\s+#", line, maxsplit=1)[0].strip()
+
+
+def _topology_line_has_data_plane_writer_command(line: str) -> bool:
+    strong_command_terms = (
+        "autopipe",
+        "autopipeline",
+        "node27_autopipeline",
+        "node27_autopipe",
+        "node27_mirror_forcing",
+        "node27_ingest_run.py",
+        "node27_refresh_coverage.py",
+        "n22_dsn",
+    )
+    if any(token in line for token in strong_command_terms):
+        return True
+    return "import-basins-registry" in line and (
+        "workers.model_registry.cli" in line or "nhms-model" in line
+    )
+
+
+def _topology_line_has_psql_mutation_command(line: str) -> bool:
+    if not re.search(r"(?:^|[\s;&|])psql(?:\s|$)", line):
+        return False
+    return bool(re.search(r"\b(?:insert|update|delete|truncate)\b", line))
 
 
 def _topology_context_has_negative_writer_or_mirror_terms(context: str) -> bool:
