@@ -257,8 +257,25 @@ STRUCTURAL_PUBLIC_PY_PATTERN = re.compile(
     re.MULTILINE,
 )
 STRUCTURAL_PUBLIC_TS_PATTERN = re.compile(
-    r"^\s*export\s+(?:default\s+)?(?:async\s+)?"
+    r"^\s*export\s+(?P<default>default\s+)?(?:async\s+)?"
     r"(?:function|class|const|let|var|interface|type|enum)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\b",
+    re.MULTILINE,
+)
+STRUCTURAL_TS_NAMED_EXPORT_PATTERN = re.compile(
+    r"^\s*export\s*{\s*(?P<body>[^}]+)\s*}(?:\s+from\s+['\"][^'\"]+['\"])?\s*;?",
+    re.MULTILINE,
+)
+STRUCTURAL_TS_DEFAULT_EXPORT_PATTERN = re.compile(r"^\s*export\s+default\b", re.MULTILINE)
+STRUCTURAL_CJS_EXPORTS_ASSIGNMENT_PATTERN = re.compile(
+    r"^\s*(?:module\.)?exports\.(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=",
+    re.MULTILINE,
+)
+STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_PATTERN = re.compile(
+    r"^\s*module\.exports\s*=\s*{\s*(?P<body>[^}]+)\s*}",
+    re.MULTILINE | re.DOTALL,
+)
+STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN = re.compile(
+    r"^\s*module\.exports\s*=(?!\s*{)",
     re.MULTILINE,
 )
 STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN = re.compile(
@@ -3898,7 +3915,18 @@ def _structural_ts_import_match_is_ignored(
     if keyword_match is None:
         return False
     keyword_position = match.start() + keyword_match.start()
-    return any(start <= keyword_position < end for start, end in ignored_spans)
+    return _structural_ts_position_is_ignored(keyword_position, ignored_spans)
+
+
+def _structural_ts_position_is_ignored(
+    position: int,
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> bool:
+    span_index = bisect_right(ignored_spans, (position, sys.maxsize)) - 1
+    if span_index < 0:
+        return False
+    start, end = ignored_spans[span_index]
+    return start <= position < end
 
 
 def _structural_added_import_families(
@@ -3975,6 +4003,27 @@ def _structural_current_import_families(root: Path, relative_path: str) -> tuple
     return _structural_import_families(relative_path, text)
 
 
+def _structural_bounded_public_surface_tokens(
+    relative_path: str,
+    blob: _BoundedGitBlobText,
+) -> tuple[str, ...]:
+    return _structural_public_surface_tokens(
+        relative_path,
+        blob.text,
+        python_partial=blob.truncated,
+    )
+
+
+def _structural_current_public_surface_tokens(
+    root: Path,
+    relative_path: str,
+) -> tuple[str, ...] | None:
+    text = _read_structural_analysis_text(root / relative_path)
+    if text is None:
+        return None
+    return _structural_public_surface_tokens(relative_path, text)
+
+
 def _structural_import_family(module: str) -> str:
     normalized = module.strip()
     if not normalized:
@@ -4000,7 +4049,7 @@ def _structural_ownership_surface_signals(
     signals: list[str] = []
     if len(import_families) >= STRUCTURAL_IMPORT_FAMILY_MIXED_COUNT:
         signals.append("many-import-families")
-    if _structural_public_entrypoint_names(relative_path, text):
+    if _structural_public_surface_tokens(relative_path, text):
         signals.append("public-entrypoint-surface")
     if STRUCTURAL_COMPATIBILITY_PATTERN.search(text):
         signals.append("compatibility-surface")
@@ -4015,36 +4064,171 @@ def _structural_public_entrypoint_names(
     *,
     python_partial: bool = False,
 ) -> tuple[str, ...]:
-    suffix = Path(relative_path).suffix
-    names: set[str] = set()
-    if suffix == ".py":
-        names.update(_structural_python_public_entrypoint_names(text, partial=python_partial))
-    elif suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
-        names.update(match.group("name") for match in STRUCTURAL_PUBLIC_TS_PATTERN.finditer(text))
-    if STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.search(text):
-        names.add("http-route")
-    return tuple(sorted(name for name in names if name and not name.startswith("_")))
-
-
-def _structural_python_public_entrypoint_names(text: str, *, partial: bool) -> tuple[str, ...]:
-    if partial:
-        return tuple(
-            sorted(
-                match.group("name")
-                for match in STRUCTURAL_PUBLIC_PY_PATTERN.finditer(text)
-                if not match.group("name").startswith("_")
+    return tuple(
+        sorted(
+            _structural_public_surface_label(token)
+            for token in _structural_public_surface_tokens(
+                relative_path,
+                text,
+                python_partial=python_partial,
             )
         )
+    )
+
+
+def _structural_public_surface_label(token: str) -> str:
+    return token.split(":", 1)[1] if ":" in token else token
+
+
+def _structural_public_surface_tokens(
+    relative_path: str,
+    text: str,
+    *,
+    python_partial: bool = False,
+) -> tuple[str, ...]:
+    suffix = Path(relative_path).suffix
+    tokens: set[str] = set()
+    if suffix == ".py":
+        tokens.update(_structural_python_public_surface_tokens(text, partial=python_partial))
+    elif suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        tokens.update(_structural_ts_public_surface_tokens(text))
+    if STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.search(text):
+        tokens.add("route:http-route")
+    return tuple(sorted(token for token in tokens if token))
+
+
+def _structural_python_public_surface_tokens(text: str, *, partial: bool) -> tuple[str, ...]:
+    if partial:
+        return _structural_python_partial_public_surface_tokens(text)
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return _structural_python_public_entrypoint_names(text, partial=True)
-    names = {
-        node.name
-        for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef)
-    }
-    return tuple(sorted(name for name in names if name and not name.startswith("_")))
+        return _structural_python_partial_public_surface_tokens(text)
+    tokens: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            if _structural_python_public_name(node.name):
+                tokens.add(f"function:{node.name}")
+            continue
+        if isinstance(node, ast.ClassDef):
+            if not _structural_python_public_name(node.name):
+                continue
+            tokens.add(f"class:{node.name}")
+            for member in node.body:
+                if isinstance(member, (ast.AsyncFunctionDef, ast.FunctionDef)) and (
+                    _structural_python_public_name(member.name)
+                ):
+                    tokens.add(f"method:{node.name}.{member.name}")
+    return tuple(sorted(tokens))
+
+
+def _structural_python_partial_public_surface_tokens(text: str) -> tuple[str, ...]:
+    tokens: set[str] = set()
+    contexts: list[tuple[str, int, str]] = []
+    pattern = re.compile(
+        r"^(?P<indent>[ \t]*)(?:(?P<class>class)|(?:(?:async\s+)?def))\s+"
+        r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\b"
+    )
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        indent = len(match.group("indent").expandtabs(4))
+        while contexts and contexts[-1][1] >= indent:
+            contexts.pop()
+        name = match.group("name")
+        if match.group("class"):
+            if indent == 0 and _structural_python_public_name(name):
+                tokens.add(f"class:{name}")
+            contexts.append(("class", indent, name))
+            continue
+        if indent == 0:
+            if _structural_python_public_name(name):
+                tokens.add(f"function:{name}")
+        elif contexts and contexts[-1][0] == "class":
+            class_name = contexts[-1][2]
+            if _structural_python_public_name(class_name) and _structural_python_public_name(name):
+                tokens.add(f"method:{class_name}.{name}")
+        contexts.append(("function", indent, name))
+    return tuple(sorted(tokens))
+
+
+def _structural_python_public_name(name: str) -> bool:
+    return bool(name) and not name.startswith("_")
+
+
+def _structural_ts_public_surface_tokens(text: str) -> tuple[str, ...]:
+    tokens: set[str] = set()
+    ignored_spans = _structural_ts_ignored_spans(text)
+    for match in STRUCTURAL_PUBLIC_TS_PATTERN.finditer(text):
+        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            continue
+        if match.group("default"):
+            tokens.add("export:default")
+        else:
+            tokens.add(f"export:{match.group('name')}")
+    for match in STRUCTURAL_TS_NAMED_EXPORT_PATTERN.finditer(text):
+        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            continue
+        tokens.update(_structural_ts_named_export_tokens(match.group("body")))
+    for match in STRUCTURAL_TS_DEFAULT_EXPORT_PATTERN.finditer(text):
+        if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            tokens.add("export:default")
+    for match in STRUCTURAL_CJS_EXPORTS_ASSIGNMENT_PATTERN.finditer(text):
+        if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            tokens.add(f"export:{match.group('name')}")
+    for match in STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_PATTERN.finditer(text):
+        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            continue
+        tokens.update(_structural_cjs_object_export_tokens(match.group("body")))
+    for match in STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN.finditer(text):
+        if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            tokens.add("export:default")
+    return tuple(sorted(token for token in tokens if token))
+
+
+def _structural_ts_named_export_tokens(body: str) -> set[str]:
+    tokens: set[str] = set()
+    identifier = r"[A-Za-z_$][A-Za-z0-9_$]*"
+    for item in body.split(","):
+        normalized = item.strip()
+        if not normalized:
+            continue
+        alias_match = re.fullmatch(
+            rf"(?:type\s+)?{identifier}\s+as\s+(?P<exported>{identifier}|default)",
+            normalized,
+        )
+        if alias_match:
+            exported = alias_match.group("exported")
+        else:
+            name_match = re.fullmatch(rf"(?:type\s+)?(?P<exported>{identifier}|default)", normalized)
+            if name_match is None:
+                continue
+            exported = name_match.group("exported")
+        tokens.add("export:default" if exported == "default" else f"export:{exported}")
+    return tokens
+
+
+def _structural_cjs_object_export_tokens(body: str) -> set[str]:
+    tokens: set[str] = set()
+    identifier = r"[A-Za-z_$][A-Za-z0-9_$]*"
+    for item in body.split(","):
+        normalized = item.strip()
+        if not normalized or normalized.startswith("..."):
+            continue
+        quoted_match = re.match(r"['\"](?P<name>[^'\"]+)['\"]\s*:", normalized)
+        if quoted_match:
+            name = quoted_match.group("name")
+        else:
+            name_match = re.match(rf"(?P<name>{identifier})\b(?:\s*:)?", normalized)
+            if name_match is None:
+                continue
+            name = name_match.group("name")
+        if name == "default":
+            tokens.add("export:default")
+        elif re.fullmatch(identifier, name):
+            tokens.add(f"export:{name}")
+    return tokens
 
 
 def _structural_budget_review_reason(
@@ -4113,17 +4297,19 @@ def _structural_ownership_growth_signals(
                 "new import families: " + ", ".join(new_import_families),
             )
         )
-    public_names = _structural_public_entrypoint_names(
+    current_public_tokens = _structural_current_public_surface_tokens(root, record.relative_path)
+    public_tokens = _structural_new_public_surface_tokens(
         record.relative_path,
         added_text,
-        python_partial=True,
+        base_blob,
+        current_public_tokens,
     )
-    if public_names:
+    if public_tokens:
         signals.append(
             _structural_growth_signal(
                 record,
                 "public-entrypoint",
-                "new public entrypoint symbols: " + ", ".join(public_names),
+                "new public surface tokens: " + ", ".join(public_tokens),
             )
         )
     compatibility_lines = _matching_structural_added_lines(added_lines, STRUCTURAL_COMPATIBILITY_PATTERN)
@@ -4154,6 +4340,18 @@ def _structural_ownership_growth_signals(
             )
         )
     return signals
+
+
+def _structural_new_public_surface_tokens(
+    relative_path: str,
+    added_text: str,
+    base_blob: _BoundedGitBlobText | None,
+    current_public_tokens: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    if base_blob is not None and current_public_tokens is not None:
+        base_public_tokens = set(_structural_bounded_public_surface_tokens(relative_path, base_blob))
+        return tuple(sorted(set(current_public_tokens) - base_public_tokens))
+    return _structural_public_surface_tokens(relative_path, added_text, python_partial=True)
 
 
 def _structural_diff_truncation_detail(added_result: _StructuralAddedLines) -> str:

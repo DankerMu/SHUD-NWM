@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -486,6 +487,166 @@ def test_structural_ownership_growth_ignores_nested_python_helper_entrypoint(
     )
 
 
+def test_structural_ownership_growth_reports_python_public_class_method_addition(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_lines = [
+        "import os",
+        "",
+        "class Controller:",
+        "    def existing(self) -> str:",
+        "        return os.name",
+    ]
+    changed_lines = [
+        "import os",
+        "",
+        "class Controller:",
+        "    def existing(self) -> str:",
+        "        return os.name",
+        "",
+        "    def handle(self) -> str:",
+        "        return os.name",
+    ]
+    _write(source_path, _structural_python_fixture(1001, *base_lines))
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, _structural_python_fixture(1001, *changed_lines))
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    signal_details = _structural_growth_signal_details(
+        budget,
+        "services/api/large.py",
+        "public-entrypoint",
+    )
+
+    assert signal_details == ["new public surface tokens: method:Controller.handle"]
+
+
+@pytest.mark.parametrize(
+    ("base_lines", "changed_lines"),
+    [
+        (
+            [
+                "def existing(value: int) -> int:",
+                "    return value",
+            ],
+            [
+                "def existing(value: int, *, strict: bool = False) -> int:",
+                "    return value if strict else value",
+            ],
+        ),
+        (
+            [
+                "class Existing:",
+                "    def handle(self) -> int:",
+                "        return 1",
+            ],
+            [
+                "class Existing(object):",
+                "    def handle(self) -> int:",
+                "        return 1",
+            ],
+        ),
+    ],
+)
+def test_structural_ownership_growth_ignores_existing_python_public_signature_edit(
+    tmp_path: Path,
+    base_lines: list[str],
+    changed_lines: list[str],
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    _write(source_path, _structural_python_fixture(1001, *base_lines))
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, _structural_python_fixture(1001, *changed_lines))
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert "public-entrypoint" not in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "added_lines", "expected_detail"),
+    [
+        (
+            "apps/frontend/src/large.ts",
+            ("const handler = () => null;", "export { handler };"),
+            "new public surface tokens: export:handler",
+        ),
+        (
+            "apps/frontend/src/large.js",
+            ("const handler = () => null;", "module.exports = { handler };"),
+            "new public surface tokens: export:handler",
+        ),
+        (
+            "apps/frontend/src/large.js",
+            ("const handler = () => null;", "exports.foo = handler;"),
+            "new public surface tokens: export:foo",
+        ),
+        (
+            "apps/frontend/src/large.ts",
+            ("export default defineConfig({});",),
+            "new public surface tokens: export:default",
+        ),
+    ],
+)
+def test_structural_ownership_growth_reports_js_ts_public_exports(
+    tmp_path: Path,
+    relative_path: str,
+    added_lines: tuple[str, ...],
+    expected_detail: str,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / relative_path
+    base_text = _structural_ts_private_fixture(1001)
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, base_text + "\n".join(added_lines) + "\n")
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
+        expected_detail
+    ]
+
+
+def test_structural_ownership_growth_ignores_existing_ts_public_signature_edit(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "apps" / "frontend" / "src" / "large.ts"
+    base_text = _structural_ts_private_fixture(
+        1001,
+        "export function handler(value: string): string {",
+        "  return value;",
+        "}",
+    )
+    changed_text = _structural_ts_private_fixture(
+        1001,
+        "export function handler(value: string, strict = false): string {",
+        "  return strict ? value.trim() : value;",
+        "}",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert "public-entrypoint" not in _structural_growth_signal_types(
+        budget,
+        "apps/frontend/src/large.ts",
+    )
+
+
 def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
     tmp_path: Path,
 ) -> None:
@@ -545,6 +706,34 @@ def test_structural_ts_import_families_ignore_comments_and_string_literals() -> 
     )
 
     assert families == ("@scope/pkg", "lodash", "react")
+
+
+def test_structural_ts_import_families_ignore_many_comment_and_string_literals_quickly() -> None:
+    ignored_lines = []
+    for index in range(6_000):
+        ignored_lines.append(f"// import('comment-only-{index}')")
+        ignored_lines.append(f"const quoted{index} = \"require('string-only-{index}')\";")
+
+    started_at = time.perf_counter()
+    families = audit_repo_entropy._structural_ts_import_families("\n".join(ignored_lines))
+    elapsed = time.perf_counter() - started_at
+
+    assert families == ()
+    assert elapsed < 2.0
+
+
+def test_structural_ts_import_families_still_detect_real_import_forms() -> None:
+    families = audit_repo_entropy._structural_ts_import_families(
+        """
+        // import('comment-only')
+        const quotedRequire = "require('string-only')";
+        import { createApp } from '@scope/app/runtime';
+        const express = require('express');
+        const lazy = import('lodash/fp');
+        """
+    )
+
+    assert families == ("@scope/app", "express", "lodash")
 
 
 def test_structural_ownership_growth_cli_uses_explicit_base_ref_for_committed_diff(
@@ -5969,6 +6158,22 @@ def _structural_growth_signal_types(budget: dict[str, object], path: str) -> set
     }
 
 
+def _structural_growth_signal_details(
+    budget: dict[str, object],
+    path: str,
+    signal_type: str,
+) -> list[str]:
+    signals = budget["ownership_growth_signals"]
+    assert isinstance(signals, list)
+    return [
+        str(signal["detail"])
+        for signal in signals
+        if isinstance(signal, dict)
+        and signal["path"] == path
+        and signal["signal_type"] == signal_type
+    ]
+
+
 def _git_rev_parse(root: Path, ref: str) -> str:
     result = subprocess.run(
         ["git", "rev-parse", ref],
@@ -5991,6 +6196,13 @@ def _structural_ts_fixture(line_count: int, *header_lines: str) -> str:
     assert line_count >= len(header_lines)
     lines = [*header_lines]
     lines.extend(f"export const value{index} = {index};" for index in range(line_count - len(header_lines)))
+    return "\n".join(lines) + "\n"
+
+
+def _structural_ts_private_fixture(line_count: int, *header_lines: str) -> str:
+    assert line_count >= len(header_lines)
+    lines = [*header_lines]
+    lines.extend(f"const value{index} = {index};" for index in range(line_count - len(header_lines)))
     return "\n".join(lines) + "\n"
 
 
