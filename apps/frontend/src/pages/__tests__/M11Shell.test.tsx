@@ -35,6 +35,7 @@ import {
   m11FallbackLegends,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
+import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { OverviewPage } from '@/pages/OverviewPage'
 import {
@@ -1907,6 +1908,48 @@ describe('M11 visual foundation shell', () => {
     expect(window.location.search).toContain('basinId=qhh')
   })
 
+  it('loads basin-detail station overlay from the resolved detail basin version when the URL omits it', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const query = parseM11QueryState('?basinId=qhh&metStations=1')
+    const snapshot = matchedBasinSnapshot('qhh', query)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...snapshot,
+        detail: {
+          ...snapshot.detail,
+          selectedBasinVersionId: 'qhh_v2026_01',
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+  })
+
   it('clears a basin-detail station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
     const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v1&metStations=1')
@@ -2441,6 +2484,63 @@ describe('M11 visual foundation shell', () => {
       expect(status).toContain('已加载 5000 个代站')
       expect(status).toContain('总数未完全统计')
       expect(status).not.toContain('5000/5000')
+    })
+
+    it('reports an honest no-renderable state when the current inventory is empty', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 0,
+          totalKnown: true,
+          loaded: 0,
+          truncated: false,
+        },
+        requestKey: 'heihe:heihe_v1',
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      const harness = screen.getByTestId('harness')
+      expect(harness.getAttribute('data-status')).toContain('暂无可渲染气象代站')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
+    })
+
+    it('reports an honest no-renderable state when loaded stations have no usable coordinates', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [
+            {
+              station_id: 'station-no-coordinates',
+              basin_version_id: 'heihe_v1',
+              station_name: 'Station without coordinates',
+              geom: null,
+              station_role: 'forcing',
+              active_flag: true,
+              created_at: '2026-05-18T00:00:00Z',
+            } as HydroMetStation,
+          ],
+          stationBasinIds: { 'station-no-coordinates': 'heihe' },
+          total: 1,
+          totalKnown: true,
+          loaded: 1,
+          truncated: false,
+        },
+        requestKey: 'heihe:heihe_v1',
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      const harness = screen.getByTestId('harness')
+      expect(harness.getAttribute('data-status')).toContain('暂无可渲染气象代站')
+      expect(harness.getAttribute('data-status')).toContain('坐标不可用')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
     })
   })
 })

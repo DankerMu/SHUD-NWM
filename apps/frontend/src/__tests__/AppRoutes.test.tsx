@@ -1316,6 +1316,42 @@ describe('App route state', () => {
     })
   })
 
+  it('preserves non-source M11 query state when best handoff resolves to concrete IFS context', async () => {
+    const ifsSelection = {
+      ...m11SourceSelection,
+      requestedSource: 'best' as const,
+      resolvedSource: 'IFS' as const,
+      scenarioIds: ['forecast_ifs_deterministic'],
+      cycleTime: '2026-05-19T00:00:00.000Z',
+      validTime: '2026-05-19T06:00:00.000Z',
+      provenanceLabel: 'Best Available (IFS) / cycle 2026-05-19T00:00:00.000Z / valid 2026-05-19T06:00:00.000Z',
+    }
+    const handoff = contextHandoff(
+      '/monitoring',
+      {
+        ...defaultM11QueryState,
+        source: 'best',
+        layer: 'flood-return-period',
+        metStations: true,
+        basemap: 'satellite',
+        basinId: 'qhh',
+        q: 'main',
+      },
+      ifsSelection,
+    )
+    const url = new URL(handoff.href, 'https://nwm.test')
+
+    expect(url.pathname).toBe('/monitoring')
+    expect(url.searchParams.get('source')).toBe('ifs')
+    expect(url.searchParams.get('cycle')).toBe('2026-05-19T00:00:00.000Z')
+    expect(url.searchParams.get('validTime')).toBe('2026-05-19T06:00:00.000Z')
+    expect(url.searchParams.get('layer')).toBe('flood-return-period')
+    expect(url.searchParams.get('metStations')).toBe('1')
+    expect(url.searchParams.get('basemap')).toBe('satellite')
+    expect(url.searchParams.get('basinId')).toBe('qhh')
+    expect(url.searchParams.get('q')).toBe('main')
+  })
+
   it('omits concrete destination source context for compare handoffs (contextHandoff)', async () => {
     const compareSelection = {
       ...m11SourceSelection,

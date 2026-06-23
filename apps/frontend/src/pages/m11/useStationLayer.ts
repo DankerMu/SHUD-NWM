@@ -114,6 +114,10 @@ export function useMetStationLayer({
       if (!currentData.totalKnown) return `已加载 ${currentData.loaded} 个代站，列表已截断（总数未完全统计）`
       return `已加载 ${currentData.loaded}/${currentData.total} 个代站，列表已截断`
     }
+    if (currentData && currentData.loaded === 0) return '暂无可渲染气象代站'
+    if (currentData && currentData.loaded > 0 && featureCollection?.features.length === 0) {
+      return '暂无可渲染气象代站：代站坐标不可用'
+    }
     if (hasMissingIdentity) return '部分流域缺少可用流域版本，代站图层仅显示已解析流域'
     return null
   })()

@@ -522,11 +522,10 @@ export function contextHandoff(
 ) {
   const sourceContext = resolvedDestinationSourceContext(state, sourceSelection)
   const search = serializeM11QueryState({
-    ...defaultM11QueryState,
+    ...state,
     source: sourceContext.source,
     cycle: sourceContext.cycle,
     validTime: sourceContext.validTime,
-    warningLevel: state.warningLevel,
   })
   return {
     href: `${pathname}${search ? `?${search}` : ''}`,

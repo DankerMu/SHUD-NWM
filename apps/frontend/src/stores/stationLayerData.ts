@@ -96,7 +96,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
     total += basinTotal
 
-    appendStations(stations, stationBasinIds, firstPage.items, context.basinId)
+    if (appendStations(stations, stationBasinIds, firstPage.items, context.basinId)) truncated = true
 
     let offset = firstPage.items.length
     while (offset < basinTotal && stations.length < STATION_CLIENT_CAP) {
@@ -107,7 +107,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
         { limit: pageLimit, offset },
       )
       if (page.items.length === 0) break
-      appendStations(stations, stationBasinIds, page.items, context.basinId)
+      if (appendStations(stations, stationBasinIds, page.items, context.basinId)) truncated = true
       offset += page.items.length
     }
 
@@ -131,10 +131,13 @@ function appendStations(
   items: HydroMetStation[],
   basinId: string,
 ) {
-  for (const station of items) {
+  const remainingCap = STATION_CLIENT_CAP - stations.length
+  const appendedItems = items.slice(0, Math.max(0, remainingCap))
+  for (const station of appendedItems) {
     stations.push(station)
     if (station.station_id) stationBasinIds[station.station_id] = basinId
   }
+  return items.length > appendedItems.length
 }
 
 export const useStationLayerDataStore = create<StationLayerDataState>((set, get) => ({

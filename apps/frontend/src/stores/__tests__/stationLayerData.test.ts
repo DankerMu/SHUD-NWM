@@ -98,6 +98,25 @@ describe('stationLayerData store (M26-3)', () => {
     expect(data.truncated).toBe(true)
   })
 
+  it('caps a backend page that over-returns beyond the remaining client cap', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValueOnce(
+      stationPage(stations('over', STATION_CLIENT_CAP + 37, 0), STATION_CLIENT_CAP + 37),
+    )
+
+    const data = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'over', basinVersionId: 'bv-over' }],
+    })
+
+    expect(data.loaded).toBe(STATION_CLIENT_CAP)
+    expect(data.stations).toHaveLength(STATION_CLIENT_CAP)
+    expect(data.truncated).toBe(true)
+    expect(data.total).toBe(STATION_CLIENT_CAP + 37)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledWith(
+      { basinVersionId: 'bv-over' },
+      { limit: STATION_PAGE_LIMIT, offset: 0 },
+    )
+  })
+
   it('marks totals unknown when the client cap skips later basin totals', async () => {
     fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }, query: { limit: number; offset: number }) => {
       if (identity.basinVersionId === 'bv-first') {
