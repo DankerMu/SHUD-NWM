@@ -687,6 +687,41 @@ def test_structural_ownership_growth_ignores_huge_python_local_helper_beyond_con
     )
 
 
+def test_structural_ownership_growth_ignores_huge_python_local_class_method(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    padding = [f"VALUE_{index} = '{'x' * 1024}'" for index in range(1_030)]
+    base_lines = [
+        "def existing() -> int:",
+        "    return 1",
+        "",
+        *padding,
+    ]
+    changed_lines = [
+        "def existing() -> int:",
+        "    class Local:",
+        "        def helper(self) -> int:",
+        "            return 1",
+        "    return Local().helper()",
+        "",
+        *padding,
+    ]
+    _write(source_path, "\n".join(base_lines) + "\n")
+    _commit_all(tmp_path, "base huge oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, "\n".join(changed_lines) + "\n")
+
+    assert source_path.stat().st_size > audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert "public-entrypoint" not in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+
+
 @pytest.mark.parametrize(
     ("base_lines", "changed_lines"),
     [
@@ -898,6 +933,46 @@ def test_structural_ownership_growth_reports_ts_exported_class_method_addition(
     ]
 
 
+@pytest.mark.parametrize("class_prefix", ["export abstract class", "export declare class"])
+def test_structural_ownership_growth_reports_ts_exported_modified_class_method_addition(
+    tmp_path: Path,
+    class_prefix: str,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "apps/frontend/src/large.ts"
+    source_path = tmp_path / relative_path
+    base_text = _structural_ts_private_fixture(
+        1001,
+        f"{class_prefix} Controller {{",
+        "  existing(value: string): string {",
+        "    return value;",
+        "  }",
+        "}",
+    )
+    changed_text = _structural_ts_private_fixture(
+        1001,
+        f"{class_prefix} Controller {{",
+        "  existing(value: string): string {",
+        "    return value;",
+        "  }",
+        "",
+        "  handle(value: string): string {",
+        "    return value.trim();",
+        "  }",
+        "}",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
+        "new public surface tokens: method:Controller.handle"
+    ]
+
+
 def test_structural_ownership_growth_ignores_existing_ts_exported_class_method_signature_edit(
     tmp_path: Path,
 ) -> None:
@@ -997,9 +1072,73 @@ def test_structural_ownership_growth_reports_new_route_decorator_alias(
 
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
+    expected_route_token = audit_repo_entropy._structural_route_path_token("/new")
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        "new public surface tokens: route:get:/new"
+        f"new public surface tokens: route:get:{expected_route_token}"
     ]
+
+
+def test_structural_ownership_growth_route_detail_hashes_long_path_literal(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "apps/api/routes/large.py"
+    source_path = tmp_path / relative_path
+    long_path = "/secret_" + ("x" * 200)
+    base_text = _structural_python_fixture(
+        1001,
+        "from fastapi import APIRouter",
+        "",
+        "router = APIRouter()",
+        "",
+        "def existing() -> dict[str, object]:",
+        "    return {}",
+    )
+    changed_text = _structural_python_fixture(
+        1001,
+        "from fastapi import APIRouter",
+        "",
+        "router = APIRouter()",
+        "",
+        f"@router.get('{long_path}')",
+        "def existing() -> dict[str, object]:",
+        "    return {}",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized route source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    details = _structural_growth_signal_details(budget, relative_path, "public-entrypoint")
+
+    expected_route_token = audit_repo_entropy._structural_route_path_token(long_path)
+    assert details == [f"new public surface tokens: route:get:{expected_route_token}"]
+    assert "secret_" not in details[0]
+    assert len(details[0]) < 120
+
+
+def test_structural_ownership_growth_import_detail_hashes_long_import_family(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "services/api/large.py"
+    source_path = tmp_path / relative_path
+    long_module = "sk_live_import_" + ("x" * 200)
+    base_text = _structural_python_fixture(1001)
+    changed_text = _structural_python_fixture(1001, f"import {long_module}")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    details = _structural_growth_signal_details(budget, relative_path, "new-import-family")
+
+    expected_import_token = audit_repo_entropy._structural_import_family(long_module)
+    assert details == [f"new import families: {expected_import_token}"]
+    assert "sk_live_import" not in details[0]
+    assert len(details[0]) < 120
 
 
 def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
@@ -1085,6 +1224,25 @@ def test_structural_ts_import_families_ignore_many_nonmatching_import_lines_quic
     elapsed = time.perf_counter() - started_at
 
     assert families == ()
+    assert elapsed < 2.0
+
+
+@pytest.mark.parametrize(
+    ("text", "minimum_token_count"),
+    [
+        ("\n".join("module.exports = {" for _ in range(4_800)), 0),
+        ("\n".join(f"export class C{index} {{" for index in range(2_400)), 2_400),
+    ],
+)
+def test_structural_ts_public_surface_handles_many_unmatched_braces_quickly(
+    text: str,
+    minimum_token_count: int,
+) -> None:
+    started_at = time.perf_counter()
+    tokens = audit_repo_entropy._structural_ts_public_surface_tokens(text)
+    elapsed = time.perf_counter() - started_at
+
+    assert len(tokens) >= minimum_token_count
     assert elapsed < 2.0
 
 
