@@ -20,6 +20,12 @@ AUDIT_SCRIPT = REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"
 BASELINE_WRITER_SCRIPT = REPO_ROOT / "scripts" / "governance" / "write_entropy_baseline.py"
 
 
+def _structural_public_surface_detail(*tokens: str) -> str:
+    return "new public surface tokens: " + ", ".join(
+        audit_repo_entropy._structural_bounded_detail_token(token) for token in tokens
+    )
+
+
 def test_entropy_audit_json_schema_is_stable() -> None:
     report = audit_repo_entropy.build_report(REPO_ROOT)
 
@@ -286,7 +292,11 @@ def test_structural_file_budget_classifies_tracked_source_thresholds_and_exempti
     assert large["line_count_lower_bound"] == 1001
     assert large["size_bytes"] == (tmp_path / "services" / "api" / "large.py").stat().st_size
     assert large["module"] == "services/api"
-    assert large["import_families"] == ["os", "services/orchestrator"]
+    assert large["import_family_tokens"] == [
+        audit_repo_entropy._structural_import_family_detail_token("os"),
+        audit_repo_entropy._structural_import_family_detail_token("services/orchestrator"),
+    ]
+    assert large["import_family_count"] == 2
     assert "inventory" in str(large["owner_action"])
 
     yellow_zone = yellow["apps/api/yellow.py"]
@@ -524,7 +534,7 @@ def test_structural_ownership_growth_reports_python_public_class_method_addition
         "public-entrypoint",
     )
 
-    assert signal_details == ["new public surface tokens: method:Controller.handle"]
+    assert signal_details == [_structural_public_surface_detail("method:Controller.handle")]
 
 
 def test_structural_ownership_growth_reports_huge_python_public_class_method_addition(
@@ -566,7 +576,7 @@ def test_structural_ownership_growth_reports_huge_python_public_class_method_add
         budget,
         "services/api/large.py",
         "public-entrypoint",
-    ) == ["new public surface tokens: method:Controller.handle"]
+    ) == [_structural_public_surface_detail("method:Controller.handle")]
 
 
 def test_structural_ownership_growth_reports_huge_python_class_method_beyond_context_window(
@@ -610,7 +620,7 @@ def test_structural_ownership_growth_reports_huge_python_class_method_beyond_con
         budget,
         "services/api/large.py",
         "public-entrypoint",
-    ) == ["new public surface tokens: method:Controller.handle"]
+    ) == [_structural_public_surface_detail("method:Controller.handle")]
 
 
 def test_structural_ownership_growth_ignores_huge_python_local_helper(
@@ -775,22 +785,22 @@ def test_structural_ownership_growth_ignores_existing_python_public_signature_ed
         (
             "apps/frontend/src/large.ts",
             ("const handler = () => null;", "export { handler };"),
-            "new public surface tokens: export:handler",
+            _structural_public_surface_detail("export:handler"),
         ),
         (
             "apps/frontend/src/large.js",
             ("const handler = () => null;", "module.exports = { handler };"),
-            "new public surface tokens: export:handler",
+            _structural_public_surface_detail("export:handler"),
         ),
         (
             "apps/frontend/src/large.js",
             ("const handler = () => null;", "exports.foo = handler;"),
-            "new public surface tokens: export:foo",
+            _structural_public_surface_detail("export:foo"),
         ),
         (
             "apps/frontend/src/large.ts",
             ("export default defineConfig({});",),
-            "new public surface tokens: export:default",
+            _structural_public_surface_detail("export:default"),
         ),
     ],
 )
@@ -839,7 +849,7 @@ def test_structural_ownership_growth_reports_cjs_export_after_nested_object(
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        "new public surface tokens: export:handler"
+        _structural_public_surface_detail("export:handler")
     ]
 
 
@@ -867,7 +877,7 @@ def test_structural_ownership_growth_reports_cjs_export_after_regex_literal_brac
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        "new public surface tokens: export:handler"
+        _structural_public_surface_detail("export:handler")
     ]
 
 
@@ -889,8 +899,9 @@ def test_structural_ownership_growth_public_export_detail_is_bounded(
 
     assert len(details) == 1
     assert details[0].startswith("new public surface tokens (30 total): ")
-    assert "(+10 more)" in details[0]
-    assert "export:handler00" in details[0]
+    assert "(+20 more)" in details[0]
+    assert audit_repo_entropy._structural_bounded_detail_token("export:handler00") in details[0]
+    assert "export:handler00" not in details[0]
     assert "export:handler29" not in details[0]
     assert len(details[0]) < 500
 
@@ -929,7 +940,7 @@ def test_structural_ownership_growth_reports_ts_exported_class_method_addition(
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        "new public surface tokens: method:Controller.handle"
+        _structural_public_surface_detail("method:Controller.handle")
     ]
 
 
@@ -969,7 +980,7 @@ def test_structural_ownership_growth_reports_ts_exported_modified_class_method_a
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        "new public surface tokens: method:Controller.handle"
+        _structural_public_surface_detail("method:Controller.handle")
     ]
 
 
@@ -1074,7 +1085,47 @@ def test_structural_ownership_growth_reports_new_route_decorator_alias(
 
     expected_route_token = audit_repo_entropy._structural_route_path_token("/new")
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
-        f"new public surface tokens: route:get:{expected_route_token}"
+        _structural_public_surface_detail(f"route:get:{expected_route_token}")
+    ]
+
+
+def test_structural_ownership_growth_reports_new_apirouter_variable_route_alias(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "apps/api/routes/large.py"
+    source_path = tmp_path / relative_path
+    base_text = _structural_python_fixture(
+        1001,
+        "from fastapi import APIRouter",
+        "",
+        "runtime_router = APIRouter()",
+        "",
+        "@runtime_router.get('/existing')",
+        "def existing() -> dict[str, object]:",
+        "    return {}",
+    )
+    changed_text = _structural_python_fixture(
+        1001,
+        "from fastapi import APIRouter",
+        "",
+        "runtime_router = APIRouter()",
+        "",
+        "@runtime_router.get('/new')",
+        "@runtime_router.get('/existing')",
+        "def existing() -> dict[str, object]:",
+        "    return {}",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized route source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    expected_route_token = audit_repo_entropy._structural_route_path_token("/new")
+    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
+        _structural_public_surface_detail(f"route:get:{expected_route_token}")
     ]
 
 
@@ -1113,7 +1164,7 @@ def test_structural_ownership_growth_route_detail_hashes_long_path_literal(
     details = _structural_growth_signal_details(budget, relative_path, "public-entrypoint")
 
     expected_route_token = audit_repo_entropy._structural_route_path_token(long_path)
-    assert details == [f"new public surface tokens: route:get:{expected_route_token}"]
+    assert details == [_structural_public_surface_detail(f"route:get:{expected_route_token}")]
     assert "secret_" not in details[0]
     assert len(details[0]) < 120
 
@@ -1350,7 +1401,7 @@ def test_structural_file_budget_bounds_huge_source_reads(
     assert huge_record["line_count_is_truncated"] is True
     assert huge_record["line_count_lower_bound"] == line_count_result.line_count_lower_bound
     assert huge_record["size_bytes"] == source_path.stat().st_size
-    assert huge_record["import_families"] == []
+    assert huge_record["import_family_tokens"] == []
     assert huge_record["ownership_surface_signals"] == []
 
 
@@ -1602,6 +1653,60 @@ def test_structural_ownership_growth_details_do_not_leak_added_source_literals(
         assert isinstance(signal, dict)
         if signal["path"] == "services/api/large.py":
             assert "matching added line" in str(signal["detail"])
+
+
+def test_structural_file_budget_report_redacts_source_derived_structural_tokens(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    import_secret = "sk_live_short_secret"
+    public_secret = "sk_live_public_entrypoint"
+    base_text = _structural_python_fixture(1001, "import os")
+    changed_text = _structural_python_fixture(
+        1001,
+        "import os",
+        f"import {import_secret}",
+        "",
+        f"def {public_secret}() -> int:",
+        "    return 1",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    report = audit_repo_entropy.build_report(tmp_path, structural_base_ref=base_ref)
+    markdown = audit_repo_entropy.render_markdown(report)
+    budget = report["metadata"]["structural_file_budget"]
+    assert isinstance(budget, dict)
+    structural_json = json.dumps(budget, sort_keys=True)
+
+    assert "new-import-family" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+    assert "public-entrypoint" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+    assert import_secret not in structural_json
+    assert public_secret not in structural_json
+    assert import_secret not in markdown
+    assert public_secret not in markdown
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    large_record = oversized["services/api/large.py"]
+    assert "import_families" not in large_record
+    assert audit_repo_entropy._structural_import_family_detail_token(import_secret) in set(
+        large_record["import_family_tokens"]
+    )
+
+    top_files = budget["top_oversized_files_by_module"]
+    assert isinstance(top_files, dict)
+    services_api_records = top_files["services/api"]
+    assert isinstance(services_api_records, list)
+    assert all("import_families" not in record for record in services_api_records)
 
 
 def test_structural_file_budget_report_and_hard_gate_commands_do_not_write_baseline(

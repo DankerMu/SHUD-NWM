@@ -190,7 +190,7 @@ STRUCTURAL_DIFF_READ_CHUNK_BYTES = 65_536
 STRUCTURAL_DIFF_MAX_LINE_BYTES = 65_536
 STRUCTURAL_TS_STATIC_IMPORT_MAX_BLOCK_LINES = 80
 STRUCTURAL_PYTHON_CONTEXT_MAX_LINES = 200
-STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT = 20
+STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT = 10
 STRUCTURAL_TOKEN_COMPONENT_MAX_CHARS = 96
 STRUCTURAL_TOKEN_HASH_HEX_CHARS = 16
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
@@ -295,8 +295,13 @@ STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN = re.compile(
     r"^\s*module\.exports\s*=(?!\s*{)",
     re.MULTILINE,
 )
+STRUCTURAL_ROUTE_OWNER_ASSIGNMENT_PATTERN = re.compile(
+    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:FastAPI|APIRouter)\s*\(",
+    re.MULTILINE,
+)
 STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN = re.compile(
-    r"^\s*@(?:app|router)\."
+    r"^\s*@(?P<owner>[A-Za-z_][A-Za-z0-9_]*)\."
     r"(?P<method>get|post|put|patch|delete|options|head)"
     r"\s*\(\s*(?P<quote>['\"])(?P<path>[^'\"]*)(?P=quote)",
     re.MULTILINE,
@@ -4249,13 +4254,10 @@ def _structural_route_path_token(path: str) -> str:
 
 
 def _structural_bounded_detail_token(token: str) -> str:
-    if len(token) <= STRUCTURAL_TOKEN_COMPONENT_MAX_CHARS:
-        return token
     digest = hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()[
         :STRUCTURAL_TOKEN_HASH_HEX_CHARS
     ]
-    prefix = token.split(":", 1)[0] if ":" in token else "token"
-    return f"{prefix}:token-sha256-{digest}"
+    return f"public-sha256-{digest}"
 
 
 def _structural_ownership_surface_signals(
@@ -4410,10 +4412,25 @@ def _structural_ts_public_surface_tokens(text: str) -> tuple[str, ...]:
 
 def _structural_route_entrypoint_tokens(text: str) -> set[str]:
     tokens: set[str] = set()
+    route_owner_names = _structural_route_owner_names(text)
     for match in STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.finditer(text):
+        owner = match.group("owner")
+        if not _structural_route_owner_name_is_allowed(owner, route_owner_names):
+            continue
         method = match.group("method").lower()
         tokens.add(f"route:{method}:{_structural_route_path_token(match.group('path'))}")
     return tokens
+
+
+def _structural_route_owner_names(text: str) -> set[str]:
+    return {
+        match.group("name")
+        for match in STRUCTURAL_ROUTE_OWNER_ASSIGNMENT_PATTERN.finditer(text)
+    } | {"app", "router"}
+
+
+def _structural_route_owner_name_is_allowed(owner: str, route_owner_names: set[str]) -> bool:
+    return owner in route_owner_names or owner.endswith(("_router", "_app"))
 
 
 def _structural_ts_exported_class_method_tokens(
@@ -5054,7 +5071,9 @@ def _structural_budget_file_record(item: _StructuralBudgetFile) -> dict[str, obj
         "size_bytes": item.size_bytes,
         "module": item.module,
         "budget_class": item.budget_class,
-        "import_families": list(item.import_families),
+        "import_family_tokens": [
+            _structural_import_family_detail_token(family) for family in item.import_families
+        ],
         "import_family_count": len(item.import_families),
         "ownership_surface_signals": list(item.ownership_surface_signals),
         "review_reason": item.review_reason,
