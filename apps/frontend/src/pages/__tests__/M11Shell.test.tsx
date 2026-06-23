@@ -1513,6 +1513,47 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
   })
 
+  it('loads overview station overlay from the query version only when overview metadata maps it to the basin', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    window.history.pushState({}, '', '/?basinVersionId=yangtze_v2026_01&metStations=1')
+    const query = parseM11QueryState(window.location.search)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      overview: {
+        requestScope: matchedOverviewScope(query),
+        bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+        basins: overviewBasins.map((basin) => ({ ...basin, selectedBasinVersionId: null })),
+        summary: createEmptyOverviewSummary(query),
+        layers,
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 1,
+          createsPerBasinNPlusOne: false,
+          missingRequiredFields: [],
+        }),
+        basinVersionToBasinId: { yangtze_v2026_01: 'yangtze' },
+      },
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' }],
+      }),
+    )
+  })
+
   it('clears an overview station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/?metStations=1')

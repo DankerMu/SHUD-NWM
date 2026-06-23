@@ -358,11 +358,15 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
   const stationLayerBasinContexts = useMemo(
     () =>
-      basins.map((basin) => ({
-        basinId: basin.basinId,
-        basinVersionId: basin.selectedBasinVersionId,
-      })),
-    [basins],
+      basins.map((basin) => {
+        const queryBasinVersionId =
+          state.basinVersionId && basinVersionToBasinId[state.basinVersionId] === basin.basinId ? state.basinVersionId : null
+        return {
+          basinId: basin.basinId,
+          basinVersionId: basin.selectedBasinVersionId ?? queryBasinVersionId,
+        }
+      }),
+    [basinVersionToBasinId, basins, state.basinVersionId],
   )
   // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
   // fit 到流域并集会把视野错误地收窄到测试流域（qhh/heihe）区域。
