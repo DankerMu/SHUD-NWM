@@ -21,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-python@v5
@@ -30,11 +31,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: Generate entropy reports
+        env:
+          STRUCTURAL_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/master' }}
         run: |
           mkdir -p artifacts/governance
           uv run python scripts/governance/audit_repo_entropy.py --format json \
+            --structural-base-ref "$STRUCTURAL_BASE_REF" \
             > artifacts/governance/entropy-report.json
           uv run python scripts/governance/audit_repo_entropy.py --format markdown \
+            --structural-base-ref "$STRUCTURAL_BASE_REF" \
             > artifacts/governance/entropy-report.md
 
       - name: Verify report contract
@@ -49,6 +54,9 @@ jobs:
           metadata = report["metadata"]
           assert metadata["mode"] == "report-only", metadata
           assert metadata["baseline_written"] is False, metadata
+          comparison_base = metadata["structural_file_budget"]["comparison_base_ref"]
+          assert comparison_base["resolved"], comparison_base
+          assert comparison_base["ref_kind"] != "head", comparison_base
           PY
 
       - name: Verify entropy baseline was not written

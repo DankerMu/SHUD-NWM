@@ -185,6 +185,8 @@ STRUCTURAL_IMPORT_FAMILY_MIXED_COUNT = 4
 MAX_SCANNED_TEXT_FILE_BYTES = 1_048_576
 MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
 HASH_CHUNK_BYTES = 1_048_576
+STRUCTURAL_DIFF_READ_CHUNK_BYTES = 65_536
+STRUCTURAL_DIFF_MAX_LINE_BYTES = 65_536
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
 LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
     r"(?P<token>"
@@ -308,6 +310,9 @@ class _StructuralFileExemption:
 class _StructuralBudgetFile:
     relative_path: str
     line_count: int
+    line_count_is_truncated: bool
+    line_count_lower_bound: int
+    size_bytes: int | None
     module: str
     budget_class: StructuralBudgetClass
     import_families: tuple[str, ...]
@@ -320,6 +325,9 @@ class _StructuralBudgetFile:
 class _StructuralBudgetExemption:
     relative_path: str
     line_count: int
+    line_count_is_truncated: bool
+    line_count_lower_bound: int
+    size_bytes: int | None
     module: str
     exemption_family: str
     exemption_reason: str
@@ -349,6 +357,21 @@ class _StructuralComparisonBase:
 class _StructuralAddedLine:
     line_number: int | None
     text: str
+
+
+@dataclass(frozen=True)
+class _StructuralPhysicalLineCount:
+    line_count: int
+    line_count_is_truncated: bool
+    line_count_lower_bound: int
+    size_bytes: int | None
+
+
+@dataclass(frozen=True)
+class _StructuralAddedLines:
+    lines: tuple[_StructuralAddedLine, ...]
+    truncated: bool
+    truncation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -820,7 +843,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "Compare structural ownership growth against this git ref. "
-            f"Defaults to ${STRUCTURAL_BUDGET_BASE_REF_ENV}, then origin/master merge-base, HEAD^, HEAD."
+            f"Defaults to ${STRUCTURAL_BUDGET_BASE_REF_ENV}, then origin/master merge-base, "
+            "HEAD^, and local-only HEAD fallback outside CI."
         ),
     )
     args = parser.parse_args(argv)
@@ -3318,9 +3342,10 @@ def _structural_file_budget_summary(
         path = root / relative_path
         if _structural_source_rejection_reason(root, path) is not None:
             continue
-        line_count = _structural_physical_line_count(path)
-        if line_count is None:
+        line_count_result = _structural_physical_line_count(path)
+        if line_count_result is None:
             continue
+        line_count = line_count_result.line_count
         if line_count < STRUCTURAL_FILE_BUDGET_YELLOW_MIN_LINES:
             continue
         module = _module_for_relative(relative_path)
@@ -3331,6 +3356,9 @@ def _structural_file_budget_summary(
                 _StructuralBudgetExemption(
                     relative_path=relative_path,
                     line_count=line_count,
+                    line_count_is_truncated=line_count_result.line_count_is_truncated,
+                    line_count_lower_bound=line_count_result.line_count_lower_bound,
+                    size_bytes=line_count_result.size_bytes,
                     module=module,
                     exemption_family=exemption.family,
                     exemption_reason=exemption.reason,
@@ -3353,6 +3381,9 @@ def _structural_file_budget_summary(
         record = _StructuralBudgetFile(
             relative_path=relative_path,
             line_count=line_count,
+            line_count_is_truncated=line_count_result.line_count_is_truncated,
+            line_count_lower_bound=line_count_result.line_count_lower_bound,
+            size_bytes=line_count_result.size_bytes,
             module=module,
             budget_class=budget_class,
             import_families=import_families,
@@ -3448,6 +3479,19 @@ def _structural_comparison_base(
             ref_kind="head-parent",
             status="fallback" if fallback_reason else "resolved",
             fallback_reason=fallback_reason,
+        )
+
+    if os.environ.get("CI"):
+        return _StructuralComparisonBase(
+            requested=requested_ref,
+            requested_source=requested_source,
+            resolved=None,
+            ref_kind="unavailable",
+            status="unavailable",
+            fallback_reason=(
+                fallback_reason
+                or "CI structural comparison requires an explicit base ref, origin/master, or HEAD^"
+            ),
         )
 
     head = _git_resolve_commit(root, "HEAD")
@@ -3578,24 +3622,42 @@ def _structural_path_is_source_like(relative_path: str) -> bool:
     return parts[0] in STRUCTURAL_SOURCE_ROOTS or path.name in STRUCTURAL_SOURCE_FILENAMES
 
 
-def _structural_physical_line_count(path: Path) -> int | None:
+def _structural_physical_line_count(path: Path) -> _StructuralPhysicalLineCount | None:
+    try:
+        file_stat = path.stat()
+    except OSError:
+        file_stat = None
+    size_bytes = file_stat.st_size if file_stat is not None else None
+    scan_limit = MAX_SCANNED_TEXT_FILE_BYTES
     try:
         line_count = 0
         saw_bytes = False
         last_byte = b""
+        remaining = scan_limit
         with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(HASH_CHUNK_BYTES)
+            while remaining > 0:
+                chunk = handle.read(min(HASH_CHUNK_BYTES, remaining))
                 if not chunk:
                     break
                 saw_bytes = True
                 line_count += chunk.count(b"\n")
                 last_byte = chunk[-1:]
+                remaining -= len(chunk)
     except OSError:
         return None
     if saw_bytes and last_byte != b"\n":
         line_count += 1
-    return line_count
+    truncated = size_bytes > scan_limit if size_bytes is not None else remaining == 0
+    if truncated:
+        effective_line_count = max(line_count, STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1)
+    else:
+        effective_line_count = line_count
+    return _StructuralPhysicalLineCount(
+        line_count=effective_line_count,
+        line_count_is_truncated=truncated,
+        line_count_lower_bound=line_count,
+        size_bytes=size_bytes,
+    )
 
 
 def _read_structural_header_text(path: Path) -> str | None:
@@ -3610,11 +3672,11 @@ def _read_structural_header_text(path: Path) -> str | None:
 
 def _read_structural_analysis_text(path: Path) -> str | None:
     try:
+        if path.stat().st_size > MAX_SCANNED_TEXT_FILE_BYTES:
+            return None
         with path.open("rb") as handle:
-            data = handle.read(MAX_SCANNED_TEXT_FILE_BYTES + 1)
+            data = handle.read(MAX_SCANNED_TEXT_FILE_BYTES)
     except OSError:
-        return None
-    if len(data) > MAX_SCANNED_TEXT_FILE_BYTES:
         return None
     return data.decode("utf-8", errors="replace")
 
@@ -3721,6 +3783,45 @@ def _structural_ts_import_families(text: str) -> tuple[str, ...]:
     return tuple(sorted(family for family in families if family))
 
 
+def _structural_added_import_families(
+    relative_path: str,
+    added_lines: tuple[_StructuralAddedLine, ...],
+) -> tuple[str, ...]:
+    suffix = Path(relative_path).suffix
+    if suffix == ".py":
+        return _structural_python_added_import_families(added_lines)
+    if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        return _structural_ts_import_families("\n".join(line.text for line in added_lines))
+    return ()
+
+
+def _structural_python_added_import_families(
+    added_lines: tuple[_StructuralAddedLine, ...],
+) -> tuple[str, ...]:
+    families: set[str] = set()
+    for added_line in added_lines:
+        text = added_line.text
+        if text != text.lstrip():
+            continue
+        stripped = text.strip()
+        if not (stripped.startswith("import ") or stripped.startswith("from ")):
+            continue
+        try:
+            parsed = ast.parse(stripped)
+        except SyntaxError:
+            continue
+        for node in parsed.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    families.add(_structural_import_family(alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    families.add("relative")
+                elif node.module:
+                    families.add(_structural_import_family(node.module))
+    return tuple(sorted(family for family in families if family))
+
+
 def _structural_import_family(module: str) -> str:
     normalized = module.strip()
     if not normalized:
@@ -3793,13 +3894,22 @@ def _structural_ownership_growth_signals(
 ) -> list[_StructuralOwnershipGrowthSignal]:
     if comparison_base_ref is None:
         return []
-    added_lines = _git_added_lines(root, record.relative_path, comparison_base_ref)
+    added_result = _git_added_lines(root, record.relative_path, comparison_base_ref)
+    added_lines = added_result.lines
     if not added_lines:
+        if added_result.truncated:
+            return [
+                _structural_growth_signal(
+                    record,
+                    "diff-analysis-truncated",
+                    _structural_diff_truncation_detail(added_result),
+                )
+            ]
         return []
     added_text = "\n".join(line.text for line in added_lines)
     base_text = _git_blob_text(root, comparison_base_ref, record.relative_path) or ""
     base_import_families = set(_structural_import_families(record.relative_path, base_text))
-    added_import_families = set(_structural_import_families(record.relative_path, added_text))
+    added_import_families = set(_structural_added_import_families(record.relative_path, added_lines))
     signals: list[_StructuralOwnershipGrowthSignal] = []
     new_import_families = sorted(added_import_families - base_import_families)
     if new_import_families:
@@ -3838,7 +3948,23 @@ def _structural_ownership_growth_signals(
                 + _summarize_added_line_matches(parser_validator_lines),
             )
         )
+    if added_result.truncated:
+        signals.append(
+            _structural_growth_signal(
+                record,
+                "diff-analysis-truncated",
+                _structural_diff_truncation_detail(added_result),
+            )
+        )
     return signals
+
+
+def _structural_diff_truncation_detail(added_result: _StructuralAddedLines) -> str:
+    reason = added_result.truncation_reason or "unknown reason"
+    return (
+        f"git diff scan truncated ({reason}) after bounded parsing; "
+        "ownership growth analysis may be incomplete"
+    )
 
 
 def _structural_growth_signal(
@@ -3879,7 +4005,7 @@ def _git_added_lines(
     root: Path,
     relative_path: str,
     comparison_base_ref: str,
-) -> tuple[_StructuralAddedLine, ...]:
+) -> _StructuralAddedLines:
     command = [
         "git",
         "diff",
@@ -3895,43 +4021,91 @@ def _git_added_lines(
             cwd=root,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
         )
     except OSError:
-        return ()
+        return _StructuralAddedLines(lines=(), truncated=False)
     if process.stdout is None:
         process.kill()
         process.communicate()
-        return ()
+        return _StructuralAddedLines(lines=(), truncated=False)
     added: list[_StructuralAddedLine] = []
     new_line_number: int | None = None
-    scanned_chars = 0
-    try:
-        for raw_line in process.stdout:
-            scanned_chars += len(raw_line)
-            if scanned_chars > MAX_SCANNED_TEXT_FILE_BYTES:
-                process.kill()
-                process.communicate()
-                return ()
-            line = raw_line.rstrip("\n")
-            hunk_match = STRUCTURAL_DIFF_HUNK_PATTERN.match(line)
-            if hunk_match:
-                new_line_number = int(hunk_match.group("start"))
-                continue
-            if line.startswith("+") and not line.startswith("+++"):
-                added.append(_StructuralAddedLine(line_number=new_line_number, text=line[1:]))
-                if new_line_number is not None:
-                    new_line_number += 1
-            elif line.startswith(" ") and new_line_number is not None:
+    scanned_bytes = 0
+    line_buffer = bytearray()
+    truncated = False
+    truncation_reason: str | None = None
+
+    def parse_diff_line(raw_line: bytes) -> None:
+        nonlocal new_line_number
+        line = raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
+        hunk_match = STRUCTURAL_DIFF_HUNK_PATTERN.match(line)
+        if hunk_match:
+            new_line_number = int(hunk_match.group("start"))
+            return
+        if line.startswith("+") and not line.startswith("+++"):
+            added.append(_StructuralAddedLine(line_number=new_line_number, text=line[1:]))
+            if new_line_number is not None:
                 new_line_number += 1
-        if process.wait() != 0:
-            return ()
+        elif line.startswith(" ") and new_line_number is not None:
+            new_line_number += 1
+
+    def consume_chunk(chunk: bytes) -> None:
+        nonlocal line_buffer, truncated, truncation_reason
+        start = 0
+        while start < len(chunk):
+            newline_index = chunk.find(b"\n", start)
+            end = len(chunk) if newline_index == -1 else newline_index
+            segment = chunk[start:end]
+            remaining_line_bytes = STRUCTURAL_DIFF_MAX_LINE_BYTES - len(line_buffer)
+            if len(segment) > remaining_line_bytes:
+                line_buffer.extend(segment[:remaining_line_bytes])
+                truncated = True
+                truncation_reason = "diff-line-byte-cap"
+                process.kill()
+                return
+            line_buffer.extend(segment)
+            if newline_index == -1:
+                return
+            parse_diff_line(bytes(line_buffer))
+            line_buffer.clear()
+            start = newline_index + 1
+
+    try:
+        while True:
+            chunk = process.stdout.read(STRUCTURAL_DIFF_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            remaining_scan_bytes = MAX_SCANNED_TEXT_FILE_BYTES - scanned_bytes
+            if len(chunk) > remaining_scan_bytes:
+                if remaining_scan_bytes > 0:
+                    consume_chunk(chunk[:remaining_scan_bytes])
+                truncated = True
+                truncation_reason = truncation_reason or "diff-output-byte-cap"
+                process.kill()
+                break
+            scanned_bytes += len(chunk)
+            consume_chunk(chunk)
+            if truncated:
+                break
+            if scanned_bytes >= MAX_SCANNED_TEXT_FILE_BYTES:
+                truncated = True
+                truncation_reason = "diff-output-byte-cap"
+                process.kill()
+                break
+        if not truncated and line_buffer:
+            parse_diff_line(bytes(line_buffer))
+            line_buffer.clear()
+        if process.wait() != 0 and not truncated:
+            return _StructuralAddedLines(lines=(), truncated=False)
     finally:
         if process.poll() is None:
             process.kill()
             process.communicate()
-    return tuple(added)
+    return _StructuralAddedLines(
+        lines=tuple(added),
+        truncated=truncated,
+        truncation_reason=truncation_reason,
+    )
 
 
 def _git_blob_text(root: Path, ref: str, relative_path: str) -> str | None:
@@ -3968,6 +4142,9 @@ def _structural_budget_file_record(item: _StructuralBudgetFile) -> dict[str, obj
     return {
         "path": item.relative_path,
         "line_count": item.line_count,
+        "line_count_is_truncated": item.line_count_is_truncated,
+        "line_count_lower_bound": item.line_count_lower_bound,
+        "size_bytes": item.size_bytes,
         "module": item.module,
         "budget_class": item.budget_class,
         "import_families": list(item.import_families),
@@ -3982,6 +4159,9 @@ def _structural_budget_exemption_record(item: _StructuralBudgetExemption) -> dic
     return {
         "path": item.relative_path,
         "line_count": item.line_count,
+        "line_count_is_truncated": item.line_count_is_truncated,
+        "line_count_lower_bound": item.line_count_lower_bound,
+        "size_bytes": item.size_bytes,
         "module": item.module,
         "budget_class": "governed-exemption",
         "exemption_family": item.exemption_family,

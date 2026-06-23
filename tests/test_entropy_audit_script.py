@@ -279,6 +279,9 @@ def test_structural_file_budget_classifies_tracked_source_thresholds_and_exempti
     large = oversized["services/api/large.py"]
     assert large["budget_class"] == "mandatory-governance"
     assert large["line_count"] == 1001
+    assert large["line_count_is_truncated"] is False
+    assert large["line_count_lower_bound"] == 1001
+    assert large["size_bytes"] == (tmp_path / "services" / "api" / "large.py").stat().st_size
     assert large["module"] == "services/api"
     assert large["import_families"] == ["os", "services/orchestrator"]
     assert "inventory" in str(large["owner_action"])
@@ -462,9 +465,64 @@ def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
     assert comparison_base["ref_kind"] == "explicit"
 
 
-def test_structural_file_budget_bounds_huge_source_reads(
+def test_structural_ownership_growth_cli_uses_explicit_base_ref_for_committed_diff(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, base_text + "import requests\n")
+    _commit_all(tmp_path, "add committed import")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(AUDIT_SCRIPT),
+            "--format",
+            "json",
+            "--structural-base-ref",
+            base_ref,
+        ],
+        cwd=tmp_path,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    report = json.loads(result.stdout)
+    budget = report["metadata"]["structural_file_budget"]
+    comparison_base = budget["comparison_base_ref"]
+
+    assert comparison_base["requested"] == base_ref
+    assert comparison_base["requested_source"] == "argument"
+    assert comparison_base["resolved"] == base_ref
+    assert "new-import-family" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+
+
+def test_structural_comparison_base_does_not_use_head_fallback_in_ci(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "services" / "api" / "large.py", "VALUE = 1\n")
+    _commit_all(tmp_path, "single commit")
+    monkeypatch.setenv("CI", "true")
+
+    comparison_base = audit_repo_entropy._structural_comparison_base(tmp_path, None)
+
+    assert comparison_base.resolved is None
+    assert comparison_base.ref_kind == "unavailable"
+    assert comparison_base.status == "unavailable"
+    assert "CI structural comparison requires" in str(comparison_base.fallback_reason)
+
+
+def test_structural_file_budget_bounds_huge_source_reads(
+    tmp_path: Path,
 ) -> None:
     _init_git(tmp_path)
     source_path = tmp_path / "services" / "api" / "huge.py"
@@ -472,23 +530,136 @@ def test_structural_file_budget_bounds_huge_source_reads(
     repeat_count = audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES // len(huge_line) + 100
     _write(source_path, huge_line * repeat_count)
     subprocess.run(["git", "add", "services/api/huge.py"], cwd=tmp_path, check=True)
-    original_read_text = Path.read_text
 
-    def guarded_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if self == source_path:
-            raise AssertionError("structural scan must not read huge source with Path.read_text")
-        return original_read_text(self, *args, **kwargs)
+    line_count_result = audit_repo_entropy._structural_physical_line_count(source_path)
 
-    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    assert line_count_result is not None
+    assert line_count_result.line_count_is_truncated is True
+    assert line_count_result.line_count >= audit_repo_entropy.STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1
+    assert line_count_result.line_count < repeat_count
+    assert line_count_result.line_count_lower_bound >= (
+        audit_repo_entropy.STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1
+    )
+    assert line_count_result.size_bytes == source_path.stat().st_size
 
     budget = audit_repo_entropy._structural_file_budget_summary(tmp_path)
 
     oversized = _structural_records_by_path(budget["oversized_files"])
     huge_record = oversized["services/api/huge.py"]
     assert huge_record["budget_class"] == "mandatory-governance"
-    assert huge_record["line_count"] == repeat_count
+    assert huge_record["line_count"] == line_count_result.line_count
+    assert huge_record["line_count"] < repeat_count
+    assert huge_record["line_count_is_truncated"] is True
+    assert huge_record["line_count_lower_bound"] == line_count_result.line_count_lower_bound
+    assert huge_record["size_bytes"] == source_path.stat().st_size
     assert huge_record["import_families"] == []
     assert huge_record["ownership_surface_signals"] == []
+
+
+def test_structural_physical_line_count_does_not_read_beyond_scan_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "services" / "api" / "huge.py"
+    _write(source_path, "VALUE = '" + ("x" * audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES) + "'\n")
+    original_open = Path.open
+    bytes_read = 0
+
+    class GuardedReader:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> "GuardedReader":
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._handle.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal bytes_read
+            if size < 0:
+                raise AssertionError("structural line count must use bounded reads")
+            data = self._handle.read(size)
+            bytes_read += len(data)
+            if bytes_read > audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES:
+                raise AssertionError("structural line count read beyond scan cap")
+            return data
+
+    def guarded_open(self: Path, *args: object, **kwargs: object) -> object:
+        handle = original_open(self, *args, **kwargs)
+        if self == source_path:
+            return GuardedReader(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    line_count_result = audit_repo_entropy._structural_physical_line_count(source_path)
+
+    assert line_count_result is not None
+    assert line_count_result.line_count == (
+        audit_repo_entropy.STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1
+    )
+    assert line_count_result.line_count_is_truncated is True
+    assert line_count_result.line_count_lower_bound == 1
+    assert bytes_read == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
+
+
+def test_structural_ownership_growth_preserves_signals_when_diff_scan_truncates(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        source_path,
+        base_text
+        + "import requests\n"
+        + "HUGE_LITERAL = '"
+        + ("x" * (audit_repo_entropy.STRUCTURAL_DIFF_MAX_LINE_BYTES + 1024))
+        + "'\n",
+    )
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    signal_types = _structural_growth_signal_types(budget, "services/api/large.py")
+    signals = [
+        signal
+        for signal in budget["ownership_growth_signals"]
+        if isinstance(signal, dict) and signal["path"] == "services/api/large.py"
+    ]
+
+    assert "new-import-family" in signal_types
+    assert "diff-analysis-truncated" in signal_types
+    assert any("diff-line-byte-cap" in str(signal["detail"]) for signal in signals)
+
+
+def test_structural_ownership_growth_detects_partial_python_import_diff(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(
+        1001,
+        "import os",
+        "def existing() -> object:",
+        "    return os",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    changed_text = base_text.replace("import os\n", "import os\nimport requests\n")
+    changed_text = changed_text.replace("    return os\n", "    return requests\n")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert "new-import-family" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
 
 
 def test_structural_ownership_growth_details_do_not_leak_added_source_literals(
