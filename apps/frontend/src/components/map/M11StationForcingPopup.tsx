@@ -5,6 +5,7 @@ import { CloudRain } from 'lucide-react'
 import { echarts } from '@/components/charts/echartsCore'
 import {
   formatIssueTime,
+  M11IssueTimeSelect,
   M11_POPUP_GLASS,
   M11PopupEmpty,
   M11PopupHeader,
@@ -19,7 +20,6 @@ import {
   isHydroMetStationSeriesRetainedDiskMiss,
   loadHydroMetStationSeries,
   mapUniqueHydroMetStationSeries,
-  stationSeriesRequestKey,
   validateHydroMetStationSeriesForChart,
   validateHydroMetStationSeriesIdentity,
   type ChartableStationSeriesPoint,
@@ -97,17 +97,24 @@ async function loadSource(
     }
 
     const identity = stationSeriesProductIdentity(product)
-    const requestKey = stationSeriesRequestKey(identity, station.station_id)
-    const response = await loadHydroMetStationSeries({
-      product: identity,
-      station: { station_id: station.station_id },
-      limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
-    })
-    const identityMessages = validateHydroMetStationSeriesIdentity(response, identity, station.station_id)
-    if (identityMessages.length > 0) {
-      return { ...empty, product, availableIssueTimes, reason: `${source}：${identityMessages[0]}` }
+    try {
+      const response = await loadHydroMetStationSeries({
+        product: identity,
+        station: { station_id: station.station_id },
+        limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
+      })
+      const identityMessages = validateHydroMetStationSeriesIdentity(response, identity, station.station_id)
+      if (identityMessages.length > 0) {
+        return { ...empty, product, availableIssueTimes, reason: `${source}：${identityMessages[0]}` }
+      }
+      return { source, product, response, availableIssueTimes, reason: null }
+    } catch (error) {
+      const cycleLabel = cycle ? formatIssueTime(cycle) : 'latest'
+      if (isHydroMetStationSeriesRetainedDiskMiss(error)) {
+        return { ...empty, product, availableIssueTimes, reason: retainedDiskMissMessage(source, cycleLabel) }
+      }
+      return { ...empty, product, availableIssueTimes, reason: `${source}：${formatHydroMetStationSeriesMessage(error, 'station-series 不可用')}` }
     }
-    return { source, product, response, availableIssueTimes, reason: null }
   } catch (error) {
     const cycleLabel = cycle ? formatIssueTime(cycle) : 'latest'
     if (isHydroMetStationSeriesRetainedDiskMiss(error)) {
@@ -227,23 +234,16 @@ function StationVariableSelector({
       data-testid="m11-station-toolbar"
     >
       {issueTimes.length > 0 ? (
-        <label className="flex shrink-0 items-center gap-2" data-testid="m11-station-cycle-bar">
+        <div className="flex shrink-0 items-center gap-2" data-testid="m11-station-cycle-bar">
           <span className="shrink-0 uppercase tracking-wide">起报</span>
-          <select
-            aria-label="起报时间选择"
-            data-testid="m11-popup-issue-time"
-            className="h-7 min-w-0 max-w-[12rem] cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            value={selectedCycle && issueTimes.includes(selectedCycle) ? selectedCycle : issueTimes[0]}
-            onChange={(event) => onCycleChange(event.target.value)}
+          <M11IssueTimeSelect
+            testId="m11-popup-issue-time"
+            issueTimes={issueTimes}
+            issueTime={selectedCycle}
+            onIssueTimeChange={onCycleChange}
             disabled={disabled}
-          >
-            {issueTimes.map((time) => (
-              <option key={time} value={time}>
-                {formatIssueTime(time)}
-              </option>
-            ))}
-          </select>
-        </label>
+          />
+        </div>
       ) : null}
       <div
         className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5"

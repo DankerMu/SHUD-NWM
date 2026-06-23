@@ -115,6 +115,108 @@ same-screen comparison workflow.
   option semantics while changing the implementation from native select to a
   controlled select.
 
+## Issue #658 Fixture: Dark Issue-Time Selectors
+
+Fixture level: expanded
+Repair intensity: medium
+Expanded trigger rationale:
+
+- NHMS profile mandatory triggers apply because the selector preserves
+  `forecast window`, `GFS`, `IFS`, and `forcing` issue-time reload behavior.
+Change surface:
+
+- `M11PopupChrome`, river forecast panel, station forcing popup, and popup
+  component tests.
+
+Must preserve:
+
+- Existing issue-time/source selection callbacks still reload the same GFS/IFS
+  series for the selected feature identity.
+- River q_down, station PRCP/TEMP/RH/wind/Rn, and existing empty/partial states
+  remain downstream consumers of the same validated series contracts.
+- Disabled retained-window issue-time choices remain visible but
+  non-selectable.
+- Popup labels, useful test ids, and keyboard-accessible control semantics
+  remain available after replacing native selects.
+
+Must add/change:
+
+- M11 popup issue-time controls use a controlled dark selector surface instead
+  of native `option` popups.
+- Shared popup source controls, where issue-time-adjacent native selects appear
+  in the curve-window chrome, use the same dark popup control treatment.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - frontend component-only
+  change, no exported API or route contract changes.
+- Config / project setup: not selected - no build or environment config change.
+- File IO / path safety / overwrite: not selected - no file system surface.
+- Schema / columns / units / field names: not selected - no data schema or unit
+  change.
+- Auth / permissions / secrets: not selected - no auth boundary touched.
+- Concurrency / shared state / ordering: not selected - no async ordering model
+  change beyond existing selection callbacks.
+- Resource limits / large input / discovery: not selected - no discovery or
+  unbounded input surface.
+- Legacy compatibility / examples: selected - preserve test ids, accessible
+  labels, disabled retained-window options, and existing cycle-selection
+  behavior.
+- Error handling / rollback / partial outputs: selected - unavailable retained
+  cycles must stay non-selectable and honest.
+- Release / packaging / dependency compatibility: not selected - uses existing
+  frontend Select primitive, no new package.
+- Documentation / migration notes: not selected - behavior is covered by this
+  OpenSpec and no user-facing migration is required.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: not selected - no map geometry, CRS, or
+  basin-selection behavior changes.
+- Hydro-met time series / forcing windows: selected - station forcing and river
+  q_down issue-time changes must continue to reload the intended GFS/IFS
+  retained windows.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD runtime
+  or numerical output semantics change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database query or
+  persisted state surface.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler
+  or compute lifecycle surface.
+- External hydro-met providers / snapshot reproducibility: not selected - this
+  PR only changes already-loaded frontend cycle selection controls.
+- Run manifest / QC provenance: not selected - no manifest or QC evidence
+  surface.
+- Published NHMS artifacts / display identity: selected - selector changes must
+  not alter station/river identity used by existing curve reloads.
+
+Required evidence:
+
+- River popup test with cycles
+  `2026-05-21T00:00:00Z`, `2026-05-20T12:00:00Z`,
+  `2026-05-20T00:00:00Z`: opening the issue-time trigger shows a dark
+  selector surface, selecting `2026-05-20T12:00:00Z` reloads both `GFS` and
+  `IFS` with that cycle, and the existing panel test id remains queryable.
+- River retained-window test: when the user selects
+  `2026-05-20T12:00:00Z` but the backend returns the latest cycle, the option
+  state remains honest and the panel shows the existing unavailable reason
+  rather than drawing a stale curve.
+- Station popup test with `DEFAULT_CYCLE` and `RETAINED_OUT_CYCLE`: opening the
+  issue-time trigger shows the same dark selector surface, selecting the
+  retained-out cycle calls station-series loads for both `GFS` and `IFS`, and
+  the unavailable source stays visible without turning `Press` into an
+  available variable.
+- Source controls test: `M11PopupSourceControls` preserves `GFS`/`IFS` source
+  buttons, `m11-popup-issue-time` identity, accessible labels, and disabled
+  retained-window options while using the controlled dark selector content.
+- `cd apps/frontend && corepack pnpm test -- M11RiverForecastPanel M11StationForcingPopup`
+- `cd apps/frontend && corepack pnpm build`
+- `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`
+
+Non-goals:
+
+- No query-state migration, station overlay render-order change, draggable
+  window frame, backend API change, or new station variable support.
+
 ## Migration Plan
 
 1. Add the new query state and normalize old station-layer URLs.

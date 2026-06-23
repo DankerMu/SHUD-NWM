@@ -1,8 +1,27 @@
 ## 1. Dark Issue-Time Selector
 
-- [ ] 1.1 Add a shared M11 dark issue-time selector wrapper around the existing frontend Select primitive, preserving accessible labels, disabled states, and popup-theme styling.
-- [ ] 1.2 Replace native issue-time selects in river forecast, station forcing, and shared popup source controls with the dark selector while preserving cycle-selection behavior and useful test ids.
-- [ ] 1.3 Update popup unit tests to cover dark selector rendering, issue-time changes, disabled retained-window options, and no regression in GFS/IFS reload behavior.
+- [x] 1.1 Add a shared M11 dark issue-time selector wrapper around the existing frontend Select primitive, preserving accessible labels, disabled states, and popup-theme styling.
+- [x] 1.2 Replace native issue-time selects in river forecast, station forcing, and shared popup source controls with the dark selector while preserving cycle-selection behavior and useful test ids.
+- [x] 1.3 Update popup unit tests to cover dark selector rendering, issue-time changes, disabled retained-window options, and no regression in GFS/IFS reload behavior.
+
+Issue #658 evidence rows:
+
+- River cycle list input:
+  `["2026-05-21T00:00:00Z","2026-05-20T12:00:00Z","2026-05-20T00:00:00Z"]`
+  -> opening the issue-time trigger exposes dark selector content, selecting
+  `2026-05-20T12:00:00Z` reloads both `GFS` and `IFS` with that exact cycle,
+  and the river panel keeps the existing useful test id.
+- River retained-window input: selected cycle `2026-05-20T12:00:00Z` while the
+  backend returns latest `2026-05-21T00:00:00Z` -> the UI shows the unavailable
+  retained-window reason and does not draw stale q_down data.
+- Station retained-window input: `DEFAULT_CYCLE` plus `RETAINED_OUT_CYCLE` ->
+  opening the issue-time trigger exposes the same dark selector content,
+  selecting the retained-out cycle reloads both station sources, keeps the
+  available source plotted, and does not expose `Press` as chartable.
+- Shared source controls input: `GFS` active, `IFS` alternative, one unavailable
+  issue time -> source buttons keep their pressed state/callbacks,
+  `m11-popup-issue-time` remains accessible, and unavailable issue-time items
+  are visible but disabled/non-selectable.
 
 ## 2. Station Overlay State And Routing
 

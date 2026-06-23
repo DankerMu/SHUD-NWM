@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Waves, X } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import { formatIssueTime, M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
+import { formatIssueTime, M11IssueTimeSelect, M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
 import { formatRiverSegmentDisplayName } from '@/lib/hydroMet/displayNames'
 import {
@@ -95,27 +95,31 @@ async function loadSource(
       return { ...empty, availableIssueTimes, reason: `${source}：起报 ${formatIssueTime(cycle)} 已不可用` }
     }
     const identity = productIdentity(product)
-    const response = await loadHydroMetRiverForecast({ product: identity, segment })
-    const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
-    if (!validation.ok) return { ...empty, availableIssueTimes, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
-    const points = validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value }))
-    return {
-      source,
-      unit: validation.unit,
-      cycleTime: validation.cycleTime ?? product.cycle_time,
-      issueTime: validation.issueTime ?? validation.cycleTime ?? product.cycle_time,
-      availableIssueTimes,
-      reason: null,
-      series: {
-        scenario: validation.scenarioId,
-        source: validation.sourceId,
-        isAnalysis: false,
-        label: source,
-        color: SOURCE_COLOR[source],
-        cycleTime: validation.cycleTime,
-        availableLeadHours: validation.series.availableLeadHours,
-        points,
-      },
+    try {
+      const response = await loadHydroMetRiverForecast({ product: identity, segment })
+      const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
+      if (!validation.ok) return { ...empty, availableIssueTimes, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
+      const points = validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value }))
+      return {
+        source,
+        unit: validation.unit,
+        cycleTime: validation.cycleTime ?? product.cycle_time,
+        issueTime: validation.issueTime ?? validation.cycleTime ?? product.cycle_time,
+        availableIssueTimes,
+        reason: null,
+        series: {
+          scenario: validation.scenarioId,
+          source: validation.sourceId,
+          isAnalysis: false,
+          label: source,
+          color: SOURCE_COLOR[source],
+          cycleTime: validation.cycleTime,
+          availableLeadHours: validation.series.availableLeadHours,
+          points,
+        },
+      }
+    } catch (error) {
+      return { ...empty, availableIssueTimes, reason: `${source}：${formatHydroMetRiverForecastMessage(error, 'forecast-series 不可用')}` }
     }
   } catch (error) {
     return { ...empty, reason: `${source}：${formatHydroMetRiverForecastMessage(error, 'forecast-series 不可用')}` }
@@ -249,20 +253,13 @@ export function M11RiverForecastPanel({
       {issueTimes.length > 0 ? (
         <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400" data-testid="m11-river-panel-cycle-bar">
           <span className="shrink-0 uppercase tracking-wide">起报</span>
-          <select
-            aria-label="起报时间选择"
-            data-testid="m11-river-panel-cycle"
-            className="h-7 min-w-0 max-w-[12rem] cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            value={selectedCycle && issueTimes.includes(selectedCycle) ? selectedCycle : issueTimes[0]}
-            onChange={(event) => setSelection({ key: identityKey, cycle: event.target.value })}
+          <M11IssueTimeSelect
+            testId="m11-river-panel-cycle"
+            issueTimes={issueTimes}
+            issueTime={selectedCycle}
+            onIssueTimeChange={(cycle) => setSelection({ key: identityKey, cycle })}
             disabled={loading}
-          >
-            {issueTimes.map((time) => (
-              <option key={time} value={time}>
-                {formatIssueTime(time)}
-              </option>
-            ))}
-          </select>
+          />
           <span className="ml-auto text-[10px] text-slate-500">GFS + IFS 同步切换</span>
         </div>
       ) : null}
