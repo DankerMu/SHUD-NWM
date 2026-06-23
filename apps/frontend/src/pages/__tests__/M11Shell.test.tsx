@@ -1558,6 +1558,57 @@ describe('M11 visual foundation shell', () => {
     )
   })
 
+  it('loads overview station overlay from active model version mapping when basin versions are not fan-out fetched', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    window.history.pushState({}, '', '/?metStations=1')
+    const query = parseM11QueryState(window.location.search)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      overview: {
+        requestScope: matchedOverviewScope(query),
+        bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+        basins: [
+          { ...overviewBasins[0], basinId: 'basins_heihe', selectedBasinVersionId: null },
+          { ...overviewBasins[0], basinId: 'basins_qhh', selectedBasinVersionId: null },
+        ],
+        summary: createEmptyOverviewSummary(query),
+        layers,
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 5,
+          createsPerBasinNPlusOne: true,
+          missingRequiredFields: ['basin_versions', 'basin_bbox'],
+        }),
+        basinVersionToBasinId: {
+          basins_heihe_vbasins: 'basins_heihe',
+          basins_qhh_vbasins: 'basins_qhh',
+        },
+      },
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [
+          { basinId: 'basins_heihe', basinVersionId: 'basins_heihe_vbasins' },
+          { basinId: 'basins_qhh', basinVersionId: 'basins_qhh_vbasins' },
+        ],
+      }),
+    )
+    expect(screen.queryByText('暂无可用流域版本以加载气象代站')).not.toBeInTheDocument()
+  })
+
   it('clears an overview station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/?metStations=1')

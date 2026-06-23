@@ -356,6 +356,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
+  const basinIdToActiveVersionId = useMemo(() => {
+    const result: Record<string, string> = {}
+    for (const [basinVersionId, basinId] of Object.entries(basinVersionToBasinId)) {
+      if (!result[basinId]) result[basinId] = basinVersionId
+    }
+    return result
+  }, [basinVersionToBasinId])
   const stationLayerBasinContexts = useMemo(
     () =>
       basins.map((basin) => {
@@ -363,10 +370,10 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
           state.basinVersionId && basinVersionToBasinId[state.basinVersionId] === basin.basinId ? state.basinVersionId : null
         return {
           basinId: basin.basinId,
-          basinVersionId: basin.selectedBasinVersionId ?? queryBasinVersionId,
+          basinVersionId: basin.selectedBasinVersionId ?? queryBasinVersionId ?? basinIdToActiveVersionId[basin.basinId] ?? null,
         }
       }),
-    [basinVersionToBasinId, basins, state.basinVersionId],
+    [basinIdToActiveVersionId, basinVersionToBasinId, basins, state.basinVersionId],
   )
   // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
   // fit 到流域并集会把视野错误地收窄到测试流域（qhh/heihe）区域。
