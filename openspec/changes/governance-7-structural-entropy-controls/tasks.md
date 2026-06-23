@@ -56,12 +56,13 @@
   known callers/tests, retention reasons, removal conditions, and verification
   commands. See
   `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`.
-- [ ] 2.2 Create a compatibility inventory for
+- [x] 2.2 Create a compatibility inventory for
   `services/orchestrator/chain.py`.
   Evidence: inventory records stage/manifest/reservation/retry/tile-publisher/
   worker/persistence facade groups, real owner modules, known callers/tests,
   retention reasons, removal conditions, caller migration paths, and
-  verification commands.
+  verification commands. See
+  `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`.
 - [ ] 2.3 Add guard tests that fail on new facade re-exports, new monkeypatch
   aliases, new non-forwarding facade implementation, or new import-family
   growth unless the corresponding inventory is updated.
