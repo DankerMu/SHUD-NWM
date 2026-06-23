@@ -1,0 +1,35 @@
+## 1. Dark Issue-Time Selector
+
+- [ ] 1.1 Add a shared M11 dark issue-time selector wrapper around the existing frontend Select primitive, preserving accessible labels, disabled states, and popup-theme styling.
+- [ ] 1.2 Replace native issue-time selects in river forecast, station forcing, and shared popup source controls with the dark selector while preserving cycle-selection behavior and useful test ids.
+- [ ] 1.3 Update popup unit tests to cover dark selector rendering, issue-time changes, disabled retained-window options, and no regression in GFS/IFS reload behavior.
+
+## 2. Station Overlay State And Routing
+
+- [ ] 2.1 Add separate `metStations` query state parsing/serialization; normalize stale `layer=met-stations` URLs to a valid hydrology layer with station overlay enabled.
+- [ ] 2.2 Retire `met-stations` from the active hydrology layer contract in `M11Layer`, overview data contracts, fallback legends, legacy M11 controls, and tests; add verification that active code no longer serializes `layer=met-stations`.
+- [ ] 2.3 Update `/meteorology` legacy redirect semantics and `docs/spec/06_frontend_gis_design.md` to emit station overlay state instead of `layer=met-stations`, including tests for preserving existing query parameters and hydrology layer values.
+- [ ] 2.4 Update floating layer controls so hydrology layer selection remains single-choice and meteorological stations are controlled by an independent overlay toggle.
+- [ ] 2.5 Update overview and basin-detail station loading activation to depend on the overlay flag and visible/current basin contexts, preserving basin/model-scoped station inventory and honest empty/truncated states.
+- [ ] 2.6 Add station overlay loading tests for inactive overlay, unresolved source for station-series, missing basin contexts, paginated/truncated station inventory, and route-level status notes that appear only when `metStations=1`.
+
+## 3. Map Layer Ordering And Hit Behavior
+
+- [ ] 3.1 Render station cluster/point layers above hydrology layers when the overlay is enabled, while keeping discharge and other hydrology MVT layers registered and visible.
+- [ ] 3.2 Change map hover/click hit ordering so station clusters/points win on overlapped pixels, clusters expand on click, and exposed river lines still open river forecast.
+- [ ] 3.3 Update MapLibre surface tests for overlay render order, interactive layer ids, cluster expansion, station-over-river hit priority, and exposed-river clickability.
+
+## 4. Draggable Coexisting Curve Windows
+
+- [ ] 4.1 Add a shared draggable curve-window frame or hook with header-only drag, viewport clamping, focus/z-index handling, and identity-based reset.
+- [ ] 4.2 Migrate river forecast and station forcing panels to the shared draggable frame, with sensible non-overlapping initial placement when both are visible.
+- [ ] 4.3 Remove mutual popup clearing in overview and basin-detail click handlers so river and station curve windows can coexist and close independently.
+- [ ] 4.4 Update component and route tests for river-then-station, station-then-river, independent close behavior, drag behavior, and chart/control interactions not starting drag.
+- [ ] 4.5 Add desktop and narrow-viewport bounding-box tests or Playwright checks proving both windows remain clamped in the map, close/header controls remain reachable, and dragging cannot push either window outside the viewport.
+
+## 5. Verification
+
+- [ ] 5.1 Run targeted frontend tests for query state, overview data contracts, station layer store/hook, floating controls, MapLibre surface, river forecast panel, station forcing popup, and M11 routes.
+- [ ] 5.2 Run `cd apps/frontend && corepack pnpm test` and `cd apps/frontend && corepack pnpm build`.
+- [ ] 5.3 Run `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`.
+- [ ] 5.4 After deployment to node-27, capture live display evidence that `/`, `/meteorology`, river click, station click, dual-window comparison, drag movement, and dark issue-time selector behavior work against `https://test.nwm.ac.cn/`.
