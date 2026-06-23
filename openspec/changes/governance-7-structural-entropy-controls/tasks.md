@@ -71,7 +71,8 @@
   `compatibility-facade-growth.*.inventory-required` findings when
   `scheduler.py` or `chain.py` grows facade surface without matching inventory
   coverage. `tests/test_entropy_audit_script.py` covers current-repo zero
-  signals, scheduler owner-module re-export, scheduler imported symbol,
+  signals, scheduler owner-module re-export including annotated aliases,
+  scheduler imported symbol,
   scheduler private monkeypatch alias, guard-hook-only inventory matching,
   chain non-forwarding local implementation, sync/async forwarding-to-local
   implementation transitions, async local implementation, chain project

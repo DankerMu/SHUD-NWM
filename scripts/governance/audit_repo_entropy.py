@@ -4002,26 +4002,46 @@ def _compatibility_facade_aliases(
 ) -> tuple[_CompatibilityFacadeAlias, ...]:
     aliases: list[_CompatibilityFacadeAlias] = []
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        value = node.value
-        if not isinstance(value, ast.Attribute) or not isinstance(value.value, ast.Name):
-            continue
-        owner_module = module_aliases.get(value.value.id)
-        if owner_module is None:
-            continue
-        aliases.append(
-            _CompatibilityFacadeAlias(
-                exposed_name=target.id,
-                owner_module=owner_module,
-                owner_attr=value.attr,
-                line=node.lineno,
+        alias: _CompatibilityFacadeAlias | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            alias = _compatibility_facade_alias(
+                node.targets[0],
+                node.value,
+                node.lineno,
+                module_aliases,
             )
-        )
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            alias = _compatibility_facade_alias(
+                node.target,
+                node.value,
+                node.lineno,
+                module_aliases,
+            )
+        if alias is None:
+            continue
+        aliases.append(alias)
     return tuple(sorted(aliases, key=lambda item: item.key))
+
+
+def _compatibility_facade_alias(
+    target: ast.expr,
+    value: ast.expr,
+    line: int,
+    module_aliases: dict[str, str],
+) -> _CompatibilityFacadeAlias | None:
+    if not isinstance(target, ast.Name):
+        return None
+    if not isinstance(value, ast.Attribute) or not isinstance(value.value, ast.Name):
+        return None
+    owner_module = module_aliases.get(value.value.id)
+    if owner_module is None:
+        return None
+    return _CompatibilityFacadeAlias(
+        exposed_name=target.id,
+        owner_module=owner_module,
+        owner_attr=value.attr,
+        line=line,
+    )
 
 
 def _compatibility_facade_definitions(
