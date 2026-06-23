@@ -2026,6 +2026,49 @@ describe('M11 visual foundation shell', () => {
     )
   })
 
+  it('loads basin-detail station overlay from a matched detail request scope when selected version is unavailable', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v2026_01&metStations=1')
+    const snapshot = matchedBasinSnapshot('qhh', query)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...snapshot,
+        detail: {
+          ...snapshot.detail,
+          selectedBasinVersionId: null,
+          basinVersions: [],
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=qhh_v2026_01&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+  })
+
   it('clears a basin-detail station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
     const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v1&metStations=1')

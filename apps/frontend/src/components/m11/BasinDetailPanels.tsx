@@ -193,9 +193,11 @@ export function useBasinDetailMode({
 
   const backToOverview = useCallback(() => onQueryChange({ basinId: null, segmentId: null }), [onQueryChange])
 
+  const stationLayerBasinVersionId = detail?.selectedBasinVersionId ??
+    (currentBasinData?.requestScope.basinVersionId === state.basinVersionId ? state.basinVersionId : null)
   const stationLayerBasinContexts = useMemo(
-    () => [{ basinId, basinVersionId: detail?.selectedBasinVersionId ?? null }],
-    [basinId, detail?.selectedBasinVersionId],
+    () => [{ basinId, basinVersionId: stationLayerBasinVersionId }],
+    [basinId, stationLayerBasinVersionId],
   )
   const stationLayer = useMetStationLayer({
     active: state.metStations,

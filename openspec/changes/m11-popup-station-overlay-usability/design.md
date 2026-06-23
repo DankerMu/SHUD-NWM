@@ -461,7 +461,7 @@ Change surface:
 - `apps/frontend/src/components/map/M11StationForcingPopup.tsx`
 - `apps/frontend/src/pages/OverviewPage.tsx`
 - `apps/frontend/src/components/m11/BasinDetailPanels.tsx`
-- Focused component, route, and mocked display tests.
+- Focused component, route, shell, and mocked display tests.
 
 Must preserve:
 
@@ -470,6 +470,10 @@ Must preserve:
   unchanged.
 - Station overlay query state and MapLibre hit priority remain owned by issues
   #659 and #660; this issue only consumes their click dispatch results.
+- Basin-detail station overlays still wait for a resolved detail request scope
+  before loading station positions; a URL basin version is only used when the
+  loaded basin-detail snapshot already matches that request scope and no
+  selected version is available.
 - Chart body, ECharts data zoom, station variable tabs, source/cycle controls,
   and close buttons keep their native control behavior.
 
