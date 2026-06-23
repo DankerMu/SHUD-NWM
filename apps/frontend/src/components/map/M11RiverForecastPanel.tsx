@@ -95,27 +95,31 @@ async function loadSource(
       return { ...empty, availableIssueTimes, reason: `${source}：起报 ${formatIssueTime(cycle)} 已不可用` }
     }
     const identity = productIdentity(product)
-    const response = await loadHydroMetRiverForecast({ product: identity, segment })
-    const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
-    if (!validation.ok) return { ...empty, availableIssueTimes, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
-    const points = validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value }))
-    return {
-      source,
-      unit: validation.unit,
-      cycleTime: validation.cycleTime ?? product.cycle_time,
-      issueTime: validation.issueTime ?? validation.cycleTime ?? product.cycle_time,
-      availableIssueTimes,
-      reason: null,
-      series: {
-        scenario: validation.scenarioId,
-        source: validation.sourceId,
-        isAnalysis: false,
-        label: source,
-        color: SOURCE_COLOR[source],
-        cycleTime: validation.cycleTime,
-        availableLeadHours: validation.series.availableLeadHours,
-        points,
-      },
+    try {
+      const response = await loadHydroMetRiverForecast({ product: identity, segment })
+      const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
+      if (!validation.ok) return { ...empty, availableIssueTimes, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
+      const points = validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value }))
+      return {
+        source,
+        unit: validation.unit,
+        cycleTime: validation.cycleTime ?? product.cycle_time,
+        issueTime: validation.issueTime ?? validation.cycleTime ?? product.cycle_time,
+        availableIssueTimes,
+        reason: null,
+        series: {
+          scenario: validation.scenarioId,
+          source: validation.sourceId,
+          isAnalysis: false,
+          label: source,
+          color: SOURCE_COLOR[source],
+          cycleTime: validation.cycleTime,
+          availableLeadHours: validation.series.availableLeadHours,
+          points,
+        },
+      }
+    } catch (error) {
+      return { ...empty, availableIssueTimes, reason: `${source}：${formatHydroMetRiverForecastMessage(error, 'forecast-series 不可用')}` }
     }
   } catch (error) {
     return { ...empty, reason: `${source}：${formatHydroMetRiverForecastMessage(error, 'forecast-series 不可用')}` }

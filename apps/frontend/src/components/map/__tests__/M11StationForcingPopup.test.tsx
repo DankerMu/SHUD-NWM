@@ -352,6 +352,56 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
   })
 
+  it('keeps issue-time choices recoverable when both downstream station-series paths fail after latest-product', async () => {
+    const user = userEvent.setup()
+    const cycles = [DEFAULT_CYCLE, RETAINED_OUT_CYCLE]
+    mockLatestProducts(cycles)
+    vi.mocked(client.GET).mockResolvedValue({
+      data: undefined,
+      error: { error: { code: 'STATION_SERIES_UNAVAILABLE', message: 'station-series failed' } },
+    } as never)
+
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    const empty = await screen.findByTestId('m11-station-popup-empty')
+    expect(empty).toHaveTextContent('GFS')
+    expect(empty).toHaveTextContent('IFS')
+    expect(screen.getByTestId('m11-popup-issue-time')).toHaveTextContent(formatIssueTime(DEFAULT_CYCLE))
+
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    expect(screen.getAllByRole('option')).toHaveLength(cycles.length)
+
+    vi.mocked(fetchHydroMetLatestProduct).mockClear()
+    await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
+    await waitFor(() => {
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: RETAINED_OUT_CYCLE }))
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: RETAINED_OUT_CYCLE }))
+    })
+    await screen.findByTestId('m11-station-popup-empty')
+
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    vi.mocked(fetchHydroMetLatestProduct).mockClear()
+    vi.mocked(client.GET).mockClear()
+    await user.click(screen.getByRole('option', { name: formatIssueTime(DEFAULT_CYCLE) }))
+
+    await waitFor(() => {
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: DEFAULT_CYCLE }))
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: DEFAULT_CYCLE }))
+      expect(client.GET).toHaveBeenCalledTimes(2)
+    })
+
+    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
+      expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
+        expect.objectContaining({
+          cycle_time: DEFAULT_CYCLE,
+          forcing_version_id: forcingVersionFor(source, DEFAULT_CYCLE),
+          model_id: 'm-1',
+        }),
+      )
+    }
+  })
+
   it('shows an empty state and draws no curve when station_id mismatches for both sources', async () => {
     mockSeriesBySource((source, query) => seriesResponseFor(source, { ...seriesOverridesFromQuery(query), station_id: 'OTHER' }))
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)

@@ -77,6 +77,23 @@ export function M11PopupHeader({
   )
 }
 
+function normalizeIssueTimeValue(value: string | null | undefined) {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+function normalizeIssueTimes(values: string[]) {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const value of values) {
+    const issueTime = normalizeIssueTimeValue(value)
+    if (!issueTime || seen.has(issueTime)) continue
+    seen.add(issueTime)
+    normalized.push(issueTime)
+  }
+  return normalized
+}
+
 export function M11IssueTimeSelect({
   issueTimes,
   issueTime,
@@ -96,17 +113,25 @@ export function M11IssueTimeSelect({
   onIssueTimeChange?: (issueTime: string) => void
   triggerClassName?: string
 }) {
-  if (issueTimes.length === 0) return null
+  const normalizedIssueTimes = normalizeIssueTimes(issueTimes)
+  if (normalizedIssueTimes.length === 0) return null
 
-  const retainedIssueTime = issueTime && !issueTimes.includes(issueTime) ? issueTime : null
-  const visibleIssueTimes = retainedIssueTime ? [retainedIssueTime, ...issueTimes] : issueTimes
-  const unavailableSet = new Set(retainedIssueTime ? [retainedIssueTime, ...unavailableIssueTimes] : unavailableIssueTimes)
-  const selectedValue = issueTime && visibleIssueTimes.includes(issueTime) ? issueTime : issueTimes[0]
+  const normalizedIssueTime = normalizeIssueTimeValue(issueTime)
+  const normalizedUnavailableIssueTimes = normalizeIssueTimes(unavailableIssueTimes)
+  const retainedIssueTime = normalizedIssueTime && !normalizedIssueTimes.includes(normalizedIssueTime) ? normalizedIssueTime : null
+  const visibleIssueTimes = retainedIssueTime ? [retainedIssueTime, ...normalizedIssueTimes] : normalizedIssueTimes
+  const unavailableSet = new Set(
+    retainedIssueTime ? [retainedIssueTime, ...normalizedUnavailableIssueTimes] : normalizedUnavailableIssueTimes,
+  )
+  const selectedValue = normalizedIssueTime && visibleIssueTimes.includes(normalizedIssueTime) ? normalizedIssueTime : normalizedIssueTimes[0]
 
   return (
     <Select
       value={selectedValue}
-      onValueChange={(value) => onIssueTimeChange?.(value)}
+      onValueChange={(value) => {
+        const normalizedValue = normalizeIssueTimeValue(value)
+        if (normalizedValue) onIssueTimeChange?.(normalizedValue)
+      }}
       disabled={disabled || !onIssueTimeChange}
     >
       <SelectTrigger
@@ -165,6 +190,8 @@ export function M11PopupSourceControls({
   unavailableIssueTimes?: string[]
   onIssueTimeChange?: (issueTime: string) => void
 }) {
+  const normalizedIssueTimes = normalizeIssueTimes(issueTimes)
+
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
       <div className="inline-flex items-center rounded-lg bg-white/5 p-0.5 ring-1 ring-inset ring-white/10" role="group" aria-label="预报源选择">
@@ -188,10 +215,10 @@ export function M11PopupSourceControls({
       </div>
       <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-[11px] text-slate-400">
         <span className="shrink-0 uppercase tracking-wide">起报</span>
-        {issueTimes.length > 0 ? (
+        {normalizedIssueTimes.length > 0 ? (
           <M11IssueTimeSelect
             testId="m11-popup-issue-time"
-            issueTimes={issueTimes}
+            issueTimes={normalizedIssueTimes}
             issueTime={issueTime}
             unavailableIssueTimes={unavailableIssueTimes}
             onIssueTimeChange={onIssueTimeChange}

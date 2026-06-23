@@ -20,7 +20,6 @@ import {
   isHydroMetStationSeriesRetainedDiskMiss,
   loadHydroMetStationSeries,
   mapUniqueHydroMetStationSeries,
-  stationSeriesRequestKey,
   validateHydroMetStationSeriesForChart,
   validateHydroMetStationSeriesIdentity,
   type ChartableStationSeriesPoint,
@@ -98,17 +97,24 @@ async function loadSource(
     }
 
     const identity = stationSeriesProductIdentity(product)
-    const requestKey = stationSeriesRequestKey(identity, station.station_id)
-    const response = await loadHydroMetStationSeries({
-      product: identity,
-      station: { station_id: station.station_id },
-      limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
-    })
-    const identityMessages = validateHydroMetStationSeriesIdentity(response, identity, station.station_id)
-    if (identityMessages.length > 0) {
-      return { ...empty, product, availableIssueTimes, reason: `${source}：${identityMessages[0]}` }
+    try {
+      const response = await loadHydroMetStationSeries({
+        product: identity,
+        station: { station_id: station.station_id },
+        limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
+      })
+      const identityMessages = validateHydroMetStationSeriesIdentity(response, identity, station.station_id)
+      if (identityMessages.length > 0) {
+        return { ...empty, product, availableIssueTimes, reason: `${source}：${identityMessages[0]}` }
+      }
+      return { source, product, response, availableIssueTimes, reason: null }
+    } catch (error) {
+      const cycleLabel = cycle ? formatIssueTime(cycle) : 'latest'
+      if (isHydroMetStationSeriesRetainedDiskMiss(error)) {
+        return { ...empty, product, availableIssueTimes, reason: retainedDiskMissMessage(source, cycleLabel) }
+      }
+      return { ...empty, product, availableIssueTimes, reason: `${source}：${formatHydroMetStationSeriesMessage(error, 'station-series 不可用')}` }
     }
-    return { source, product, response, availableIssueTimes, reason: null }
   } catch (error) {
     const cycleLabel = cycle ? formatIssueTime(cycle) : 'latest'
     if (isHydroMetStationSeriesRetainedDiskMiss(error)) {
