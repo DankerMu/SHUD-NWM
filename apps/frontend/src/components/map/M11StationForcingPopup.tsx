@@ -131,11 +131,12 @@ async function loadSource(
  */
 export function M11StationForcingPopup({
   basinId,
+  initialSource,
   station,
   onClose,
 }: {
   basinId: string | null
-  initialSource: HydroMetSource | null
+  initialSource: HydroMetSource | 'GFS+IFS' | null
   station: M11StationPopupStation
   onClose?: () => void
 }) {
@@ -150,7 +151,7 @@ export function M11StationForcingPopup({
   )
 
   useEffect(() => {
-    if (!basinId) {
+    if (!basinId || !initialSource) {
       setState({ loading: false, results: [] })
       return
     }
@@ -163,7 +164,7 @@ export function M11StationForcingPopup({
     return () => {
       cancelled = true
     }
-  }, [basinId, selectedCycle, station])
+  }, [basinId, initialSource, selectedCycle, station])
 
   const issueTimes = useMemo(
     () => state.results.find((result) => result.availableIssueTimes.length > 0)?.availableIssueTimes ?? [],
@@ -199,6 +200,8 @@ export function M11StationForcingPopup({
 
       {!basinId ? (
         <M11PopupEmpty testId="m11-station-popup-no-product">请选择流域</M11PopupEmpty>
+      ) : !initialSource ? (
+        <M11PopupEmpty testId="m11-station-popup-no-product">等待 GFS/IFS 源解析后加载 station-series</M11PopupEmpty>
       ) : showInitialLoading ? (
         <M11PopupLoading testId="m11-station-popup-loading">正在加载 GFS / IFS {station.station_id} station-series...</M11PopupLoading>
       ) : (

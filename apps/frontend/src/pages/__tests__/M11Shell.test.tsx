@@ -35,6 +35,7 @@ import {
   m11FallbackLegends,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
+import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { OverviewPage } from '@/pages/OverviewPage'
 import {
@@ -45,7 +46,7 @@ import {
   type M11OverviewRequestScope,
   type OverviewDataSnapshot,
 } from '@/stores/overviewData'
-import { useStationLayerDataStore } from '@/stores/stationLayerData'
+import { STATION_CONTEXT_CAP, stationLayerRequestKey, useStationLayerDataStore } from '@/stores/stationLayerData'
 import { client } from '@/api/client'
 
 // 让 PR 4/7 wire-up 的 loadFloodRankingOnDemand / releaseFloodRankingOnDemand 可观测：
@@ -499,10 +500,10 @@ function geoJsonResponse(body: unknown) {
 // 复刻 store 的 requestScope key 公式（overviewData.ts: requestScopeQueryKey / requestScopeDataKey），
 // 用于构造「与当前 query 真匹配」的 store 快照，让生产接线（loading || !currentOverview）真正被测到。
 function scopeQueryKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
+  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
 }
 function scopeDataKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap })
+  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap })
 }
 
 function matchedOverviewScope(query: M11QueryState): M11OverviewRequestScope {
@@ -554,6 +555,40 @@ function matchedBasinSnapshot(basinId: string, query: M11QueryState): BasinDataS
     segments: [],
     selectedSegment: null,
     layers: [],
+  }
+}
+
+function stationLayerStoreSnapshot({
+  basinId,
+  basinVersionId,
+  stationId = 'HMT-Y2-0237',
+}: {
+  basinId: string
+  basinVersionId: string | null
+  stationId?: string
+}) {
+  return {
+    requestKey: stationLayerRequestKey({ basinContexts: [{ basinId, basinVersionId }] }),
+    data: {
+      stations: [
+        {
+          station_id: stationId,
+          basin_version_id: basinVersionId ?? '',
+          station_name: 'Station 0237',
+          geom: { type: 'Point' as const, coordinates: [100.4, 30.4] },
+          elevation_m: 320,
+          station_role: 'forcing',
+          active_flag: true,
+          properties_json: null,
+          created_at: '2026-05-18T00:00:00Z',
+        },
+      ],
+      stationBasinIds: { [stationId]: basinId },
+      total: 1,
+      totalKnown: true,
+      loaded: 1,
+      truncated: false,
+    },
   }
 }
 
@@ -630,8 +665,9 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
-    await waitFor(() => expect(window.location.search).toContain('layer=met-stations'))
-    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('点位聚合')
+    await waitFor(() => expect(window.location.search).toContain('metStations=1'))
+    expect(new URLSearchParams(window.location.search).get('layer')).toBeNull()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
   })
 
   it('keeps default discharge unregistered without basin river geometry while preserving controls and unavailable map status', async () => {
@@ -716,10 +752,10 @@ describe('M11 visual foundation shell', () => {
     )
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '2'))
 
-    // 无动态河网线层（met-stations 不注册 overlay）→ overlayIsRiverLine=false → 即便 meshRiverBasinIds 有值也不剔除，
+    // 气象代站叠加不注册 hydrology overlay → overlayIsRiverLine=false → 即便 meshRiverBasinIds 有值也不剔除，
     // 保留全部静态河流（守住非线叠加层不误删的诚实降级语义）。
     rerender(
-      <M11MapSurface state={{ ...state, layer: 'met-stations' }} layers={layers} nationalRiverGeo={riverGeo} meshRiverBasinIds={['basinA']} onQueryChange={vi.fn()} />,
+      <M11MapSurface state={{ ...state, metStations: true }} layers={layers} nationalRiverGeo={riverGeo} meshRiverBasinIds={['basinA']} onQueryChange={vi.fn()} />,
     )
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '2'))
   })
@@ -1433,6 +1469,89 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
   })
 
+  it('shows missing-basin station status only when metStations overlay is enabled', () => {
+    window.history.pushState({}, '', '/?metStations=1')
+    const overlayQuery = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({
+      overview: matchedEmptyOverviewSnapshot(overlayQuery),
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    const { unmount } = render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.getByTestId('m11-met-station-status')).toHaveTextContent('暂无可用流域版本')
+    expect(screen.queryByTestId('m11-overview-empty')).not.toBeInTheDocument()
+
+    unmount()
+    window.history.pushState({}, '', '/')
+    const hydrologyOnlyQuery = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({
+      overview: matchedEmptyOverviewSnapshot(hydrologyOnlyQuery),
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.queryByTestId('m11-met-station-status')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
+  })
+
+  it('clears an overview station popup when the station overlay is disabled', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/?metStations=1')
+    const query = parseM11QueryState(window.location.search)
+    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' })
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      ...stationSnapshot,
+      loading: false,
+      error: null,
+      loadStationLayer: vi.fn().mockResolvedValue(stationSnapshot.data),
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      overview: {
+        requestScope: matchedOverviewScope(query),
+        bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+        basins: overviewBasins,
+        summary: createEmptyOverviewSummary(query),
+        layers,
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 1,
+          createsPerBasinNPlusOne: false,
+          missingRequiredFields: [],
+        }),
+        basinVersionToBasinId: {},
+      },
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
+    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(window.location.search).not.toContain('metStations=1')
+  })
+
   // PR #589 round-2 C1：阶段 1 reject（bootstrapError !=null + overview.bootstrap=null）→
   // surfaceSettling 必须退出（spec scenario "Map bootstrap rejection"：MUST render bootstrap
   // failed state rather than indefinite spinner）。bootstrapError 必须从 m11-overview-empty 透出。
@@ -1665,6 +1784,44 @@ describe('M11 visual foundation shell', () => {
       consoleErrorSpy.mockRestore()
     })
 
+    it('does not restart an in-flight flood ranking request when only metStations changes', async () => {
+      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
+      const initialQuery = parseM11QueryState(window.location.search)
+      useOverviewDataStore.setState({
+        overview: snapshotWithRunId(initialQuery, 'run-gfs-overlay'),
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
+      const rankingState = { rankingCalls: 0 }
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') {
+          rankingState.rankingCalls += 1
+          return new Promise(() => undefined) as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+      const user = userEvent.setup()
+
+      const { unmount } = render(
+        <BrowserRouter>
+          <OverviewPage />
+        </BrowserRouter>,
+      )
+
+      await waitFor(() => expect(_floodRankingInFlightSize()).toBe(1))
+      expect(rankingState.rankingCalls).toBe(1)
+
+      await user.click(screen.getByRole('button', { name: /气象代站/ }))
+      await waitFor(() => expect(window.location.search).toContain('metStations=1'))
+
+      expect(_floodRankingInFlightSize()).toBe(1)
+      expect(rankingState.rankingCalls).toBe(1)
+
+      unmount()
+      expect(_floodRankingInFlightSize()).toBe(0)
+    })
+
     it('clears the in-flight ranking entry on unmount mid-flight without setState-after-unmount warning', async () => {
       window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
       const query = parseM11QueryState(window.location.search)
@@ -1749,6 +1906,165 @@ describe('M11 visual foundation shell', () => {
     expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
     expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
     expect(window.location.search).toContain('basinId=qhh')
+  })
+
+  it('waits for the resolved basin-detail station identity instead of using a mismatched URL version', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    const staleQuery = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_old&metStations=1')
+    const staleSnapshot = matchedBasinSnapshot('qhh', staleQuery)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...staleSnapshot,
+        detail: {
+          ...staleSnapshot.detail,
+          selectedBasinVersionId: 'qhh_old',
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('qhh', expect.objectContaining({ basinVersionId: 'heihe_v1' })))
+    expect(await screen.findByTestId('m11-met-station-status')).toHaveTextContent('暂无可用流域版本')
+    expect(loadStationLayer).not.toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
+    })
+
+    const resolvedQuery = parseM11QueryState('?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+    const resolvedSnapshot = matchedBasinSnapshot('qhh', resolvedQuery)
+    await act(async () => {
+      useOverviewDataStore.setState({
+        basinDetail: {
+          ...resolvedSnapshot,
+          detail: {
+            ...resolvedSnapshot.detail,
+            selectedBasinVersionId: 'qhh_v2026_01',
+          },
+        },
+        basinLoading: false,
+        basinError: null,
+      })
+    })
+
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+    expect(loadStationLayer).not.toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
+    })
+  })
+
+  it('loads basin-detail station overlay from the resolved detail basin version when the URL omits it', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const query = parseM11QueryState('?basinId=qhh&metStations=1')
+    const snapshot = matchedBasinSnapshot('qhh', query)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...snapshot,
+        detail: {
+          ...snapshot.detail,
+          selectedBasinVersionId: 'qhh_v2026_01',
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+  })
+
+  it('clears a basin-detail station popup when the station overlay is disabled', async () => {
+    const user = userEvent.setup()
+    const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v1&metStations=1')
+    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'qhh', basinVersionId: 'qhh_v1' })
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      ...stationSnapshot,
+      loading: false,
+      error: null,
+      loadStationLayer: vi.fn().mockResolvedValue(stationSnapshot.data),
+      clear: vi.fn(),
+    })
+    const basinSnapshot = matchedBasinSnapshot('qhh', query)
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot,
+        detail: {
+          ...basinSnapshot.detail,
+          selectedBasinVersionId: 'qhh_v1',
+        },
+      },
+      basinLoading: false,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=qhh_v1&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+
+    fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
+    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(window.location.search).toContain('basinId=qhh')
+    expect(window.location.search).not.toContain('metStations=1')
   })
 
   it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {
@@ -1910,11 +2226,11 @@ describe('M11 visual foundation shell', () => {
   it('updates valid time from slider and cleans up bounded playback timers', async () => {
     vi.useFakeTimers()
     const onQueryChange = vi.fn((patch: M11QueryPatch) => {
-      currentState = { ...currentState, ...patch }
+      currentState = { ...currentState, ...patch } as M11QueryState
       rerender(<M11Timeline state={currentState} layers={layers} onQueryChange={onQueryChange} />)
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
-    let currentState = state
+    let currentState: M11QueryState = state
     const { rerender, unmount } = render(<M11Timeline state={currentState} layers={layers} onQueryChange={onQueryChange} />)
 
     fireEvent.change(screen.getByRole('slider', { name: '有效时间滑块' }), { target: { value: '2' } })
@@ -1946,7 +2262,7 @@ describe('M11 visual foundation shell', () => {
         },
       ],
     }
-    const metState = { ...state, layer: 'met-stations' as const }
+    const metState = { ...state, metStations: true }
 
     it('registers a clustered-GeoJSON source with three layers and interactive ids when the met-station layer is on', () => {
       render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
@@ -2024,14 +2340,14 @@ describe('M11 visual foundation shell', () => {
       expect(flyToCalls).toHaveLength(0)
     })
 
-    it('exposes a switchable met-station layer entry in the meteorology group', async () => {
+    it('exposes a switchable met-station overlay entry in the meteorology group', async () => {
       const onQueryChange = vi.fn()
       const user = userEvent.setup()
 
       render(<LayerGroupControls state={state} layers={layers} onQueryChange={onQueryChange} />)
 
       await user.click(screen.getByRole('button', { name: /气象代站/ }))
-      expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
+      expect(onQueryChange).toHaveBeenCalledWith({ metStations: true })
     })
 
     it('loads met-stations on the national overview using every visible basin identity', async () => {
@@ -2051,7 +2367,7 @@ describe('M11 visual foundation shell', () => {
           selectedBasinVersionId: 'qhh_v2026_01',
         },
       ]
-      window.history.pushState({}, '', `/?${serializeM11QueryState({ ...state, layer: 'met-stations' })}`)
+      window.history.pushState({}, '', `/?${serializeM11QueryState({ ...state, metStations: true })}`)
       const query = parseM11QueryState(window.location.search)
       useOverviewDataStore.setState({
         overview: {
@@ -2083,8 +2399,6 @@ describe('M11 visual foundation shell', () => {
             { basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' },
             { basinId: 'qhh', basinVersionId: 'qhh_v2026_01' },
           ],
-          resolvedSource: 'GFS',
-          cycle: state.cycle,
         })
       })
       expect(screen.queryByText('请选择流域以加载气象代站')).not.toBeInTheDocument()
@@ -2104,21 +2418,23 @@ describe('M11 visual foundation shell', () => {
       )
     }
 
-    it('does not fetch while the source is unresolved (best not yet GFS/IFS)', () => {
+    it('does not fetch station inventory while the overlay is inactive', () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      const clear = vi.fn()
       useStationLayerDataStore.setState({
         ...useStationLayerDataStore.getInitialState(),
         loadStationLayer,
-        clear: vi.fn(),
+        clear,
       })
 
-      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="Unknown" cycle={null} />)
+      render(<Harness active={false} basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
 
       expect(loadStationLayer).not.toHaveBeenCalled()
-      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('Best Available')
+      expect(clear).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toBe('')
     })
 
-    it('fetches with the basin identity once the source resolves to GFS/IFS', () => {
+    it('shows an honest status and avoids unbounded inventory requests when basin contexts are missing', () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)
       useStationLayerDataStore.setState({
         ...useStationLayerDataStore.getInitialState(),
@@ -2126,12 +2442,75 @@ describe('M11 visual foundation shell', () => {
         clear: vi.fn(),
       })
 
-      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="GFS" cycle={null} />)
+      render(<Harness active basinContexts={[]} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('暂无可用流域版本')
+    })
+
+    it('does not fetch station inventory for basin contexts missing version identity', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'heihe', basinVersionId: null },
+        { basinId: 'qhh', basinVersionId: '' },
+      ]} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('暂无可用流域版本')
+    })
+
+    it('fetches resolved station identities while reporting skipped missing-version basins', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'heihe', basinVersionId: 'heihe_v1' },
+        { basinId: 'qhh', basinVersionId: null },
+      ]} />)
 
       expect(loadStationLayer).toHaveBeenCalledWith({
         basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }],
-        resolvedSource: 'GFS',
-        cycle: null,
+      })
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('仅显示已解析流域')
+    })
+
+    it('fetches while the source is unresolved because inventory is basin-scoped', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }],
+      })
+    })
+
+    it('fetches with the basin identity when the overlay is active', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }],
       })
     })
 
@@ -2144,18 +2523,140 @@ describe('M11 visual foundation shell', () => {
           stations: [],
           stationBasinIds: {},
           total: 12000,
+          totalKnown: true,
           loaded: 5000,
           truncated: true,
         },
-        requestKey: 'heihe:heihe_v1::GFS::latest',
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
       })
 
-      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} resolvedSource="GFS" cycle={null} />)
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
 
       const harness = screen.getByTestId('harness')
       expect(harness).toHaveAttribute('data-truncated', 'true')
       expect(harness.getAttribute('data-status')).toContain('5000/12000')
       expect(harness.getAttribute('data-status')).toContain('截断')
+    })
+
+    it('does not show a fake denominator when truncation skips remaining basin totals', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 5000,
+          totalKnown: false,
+          loaded: 5000,
+          truncated: true,
+        },
+        requestKey: stationLayerRequestKey({
+          basinContexts: [
+            { basinId: 'first', basinVersionId: 'first_v1' },
+            { basinId: 'second', basinVersionId: 'second_v1' },
+          ],
+        }),
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'first', basinVersionId: 'first_v1' },
+        { basinId: 'second', basinVersionId: 'second_v1' },
+      ]} />)
+
+      const status = screen.getByTestId('harness').getAttribute('data-status') ?? ''
+      expect(status).toContain('已加载 5000 个代站')
+      expect(status).toContain('总数未完全统计')
+      expect(status).not.toContain('5000/5000')
+    })
+
+    it('reports context-cap truncation even when no stations were loaded', () => {
+      const basinContexts = Array.from({ length: STATION_CONTEXT_CAP + 1 }, (_, index) => ({
+        basinId: `basin-${index}`,
+        basinVersionId: `basin-${index}_v1`,
+      }))
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 0,
+          totalKnown: false,
+          loaded: 0,
+          truncated: true,
+        },
+        requestKey: stationLayerRequestKey({ basinContexts }),
+      })
+
+      render(<Harness active basinContexts={basinContexts} />)
+
+      const harness = screen.getByTestId('harness')
+      const status = harness.getAttribute('data-status') ?? ''
+      expect(harness).toHaveAttribute('data-truncated', 'true')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
+      expect(status).toContain('已加载 0 个代站')
+      expect(status).toContain('总数未完全统计')
+      expect(status).toContain('截断')
+      expect(status).not.toContain('暂无可渲染气象代站')
+    })
+
+    it('reports an honest no-renderable state when the current inventory is empty', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 0,
+          totalKnown: true,
+          loaded: 0,
+          truncated: false,
+        },
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      const harness = screen.getByTestId('harness')
+      expect(harness.getAttribute('data-status')).toContain('暂无可渲染气象代站')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
+    })
+
+    it('reports an honest no-renderable state when loaded stations have no usable coordinates', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [
+            {
+              station_id: 'station-no-coordinates',
+              basin_version_id: 'heihe_v1',
+              station_name: 'Station without coordinates',
+              geom: null,
+              station_role: 'forcing',
+              active_flag: true,
+              created_at: '2026-05-18T00:00:00Z',
+            } as HydroMetStation,
+          ],
+          stationBasinIds: { 'station-no-coordinates': 'heihe' },
+          total: 1,
+          totalKnown: true,
+          loaded: 1,
+          truncated: false,
+        },
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
+      })
+
+      render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      const harness = screen.getByTestId('harness')
+      expect(harness.getAttribute('data-status')).toContain('暂无可渲染气象代站')
+      expect(harness.getAttribute('data-status')).toContain('坐标不可用')
+      expect(harness).toHaveAttribute('data-feature-count', '0')
     })
   })
 })

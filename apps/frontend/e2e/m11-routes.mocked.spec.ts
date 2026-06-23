@@ -424,9 +424,10 @@ test.describe('M26 single fullscreen map', () => {
     await expect(page.getByRole('button', { name: /气象栅格/ })).toHaveCount(0)
     await expect(page.getByTestId('m11-met-raster-notice')).toHaveCount(0)
 
-    // 切气象代站 → 全国总览未选流域时 honest「请选择流域」，不取假数据。
+    // 打开气象代站叠加 → URL 写 metStations=1，水文图例仍跟随 discharge。
     await page.getByRole('button', { name: /气象代站/ }).click()
-    await expect(page).toHaveURL(/layer=met-stations/)
+    await expect(page).toHaveURL(/metStations=1/)
+    await expect(page).not.toHaveURL(/layer=met-station[s]/)
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')
   })
 
@@ -447,12 +448,13 @@ test.describe('M26 single fullscreen map', () => {
     await expect.poll(() => calls.some((call) => call.path === '/api/v1/runs' && call.query.source === 'GFS')).toBe(true)
   })
 
-  test('lands the /meteorology redirect on the met-stations layer', async ({ page }) => {
+  test('lands the /meteorology redirect with station overlay enabled', async ({ page }) => {
     await mockSingleMapApis(page)
 
-    // 旧 /meteorology → /?layer=met-stations（LegacyRedirect extraParams）。
+    // 旧 /meteorology → /?metStations=1（LegacyRedirect extraParams）。
     await page.goto('/meteorology?source=gfs')
-    await expect(page).toHaveURL(/layer=met-stations/)
+    await expect(page).toHaveURL(/metStations=1/)
+    await expect(page).not.toHaveURL(/layer=met-station[s]/)
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
     await expect(page.getByRole('button', { name: /气象代站/, pressed: true })).toBeVisible()
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')

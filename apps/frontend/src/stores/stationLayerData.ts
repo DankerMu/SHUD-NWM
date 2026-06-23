@@ -1,14 +1,11 @@
 import { create } from 'zustand'
 
-import { client } from '@/api/client'
-import { getApiErrorMessage, unwrapApiData } from '@/api/response'
-import type { components } from '@/api/types'
+import { getApiErrorMessage } from '@/api/response'
 import {
   HYDRO_MET_STATION_LIMIT,
   fetchHydroMetStationsByIdentity,
   type HydroMetStation,
 } from '@/pages/hydroMet/bootstrap'
-import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 /**
@@ -16,14 +13,15 @@ import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
  * 不让"看似完整"的图层掩盖缺失（spec: 诚实标注 truncation）。
  */
 export const STATION_CLIENT_CAP = 5000
+/** 国家级 overview 守卫：最多请求前 N 个已解析流域版本，避免空/稀疏流域扇出无界首页请求。 */
+export const STATION_CONTEXT_CAP = 50
 export const STATION_PAGE_LIMIT = HYDRO_MET_STATION_LIMIT
-
-type ApiBasinVersion = components['schemas']['BasinVersion']
 
 export interface StationLayerData {
   stations: HydroMetStation[]
   stationBasinIds: Record<string, string>
   total: number
+  totalKnown: boolean
   loaded: number
   truncated: boolean
 }
@@ -35,29 +33,26 @@ export interface StationLayerBasinContext {
 
 export interface StationLayerRequest {
   basinContexts: StationLayerBasinContext[]
-  /** 已解析的具体源；store 不接受 best/compare（类型即 GFS/IFS）。 */
-  resolvedSource: HydroMetSource
-  cycle: string | null
 }
 
 interface StationLayerDataState {
   data: StationLayerData | null
   loading: boolean
   error: string | null
-  /** 当前已解析快照的请求键（basinId+source+cycle）；用于 UI 判定数据是否匹配当前请求。 */
+  /** 当前已解析快照的请求键（basinId+basinVersionId）；用于 UI 判定数据是否匹配当前请求。 */
   requestKey: string | null
   loadStationLayer: (request: StationLayerRequest) => Promise<StationLayerData>
   clear: () => void
 }
 
-function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
+function normalizeBasinContexts(contexts: StationLayerBasinContext[]): Array<StationLayerBasinContext & { basinVersionId: string }> {
   const seen = new Set<string>()
-  const normalized: StationLayerBasinContext[] = []
+  const normalized: Array<StationLayerBasinContext & { basinVersionId: string }> = []
   for (const context of contexts) {
     const basinId = context.basinId.trim()
     const basinVersionId = context.basinVersionId?.trim() || null
-    if (!basinId) continue
-    const key = `${basinId}::${basinVersionId ?? ''}`
+    if (!basinId || !basinVersionId) continue
+    const key = JSON.stringify([basinId, basinVersionId])
     if (seen.has(key)) continue
     seen.add(key)
     normalized.push({ basinId, basinVersionId })
@@ -66,10 +61,9 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
 }
 
 export function stationLayerRequestKey(request: StationLayerRequest) {
-  const basinKey = normalizeBasinContexts(request.basinContexts)
-    .map((context) => `${context.basinId}:${context.basinVersionId ?? 'missing'}`)
-    .join(',')
-  return `${basinKey}::${request.resolvedSource}::${request.cycle ?? 'latest'}`
+  return JSON.stringify(
+    normalizeBasinContexts(request.basinContexts).map(({ basinId, basinVersionId }) => [basinId, basinVersionId]),
+  )
 }
 
 const inFlight = new Map<string, Promise<StationLayerData>>()
@@ -81,39 +75,42 @@ let activeRequestKey: string | null = null
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const contexts = await resolveStationBasinContexts(normalizeBasinContexts(request.basinContexts))
-  if (contexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
+  const normalizedContexts = normalizeBasinContexts(request.basinContexts)
+  if (normalizedContexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
+  const contexts = normalizedContexts.slice(0, STATION_CONTEXT_CAP)
 
   const stations: HydroMetStation[] = []
   const stationBasinIds: Record<string, string> = {}
   let total = 0
-  let truncated = false
+  let totalKnown = normalizedContexts.length <= contexts.length
+  let truncated = normalizedContexts.length > contexts.length
 
   for (const context of contexts) {
     if (stations.length >= STATION_CLIENT_CAP) {
       truncated = true
+      totalKnown = false
       break
     }
 
     const firstPage = await fetchHydroMetStationsByIdentity(
-      { basinVersionId: context.basinVersionId },
+      { basinVersionId: context.basinVersionId as string },
       { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
     )
     const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
     total += basinTotal
 
-    appendStations(stations, stationBasinIds, firstPage.items, context.basinId)
+    if (appendStations(stations, stationBasinIds, firstPage.items, context.basinId)) truncated = true
 
     let offset = firstPage.items.length
     while (offset < basinTotal && stations.length < STATION_CLIENT_CAP) {
       const remainingCap = STATION_CLIENT_CAP - stations.length
       const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
       const page = await fetchHydroMetStationsByIdentity(
-        { basinVersionId: context.basinVersionId },
+        { basinVersionId: context.basinVersionId as string },
         { limit: pageLimit, offset },
       )
       if (page.items.length === 0) break
-      appendStations(stations, stationBasinIds, page.items, context.basinId)
+      if (appendStations(stations, stationBasinIds, page.items, context.basinId)) truncated = true
       offset += page.items.length
     }
 
@@ -125,29 +122,10 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     stations,
     stationBasinIds,
     total,
+    totalKnown,
     loaded,
     truncated: truncated || loaded < total,
   }
-}
-
-async function resolveStationBasinContexts(contexts: StationLayerBasinContext[]): Promise<StationLayerBasinContext[]> {
-  const resolved = await Promise.all(
-    contexts.map(async (context) => ({
-      basinId: context.basinId,
-      basinVersionId: context.basinVersionId ?? (await fetchDefaultBasinVersionId(context.basinId)),
-    })),
-  )
-  return resolved.filter((context): context is StationLayerBasinContext & { basinVersionId: string } => Boolean(context.basinVersionId))
-}
-
-async function fetchDefaultBasinVersionId(basinId: string): Promise<string | null> {
-  const { data, error } = await client.GET('/api/v1/basins/{basin_id}/versions', {
-    params: { path: { basin_id: basinId }, query: { limit: 20, offset: 0 } },
-  })
-  if (error) throw new Error(getApiErrorMessage(error, '获取流域版本失败'))
-  const versions = unwrapApiData<ApiBasinVersion[]>(data, '获取流域版本失败')
-  const selected = versions.find((version) => version.active_flag) ?? versions[0] ?? null
-  return selected?.basin_version_id ?? null
 }
 
 function appendStations(
@@ -156,13 +134,16 @@ function appendStations(
   items: HydroMetStation[],
   basinId: string,
 ) {
-  for (const station of items) {
+  const remainingCap = STATION_CLIENT_CAP - stations.length
+  const appendedItems = items.slice(0, Math.max(0, remainingCap))
+  for (const station of appendedItems) {
     stations.push(station)
     if (station.station_id) stationBasinIds[station.station_id] = basinId
   }
+  return items.length > appendedItems.length
 }
 
-export const useStationLayerDataStore = create<StationLayerDataState>((set) => ({
+export const useStationLayerDataStore = create<StationLayerDataState>((set, get) => ({
   data: null,
   loading: false,
   error: null,
@@ -175,6 +156,8 @@ export const useStationLayerDataStore = create<StationLayerDataState>((set) => (
   },
   loadStationLayer: async (request) => {
     const key = stationLayerRequestKey(request)
+    const current = get()
+    if (!current.loading && current.requestKey === key && current.data) return current.data
     const existing = inFlight.get(key)
     if (existing && activeRequestKey === key) return existing
 
@@ -182,7 +165,8 @@ export const useStationLayerDataStore = create<StationLayerDataState>((set) => (
     activeRequestKey = key
     set({ loading: true, error: null })
 
-    const load = (async () => {
+    let load!: Promise<StationLayerData>
+    load = (async () => {
       try {
         const data = await fetchAllStations(request)
         if (nonce === requestNonce && activeRequestKey === key) {

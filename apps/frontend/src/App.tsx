@@ -21,7 +21,7 @@ const ModelAssetsPage = lazy(() =>
  * - 附加语义参数时同名键以原始 search 的值为准（用户既有状态优先）。
  *
  * `param` 把路径参数（basinId/segmentId）映射为语义查询键；
- * `extraParams` 是静态语义参数（layer 等）。
+ * `extraParams` 是静态语义参数（layer / overlay 等）。
  */
 export function LegacyRedirect({
   param,
@@ -62,7 +62,7 @@ export default function App() {
             <Route path="/forecast" element={<LegacyRedirect />} />
             <Route
               path="/meteorology"
-              element={<LegacyRedirect extraParams={{ layer: 'met-stations' }} />}
+              element={<LegacyRedirect extraParams={{ metStations: '1' }} />}
             />
             <Route
               path="/flood-alerts"

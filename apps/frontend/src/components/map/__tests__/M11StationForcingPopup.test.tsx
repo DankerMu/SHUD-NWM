@@ -208,6 +208,23 @@ afterEach(() => {
 })
 
 describe('M11StationForcingPopup', () => {
+  it('waits honestly without station-series requests when no concrete GFS/IFS source is available', () => {
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource={null} station={station} />)
+
+    expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('等待 GFS/IFS 源解析')
+    expect(fetchHydroMetLatestProduct).not.toHaveBeenCalled()
+    expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
+  })
+
+  it('keeps compare GFS+IFS resolved state on the existing dual-source station-series path', async () => {
+    mockSeriesBySource()
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS+IFS" station={station} />)
+
+    expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
+  })
+
   it('renders one selected forcing variable chart with GFS and IFS on the same axis', async () => {
     mockSeriesBySource()
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)

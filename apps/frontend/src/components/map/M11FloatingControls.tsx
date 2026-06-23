@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench } from 'lucide-react'
+import { ArrowLeft, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { cn } from '@/lib/cn'
@@ -10,17 +10,18 @@ import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
 const GLASS_PANEL =
   'rounded-lg border border-white/40 bg-white/70 shadow-lg backdrop-blur-md supports-[backdrop-filter]:bg-white/55'
 
-/** 浮层图层切换器可选项：流量（默认）/ 气象代站。 */
+/** 浮层水文图层切换器可选项。 */
 export interface M11FloatingLayerOption {
   value: M11Layer
   label: string
   description: string
-  icon: typeof Droplets
+  icon: LucideIcon
 }
 
 export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m3/s', icon: Droplets },
-  { value: 'met-stations', label: '气象代站', description: '点位代站聚合', icon: MapPin },
+  { value: 'flood-return-period', label: '重现期', description: 'Return period', icon: Layers },
+  { value: 'warning-level', label: '预警等级', description: 'Warning level', icon: Layers },
 ]
 
 /**
@@ -28,9 +29,11 @@ export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
  */
 export function M11FloatingLayerSwitcher({
   layer,
+  metStations = false,
   onQueryChange,
 }: {
   layer: M11Layer
+  metStations?: boolean
   onQueryChange?: (patch: M11QueryPatch) => void
 }) {
   return (
@@ -41,7 +44,7 @@ export function M11FloatingLayerSwitcher({
     >
       <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
         <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        图层
+        水文图层
       </div>
       <div className="space-y-1">
         {m11FloatingLayerOptions.map((option) => {
@@ -68,6 +71,25 @@ export function M11FloatingLayerSwitcher({
             </button>
           )
         })}
+      </div>
+      <div className="mt-2 border-t border-white/50 pt-2">
+        <button
+          type="button"
+          className={cn(
+            'flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
+            metStations
+              ? 'border-primary-600 bg-primary-600/15 text-primary-700'
+              : 'border-transparent text-neutral-700 hover:bg-white/60',
+          )}
+          aria-pressed={metStations}
+          onClick={() => onQueryChange?.({ metStations: !metStations })}
+        >
+          <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0">
+            <span className="block text-sm font-medium leading-tight">气象代站</span>
+            <span className="block truncate text-xs text-neutral-600">点位代站叠加</span>
+          </span>
+        </button>
       </div>
     </section>
   )
@@ -132,7 +154,6 @@ export function resolveM11FloatingLegend(layer: M11Layer, layers: LayerState[]):
 function legendTitle(layer: M11Layer) {
   if (layer === 'warning-level') return '预警等级图例'
   if (layer === 'flood-return-period') return '重现期图例'
-  if (layer === 'met-stations') return '气象代站图例'
   return '径流量图例'
 }
 
@@ -142,7 +163,6 @@ function legendTitle(layer: M11Layer) {
  */
 export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: LayerState[] }) {
   const entries = resolveM11FloatingLegend(layer, layers)
-  const honestNote = layer === 'met-stations' ? '代站为点位聚合图层，无色阶图例。' : '当前图层暂无图例合同。'
 
   return (
     <section
@@ -166,7 +186,7 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
         </div>
       ) : (
         <p className="text-xs text-neutral-600" data-testid="m11-floating-legend-empty">
-          {honestNote}
+          当前图层暂无图例合同。
         </p>
       )}
     </section>

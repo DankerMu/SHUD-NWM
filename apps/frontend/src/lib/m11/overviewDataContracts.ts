@@ -1,6 +1,6 @@
 import type { components } from '@/api/types'
 import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
-import { m11QueryHref } from '@/lib/m11/queryState'
+import { defaultM11QueryState, m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -325,7 +325,6 @@ const layerLabels: Record<M11Layer, string> = {
   discharge: 'Discharge',
   'flood-return-period': 'Flood return period',
   'warning-level': 'Warning level',
-  'met-stations': 'Meteorological stations',
 }
 
 export function createSourceScenarioSelection(
@@ -757,7 +756,7 @@ export function filterBasinSegmentRows(
 }
 
 export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'basemap' | 'q'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'metStations' | 'basemap' | 'q'>
   basin?: ApiBasin | null
   basinVersionId: string
   segmentId: string
@@ -835,10 +834,12 @@ export function normalizeSelectedSegmentDetail(input: {
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
     handoffUrl: m11QueryHref('/', {
+      ...defaultM11QueryState,
       source: handoffSource,
       cycle: selectionQuery.cycle,
       validTime: effectiveValidTime,
       layer: input.query.layer,
+      metStations: input.query.metStations,
       basemap: input.query.basemap,
       basinVersionId: input.basinVersionId,
       riverNetworkVersionId:
@@ -1348,8 +1349,7 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
 export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 'returnPeriod' | 'warningLevel'>, layer: M11Layer) {
   if (layer === 'warning-level') return m11WarningLevelColor(row.warningLevel)
   if (layer === 'flood-return-period') return m11ReturnPeriodColor(row.returnPeriod)
-  if (layer === 'discharge') return m11DischargeColor(row.currentQ)
-  return '#94A3B8'
+  return m11DischargeColor(row.currentQ)
 }
 
 // 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同源（ColorBrewer 蓝系、log 阶分桶）。

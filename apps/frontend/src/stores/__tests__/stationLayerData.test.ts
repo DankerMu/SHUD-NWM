@@ -3,17 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import {
   STATION_CLIENT_CAP,
+  STATION_CONTEXT_CAP,
   STATION_PAGE_LIMIT,
   stationLayerRequestKey,
   useStationLayerDataStore,
 } from '@/stores/stationLayerData'
 
 const fetchHydroMetStationsByIdentityMock = vi.fn()
-const clientGetMock = vi.fn()
-
-vi.mock('@/api/client', () => ({
-  client: { GET: (...args: unknown[]) => clientGetMock(...args) },
-}))
 
 vi.mock('@/pages/hydroMet/bootstrap', async () => {
   const actual = await vi.importActual<typeof import('@/pages/hydroMet/bootstrap')>('@/pages/hydroMet/bootstrap')
@@ -51,8 +47,28 @@ function stationPage(items: HydroMetStation[], totalCount?: number) {
 describe('stationLayerData store (M26-3)', () => {
   beforeEach(() => {
     fetchHydroMetStationsByIdentityMock.mockReset()
-    clientGetMock.mockReset()
     useStationLayerDataStore.getState().clear()
+  })
+
+  it('builds structural request keys for delimiter-shaped basin identities', () => {
+    const first = stationLayerRequestKey({
+      basinContexts: [{ basinId: 'a:b', basinVersionId: 'c' }],
+    })
+    const second = stationLayerRequestKey({
+      basinContexts: [{ basinId: 'a', basinVersionId: 'b:c' }],
+    })
+
+    expect(first).not.toBe(second)
+    expect(
+      stationLayerRequestKey({
+        basinContexts: [
+          { basinId: ' qhh ', basinVersionId: ' bv-qhh ' },
+          { basinId: 'qhh', basinVersionId: 'bv-qhh' },
+        ],
+      }),
+    ).toBe(stationLayerRequestKey({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
+    }))
   })
 
   it('loads every visible basin version and pages by offset until total is reached', async () => {
@@ -69,11 +85,10 @@ describe('stationLayerData store (M26-3)', () => {
         { basinId: 'heihe', basinVersionId: 'bv-heihe' },
         { basinId: 'qhh', basinVersionId: 'bv-qhh' },
       ],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(2095)
+    expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(2095)
     expect(data.truncated).toBe(false)
     expect(data.stationBasinIds['heihe-0']).toBe('heihe')
@@ -98,13 +113,78 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'china', basinVersionId: 'bv-cn' }],
-      resolvedSource: 'IFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(12000)
+    expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(STATION_CLIENT_CAP)
     expect(data.truncated).toBe(true)
+  })
+
+  it('caps a backend page that over-returns beyond the remaining client cap', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValueOnce(
+      stationPage(stations('over', STATION_CLIENT_CAP + 37, 0), STATION_CLIENT_CAP + 37),
+    )
+
+    const data = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'over', basinVersionId: 'bv-over' }],
+    })
+
+    expect(data.loaded).toBe(STATION_CLIENT_CAP)
+    expect(data.stations).toHaveLength(STATION_CLIENT_CAP)
+    expect(data.truncated).toBe(true)
+    expect(data.total).toBe(STATION_CLIENT_CAP + 37)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledWith(
+      { basinVersionId: 'bv-over' },
+      { limit: STATION_PAGE_LIMIT, offset: 0 },
+    )
+  })
+
+  it('marks totals unknown when the client cap skips later basin totals', async () => {
+    fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }, query: { limit: number; offset: number }) => {
+      if (identity.basinVersionId === 'bv-first') {
+        return stationPage(stations('first', query.limit, query.offset), STATION_CLIENT_CAP)
+      }
+      return stationPage(stations('second', 10, query.offset), 10)
+    })
+
+    const data = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [
+        { basinId: 'first', basinVersionId: 'bv-first' },
+        { basinId: 'second', basinVersionId: 'bv-second' },
+      ],
+    })
+
+    expect(data.loaded).toBe(STATION_CLIENT_CAP)
+    expect(data.total).toBe(STATION_CLIENT_CAP)
+    expect(data.totalKnown).toBe(false)
+    expect(data.truncated).toBe(true)
+    expect(fetchHydroMetStationsByIdentityMock).not.toHaveBeenCalledWith(
+      { basinVersionId: 'bv-second' },
+      expect.anything(),
+    )
+  })
+
+  it('caps empty visible basin contexts and reports unknown total coverage', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage([], 0))
+    const basinContexts = Array.from({ length: STATION_CONTEXT_CAP + 3 }, (_, index) => ({
+      basinId: `basin-${index}`,
+      basinVersionId: `bv-${index}`,
+    }))
+
+    const data = await useStationLayerDataStore.getState().loadStationLayer({ basinContexts })
+
+    expect(data.total).toBe(0)
+    expect(data.loaded).toBe(0)
+    expect(data.totalKnown).toBe(false)
+    expect(data.truncated).toBe(true)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(STATION_CONTEXT_CAP)
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual(
+      basinContexts.slice(0, STATION_CONTEXT_CAP).map((context) => ({ basinVersionId: context.basinVersionId })),
+    )
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).not.toContainEqual({
+      basinVersionId: `bv-${STATION_CONTEXT_CAP}`,
+    })
   })
 
   it('loads a single page basin without truncation', async () => {
@@ -113,45 +193,25 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(386)
+    expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(386)
     expect(data.truncated).toBe(false)
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
   })
 
-  it('resolves a missing basin version from the basin versions endpoint before loading stations', async () => {
-    clientGetMock.mockResolvedValueOnce({
-      data: {
-        status: 'ok',
-        data: [
-          { basin_version_id: 'bv-qhh-old', active_flag: false },
-          { basin_version_id: 'bv-qhh-active', active_flag: true },
-        ],
-      },
-      error: undefined,
-    })
-    fetchHydroMetStationsByIdentityMock.mockResolvedValueOnce(stationPage(stations('qhh', 2, 0), 2))
-
-    const data = await useStationLayerDataStore.getState().loadStationLayer({
+  it('rejects missing basin versions without per-basin discovery requests', async () => {
+    const request = {
       basinContexts: [{ basinId: 'qhh', basinVersionId: null }],
-      resolvedSource: 'GFS',
-      cycle: null,
-    })
+    }
 
-    expect(clientGetMock).toHaveBeenCalledWith(
-      '/api/v1/basins/{basin_id}/versions',
-      { params: { path: { basin_id: 'qhh' }, query: { limit: 20, offset: 0 } } },
+    await expect(useStationLayerDataStore.getState().loadStationLayer(request)).rejects.toThrow(
+      '代站图层缺少可用流域版本身份',
     )
-    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledWith(
-      { basinVersionId: 'bv-qhh-active' },
-      { limit: STATION_PAGE_LIMIT, offset: 0 },
-    )
-    expect(data.loaded).toBe(2)
-    expect(data.stationBasinIds['qhh-0']).toBe('qhh')
+    expect(fetchHydroMetStationsByIdentityMock).not.toHaveBeenCalled()
+    expect(useStationLayerDataStore.getState().requestKey).toBe(stationLayerRequestKey(request))
   })
 
   it('handles a zero-station basin without false truncation', async () => {
@@ -160,11 +220,10 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'empty', basinVersionId: 'bv-empty' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(0)
+    expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(0)
     expect(data.truncated).toBe(false)
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
@@ -177,11 +236,10 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'nocount', basinVersionId: 'bv-nocount' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.loaded).toBe(386)
+    expect(data.totalKnown).toBe(true)
     expect(data.truncated).toBe(false)
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
   })
@@ -196,8 +254,6 @@ describe('stationLayerData store (M26-3)', () => {
     await expect(
       useStationLayerDataStore.getState().loadStationLayer({
         basinContexts: [{ basinId: 'heihe', basinVersionId: 'bv-heihe' }],
-        resolvedSource: 'GFS',
-        cycle: null,
       }),
     ).rejects.toThrow('第二页加载失败')
 
@@ -209,7 +265,7 @@ describe('stationLayerData store (M26-3)', () => {
   it('dedupes concurrent identical requests', async () => {
     fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage(stations('qhh', 386, 0), 386))
 
-    const request = { basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }], resolvedSource: 'GFS' as const, cycle: null }
+    const request = { basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }] }
     const [a, b] = await Promise.all([
       useStationLayerDataStore.getState().loadStationLayer(request),
       useStationLayerDataStore.getState().loadStationLayer(request),
@@ -217,6 +273,74 @@ describe('stationLayerData store (M26-3)', () => {
 
     expect(a).toBe(b)
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns settled matching data without refetching the same station inventory key', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage(stations('qhh', 2, 0), 2))
+
+    const first = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
+    })
+    const second = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
+    })
+
+    expect(second).toBe(first)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reuse settled data for delimiter-colliding basin identities', async () => {
+    fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }) => {
+      if (identity.basinVersionId === 'c') return stationPage([station('shape-a')], 1)
+      if (identity.basinVersionId === 'b:c') return stationPage([station('shape-b')], 1)
+      throw new Error(`Unexpected basin version ${identity.basinVersionId}`)
+    })
+
+    const firstRequest = { basinContexts: [{ basinId: 'a:b', basinVersionId: 'c' }] }
+    const secondRequest = { basinContexts: [{ basinId: 'a', basinVersionId: 'b:c' }] }
+
+    const first = await useStationLayerDataStore.getState().loadStationLayer(firstRequest)
+    const second = await useStationLayerDataStore.getState().loadStationLayer(secondRequest)
+
+    expect(stationLayerRequestKey(firstRequest)).not.toBe(stationLayerRequestKey(secondRequest))
+    expect(second).not.toBe(first)
+    expect(first.stations[0]?.station_id).toBe('shape-a')
+    expect(second.stations[0]?.station_id).toBe('shape-b')
+    expect(useStationLayerDataStore.getState().data?.stations[0]?.station_id).toBe('shape-b')
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual([
+      { basinVersionId: 'c' },
+      { basinVersionId: 'b:c' },
+    ])
+  })
+
+  it('does not reuse in-flight data for delimiter-colliding basin identities', async () => {
+    let resolveFirst: ((value: ReturnType<typeof stationPage>) => void) | null = null
+    fetchHydroMetStationsByIdentityMock.mockImplementation((identity: { basinVersionId: string }) => {
+      if (identity.basinVersionId === 'c') {
+        return new Promise((resolve) => {
+          resolveFirst = resolve
+        })
+      }
+      if (identity.basinVersionId === 'b:c') return Promise.resolve(stationPage([station('shape-b')], 1))
+      throw new Error(`Unexpected basin version ${identity.basinVersionId}`)
+    })
+
+    const firstRequest = { basinContexts: [{ basinId: 'a:b', basinVersionId: 'c' }] }
+    const secondRequest = { basinContexts: [{ basinId: 'a', basinVersionId: 'b:c' }] }
+
+    const firstPromise = useStationLayerDataStore.getState().loadStationLayer(firstRequest)
+    const secondPromise = useStationLayerDataStore.getState().loadStationLayer(secondRequest)
+
+    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual([
+      { basinVersionId: 'c' },
+      { basinVersionId: 'b:c' },
+    ])
+
+    resolveFirst?.(stationPage([station('shape-a')], 1))
+    const [first, second] = await Promise.all([firstPromise, secondPromise])
+
+    expect(first.stations[0]?.station_id).toBe('shape-a')
+    expect(second.stations[0]?.station_id).toBe('shape-b')
   })
 
   it('does not overwrite a newer request with a stale earlier response', async () => {
@@ -233,14 +357,11 @@ describe('stationLayerData store (M26-3)', () => {
     const store = useStationLayerDataStore.getState()
     const firstPromise = store.loadStationLayer({
       basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     }).catch(() => undefined)
-    const secondData = await store.loadStationLayer({
+    const secondRequest = {
       basinContexts: [{ basinId: 'heihe', basinVersionId: 'bv-heihe' }],
-      resolvedSource: 'GFS',
-      cycle: null,
-    })
+    }
+    const secondData = await store.loadStationLayer(secondRequest)
 
     // 让过期的第一个请求晚一步 resolve。
     resolveFirst?.(stationPage(stations('qhh', 5, 0), 5))
@@ -248,11 +369,11 @@ describe('stationLayerData store (M26-3)', () => {
 
     expect(secondData.total).toBe(10)
     expect(useStationLayerDataStore.getState().data?.total).toBe(10)
-    expect(useStationLayerDataStore.getState().requestKey).toContain('heihe')
+    expect(useStationLayerDataStore.getState().requestKey).toBe(stationLayerRequestKey(secondRequest))
   })
 
   it('surfaces an error when no basin version identity is available', async () => {
-    const request = { basinContexts: [], resolvedSource: 'GFS' as const, cycle: null }
+    const request = { basinContexts: [] }
 
     await expect(
       useStationLayerDataStore.getState().loadStationLayer(request),

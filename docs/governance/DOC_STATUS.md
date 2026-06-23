@@ -101,7 +101,7 @@ is defined by `apps/frontend/src/App.tsx`.
 - **Legacy redirect aliases** (compatibility only; not active independent pages —
   they `replace`-redirect to `/` preserving search + added semantic params):
   `/overview`, `/hydro-met`, `/forecast` → `/`; `/meteorology` →
-  `/?layer=met-stations`; `/flood-alerts` → `/?layer=flood-return-period`;
+  `/?metStations=1`; `/flood-alerts` → `/?layer=flood-return-period`;
   `/basins/:basinId` → `/?basinId=…`; `/segments/:segmentId` → `/?segmentId=…`.
 - Current entrypoint docs (`README.md`, `progress.md`, `CLAUDE.md`) must not
   present the legacy aliases as active independent pages. Remaining old-route

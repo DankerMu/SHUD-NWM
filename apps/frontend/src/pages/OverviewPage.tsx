@@ -170,7 +170,7 @@ function M11FullscreenMap({
         onOverlayHover={onOverlayHover}
         onOverlayClick={onOverlayClick}
       />
-      <M11FloatingLayerSwitcher layer={state.layer} onQueryChange={onQueryChange} />
+      <M11FloatingLayerSwitcher layer={state.layer} metStations={state.metStations} onQueryChange={onQueryChange} />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11OpsLink visible={opsVisible} />
       {children}
@@ -229,8 +229,8 @@ function BasinDetailMode({
 
 const NONE_VISIBLE_SENTINEL = '__none__'
 
-function concreteHydroMetSource(resolvedSource: string | null | undefined): HydroMetSource | null {
-  if (resolvedSource === 'GFS' || resolvedSource === 'IFS') return resolvedSource
+function stationSeriesSourceAvailability(resolvedSource: string | null | undefined): HydroMetSource | 'GFS+IFS' | null {
+  if (resolvedSource === 'GFS' || resolvedSource === 'IFS' || resolvedSource === 'GFS+IFS') return resolvedSource
   return null
 }
 
@@ -241,6 +241,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       cycle: state.cycle,
       validTime: state.validTime,
       layer: state.layer,
+      metStations: false,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
@@ -299,6 +300,22 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // store 也不跟踪它（in-flight 用作 coalesce + 模块级 cached() 持久化兜底），但保留 mountedRef
   // 让未来加 setState 消费时仍有显式 guard。
   const overviewLatestRunId = currentOverview?.summary?.freshness?.runId ?? null
+  const rankingQuery = useMemo(
+    () => ({ ...state, metStations: false }),
+    [
+      state.basemap,
+      state.basinId,
+      state.basinVersionId,
+      state.cycle,
+      state.layer,
+      state.q,
+      state.riverNetworkVersionId,
+      state.segmentId,
+      state.source,
+      state.validTime,
+      state.warningLevel,
+    ],
+  )
   const mountedRef = useRef(true)
   useEffect(() => {
     mountedRef.current = true
@@ -307,11 +324,11 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     }
   }, [])
   useEffect(() => {
-    const rankingDrivenLayer = state.layer === 'flood-return-period' || state.layer === 'warning-level'
+    const rankingDrivenLayer = rankingQuery.layer === 'flood-return-period' || rankingQuery.layer === 'warning-level'
     if (!rankingDrivenLayer || !overviewLatestRunId) return
     // 全国总览：basinId 始终 null（overviewLatestRunId 已隐含到 run_id），无须二次过滤；
     // basinId 缺省值与 in-flight key 形状对齐（floodRankingKey 第三参 `basinId ?? ''`）。
-    void loadFloodRankingOnDemand(overviewLatestRunId, state, null)
+    void loadFloodRankingOnDemand(overviewLatestRunId, rankingQuery, null)
       .then(() => {
         if (!mountedRef.current) return
         // 未来若需把 ranking 写回本地 state，必须先校验 mountedRef.current（防 unmount 后 setState）。
@@ -319,9 +336,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       .catch(() => undefined)
     return () => {
       // 释放 in-flight 条目：layer 切走 / runId 变更 / 组件 unmount 都走同一清理路径。
-      releaseFloodRankingOnDemand(overviewLatestRunId, state, null)
+      releaseFloodRankingOnDemand(overviewLatestRunId, rankingQuery, null)
     }
-  }, [overviewLatestRunId, state])
+  }, [overviewLatestRunId, rankingQuery])
 
   // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
   const nationalGeo = useNationalBasinGeo(true)
@@ -359,6 +376,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     setRiverPopup(null)
     setStationPopup(null)
   }, [state.layer])
+  useEffect(() => {
+    if (!state.metStations) setStationPopup(null)
+  }, [state.metStations])
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
@@ -424,7 +444,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const stationForecastPanel = stationPopup ? (
     <M11StationForcingPopup
       basinId={stationPopup.basinId}
-      initialSource={concreteHydroMetSource(sourceSelection?.resolvedSource)}
+      initialSource={stationSeriesSourceAvailability(sourceSelection?.resolvedSource)}
       station={stationPopup.station}
       onClose={() => setStationPopup(null)}
     />
@@ -433,10 +453,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 全国总览开代站图层：按当前总览中的所有可见流域版本取代站点位；
   // 点位展示不依赖 latest-product ready，避免某个流域 forcing 曲线未就绪时站点也消失。
   const stationLayer = useMetStationLayer({
-    active: state.layer === 'met-stations',
+    active: state.metStations,
     basinContexts: stationLayerBasinContexts,
-    resolvedSource: sourceSelection?.resolvedSource ?? null,
-    cycle: state.cycle,
   })
 
   // 「mapBootstrap 尚未首次落定」单一信号：阶段 1 完成且 overview.bootstrap 已写入即解锁。
@@ -482,7 +500,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     >
       {riverForecastPanel}
       {stationForecastPanel}
-      {state.layer === 'met-stations' && stationLayer.statusNote ? (
+      {state.metStations && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
       ) : surfaceSettling ? (
@@ -504,11 +522,10 @@ export function contextHandoff(
 ) {
   const sourceContext = resolvedDestinationSourceContext(state, sourceSelection)
   const search = serializeM11QueryState({
-    ...defaultM11QueryState,
+    ...state,
     source: sourceContext.source,
     cycle: sourceContext.cycle,
     validTime: sourceContext.validTime,
-    warningLevel: state.warningLevel,
   })
   return {
     href: `${pathname}${search ? `?${search}` : ''}`,

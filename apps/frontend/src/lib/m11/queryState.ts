@@ -3,7 +3,6 @@ export type M11Layer =
   | 'discharge'
   | 'flood-return-period'
   | 'warning-level'
-  | 'met-stations'
 export type M11Basemap = 'terrain' | 'satellite' | 'vector'
 export type M11QueryWarningLevel = 'normal' | 'elevated' | 'watch' | 'warning' | 'major' | 'severe' | 'extreme' | 'orange' | 'red'
 
@@ -12,6 +11,7 @@ export interface M11QueryState {
   cycle: string | null
   validTime: string | null
   layer: M11Layer
+  metStations: boolean
   basemap: M11Basemap
   basinVersionId: string | null
   riverNetworkVersionId: string | null
@@ -21,18 +21,22 @@ export interface M11QueryState {
   q: string | null
 }
 
-export type M11QueryPatch = Partial<Record<keyof M11QueryState, string | null | undefined>>
+export type M11QueryPatch = Partial<{
+  [Key in keyof M11QueryState]: M11QueryState[Key] | null | undefined
+}>
 
 const sources = ['gfs', 'ifs', 'best', 'compare'] as const
-const layers = ['discharge', 'flood-return-period', 'warning-level', 'met-stations'] as const
+const layers = ['discharge', 'flood-return-period', 'warning-level'] as const
 const basemaps = ['terrain', 'satellite', 'vector'] as const
 const warningLevels = ['normal', 'elevated', 'watch', 'warning', 'major', 'severe', 'extreme', 'orange', 'red'] as const
+const legacyMetStationsLayer = 'met-stations'
 
 export const defaultM11QueryState: M11QueryState = {
   source: 'best',
   cycle: null,
   validTime: null,
   layer: 'discharge',
+  metStations: false,
   basemap: 'vector',
   basinVersionId: null,
   riverNetworkVersionId: null,
@@ -44,6 +48,11 @@ export const defaultM11QueryState: M11QueryState = {
 
 function isOneOf<T extends readonly string[]>(value: string | null, allowed: T): value is T[number] {
   return value !== null && (allowed as readonly string[]).includes(value)
+}
+
+function normalizeSource(value: string | null): M11Source | null {
+  const normalized = value?.trim().toLowerCase() ?? null
+  return isOneOf(normalized, sources) ? normalized : null
 }
 
 const rfc3339InstantPattern =
@@ -125,16 +134,19 @@ function normalizeSearch(value: string | null) {
 
 export function parseM11QueryState(input: string | URLSearchParams): M11QueryState {
   const params = typeof input === 'string' ? new URLSearchParams(input) : input
-  const source = params.get('source')
-  const layer = params.get('layer')
+  const source = normalizeSource(params.get('source'))
+  const layerValues = params.getAll('layer')
+  const layer = layerValues.find((value): value is M11Layer => isOneOf(value, layers)) ?? null
   const basemap = params.get('basemap')
   const warningLevel = params.get('warningLevel')
+  const hasLegacyMetStationsLayer = layerValues.includes(legacyMetStationsLayer)
 
   return {
-    source: isOneOf(source, sources) ? source : defaultM11QueryState.source,
+    source: source ?? defaultM11QueryState.source,
     cycle: normalizeIsoInstant(params.get('cycle')),
     validTime: normalizeIsoInstant(params.get('validTime')),
-    layer: isOneOf(layer, layers) ? layer : defaultM11QueryState.layer,
+    layer: layer ?? defaultM11QueryState.layer,
+    metStations: params.get('metStations') === '1' || hasLegacyMetStationsLayer,
     basemap: isOneOf(basemap, basemaps) ? basemap : defaultM11QueryState.basemap,
     basinVersionId: normalizeM11Identifier(params.get('basinVersionId')),
     riverNetworkVersionId: normalizeM11Identifier(params.get('riverNetworkVersionId')),
@@ -145,14 +157,28 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
   }
 }
 
-export function serializeM11QueryState(state: M11QueryState) {
-  const normalized = parseM11QueryState(new URLSearchParams(Object.entries(state).flatMap(([key, value]) => (value ? [[key, value]] : []))))
+function queryParamsFromState(state: M11QueryPatch) {
+  const params = new URLSearchParams()
+  Object.entries(state).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    if (typeof value === 'boolean') {
+      if (value) params.set(key, '1')
+      return
+    }
+    params.set(key, String(value))
+  })
+  return params
+}
+
+export function serializeM11QueryState(state: M11QueryPatch) {
+  const normalized = parseM11QueryState(queryParamsFromState(state))
   const params = new URLSearchParams()
 
   if (normalized.source !== defaultM11QueryState.source) params.set('source', normalized.source)
   if (normalized.cycle) params.set('cycle', normalized.cycle)
   if (normalized.validTime) params.set('validTime', normalized.validTime)
   if (normalized.layer !== defaultM11QueryState.layer) params.set('layer', normalized.layer)
+  if (normalized.metStations) params.set('metStations', '1')
   if (normalized.basemap !== defaultM11QueryState.basemap) params.set('basemap', normalized.basemap)
   if (normalized.basinVersionId) params.set('basinVersionId', normalized.basinVersionId)
   if (normalized.riverNetworkVersionId) params.set('riverNetworkVersionId', normalized.riverNetworkVersionId)
@@ -174,11 +200,7 @@ export function m11QueryHref(pathname: string, state: M11QueryState, patch: M11Q
 }
 
 export function normalizeM11QueryPatch(patch: M11QueryPatch) {
-  const params = new URLSearchParams()
-  Object.entries(patch).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) params.set(key, value)
-  })
-  return parseM11QueryState(params)
+  return parseM11QueryState(queryParamsFromState(patch))
 }
 
 export function needsM11QueryReplacement(search: string) {
