@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Waves, X } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import { formatIssueTime, M11IssueTimeSelect, M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
+import { M11DraggableCurveWindow } from '@/components/map/M11DraggableCurveWindow'
+import { formatIssueTime, M11IssueTimeSelect } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
 import { formatRiverSegmentDisplayName } from '@/lib/hydroMet/displayNames'
 import {
@@ -147,17 +148,21 @@ function buildDualForecast(segment: HydroMetRiverForecastSegmentIdentity, result
 }
 
 /**
- * 河段 q_down 预报面板（M26 单页全屏）：屏幕居中 16:9 玻璃窗（点河段后于屏幕中央展开）。
+ * 河段 q_down 预报面板（M26 单页全屏）：可拖拽玻璃曲线窗。
  * GFS + IFS 同一坐标轴同时渲染、不做切换；滚轮缩放时间轴（以光标所在时刻为中心）。
  * honest 红线：每个源契约校验失败/无产品 → 列出原因，绝不绘制；两源皆无 → honest 空态。
  */
 export function M11RiverForecastPanel({
   basinId,
   segment,
+  active = true,
+  onActivate,
   onClose,
 }: {
   basinId: string | null
   segment: M11RiverPopupSegment
+  active?: boolean
+  onActivate?: () => void
   onClose?: () => void
 }) {
   const identity = useMemo(
@@ -216,40 +221,42 @@ export function M11RiverForecastPanel({
   const failedReasons = forecast.results.filter((result) => result.reason).map((result) => result.reason as string)
   const showInitialLoading = loading && !forecast.data && showLoadingCopy
 
-  return (
-    <aside
-      className={cn(
-        'absolute left-1/2 top-1/2 z-[130] flex aspect-video w-[min(44rem,46vw)] max-h-[82vh] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
-        M11_POPUP_GLASS,
-      )}
-      data-testid="m11-river-forecast-panel"
-    >
-      <div className="h-px shrink-0 bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
-      <header className="flex shrink-0 items-start justify-between gap-2.5 border-b border-white/10 px-4 py-3">
-        <div className="flex min-w-0 items-start gap-2.5">
-          <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-cyan-400/10 text-cyan-300 ring-1 ring-inset ring-cyan-400/30">
-            <Waves className="h-4 w-4" aria-hidden="true" />
-          </span>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold leading-tight text-slate-50" title={displayName.meta ?? displayName.title}>
-              {displayName.title}
-            </div>
-            <div className="mt-0.5 text-[11px] uppercase tracking-[0.14em] text-cyan-300/80">河段 q_down 流量预报 · GFS+IFS</div>
-            {displayName.meta ? <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{displayName.meta}</div> : null}
+  const header = (
+    <header className="flex shrink-0 items-start justify-between gap-2.5 border-b border-white/10 px-4 py-3">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-cyan-400/10 text-cyan-300 ring-1 ring-inset ring-cyan-400/30">
+          <Waves className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold leading-tight text-slate-50" title={displayName.meta ?? displayName.title}>
+            {displayName.title}
           </div>
+          <div className="mt-0.5 text-[11px] uppercase tracking-[0.14em] text-cyan-300/80">河段 q_down 流量预报 · GFS+IFS</div>
+          {displayName.meta ? <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{displayName.meta}</div> : null}
         </div>
-        {onClose ? (
-          <button
-            type="button"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100"
-            aria-label="关闭面板"
-            onClick={onClose}
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        ) : null}
-      </header>
+      </div>
+      {onClose ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100"
+          aria-label="关闭面板"
+          onClick={onClose}
+        >
+          <X className="h-4 w-4" aria-hidden="true" />
+        </button>
+      ) : null}
+    </header>
+  )
 
+  return (
+    <M11DraggableCurveWindow
+      kind="river"
+      identityKey={`${identity.basin_version_id}:${identity.river_network_version_id}:${identity.river_segment_id}`}
+      active={active}
+      onActivate={onActivate}
+      testId="m11-river-forecast-panel"
+      header={header}
+    >
       {issueTimes.length > 0 ? (
         <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400" data-testid="m11-river-panel-cycle-bar">
           <span className="shrink-0 uppercase tracking-wide">起报</span>
@@ -306,6 +313,6 @@ export function M11RiverForecastPanel({
           )}
         </div>
       )}
-    </aside>
+    </M11DraggableCurveWindow>
   )
 }

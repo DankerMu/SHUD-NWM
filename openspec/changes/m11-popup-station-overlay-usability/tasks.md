@@ -63,15 +63,15 @@ Issue #659 evidence rows:
 
 ## 4. Draggable Coexisting Curve Windows
 
-- [ ] 4.1 Add a shared draggable curve-window frame or hook with header-only drag, viewport clamping, focus/z-index handling, and identity-based reset.
-- [ ] 4.2 Migrate river forecast and station forcing panels to the shared draggable frame, with sensible non-overlapping initial placement when both are visible.
-- [ ] 4.3 Remove mutual popup clearing in overview and basin-detail click handlers so river and station curve windows can coexist and close independently.
-- [ ] 4.4 Update component and route tests for river-then-station, station-then-river, independent close behavior, drag behavior, and chart/control interactions not starting drag.
-- [ ] 4.5 Add desktop and narrow-viewport bounding-box tests or Playwright checks proving both windows remain clamped in the map, close/header controls remain reachable, and dragging cannot push either window outside the viewport.
+- [x] 4.1 Add a shared draggable curve-window frame or hook with header-only drag, viewport clamping, focus/z-index handling, and identity-based reset.
+- [x] 4.2 Migrate river forecast and station forcing panels to the shared draggable frame, with sensible non-overlapping initial placement when both are visible.
+- [x] 4.3 Remove mutual popup clearing in overview and basin-detail click handlers so river and station curve windows can coexist and close independently.
+- [x] 4.4 Update component and route tests for river-then-station, station-then-river, independent close behavior, drag behavior, and chart/control interactions not starting drag.
+- [x] 4.5 Add desktop and narrow-viewport bounding-box tests or Playwright checks proving both windows remain clamped in the map, close/header controls remain reachable, and dragging cannot push either window outside the viewport.
 
 ## 5. Verification
 
-- [ ] 5.1 Run targeted frontend tests for query state, overview data contracts, station layer store/hook, floating controls, MapLibre surface, river forecast panel, station forcing popup, and M11 routes.
-- [ ] 5.2 Run `cd apps/frontend && corepack pnpm test` and `cd apps/frontend && corepack pnpm build`.
-- [ ] 5.3 Run `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`.
-- [ ] 5.4 After deployment to node-27, capture live display evidence that `/`, `/meteorology`, river click, station click, dual-window comparison, drag movement, and dark issue-time selector behavior work against `https://test.nwm.ac.cn/`.
+- [x] 5.1 Run targeted frontend tests for query state, overview data contracts, station layer store/hook, floating controls, MapLibre surface, river forecast panel, station forcing popup, and M11 routes.
+- [x] 5.2 Run `cd apps/frontend && corepack pnpm test` and `cd apps/frontend && corepack pnpm build`.
+- [x] 5.3 Run `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`.
+- [x] 5.4 After deployment to node-27, capture live display evidence that `/`, `/meteorology`, river click, station click, dual-window comparison, drag movement, and dark issue-time selector behavior work against `https://test.nwm.ac.cn/`.

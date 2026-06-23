@@ -119,8 +119,82 @@ async function openIssueTimeSelect(user: ReturnType<typeof userEvent.setup>, tes
   return { trigger, content }
 }
 
+const originalViewport = { width: window.innerWidth, height: window.innerHeight }
+
+function setViewport(width: number, height: number) {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width })
+  Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height })
+  window.dispatchEvent(new Event('resize'))
+}
+
+function panelPosition(panel: HTMLElement) {
+  return {
+    x: Number.parseFloat(panel.style.left),
+    y: Number.parseFloat(panel.style.top),
+  }
+}
+
+async function positionedPanel(testId: string) {
+  const panel = await screen.findByTestId(testId)
+  await waitFor(() => expect(Number.isFinite(panelPosition(panel).x)).toBe(true))
+  return panel
+}
+
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  } as DOMRect
+}
+
+function expectRectInside(container: DOMRect, target: DOMRect) {
+  expect(target.left).toBeGreaterThanOrEqual(container.left)
+  expect(target.top).toBeGreaterThanOrEqual(container.top)
+  expect(target.right).toBeLessThanOrEqual(container.right)
+  expect(target.bottom).toBeLessThanOrEqual(container.bottom)
+}
+
+function mockCurveWindowRects({
+  containerTestId,
+  panelTestId,
+  handleTestId,
+  closeLabel,
+  panelWidth,
+  panelHeight,
+}: {
+  containerTestId: string
+  panelTestId: string
+  handleTestId: string
+  closeLabel: string
+  panelWidth: number
+  panelHeight: number
+}) {
+  const original = HTMLElement.prototype.getBoundingClientRect
+  return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function getBoundingClientRect(this: HTMLElement) {
+    const testId = this.getAttribute('data-testid')
+    const panel = document.querySelector(`[data-testid="${panelTestId}"]`) as HTMLElement | null
+    const current = panel ? panelPosition(panel) : { x: 0, y: 0 }
+    const left = Number.isFinite(current.x) ? current.x : 0
+    const top = Number.isFinite(current.y) ? current.y : 0
+
+    if (testId === containerTestId) return rect(0, 0, 900, 600)
+    if (testId === panelTestId) return rect(left, top, panelWidth, panelHeight)
+    if (testId === handleTestId) return rect(left, top, panelWidth, 72)
+    if (this.getAttribute('aria-label') === closeLabel) return rect(left + panelWidth - 44, top + 12, 28, 28)
+    return original.call(this)
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  setViewport(originalViewport.width, originalViewport.height)
   vi.mocked(fetchHydroMetLatestProduct).mockImplementation((async ({ source }: { source: HydroMetSource }) => product(source)) as never)
 })
 
@@ -147,6 +221,87 @@ describe('M11RiverForecastPanel', () => {
     // 两源各解析一次 latest-product
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
+  })
+
+  it('drags only from the header and clamps the river window inside the viewport', async () => {
+    setViewport(1024, 768)
+    mockForecastBySource()
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    const panel = await positionedPanel('m11-river-forecast-panel')
+    const initial = panelPosition(panel)
+    await screen.findByTestId('m11-river-panel-chart')
+
+    fireEvent.pointerDown(screen.getByTestId('m11-river-panel-chart'), { button: 0, clientX: initial.x + 80, clientY: initial.y + 160 })
+    fireEvent.pointerMove(window, { clientX: initial.x + 240, clientY: initial.y + 260 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).toEqual(initial)
+
+    const handle = screen.getByTestId('m11-river-forecast-panel-drag-handle')
+    fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+    fireEvent.pointerMove(window, { clientX: -4000, clientY: -4000 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).toEqual({ x: 12, y: 12 })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 24, clientY: 24 })
+    fireEvent.pointerMove(window, { clientX: 4000, clientY: 4000 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel).x).toBeCloseTo(1024 - Math.min(704, 1024 * 0.42) - 12)
+    expect(panelPosition(panel).y).toBeCloseTo(768 - Math.min(Math.min(704, 1024 * 0.42) * 9 / 16, 768 - 24) - 12)
+  })
+
+  it('keeps the river window, drag handle, and close button inside a nonzero map container', async () => {
+    setViewport(900, 600)
+    mockForecastBySource()
+    const rectSpy = mockCurveWindowRects({
+      containerTestId: 'm11-map-container',
+      panelTestId: 'm11-river-forecast-panel',
+      handleTestId: 'm11-river-forecast-panel-drag-handle',
+      closeLabel: '关闭面板',
+      panelWidth: 378,
+      panelHeight: 213,
+    })
+
+    try {
+      render(
+        <section data-testid="m11-map-container">
+          <M11RiverForecastPanel basinId="basins_qhh" segment={segment} onClose={() => undefined} />
+        </section>,
+      )
+
+      const panel = await positionedPanel('m11-river-forecast-panel')
+      const handle = screen.getByTestId('m11-river-forecast-panel-drag-handle')
+      const close = screen.getByLabelText('关闭面板')
+      const initial = panelPosition(panel)
+
+      fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+      fireEvent.pointerMove(window, { clientX: 5000, clientY: 5000 })
+      fireEvent.pointerUp(window)
+
+      const containerRect = screen.getByTestId('m11-map-container').getBoundingClientRect()
+      expectRectInside(containerRect, panel.getBoundingClientRect())
+      expectRectInside(containerRect, handle.getBoundingClientRect())
+      expectRectInside(containerRect, close.getBoundingClientRect())
+    } finally {
+      rectSpy.mockRestore()
+    }
+  })
+
+  it('resets only the river window placement when the river identity changes', async () => {
+    mockForecastBySource()
+    const { rerender } = render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    const panel = await positionedPanel('m11-river-forecast-panel')
+    const initial = panelPosition(panel)
+    const handle = screen.getByTestId('m11-river-forecast-panel-drag-handle')
+    fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+    fireEvent.pointerMove(window, { clientX: initial.x + 180, clientY: initial.y + 120 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).not.toEqual(initial)
+
+    rerender(<M11RiverForecastPanel basinId="basins_qhh" segment={{ ...segment, river_segment_id: 'seg-010', segment_id: 'seg-010' }} />)
+
+    await waitFor(() => expect(panelPosition(panel)).toEqual(initial))
   })
 
   it('renders a readable river segment title while preserving the raw segment ID', async () => {

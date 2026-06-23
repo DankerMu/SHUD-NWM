@@ -1513,6 +1513,47 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
   })
 
+  it('loads overview station overlay from the query version only when overview metadata maps it to the basin', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    window.history.pushState({}, '', '/?basinVersionId=yangtze_v2026_01&metStations=1')
+    const query = parseM11QueryState(window.location.search)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      overview: {
+        requestScope: matchedOverviewScope(query),
+        bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+        basins: overviewBasins.map((basin) => ({ ...basin, selectedBasinVersionId: null })),
+        summary: createEmptyOverviewSummary(query),
+        layers,
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 1,
+          createsPerBasinNPlusOne: false,
+          missingRequiredFields: [],
+        }),
+        basinVersionToBasinId: { yangtze_v2026_01: 'yangtze' },
+      },
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' }],
+      }),
+    )
+  })
+
   it('clears an overview station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/?metStations=1')
@@ -2022,6 +2063,119 @@ describe('M11 visual foundation shell', () => {
     await waitFor(() =>
       expect(loadStationLayer).toHaveBeenCalledWith({
         basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+  })
+
+  it('loads basin-detail station overlay from a matched detail request scope when selected version is unavailable', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v2026_01&metStations=1')
+    const snapshot = matchedBasinSnapshot('qhh', query)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...snapshot,
+        requestScope: {
+          ...snapshot.requestScope,
+          dataKey: 'stale-time-window',
+        },
+        detail: {
+          ...snapshot.detail,
+          selectedBasinVersionId: null,
+          basinVersions: [],
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=qhh_v2026_01&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'qhh_v2026_01' }],
+      }),
+    )
+  })
+
+  it('waits for a query-matched basin-detail scope before falling back to URL station identity', async () => {
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    const staleQuery = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_old&metStations=1')
+    const staleSnapshot = matchedBasinSnapshot('qhh', staleQuery)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...staleSnapshot,
+        detail: {
+          ...staleSnapshot.detail,
+          selectedBasinVersionId: null,
+          basinVersions: [],
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail: vi.fn().mockResolvedValue(undefined),
+    })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-met-station-status')).toHaveTextContent('暂无可用流域版本')
+    expect(loadStationLayer).not.toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
+    })
+
+    const resolvedQuery = parseM11QueryState('?basinId=qhh&basinVersionId=heihe_v1&metStations=1')
+    const resolvedSnapshot = matchedBasinSnapshot('qhh', resolvedQuery)
+    await act(async () => {
+      useOverviewDataStore.setState({
+        basinDetail: {
+          ...resolvedSnapshot,
+          detail: {
+            ...resolvedSnapshot.detail,
+            selectedBasinVersionId: null,
+            basinVersions: [],
+          },
+        },
+        basinLoading: false,
+        basinError: null,
+      })
+    })
+
+    await waitFor(() =>
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'qhh', basinVersionId: 'heihe_v1' }],
       }),
     )
   })

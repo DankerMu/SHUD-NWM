@@ -95,18 +95,22 @@ vi.mock('react-map-gl/maplibre', () => ({
           onKeyDown={(event) => {
             if (event.key !== 'Enter') return
             event.preventDefault()
+            const segmentId = event.altKey ? 'seg-009' : 'seg-001'
+            const segmentName = event.altKey ? 'Main Stem 009' : 'North Branch 001'
+            const layerId = event.shiftKey ? 'm11-discharge-line-hit' : 'm11-basin-river-line'
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
               lngLat: { lng: 100.5, lat: 30.5 },
               features: [
                 {
-                  layer: { id: 'm11-basin-river-line' },
+                  layer: { id: layerId },
                   properties: {
-                    river_segment_id: 'seg-001',
-                    segment_id: 'seg-001',
+                    river_segment_id: segmentId,
+                    segment_id: segmentId,
+                    basin_id: 'basin-demo',
                     basin_version_id: 'bv-001',
                     river_network_version_id: 'rn-v1',
-                    segment_name: 'North Branch 001',
+                    segment_name: segmentName,
                   },
                 },
               ],
@@ -257,6 +261,24 @@ const m11FloodMvtMetadata: NonNullable<LayerState['metadata']> = {
   valid_times: ['2026-05-18T06:00:00Z'],
 }
 
+const m11DischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'discharge',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/discharge/{valid_time}/{variable}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/discharge/{valid_time}/{variable}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'discharge',
+  source_layer: 'discharge',
+  fallback_available: true,
+  release_blocking: false,
+  required_placeholders: ['valid_time', 'variable', 'z', 'x', 'y'],
+  source_refs: {
+    source_version: 'rnv-v1',
+    basin_version_id: 'bv-001',
+    river_network_version_id: 'rn-v1',
+  },
+  valid_times: ['2026-05-18T06:00:00Z'],
+}
+
 const m11Layers: LayerState[] = [
   {
     layerId: 'discharge',
@@ -284,6 +306,14 @@ const m11Layers: LayerState[] = [
     freshness: m11LayerFreshness,
     legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
+]
+
+const m11LayersWithNationalDischargeMvt: LayerState[] = [
+  {
+    ...m11Layers[0],
+    metadata: m11DischargeNationalMvtMetadata,
+  },
+  m11Layers[1],
 ]
 
 const staleOverviewLayers: LayerState[] = [
@@ -1107,6 +1137,104 @@ describe('App route state', () => {
     expect(overviewAsync).not.toHaveBeenCalled()
   })
 
+  it('keeps overview river and station curve windows coexisting when river is opened before station (M11-661)', async () => {
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
+      data: {
+        stations: hydroMetStationPage.items,
+        stationBasinIds: { qhh_forc_001: 'basin-demo' },
+        total: 1,
+        totalKnown: true,
+        loaded: 1,
+        truncated: false,
+      },
+      requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }] }),
+    })
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(m11LayersWithNationalDischargeMvt, 'source=gfs', 'source=gfs', 'basin-demo'),
+    })
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/?source=gfs&metStations=1')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.getByLabelText('全国总览地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('m11-discharge-line-hit'),
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('met-stations-point'),
+    )
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter', shiftKey: true })
+    const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
+    expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+
+    fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
+    const stationPanel = await screen.findByTestId('m11-station-popup')
+    expect(riverPanel).toBeInTheDocument()
+    expect(stationPanel).toBeInTheDocument()
+    await waitFor(() => expect(riverPanel.style.left).not.toEqual(stationPanel.style.left))
+    expect(stationPanel.style.zIndex).toBe('142')
+    expect(riverPanel.style.zIndex).toBe('132')
+
+    fireEvent.pointerDown(riverPanel, { button: 0, clientX: 120, clientY: 120 })
+    await waitFor(() => expect(riverPanel.style.zIndex).toBe('142'))
+    expect(stationPanel.style.zIndex).toBe('132')
+
+    fireEvent.click(within(stationPanel).getByLabelText('关闭弹窗'))
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
+  })
+
+  it('keeps overview station and river curve windows coexisting when station is opened before river (M11-661)', async () => {
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
+      data: {
+        stations: hydroMetStationPage.items,
+        stationBasinIds: { qhh_forc_001: 'basin-demo' },
+        total: 1,
+        totalKnown: true,
+        loaded: 1,
+        truncated: false,
+      },
+      requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }] }),
+    })
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(m11LayersWithNationalDischargeMvt, 'source=gfs', 'source=gfs', 'basin-demo'),
+    })
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/?source=gfs&metStations=1')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.getByLabelText('全国总览地图')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('met-stations-point'),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
+    const stationPanel = await screen.findByTestId('m11-station-popup')
+    expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter', shiftKey: true })
+    const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
+    expect(stationPanel).toBeInTheDocument()
+    expect(riverPanel).toBeInTheDocument()
+    expect(riverPanel.style.zIndex).toBe('142')
+    expect(stationPanel.style.zIndex).toBe('132')
+
+    fireEvent.click(within(riverPanel).getByLabelText('关闭面板'))
+    await waitFor(() => expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
+  })
+
   it('normalizes the retired met-raster layer back to the default discharge layer (M26)', async () => {
     useOverviewDataStore.setState({
       overview: overviewSnapshot(m11Layers, ''),
@@ -1740,8 +1868,22 @@ describe('App route state', () => {
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
   })
 
-  it('opens the river forecast panel when a river segment map feature is clicked (M26-4)', async () => {
+  it('keeps river and station curve windows coexisting when river is opened before station (M11-661)', async () => {
     const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
+      data: {
+        stations: hydroMetStationPage.items,
+        stationBasinIds: { qhh_forc_001: 'basin-demo' },
+        total: 1,
+        totalKnown: true,
+        loaded: 1,
+        truncated: false,
+      },
+      requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }] }),
+    })
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&basinVersionId=bv-001', 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
       basinLoading: false,
@@ -1750,17 +1892,36 @@ describe('App route state', () => {
     })
     mockHydroMetRouteClient()
 
-    await renderAppAtBasinDetail('/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+    await renderAppAtBasinDetail('/?source=gfs&metStations=1&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('met-stations-point'),
+    )
 
-    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
-
-    expect(await screen.findByTestId('m11-river-forecast-panel')).toBeInTheDocument()
-    expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter', altKey: true })
+    const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
     // 右侧 16:9 面板：GFS+IFS 同轴双绘，无 source 切换控件
     expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+    expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-009')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '1')
+
+    fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
+    const stationPanel = await screen.findByTestId('m11-station-popup')
+    expect(riverPanel).toBeInTheDocument()
+    expect(stationPanel).toBeInTheDocument()
+    await waitFor(() => expect(riverPanel.style.left).not.toEqual(stationPanel.style.left))
+    expect(stationPanel.style.zIndex).toBe('142')
+    expect(riverPanel.style.zIndex).toBe('132')
+
+    fireEvent.pointerDown(riverPanel, { button: 0, clientX: 120, clientY: 120 })
+    await waitFor(() => expect(riverPanel.style.zIndex).toBe('142'))
+    expect(stationPanel.style.zIndex).toBe('132')
+
+    fireEvent.click(within(stationPanel).getByLabelText('关闭弹窗'))
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
   })
 
-  it('opens the station forcing popup when a met-station map feature is clicked (M26-4)', async () => {
+  it('keeps station and river curve windows coexisting when station is opened before river (M11-661)', async () => {
     const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
     useStationLayerDataStore.setState({
       ...useStationLayerDataStore.getInitialState(),
@@ -1792,9 +1953,19 @@ describe('App route state', () => {
 
     fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
 
-    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
-    expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument()
+    const stationPanel = await screen.findByTestId('m11-station-popup')
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
+    const riverPanel = await screen.findByTestId('m11-river-forecast-panel')
+    expect(stationPanel).toBeInTheDocument()
+    expect(riverPanel).toBeInTheDocument()
+    expect(riverPanel.style.zIndex).toBe('142')
+    expect(stationPanel.style.zIndex).toBe('132')
+
+    fireEvent.click(within(riverPanel).getByLabelText('关闭面板'))
+    await waitFor(() => expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument())
+    expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
   })
 
   it('replaces stale URL river network identity from clicked basin map features', async () => {
