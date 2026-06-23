@@ -77,8 +77,6 @@ const basemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof Map
 
 const hydrologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
   { value: 'discharge', label: '河段径流', description: 'q_down / m3/s' },
-  { value: 'flood-return-period', label: '洪水重现期', description: 'Return period' },
-  { value: 'warning-level', label: '预警等级', description: 'Flood warning semantics' },
 ]
 
 const sourceOptions: Array<{ value: M11Source; label: string; description: string }> = [
@@ -94,10 +92,11 @@ const basePlaceholders = [
   ['dem', 'DEM'],
 ] as const
 
+const dischargeFallbackLegend = getM11LayerLegend('discharge')
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
-  discharge: getM11LayerLegend('discharge'),
-  'flood-return-period': getM11LayerLegend('flood-return-period'),
-  'warning-level': getM11LayerLegend('warning-level'),
+  discharge: dischargeFallbackLegend,
+  'flood-return-period': dischargeFallbackLegend,
+  'warning-level': dischargeFallbackLegend,
 }
 
 export function M11MapSurface({
@@ -285,15 +284,10 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
   )
 }
 
-export function LayerLegendPanel({ state, layers = [] }: SharedControlProps) {
-  const activeLayer = layers.find((layer) => layer.layerId === state.layer)
-  const entries = activeLayer?.legend.length ? activeLayer.legend : fallbackLegends[state.layer]
-  const title =
-    state.layer === 'warning-level'
-      ? '预警等级图例'
-      : state.layer === 'flood-return-period'
-        ? '重现期图例'
-        : '径流量图例'
+export function LayerLegendPanel({ layers = [] }: SharedControlProps) {
+  const activeLayer = layers.find((layer) => layer.layerId === 'discharge')
+  const entries = activeLayer?.legend.length ? activeLayer.legend : dischargeFallbackLegend
+  const title = '径流量图例'
 
   return (
     <section className="space-y-2" aria-label="M11 图例">

@@ -66,7 +66,7 @@ export default function App() {
             />
             <Route
               path="/flood-alerts"
-              element={<LegacyRedirect extraParams={{ layer: 'flood-return-period' }} />}
+              element={<LegacyRedirect />}
             />
             <Route
               path="/basins/:basinId"

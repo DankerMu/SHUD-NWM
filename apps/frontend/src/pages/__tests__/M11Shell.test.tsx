@@ -1130,7 +1130,11 @@ describe('M11 visual foundation shell', () => {
         (feature) => feature.properties.layer_color,
       )
       expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
-      expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      if (layerId === 'discharge') {
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      } else {
+        expect(fallbackLegendColors).toEqual(m11FallbackLegends.discharge.map((entry) => entry.color))
+      }
     }
   })
 
@@ -1790,11 +1794,11 @@ describe('M11 visual foundation shell', () => {
       return state
     }
 
-    it('fetches ranking exactly once on flood-return-period mount and releases on layer switch back to discharge', async () => {
+    it('normalizes retired flood-layer deep links without starting ranking fetches', async () => {
       window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
       const initialQuery = parseM11QueryState(window.location.search)
       useOverviewDataStore.setState({
-        overview: snapshotWithRunId(initialQuery, 'run-gfs-1'),
+        overview: snapshotWithRunId(initialQuery, 'run-gfs-retired'),
         mapBootstrapLoading: false,
         enrichmentLoading: false,
       })
@@ -1807,101 +1811,11 @@ describe('M11 visual foundation shell', () => {
         </BrowserRouter>,
       )
 
-      // 挂载即触发 ranking 一次（spec scenario "Ranking panel mounted"）。
-      await waitFor(() => expect(rankingState.rankingCalls).toBe(1))
-
-      // 切回 discharge：BrowserRouter 监听 popstate，pushState + popstate 触发 OverviewPage 重新解析 query.layer。
-      // effect 旧 cleanup 调用 releaseFloodRankingOnDemand，新 effect 因 layer 不是 ranking-driven 不再 fetch。
-      const dischargeQuery = { ...initialQuery, layer: 'discharge' as const }
-      // 同步 store 内的 overview snapshot，确保 OverviewMode 仍能拿到 runId（layer 切换不影响 freshness.runId）。
-      useOverviewDataStore.setState({
-        overview: snapshotWithRunId(dischargeQuery, 'run-gfs-1'),
-        mapBootstrapLoading: false,
-        enrichmentLoading: false,
-      })
-      window.history.pushState({}, '', '/?source=gfs&layer=discharge')
-      window.dispatchEvent(new PopStateEvent('popstate'))
-
-      // 等 React 跑完 effect cycle；ranking call count 不能再增（spec scenario 的"no setState MUST occur"语义
-      // 的间接断言：layer 切换 cleanup → release，不再发 fetch、in-flight 已清空，下一次切回 flood 再发新 fetch）。
+      expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+      await waitFor(() => expect(window.location.search).not.toContain('layer=flood-return-period'))
       await waitFor(() => expect(_floodRankingInFlightSize()).toBe(0))
-      expect(rankingState.rankingCalls).toBe(1)
+      expect(rankingState.rankingCalls).toBe(0)
 
-      // 无 act() / setState-after-unmount 警告。
-      expect(consoleErrorSpy).not.toHaveBeenCalled()
-      consoleErrorSpy.mockRestore()
-    })
-
-    it('does not restart an in-flight flood ranking request when only metStations changes', async () => {
-      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
-      const initialQuery = parseM11QueryState(window.location.search)
-      useOverviewDataStore.setState({
-        overview: snapshotWithRunId(initialQuery, 'run-gfs-overlay'),
-        mapBootstrapLoading: false,
-        enrichmentLoading: false,
-      })
-      const rankingState = { rankingCalls: 0 }
-      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
-        const path = String(args[0])
-        if (path === '/api/v1/flood-alerts/ranking') {
-          rankingState.rankingCalls += 1
-          return new Promise(() => undefined) as never
-        }
-        throw new Error(`Unexpected GET ${path}`)
-      })
-      const user = userEvent.setup()
-
-      const { unmount } = render(
-        <BrowserRouter>
-          <OverviewPage />
-        </BrowserRouter>,
-      )
-
-      await waitFor(() => expect(_floodRankingInFlightSize()).toBe(1))
-      expect(rankingState.rankingCalls).toBe(1)
-
-      await user.click(screen.getByRole('button', { name: /气象代站/ }))
-      await waitFor(() => expect(window.location.search).toContain('metStations=1'))
-
-      expect(_floodRankingInFlightSize()).toBe(1)
-      expect(rankingState.rankingCalls).toBe(1)
-
-      unmount()
-      expect(_floodRankingInFlightSize()).toBe(0)
-    })
-
-    it('clears the in-flight ranking entry on unmount mid-flight without setState-after-unmount warning', async () => {
-      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
-      const query = parseM11QueryState(window.location.search)
-      useOverviewDataStore.setState({
-        overview: snapshotWithRunId(query, 'run-gfs-2'),
-        mapBootstrapLoading: false,
-        enrichmentLoading: false,
-      })
-      // 阻塞 ranking：fetch 不 resolve，让 in-flight 条目保持存在，断言 unmount cleanup 路径真清掉。
-      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
-        const path = String(args[0])
-        if (path === '/api/v1/flood-alerts/ranking') return new Promise(() => undefined) as never
-        throw new Error(`Unexpected GET ${path}`)
-      })
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-
-      const { unmount } = render(
-        <BrowserRouter>
-          <OverviewPage />
-        </BrowserRouter>,
-      )
-
-      // 挂载即触发 in-flight 条目。
-      await waitFor(() => expect(_floodRankingInFlightSize()).toBeGreaterThanOrEqual(1))
-
-      // unmount 时 effect cleanup 调用 releaseFloodRankingOnDemand。
-      unmount()
-
-      // release 路径必须把对应 in-flight 条目清掉（spec scenario "Ranking fetch is cancelled"
-      // 的"the in-flight cache entry MUST be cleared"子句）。
-      expect(_floodRankingInFlightSize()).toBe(0)
-      // unmount 后没有 React act() / setState-after-unmount 警告（spec "no setState MUST occur"）。
       expect(consoleErrorSpy).not.toHaveBeenCalled()
       consoleErrorSpy.mockRestore()
     })
@@ -2275,7 +2189,6 @@ describe('M11 visual foundation shell', () => {
 
   it('renders grouped layers and marks meteorology/base placeholders unavailable without fake data', async () => {
     const onQueryChange = vi.fn()
-    const user = userEvent.setup()
 
     render(<LayerGroupControls state={state} layers={layers} onQueryChange={onQueryChange} />)
 
@@ -2285,10 +2198,10 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByText('降水格点')).not.toBeInTheDocument()
     expect(screen.queryByText('气象格点合同未在 M11 接入')).not.toBeInTheDocument()
     expect(screen.getByText('DEM 合同未在 M11 接入')).toBeInTheDocument()
-    expect(screen.getByText('Layer has no valid times.')).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /洪水重现期/ }))
-    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'flood-return-period' })
+    expect(screen.queryByText('Layer has no valid times.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /洪水重现期/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /预警等级/ })).not.toBeInTheDocument()
+    expect(onQueryChange).not.toHaveBeenCalled()
   })
 
   it('updates source/scenario query state and exposes best provenance plus compare availability', async () => {
@@ -2316,18 +2229,20 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByText('Comparison requires both GFS and IFS series.')).toBeInTheDocument()
   })
 
-  it('selects legends for discharge, flood return period, and warning level semantics', () => {
+  it('selects the public discharge legend only', () => {
     const { rerender } = render(<LayerLegendPanel state={state} layers={layers} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
 
     rerender(<LayerLegendPanel state={{ ...state, layer: 'flood-return-period' }} layers={layers} />)
-    expect(screen.getByText('重现期图例')).toBeInTheDocument()
-    expect(screen.getByText('warning')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+    expect(screen.queryByText('重现期图例')).not.toBeInTheDocument()
+    expect(screen.queryByText('warning')).not.toBeInTheDocument()
 
     rerender(<LayerLegendPanel state={{ ...state, layer: 'warning-level' }} layers={[]} />)
-    expect(screen.getByText('预警等级图例')).toBeInTheDocument()
-    expect(screen.getByText('高风险')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+    expect(screen.queryByText('预警等级图例')).not.toBeInTheDocument()
+    expect(screen.queryByText('高风险')).not.toBeInTheDocument()
   })
 
   it('builds timeline state from layer API valid times and corrects stale valid times', () => {
@@ -2340,18 +2255,11 @@ describe('M11 visual foundation shell', () => {
     expect(model.sourceLabel).toContain('/api/v1/layers/{layer_id}/valid-times')
     expect(model.dividerPercent).toBe(50)
     expect(resolveM11ValidTimeCorrection(staleState, layers)).toBe('2026-05-18T00:00:00.000Z')
-    expect(resolveM11ValidTimeCorrection({ ...state, layer: 'flood-return-period' }, layers)).toBe('2026-05-18T12:00:00.000Z')
-    expect(
-      resolveM11ValidTimeCorrection(
-        { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
-        layers,
-      ),
-    ).toBeUndefined()
   })
 
   it('uses payload-derived valid times only when no layer contract applies', () => {
     const model = buildM11TimelineViewModel(
-      { ...state, layer: 'warning-level', validTime: null },
+      { ...state, layer: 'discharge', validTime: null },
       [],
       { label: 'selected segment forecast payload', validTimes: ['2026-05-18T09:00:00Z', '2026-05-18T03:00:00Z'] },
       sourceSelection,

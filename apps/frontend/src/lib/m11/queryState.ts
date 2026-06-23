@@ -26,7 +26,7 @@ export type M11QueryPatch = Partial<{
 }>
 
 const sources = ['gfs', 'ifs', 'best', 'compare'] as const
-const layers = ['discharge', 'flood-return-period', 'warning-level'] as const
+const layers = ['discharge'] as const
 const basemaps = ['terrain', 'satellite', 'vector'] as const
 const warningLevels = ['normal', 'elevated', 'watch', 'warning', 'major', 'severe', 'extreme', 'orange', 'red'] as const
 const legacyMetStationsLayer = 'met-stations'

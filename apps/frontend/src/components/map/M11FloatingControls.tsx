@@ -20,8 +20,6 @@ export interface M11FloatingLayerOption {
 
 export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m3/s', icon: Droplets },
-  { value: 'flood-return-period', label: '重现期', description: 'Return period', icon: Layers },
-  { value: 'warning-level', label: '预警等级', description: 'Warning level', icon: Layers },
 ]
 
 /**
@@ -145,15 +143,13 @@ export function M11FloatingBasemapSwitcher({
 }
 
 /** 浮层图例当前 active layer 的图例条目（复用 layers API 图例，回退到合同图例）。 */
-export function resolveM11FloatingLegend(layer: M11Layer, layers: LayerState[]): LayerLegendEntry[] {
-  const activeLayer = layers.find((entry) => entry.layerId === layer)
+export function resolveM11FloatingLegend(_layer: M11Layer, layers: LayerState[]): LayerLegendEntry[] {
+  const activeLayer = layers.find((entry) => entry.layerId === 'discharge')
   if (activeLayer?.legend.length) return activeLayer.legend
-  return getM11LayerLegend(layer)
+  return getM11LayerLegend('discharge')
 }
 
-function legendTitle(layer: M11Layer) {
-  if (layer === 'warning-level') return '预警等级图例'
-  if (layer === 'flood-return-period') return '重现期图例'
+function legendTitle(_layer: M11Layer) {
   return '径流量图例'
 }
 

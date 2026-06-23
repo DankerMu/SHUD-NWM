@@ -12,14 +12,14 @@ import {
 describe('M11 query state helpers', () => {
   it('round-trips supported values', () => {
     const state = parseM11QueryState(
-      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=warning-level&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basins_qhh&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=discharge&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basins_qhh&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
     )
 
     expect(state).toEqual({
       source: 'ifs',
       cycle: '2026-05-18T00:00:00.000Z',
       validTime: '2026-05-18T06:00:00.000Z',
-      layer: 'warning-level',
+      layer: 'discharge',
       metStations: false,
       basemap: 'satellite',
       basinVersionId: 'bv-001',
@@ -159,12 +159,21 @@ describe('M11 query state helpers', () => {
     expect(needsM11QueryReplacement('?layer=met-stations')).toBe(true)
   })
 
-  it('keeps a valid hydrology layer while enabling the station overlay', () => {
+  it('normalizes retired flood layers while enabling the station overlay', () => {
     const state = parseM11QueryState('layer=flood-return-period&metStations=1')
 
-    expect(state.layer).toBe('flood-return-period')
+    expect(state.layer).toBe('discharge')
     expect(state.metStations).toBe(true)
-    expect(serializeM11QueryState(state)).toBe('layer=flood-return-period&metStations=1')
+    expect(serializeM11QueryState(state)).toBe('metStations=1')
+    expect(needsM11QueryReplacement('?layer=flood-return-period&metStations=1')).toBe(true)
+  })
+
+  it('normalizes retired warning layer URLs back to the public discharge layer', () => {
+    const state = parseM11QueryState('layer=warning-level')
+
+    expect(state.layer).toBe('discharge')
+    expect(serializeM11QueryState(state)).toBe('')
+    expect(needsM11QueryReplacement('?layer=warning-level')).toBe(true)
   })
 
   it('can explicitly clear segment identity when a handoff changes basin version', () => {

@@ -996,9 +996,7 @@ function basinSnapshot(
 }
 
 const overviewDefaultScopeKey = 'source=gfs'
-const overviewFloodScopeKey = 'source=gfs&layer=flood-return-period'
 const overviewValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z'
-const overviewFloodValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period'
 const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
 const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
 
@@ -1108,8 +1106,9 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
-    // 浮层图例随 active layer（重现期）渲染；不再有侧栏/timeline
-    expect(screen.getByText('重现期图例')).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).not.toContain('layer=flood-return-period'))
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+    expect(screen.queryByText('重现期图例')).not.toBeInTheDocument()
     expect(screen.queryByTestId('m11-timeline')).not.toBeInTheDocument()
   })
 
@@ -1283,7 +1282,7 @@ describe('App route state', () => {
     })
   })
 
-  it('does not correct overview valid time from a stale source/layer snapshot', async () => {
+  it('corrects overview valid time against the normalized discharge snapshot after retiring flood layer URLs', async () => {
     const loadOverview = vi.fn().mockResolvedValue(undefined)
     useOverviewDataStore.setState({
       overview: overviewSnapshot(staleOverviewLayers, overviewDefaultScopeKey),
@@ -1296,22 +1295,23 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
-    await waitFor(() => expect(loadOverview).toHaveBeenCalledWith(expect.objectContaining({ layer: 'flood-return-period' })))
-    expect(window.location.search).toContain('validTime=2026-05-16T00%3A00%3A00.000Z')
+    await waitFor(() => expect(loadOverview).toHaveBeenCalledWith(expect.objectContaining({ layer: 'discharge' })))
+    await waitFor(() => expect(window.location.search).not.toContain('layer=flood-return-period'))
+    expect(window.location.search).toContain('validTime=2026-05-17T00%3A00%3A00.000Z')
 
     useOverviewDataStore.setState({
-      overview: overviewSnapshot(m11Layers, overviewFloodScopeKey),
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey),
       mapBootstrapLoading: false,
       enrichmentLoading: false,
     })
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
   })
 
-  it('keeps the national overview camera and registers the flood overlay through the route surface', async () => {
+  it('keeps the national overview camera and does not register retired flood overlays through the route surface', async () => {
     const tileFetch = vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] }))
     vi.stubGlobal('fetch', tileFetch)
     useOverviewDataStore.setState({
-      overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey, overviewFloodValid06ScopeKey),
+      overview: overviewSnapshotWithBasin(m11LayersWithNationalDischargeMvt, overviewDefaultScopeKey, overviewValid06ScopeKey),
       mapBootstrapLoading: false,
       enrichmentLoading: false,
     })
@@ -1320,7 +1320,8 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    await waitFor(() => expect(window.location.search).not.toContain('layer=flood-return-period'))
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge'))
     // 全国总览不做相机 fit（全国系统保持中国全景，不收窄到测试流域 bbox）。
     expect(m11FitBoundsCalls).toEqual([])
     expect(tileFetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
@@ -1459,7 +1460,7 @@ describe('App route state', () => {
       {
         ...defaultM11QueryState,
         source: 'best',
-        layer: 'flood-return-period',
+        layer: 'discharge',
         metStations: true,
         basemap: 'satellite',
         basinId: 'qhh',
@@ -1473,7 +1474,7 @@ describe('App route state', () => {
     expect(url.searchParams.get('source')).toBe('ifs')
     expect(url.searchParams.get('cycle')).toBe('2026-05-19T00:00:00.000Z')
     expect(url.searchParams.get('validTime')).toBe('2026-05-19T06:00:00.000Z')
-    expect(url.searchParams.get('layer')).toBe('flood-return-period')
+    expect(url.searchParams.get('layer')).toBeNull()
     expect(url.searchParams.get('metStations')).toBe('1')
     expect(url.searchParams.get('basemap')).toBe('satellite')
     expect(url.searchParams.get('basinId')).toBe('qhh')
@@ -1518,7 +1519,7 @@ describe('App route state', () => {
   it('keeps the single-page query free of basinId when a basin boundary is clicked (#508)', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
-      overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey, overviewFloodValid06ScopeKey, 'basin-demo'),
+      overview: overviewSnapshotWithBasin(m11Layers, overviewDefaultScopeKey, overviewValid06ScopeKey, 'basin-demo'),
       mapBootstrapLoading: false,
       enrichmentLoading: false,
     })
@@ -1735,18 +1736,18 @@ describe('App route state', () => {
         ...basinSnapshot(
           'basin-demo',
           m11Layers,
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           456,
           true,
         ),
         requestScope: {
           kind: 'basin-detail',
-          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
-          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           basinId: 'basin-demo',
           source: 'ifs',
-          layer: 'flood-return-period',
+          layer: 'discharge',
           cycle: '2026-05-18T00:00:00.000Z',
           validTime: '2026-05-18T06:00:00.000Z',
           basemap: 'satellite',
@@ -1773,7 +1774,7 @@ describe('App route state', () => {
           source: 'ifs',
           cycle: '2026-05-18T00:00:00.000Z',
           validTime: '2026-05-18T06:00:00.000Z',
-          layer: 'flood-return-period',
+          layer: 'discharge',
           basinVersionId: 'bv-001',
           riverNetworkVersionId: 'rn-v1',
           segmentId: 'seg-009',
@@ -4786,10 +4787,7 @@ function RedirectMatrixHarness() {
         <Route path="/hydro-met" element={<LegacyRedirect />} />
         <Route path="/forecast" element={<LegacyRedirect />} />
         <Route path="/meteorology" element={<LegacyRedirect extraParams={{ metStations: '1' }} />} />
-        <Route
-          path="/flood-alerts"
-          element={<LegacyRedirect extraParams={{ layer: 'flood-return-period' }} />}
-        />
+        <Route path="/flood-alerts" element={<LegacyRedirect />} />
         <Route
           path="/basins/:basinId"
           element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
@@ -4833,13 +4831,13 @@ describe('legacy route redirect query contract', () => {
     expect(params.get('layer')).toBeNull()
   })
 
-  it('redirects /flood-alerts with layer=flood-return-period', async () => {
+  it('redirects /flood-alerts without retired flood layer state', async () => {
     window.history.pushState({}, '', '/flood-alerts')
 
     render(<RedirectMatrixHarness />)
 
     const { params } = await landingParams()
-    expect(params.get('layer')).toBe('flood-return-period')
+    expect(params.get('layer')).toBeNull()
   })
 
   it('redirects /basins/:basinId with basinId query', async () => {
@@ -4885,15 +4883,16 @@ describe('legacy route redirect query contract', () => {
     expect(params.get('layer')).toBeNull()
   })
 
-  it('preserves a valid hydrology layer when /meteorology enables station overlay', async () => {
+  it('lets the full app canonicalize retired hydrology layers when /meteorology enables station overlay', async () => {
     window.history.pushState({}, '', '/meteorology?layer=flood-return-period&source=IFS&validTime=2026-06-05T18:00:00Z')
 
-    render(<RedirectMatrixHarness />)
+    render(<App />)
 
-    const { params } = await landingParams()
-    expect(params.get('layer')).toBe('flood-return-period')
-    expect(params.get('source')).toBe('IFS')
-    expect(params.get('validTime')).toBe('2026-06-05T18:00:00Z')
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('layer')).toBeNull())
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('ifs')
+    expect(params.get('validTime')).toBe('2026-06-05T18:00:00.000Z')
     expect(params.get('metStations')).toBe('1')
   })
 
