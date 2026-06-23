@@ -949,13 +949,19 @@ def _process_run(
     )
     forcing_stage = forcing.get("forcing_stage")
     if forcing["outcome"] == "skipped":
-        return {
-            "run_id": run_id,
-            "outcome": "skipped",
-            "stage": forcing.get("stage", FORCING_STAGE),
-            "reason": forcing.get("reason"),
-            "forcing_stage": forcing_stage,
-        }
+        # Live station-series reads the SHUD CSVs directly from object-store.
+        # Missing DB forcing handoff should not block parsing already-completed
+        # SHUD hydro outputs; declared handoff failures and mirror failures
+        # still stop this run below because they indicate an explicit contract
+        # was present but unhealthy.
+        if forcing.get("reason") != NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON:
+            return {
+                "run_id": run_id,
+                "outcome": "skipped",
+                "stage": forcing.get("stage", FORCING_STAGE),
+                "reason": forcing.get("reason"),
+                "forcing_stage": forcing_stage,
+            }
     if forcing["outcome"] == "failed":
         return {
             "run_id": run_id,

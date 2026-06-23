@@ -226,7 +226,7 @@ def test_declared_handoff_success_bypasses_mirror_and_records_run_details(
     assert summary["runs"]["published"] == 7
 
 
-def test_no_declared_handoff_without_explicit_mirror_skips_before_mirror(
+def test_no_declared_handoff_without_explicit_mirror_parses_hydro_outputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -241,13 +241,15 @@ def test_no_declared_handoff_without_explicit_mirror_skips_before_mirror(
     rc, summary = _run_main(capsys, object_store_root)
 
     assert rc == 0
-    assert _command_kinds(calls) == ["register"]
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
     assert published_calls == ["postgresql://node27-writer:secret@db.example/nhms"]
     detail = summary["runs"]["details"][0]
-    assert detail["outcome"] == "skipped"
-    assert detail["stage"] == "forcing_handoff"
+    assert detail["outcome"] == "ingested"
+    assert detail["stage"] == "coverage"
     assert detail["forcing_stage"]["mode"] == autopipe.NO_FORCING_HANDOFF_MODE
     assert detail["forcing_stage"]["reason_codes"] == [autopipe.NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON]
+    assert detail["parse_status"] == "parsed"
+    assert detail["coverage_refresh"] == "refreshed"
 
 
 def test_no_declared_handoff_uses_explicit_mirror_fallback_and_normalizes_counts(
