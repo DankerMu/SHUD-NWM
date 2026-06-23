@@ -33,6 +33,14 @@ describe('M11 query state helpers', () => {
     expect(parseM11QueryState(serializeM11QueryState(state))).toEqual(state)
   })
 
+  it('canonicalizes source values case-insensitively for legacy deep links', () => {
+    const state = parseM11QueryState('source=IFS&metStations=1')
+
+    expect(state.source).toBe('ifs')
+    expect(serializeM11QueryState(state)).toBe('source=ifs&metStations=1')
+    expect(needsM11QueryReplacement('?source=IFS&metStations=1')).toBe(true)
+  })
+
   it('normalizes invalid values to documented defaults', () => {
     const state = parseM11QueryState('source=unknown&basemap=bad&warningLevel=invalid&cycle=not-a-date&metStations=0&q=')
 

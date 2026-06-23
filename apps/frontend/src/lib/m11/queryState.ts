@@ -50,6 +50,11 @@ function isOneOf<T extends readonly string[]>(value: string | null, allowed: T):
   return value !== null && (allowed as readonly string[]).includes(value)
 }
 
+function normalizeSource(value: string | null): M11Source | null {
+  const normalized = value?.trim().toLowerCase() ?? null
+  return isOneOf(normalized, sources) ? normalized : null
+}
+
 const rfc3339InstantPattern =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
@@ -129,7 +134,7 @@ function normalizeSearch(value: string | null) {
 
 export function parseM11QueryState(input: string | URLSearchParams): M11QueryState {
   const params = typeof input === 'string' ? new URLSearchParams(input) : input
-  const source = params.get('source')
+  const source = normalizeSource(params.get('source'))
   const layerValues = params.getAll('layer')
   const layer = layerValues.find((value): value is M11Layer => isOneOf(value, layers)) ?? null
   const basemap = params.get('basemap')
@@ -137,7 +142,7 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
   const hasLegacyMetStationsLayer = layerValues.includes(legacyMetStationsLayer)
 
   return {
-    source: isOneOf(source, sources) ? source : defaultM11QueryState.source,
+    source: source ?? defaultM11QueryState.source,
     cycle: normalizeIsoInstant(params.get('cycle')),
     validTime: normalizeIsoInstant(params.get('validTime')),
     layer: layer ?? defaultM11QueryState.layer,

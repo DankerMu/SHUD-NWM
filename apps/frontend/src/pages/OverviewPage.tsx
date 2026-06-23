@@ -376,6 +376,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     setRiverPopup(null)
     setStationPopup(null)
   }, [state.layer])
+  useEffect(() => {
+    if (!state.metStations) setStationPopup(null)
+  }, [state.metStations])
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {

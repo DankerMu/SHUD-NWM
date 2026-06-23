@@ -45,7 +45,7 @@ import {
   type M11OverviewRequestScope,
   type OverviewDataSnapshot,
 } from '@/stores/overviewData'
-import { useStationLayerDataStore } from '@/stores/stationLayerData'
+import { stationLayerRequestKey, useStationLayerDataStore } from '@/stores/stationLayerData'
 import { client } from '@/api/client'
 
 // 让 PR 4/7 wire-up 的 loadFloodRankingOnDemand / releaseFloodRankingOnDemand 可观测：
@@ -554,6 +554,39 @@ function matchedBasinSnapshot(basinId: string, query: M11QueryState): BasinDataS
     segments: [],
     selectedSegment: null,
     layers: [],
+  }
+}
+
+function stationLayerStoreSnapshot({
+  basinId,
+  basinVersionId,
+  stationId = 'HMT-Y2-0237',
+}: {
+  basinId: string
+  basinVersionId: string | null
+  stationId?: string
+}) {
+  return {
+    requestKey: stationLayerRequestKey({ basinContexts: [{ basinId, basinVersionId }] }),
+    data: {
+      stations: [
+        {
+          station_id: stationId,
+          basin_version_id: basinVersionId ?? '',
+          station_name: 'Station 0237',
+          geom: { type: 'Point' as const, coordinates: [100.4, 30.4] },
+          elevation_m: 320,
+          station_role: 'forcing',
+          active_flag: true,
+          properties_json: null,
+          created_at: '2026-05-18T00:00:00Z',
+        },
+      ],
+      stationBasinIds: { [stationId]: basinId },
+      total: 1,
+      loaded: 1,
+      truncated: false,
+    },
   }
 }
 
@@ -1471,6 +1504,52 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
   })
 
+  it('clears an overview station popup when the station overlay is disabled', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/?metStations=1')
+    const query = parseM11QueryState(window.location.search)
+    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'yangtze', basinVersionId: 'yangtze_v2026_01' })
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      ...stationSnapshot,
+      loading: false,
+      error: null,
+      loadStationLayer: vi.fn().mockResolvedValue(stationSnapshot.data),
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({
+      overview: {
+        requestScope: matchedOverviewScope(query),
+        bootstrap: { basins: [], layers: [], layerStates: layers, currentLayerValidTime: null },
+        basins: overviewBasins,
+        summary: createEmptyOverviewSummary(query),
+        layers,
+        aggregationDecision: decideAggregationEndpoint({
+          initialRequestCount: 1,
+          createsPerBasinNPlusOne: false,
+          missingRequiredFields: [],
+        }),
+        basinVersionToBasinId: {},
+      },
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
+    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(window.location.search).not.toContain('metStations=1')
+  })
+
   // PR #589 round-2 C1：阶段 1 reject（bootstrapError !=null + overview.bootstrap=null）→
   // surfaceSettling 必须退出（spec scenario "Map bootstrap rejection"：MUST render bootstrap
   // failed state rather than indefinite spinner）。bootstrapError 必须从 m11-overview-empty 透出。
@@ -1825,6 +1904,44 @@ describe('M11 visual foundation shell', () => {
     expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
     expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
     expect(window.location.search).toContain('basinId=qhh')
+  })
+
+  it('clears a basin-detail station popup when the station overlay is disabled', async () => {
+    const user = userEvent.setup()
+    const query = parseM11QueryState('?basinId=qhh&metStations=1')
+    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'qhh', basinVersionId: null })
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      ...stationSnapshot,
+      loading: false,
+      error: null,
+      loadStationLayer: vi.fn().mockResolvedValue(stationSnapshot.data),
+      clear: vi.fn(),
+    })
+    useOverviewDataStore.setState({ basinDetail: matchedBasinSnapshot('qhh', query), basinLoading: false })
+    window.history.pushState({}, '', '/')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh&metStations=1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+
+    fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
+    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+
+    await waitFor(() => expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument())
+    expect(window.location.search).toContain('basinId=qhh')
+    expect(window.location.search).not.toContain('metStations=1')
   })
 
   it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {

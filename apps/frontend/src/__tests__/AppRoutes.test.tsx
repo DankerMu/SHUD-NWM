@@ -4662,6 +4662,19 @@ describe('legacy route redirect query contract', () => {
     expect(params.get('layer')).toBeNull()
   })
 
+  it('canonicalizes source after the full /meteorology redirect lands on the app root', async () => {
+    window.history.pushState({}, '', '/meteorology?source=IFS&validTime=2026-06-05T18:00:00Z')
+
+    render(<App />)
+
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('source')).toBe('ifs'))
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('validTime')).toBe('2026-06-05T18:00:00.000Z')
+    expect(params.get('metStations')).toBe('1')
+    expect(params.get('layer')).toBeNull()
+  })
+
   it('preserves a valid hydrology layer when /meteorology enables station overlay', async () => {
     window.history.pushState({}, '', '/meteorology?layer=flood-return-period&source=IFS&validTime=2026-06-05T18:00:00Z')
 

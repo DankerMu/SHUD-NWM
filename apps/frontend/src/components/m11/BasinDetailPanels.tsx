@@ -205,6 +205,9 @@ export function useBasinDetailMode({
     setRiverPopup(null)
     setStationPopup(null)
   }, [basinId])
+  useEffect(() => {
+    if (!state.metStations) setStationPopup(null)
+  }, [state.metStations])
 
   // 已解析具体源在 GFS↔IFS 间真正切换时清 popup；transient null 不清。
   const lastConcretePopupSourceRef = useRef<string | null>(null)
