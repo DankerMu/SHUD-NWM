@@ -2038,6 +2038,10 @@ describe('M11 visual foundation shell', () => {
     useOverviewDataStore.setState({
       basinDetail: {
         ...snapshot,
+        requestScope: {
+          ...snapshot.requestScope,
+          dataKey: 'stale-time-window',
+        },
         detail: {
           ...snapshot.detail,
           selectedBasinVersionId: null,
