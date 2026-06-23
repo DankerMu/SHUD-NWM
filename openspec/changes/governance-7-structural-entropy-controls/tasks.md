@@ -41,11 +41,12 @@
     growth signal.
   - every ownership-growth signal is report-only and points to inventory/update
     action rather than requiring immediate file splitting.
-- [ ] 1.4 Record current oversized source-file dispositions.
+- [x] 1.4 Record current oversized source-file dispositions.
   Evidence: inventory covers at least `scheduler.py`, `chain.py`,
   `two_node_e2e_evidence.py`, `readiness_validation.py`, `apps/api/main.py`,
   and `M11MapLibreSurface.tsx`, with per-file priority, owner, disposition, and
-  follow-up issue mapping.
+  follow-up issue mapping. See
+  `docs/governance/STRUCTURAL_FILE_DISPOSITION_INVENTORY.md`.
 
 ## 2. Compatibility Facade Governance
 
