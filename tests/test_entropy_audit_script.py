@@ -521,6 +521,196 @@ def test_compatibility_facade_guard_reports_scheduler_annotated_owner_alias_unti
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
 
 
+def test_compatibility_facade_guard_reports_scheduler_full_module_dotted_aliases_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "\n"
+        + "import services.orchestrator.scheduler_state\n"
+        + "DottedAlias = services.orchestrator.scheduler_state.DottedAlias\n"
+        + "DottedAnnotatedAlias: object = "
+        + "services.orchestrator.scheduler_state.DottedAnnotatedAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    ]
+    assert [signal["inventory_tokens"] for signal in signals] == [
+        ["DottedAlias"],
+        ["DottedAnnotatedAlias"],
+    ]
+    assert (
+        signals[0]["detail"]
+        == "new owner-module alias `DottedAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.DottedAlias`"
+    )
+    assert (
+        signals[1]["detail"]
+        == "new owner-module alias `DottedAnnotatedAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.DottedAnnotatedAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "DottedAlias and DottedAnnotatedAlias owner aliases retain removal conditions.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_classifies_full_module_dotted_call_as_forwarding(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "\n"
+        + "import services.orchestrator.scheduler_state\n"
+        + "def dotted_scheduler_forwarder(value: object) -> object:\n"
+        + "    return services.orchestrator.scheduler_state.dotted_scheduler_forwarder(value)\n",
+    )
+
+    forwarding_signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    non_forwarding_signals = _compatibility_facade_signals(
+        tmp_path,
+        base_ref,
+        "new-non-forwarding-implementation",
+    )
+
+    assert [signal["inventory_tokens"] for signal in forwarding_signals] == [
+        ["dotted_scheduler_forwarder", "dotted_scheduler_forwarder"]
+    ]
+    assert "new forwarding facade path" in str(forwarding_signals[0]["detail"])
+    assert non_forwarding_signals == []
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "dotted_scheduler_forwarder forwarding facade path retained until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_same_rhs_multi_target_aliases_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "SameRhsAlias = SameRhsAliasCompat = _scheduler_state.SameRhsAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    signals_by_token = {tuple(signal["inventory_tokens"]): signal for signal in signals}
+    assert set(signals_by_token) == {
+        ("SameRhsAlias",),
+        ("SameRhsAliasCompat",),
+    }
+    assert (
+        signals_by_token[("SameRhsAlias",)]["detail"]
+        == "new owner-module alias `SameRhsAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.SameRhsAlias`"
+    )
+    assert (
+        signals_by_token[("SameRhsAliasCompat",)]["detail"]
+        == "new owner-module alias `SameRhsAliasCompat` forwarding to "
+        "`services.orchestrator.scheduler_state.SameRhsAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "SameRhsAlias and SameRhsAliasCompat share owner alias retention coverage.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("opening", "closing", "name_prefix"),
+    [
+        ("(", ")", "Tuple"),
+        ("[", "]", "List"),
+    ],
+)
+def test_compatibility_facade_guard_reports_sequence_owner_aliases_until_inventory_updates(
+    tmp_path: Path,
+    opening: str,
+    closing: str,
+    name_prefix: str,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + (
+            f"{opening}{name_prefix}Alias, {name_prefix}OtherAlias{closing} = "
+            f"{opening}_scheduler_state.{name_prefix}Alias, "
+            f"_scheduler_state.{name_prefix}OtherAlias{closing}\n"
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["inventory_tokens"] for signal in signals] == [
+        [f"{name_prefix}Alias"],
+        [f"{name_prefix}OtherAlias"],
+    ]
+    assert (
+        signals[0]["detail"]
+        == f"new owner-module alias `{name_prefix}Alias` forwarding to "
+        f"`services.orchestrator.scheduler_state.{name_prefix}Alias`"
+    )
+    assert (
+        signals[1]["detail"]
+        == f"new owner-module alias `{name_prefix}OtherAlias` forwarding to "
+        f"`services.orchestrator.scheduler_state.{name_prefix}OtherAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        f"{name_prefix}Alias and {name_prefix}OtherAlias sequence owner aliases covered.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
 def test_compatibility_facade_guard_reports_scheduler_imported_symbol(
     tmp_path: Path,
 ) -> None:

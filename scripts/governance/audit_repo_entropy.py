@@ -3957,7 +3957,7 @@ def _compatibility_facade_module_aliases(root: Path, tree: ast.Module) -> dict[s
             for alias in node.names:
                 if not _compatibility_project_module(alias.name):
                     continue
-                exposed_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+                exposed_name = alias.asname or alias.name
                 aliases[exposed_name] = alias.name
         elif isinstance(node, ast.ImportFrom) and node.module:
             if not _compatibility_project_module(node.module):
@@ -4002,25 +4002,82 @@ def _compatibility_facade_aliases(
 ) -> tuple[_CompatibilityFacadeAlias, ...]:
     aliases: list[_CompatibilityFacadeAlias] = []
     for node in tree.body:
-        alias: _CompatibilityFacadeAlias | None = None
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            alias = _compatibility_facade_alias(
-                node.targets[0],
-                node.value,
-                node.lineno,
-                module_aliases,
+        if isinstance(node, ast.Assign):
+            aliases.extend(
+                _compatibility_facade_assignment_aliases(
+                    tuple(node.targets),
+                    node.value,
+                    node.lineno,
+                    module_aliases,
+                )
             )
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            alias = _compatibility_facade_alias(
-                node.target,
-                node.value,
-                node.lineno,
+            aliases.extend(
+                _compatibility_facade_assignment_aliases(
+                    (node.target,),
+                    node.value,
+                    node.lineno,
+                    module_aliases,
+                )
+            )
+    return tuple(sorted(aliases, key=lambda item: item.key))
+
+
+def _compatibility_facade_assignment_aliases(
+    targets: tuple[ast.expr, ...],
+    value: ast.expr,
+    line: int,
+    module_aliases: dict[str, str],
+) -> tuple[_CompatibilityFacadeAlias, ...]:
+    aliases: list[_CompatibilityFacadeAlias] = []
+    for target in targets:
+        aliases.extend(
+            _compatibility_facade_aliases_for_target_value(
+                target,
+                value,
+                line,
                 module_aliases,
             )
-        if alias is None:
-            continue
-        aliases.append(alias)
-    return tuple(sorted(aliases, key=lambda item: item.key))
+        )
+    return tuple(aliases)
+
+
+def _compatibility_facade_aliases_for_target_value(
+    target: ast.expr,
+    value: ast.expr,
+    line: int,
+    module_aliases: dict[str, str],
+) -> tuple[_CompatibilityFacadeAlias, ...]:
+    alias = _compatibility_facade_alias(target, value, line, module_aliases)
+    if alias is not None:
+        return (alias,)
+
+    target_elements = _compatibility_sequence_elements(target)
+    value_elements = _compatibility_sequence_elements(value)
+    if (
+        target_elements is None
+        or value_elements is None
+        or len(target_elements) != len(value_elements)
+    ):
+        return ()
+
+    aliases: list[_CompatibilityFacadeAlias] = []
+    for target_element, value_element in zip(target_elements, value_elements, strict=True):
+        alias = _compatibility_facade_alias(
+            target_element,
+            value_element,
+            line,
+            module_aliases,
+        )
+        if alias is not None:
+            aliases.append(alias)
+    return tuple(aliases)
+
+
+def _compatibility_sequence_elements(expression: ast.expr) -> tuple[ast.expr, ...] | None:
+    if not isinstance(expression, ast.Tuple | ast.List):
+        return None
+    return tuple(expression.elts)
 
 
 def _compatibility_facade_alias(
@@ -4031,17 +4088,49 @@ def _compatibility_facade_alias(
 ) -> _CompatibilityFacadeAlias | None:
     if not isinstance(target, ast.Name):
         return None
-    if not isinstance(value, ast.Attribute) or not isinstance(value.value, ast.Name):
+    owner_attribute = _compatibility_facade_owner_attribute(value, module_aliases)
+    if owner_attribute is None:
         return None
-    owner_module = module_aliases.get(value.value.id)
-    if owner_module is None:
-        return None
+    owner_module, owner_attr = owner_attribute
     return _CompatibilityFacadeAlias(
         exposed_name=target.id,
         owner_module=owner_module,
-        owner_attr=value.attr,
+        owner_attr=owner_attr,
         line=line,
     )
+
+
+def _compatibility_facade_owner_attribute(
+    expression: ast.expr,
+    module_aliases: dict[str, str],
+) -> tuple[str, str] | None:
+    parts = _compatibility_attribute_parts(expression)
+    if len(parts) < 2:
+        return None
+    module_parts = parts[:-1]
+    owner_attr = parts[-1]
+    for prefix_length in range(len(module_parts), 0, -1):
+        module_prefix = ".".join(module_parts[:prefix_length])
+        owner_module = module_aliases.get(module_prefix)
+        if owner_module is None:
+            continue
+        remaining_parts = module_parts[prefix_length:]
+        if remaining_parts:
+            owner_module = ".".join((owner_module, *remaining_parts))
+        return owner_module, owner_attr
+    return None
+
+
+def _compatibility_attribute_parts(expression: ast.expr) -> tuple[str, ...]:
+    parts: list[str] = []
+    current = expression
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return ()
+    parts.append(current.id)
+    return tuple(reversed(parts))
 
 
 def _compatibility_facade_definitions(
@@ -4128,12 +4217,7 @@ def _compatibility_expression_is_owner_call(
         expression = expression.value
     if not isinstance(expression, ast.Call):
         return False
-    function = expression.func
-    return (
-        isinstance(function, ast.Attribute)
-        and isinstance(function.value, ast.Name)
-        and function.value.id in module_aliases
-    )
+    return _compatibility_facade_owner_attribute(expression.func, module_aliases) is not None
 
 
 def _compatibility_project_module(module: str) -> bool:
