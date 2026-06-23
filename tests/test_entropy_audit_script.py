@@ -41,6 +41,26 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     } <= set(summary_counts)
     assert metadata["budget_counted_count"] == summary_counts["by_budget_count"]["budget_counted"]
     assert metadata["gate_eligible_count"] == summary_counts["by_gate_eligibility"]["gate_eligible"]
+    structural_budget = metadata["structural_file_budget"]
+    assert isinstance(structural_budget, dict)
+    assert structural_budget["schema_version"] == audit_repo_entropy.STRUCTURAL_FILE_BUDGET_SCHEMA_VERSION
+    assert structural_budget["mode"] == "report-only"
+    assert {
+        "thresholds",
+        "mandatory_governance_count",
+        "yellow_zone_count",
+        "governed_exemption_count",
+        "ownership_growth_signal_count",
+        "oversized_files",
+        "yellow_zone_files",
+        "governed_exemptions",
+        "ownership_growth_signals",
+        "top_oversized_modules",
+    } <= set(structural_budget)
+    thresholds = structural_budget["thresholds"]
+    assert isinstance(thresholds, dict)
+    assert thresholds["yellow_zone_min_physical_lines"] == 500
+    assert thresholds["mandatory_governance_over_physical_lines"] == 1000
     assert metadata["max_scanned_text_file_bytes"] == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
     assert metadata["max_artifact_fingerprint_bytes"] == audit_repo_entropy.MAX_ARTIFACT_FINGERPRINT_BYTES
     assert ".venv" in metadata["skipped_path_families"]
@@ -184,7 +204,9 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
     assert result.returncode == 0
     assert "- Baseline path: `.entropy-baseline/latest.json`" in result.stdout
     assert "- Baseline written: `false`" in result.stdout
+    assert "## Structural File Budget" in result.stdout
     assert "## Entropy Heatmap" in result.stdout
+    assert "## High-Spread Patterns" in result.stdout
     assert "## Prioritized Cleanup Targets" in result.stdout
     assert _entropy_baseline_snapshot() == before
 
@@ -205,6 +227,181 @@ def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseabl
     assert metadata["hard_gate_gated_check_ids"] == sorted(audit_repo_entropy.HARD_GATE_CHECK_IDS)
     assert metadata["hard_gate_failing_count"] == metadata["gate_eligible_count"]
     assert _entropy_baseline_snapshot() == before
+
+
+def test_structural_file_budget_classifies_tracked_source_thresholds_and_exemptions(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "services" / "api" / "large.py",
+        _structural_python_fixture(
+            1001,
+            "import os",
+            "from services.orchestrator import chain",
+        ),
+    )
+    _write(
+        tmp_path / "apps" / "api" / "yellow.py",
+        _structural_python_fixture(500),
+    )
+    _write(
+        tmp_path / "schemas" / "generated" / "openapi_types.ts",
+        _structural_ts_fixture(1001, "// generated; do not edit"),
+    )
+    _write(
+        tmp_path / "apps" / "frontend" / "pnpm-lock.yaml",
+        _structural_yaml_fixture(1001, "lockfileVersion: '9.0'"),
+    )
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "services/api/large.py",
+            "apps/api/yellow.py",
+            "schemas/generated/openapi_types.ts",
+            "apps/frontend/pnpm-lock.yaml",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    budget = _structural_budget(tmp_path)
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    yellow = _structural_records_by_path(budget["yellow_zone_files"])
+    exemptions = _structural_records_by_path(budget["governed_exemptions"])
+
+    large = oversized["services/api/large.py"]
+    assert large["budget_class"] == "mandatory-governance"
+    assert large["line_count"] == 1001
+    assert large["module"] == "services/api"
+    assert large["import_families"] == ["os", "services/orchestrator"]
+    assert "inventory" in str(large["owner_action"])
+
+    yellow_zone = yellow["apps/api/yellow.py"]
+    assert yellow_zone["budget_class"] == "yellow-zone"
+    assert yellow_zone["line_count"] == 500
+    assert "review-only" in str(yellow_zone["review_reason"])
+
+    generated = exemptions["schemas/generated/openapi_types.ts"]
+    assert generated["budget_class"] == "governed-exemption"
+    assert generated["line_count"] == 1001
+    assert generated["exemption_family"] == "generated"
+    assert "schemas/generated/openapi_types.ts" not in oversized
+
+    lockfile = exemptions["apps/frontend/pnpm-lock.yaml"]
+    assert lockfile["budget_class"] == "governed-exemption"
+    assert lockfile["line_count"] == 1001
+    assert lockfile["module"] == "apps/frontend"
+    assert lockfile["exemption_family"] == "dependency-lockfile"
+    assert (
+        lockfile["exemption_reason"]
+        == "well-known dependency lockfile is a machine-readable dependency artifact"
+    )
+    assert "apps/frontend/pnpm-lock.yaml" not in oversized
+
+    assert budget["mandatory_governance_count"] == 1
+    assert budget["yellow_zone_count"] == 1
+    assert budget["governed_exemption_count"] == 2
+    assert budget["top_oversized_modules"][0]["module"] == "services/api"
+
+
+def test_structural_file_budget_markdown_keeps_existing_report_sections(tmp_path: Path) -> None:
+    report = audit_repo_entropy.build_report(tmp_path)
+
+    markdown = audit_repo_entropy.render_markdown(report)
+
+    assert "## Structural File Budget" in markdown
+    assert "## Entropy Heatmap" in markdown
+    assert "## High-Spread Patterns" in markdown
+    assert "## Prioritized Cleanup Targets" in markdown
+    assert markdown.index("## Structural File Budget") < markdown.index("## Entropy Heatmap")
+
+
+def test_structural_ownership_growth_ignores_oversized_bugfix_only_edit(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "initial oversized source")
+    _write(source_path, base_text + "BUGFIX_SENTINEL = True\n")
+
+    budget = _structural_budget(tmp_path)
+
+    assert "services/api/large.py" in _structural_records_by_path(budget["oversized_files"])
+    assert _structural_growth_signal_types(budget, "services/api/large.py") == set()
+
+
+@pytest.mark.parametrize(
+    ("added_lines", "expected_signal"),
+    [
+        (("import requests",), "new-import-family"),
+        (("def public_entrypoint():", "    return 1"), "public-entrypoint"),
+        (("LEGACY_ALIAS = object()  # compatibility alias",), "compatibility-symbol"),
+        (("SCHEMA = {'mode': 'strict'}",), "parser-validator-responsibility"),
+    ],
+)
+def test_structural_ownership_growth_reports_new_surface_in_oversized_source(
+    tmp_path: Path,
+    added_lines: tuple[str, ...],
+    expected_signal: str,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "initial oversized source")
+    _write(source_path, base_text + "\n".join(added_lines) + "\n")
+
+    budget = _structural_budget(tmp_path)
+    signals = [
+        signal
+        for signal in budget["ownership_growth_signals"]
+        if signal["path"] == "services/api/large.py"
+    ]
+
+    assert expected_signal in {signal["signal_type"] for signal in signals}
+    assert all("inventory" in str(signal["owner_action"]) for signal in signals)
+    assert all("no immediate split" in str(signal["owner_action"]) for signal in signals)
+
+
+def test_structural_file_budget_report_and_hard_gate_commands_do_not_write_baseline(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(
+        tmp_path / "services" / "api" / "large.py",
+        _structural_python_fixture(1001),
+    )
+    subprocess.run(["git", "add", "services/api/large.py"], cwd=tmp_path, check=True)
+    baseline = tmp_path / ".entropy-baseline" / "latest.json"
+
+    for mode in ("report", "hard-gate"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(AUDIT_SCRIPT),
+                "--format",
+                "json",
+                "--mode",
+                mode,
+            ],
+            cwd=tmp_path,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        report = json.loads(result.stdout)
+
+        assert result.returncode == (
+            1 if report["metadata"].get("hard_gate_failing_count", 0) else 0
+        )
+        assert report["metadata"]["baseline_written"] is False
+        assert report["metadata"]["structural_file_budget"]["mandatory_governance_count"] == 1
+        assert not baseline.exists()
 
 
 def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_archive(tmp_path: Path) -> None:
@@ -5227,6 +5424,55 @@ def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
     if not baseline_dir.exists():
         return []
     return sorted(path for path in baseline_dir.glob("*.json") if path.name != "latest.json")
+
+
+def _structural_budget(root: Path) -> dict[str, object]:
+    report = audit_repo_entropy.build_report(root)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    budget = metadata["structural_file_budget"]
+    assert isinstance(budget, dict)
+    return budget
+
+
+def _structural_records_by_path(records: object) -> dict[str, dict[str, object]]:
+    assert isinstance(records, list)
+    by_path: dict[str, dict[str, object]] = {}
+    for record in records:
+        assert isinstance(record, dict)
+        by_path[str(record["path"])] = record
+    return by_path
+
+
+def _structural_growth_signal_types(budget: dict[str, object], path: str) -> set[str]:
+    signals = budget["ownership_growth_signals"]
+    assert isinstance(signals, list)
+    return {
+        str(signal["signal_type"])
+        for signal in signals
+        if isinstance(signal, dict) and signal["path"] == path
+    }
+
+
+def _structural_python_fixture(line_count: int, *header_lines: str) -> str:
+    assert line_count >= len(header_lines)
+    lines = [*header_lines]
+    lines.extend(f"VALUE_{index} = {index}" for index in range(line_count - len(header_lines)))
+    return "\n".join(lines) + "\n"
+
+
+def _structural_ts_fixture(line_count: int, *header_lines: str) -> str:
+    assert line_count >= len(header_lines)
+    lines = [*header_lines]
+    lines.extend(f"export const value{index} = {index};" for index in range(line_count - len(header_lines)))
+    return "\n".join(lines) + "\n"
+
+
+def _structural_yaml_fixture(line_count: int, *header_lines: str) -> str:
+    assert line_count >= len(header_lines)
+    lines = [*header_lines]
+    lines.extend(f"package_{index}: {index}" for index in range(line_count - len(header_lines)))
+    return "\n".join(lines) + "\n"
 
 
 def _relative_files(root: Path) -> set[str]:
