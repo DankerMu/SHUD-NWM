@@ -196,7 +196,7 @@ export function useBasinDetailMode({
   const stationLayerBasinVersionId =
     detail?.selectedBasinVersionId ??
     (
-      !loading && basinData?.requestScope?.kind === 'basin-detail' && basinData.requestScope.basinId === basinId
+      !loading && basinMetadataMatchesQuery && basinData?.requestScope?.kind === 'basin-detail' && basinData.requestScope.basinId === basinId
         && basinData.detail.selectedBasinVersionId == null
         ? state.basinVersionId
         : null

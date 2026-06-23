@@ -471,11 +471,11 @@ Must preserve:
 - Station overlay query state and MapLibre hit priority remain owned by issues
   #659 and #660; this issue only consumes their click dispatch results.
 - Basin-detail station overlays keep resolved detail identity first; the
-  current query basin version is only a fallback after same-basin detail state
-  has settled without a resolved selected version, so stale resolved identities
-  still win over URL drift. Overview station overlays may likewise fall back to
-  the query basin version only when overview metadata maps that version back to
-  the same basin.
+  current query basin version is only a fallback after query-matched same-basin
+  detail state has settled without a resolved selected version, so stale resolved
+  identities still win over URL drift. Overview station overlays may likewise
+  fall back to the query basin version only when overview metadata maps that
+  version back to the same basin.
 - Chart body, ECharts data zoom, station variable tabs, source/cycle controls,
   and close buttons keep their native control behavior.
 
