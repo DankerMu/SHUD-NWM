@@ -445,8 +445,8 @@ function overviewSnapshotWithBasins(layers: LayerState[], queryKey = '', dataKey
 }
 
 function overviewSnapshotForQuery(query: M11QueryState) {
-  const queryKey = serializeM11QueryState({ ...query, basemap: 'vector', validTime: null })
-  const dataKey = serializeM11QueryState({ ...query, basemap: 'vector' })
+  const queryKey = serializeM11QueryState({ ...query, metStations: false, basemap: 'vector', validTime: null })
+  const dataKey = serializeM11QueryState({ ...query, metStations: false, basemap: 'vector' })
   const snapshot = overviewSnapshotWithBasin(m11Layers, queryKey, dataKey)
   return {
     ...snapshot,
@@ -1083,7 +1083,7 @@ describe('App route state', () => {
     expect(screen.queryByTestId('m11-timeline')).not.toBeInTheDocument()
   })
 
-  it('reloads overview data when the floating layer switcher changes the layer (M26)', async () => {
+  it('enables the station overlay without changing the hydrology layer or reloading overview as a layer change (M26)', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshot(m11Layers, ''),
@@ -1097,10 +1097,14 @@ describe('App route state', () => {
     expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
 
-    // 切到气象代站 → 写 layer=met-stations 并以新 layer 重取
+    overviewAsync.mockClear()
+
+    // 打开气象代站叠加 → 写 metStations=1，水文 layer 仍是 discharge。
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
-    expect(window.location.search).toContain('layer=met-stations')
-    await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ layer: 'met-stations' })))
+    expect(window.location.search).toContain('metStations=1')
+    expect(new URLSearchParams(window.location.search).get('layer')).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: /气象代站/, pressed: true })).toBeInTheDocument())
+    expect(overviewAsync).not.toHaveBeenCalled()
   })
 
   it('normalizes the retired met-raster layer back to the default discharge layer (M26)', async () => {
@@ -1611,8 +1615,14 @@ describe('App route state', () => {
     expect(screen.queryByPlaceholderText('搜索河段名称或 ID')).not.toBeInTheDocument()
   })
 
-  it('reloads basin detail when the floating layer switcher changes the layer (M26)', async () => {
+  it('enables the station overlay in basin detail without changing the hydrology layer (M26)', async () => {
     const user = userEvent.setup()
+    const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer,
+      clear: vi.fn(),
+    })
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
       basinLoading: false,
@@ -1623,11 +1633,16 @@ describe('App route state', () => {
 
     // 浮层切换器在详情模式同样可用；不再有水文图层侧栏
     expect(screen.queryByText('数据源与情景')).not.toBeInTheDocument()
+    overviewAsync.mockClear()
+
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
-    expect(window.location.search).toContain('layer=met-stations')
-    await waitFor(() =>
-      expect(overviewAsync).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ layer: 'met-stations' })),
-    )
+    expect(window.location.search).toContain('metStations=1')
+    expect(new URLSearchParams(window.location.search).get('layer')).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: /气象代站/, pressed: true })).toBeInTheDocument())
+    expect(loadStationLayer).toHaveBeenCalledWith({
+      basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }],
+    })
+    expect(overviewAsync).not.toHaveBeenCalled()
   })
 
   it('writes the clicked river segment id into the URL from a map feature (M26)', async () => {
@@ -1711,17 +1726,17 @@ describe('App route state', () => {
         loaded: 1,
         truncated: false,
       },
-      requestKey: 'basin-demo:bv-001::GFS::latest',
+      requestKey: 'basin-demo:bv-001',
     })
     useOverviewDataStore.setState({
-      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&layer=met-stations&basinVersionId=bv-001', 'source=gfs&layer=met-stations&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&basinVersionId=bv-001', 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
       basinLoading: false,
       basinError: null,
       loadBasinDetail,
     })
     mockHydroMetRouteClient()
 
-    await renderAppAtBasinDetail('/?source=gfs&layer=met-stations&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+    await renderAppAtBasinDetail('/?source=gfs&metStations=1&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     await waitFor(() =>
       expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('met-stations-point'),
@@ -4551,7 +4566,7 @@ function RedirectMatrixHarness() {
         <Route path="/overview" element={<LegacyRedirect />} />
         <Route path="/hydro-met" element={<LegacyRedirect />} />
         <Route path="/forecast" element={<LegacyRedirect />} />
-        <Route path="/meteorology" element={<LegacyRedirect extraParams={{ layer: 'met-stations' }} />} />
+        <Route path="/meteorology" element={<LegacyRedirect extraParams={{ metStations: '1' }} />} />
         <Route
           path="/flood-alerts"
           element={<LegacyRedirect extraParams={{ layer: 'flood-return-period' }} />}
@@ -4588,14 +4603,15 @@ describe('legacy route redirect query contract', () => {
     expect(params.toString()).toBe('')
   })
 
-  it('redirects /meteorology with layer=met-stations', async () => {
+  it('redirects /meteorology with metStations=1', async () => {
     window.history.pushState({}, '', '/meteorology')
 
     render(<RedirectMatrixHarness />)
 
     const { pathname, params } = await landingParams()
     expect(pathname).toBe('/')
-    expect(params.get('layer')).toBe('met-stations')
+    expect(params.get('metStations')).toBe('1')
+    expect(params.get('layer')).toBeNull()
   })
 
   it('redirects /flood-alerts with layer=flood-return-period', async () => {
@@ -4625,25 +4641,38 @@ describe('legacy route redirect query contract', () => {
     expect(params.get('segmentId')).toBe('seg_001')
   })
 
-  it('preserves original deep-link search and appends the semantic layer param', async () => {
-    window.history.pushState({}, '', '/meteorology?source=IFS&time=2026-06-05T18:00:00Z')
+  it('preserves original deep-link search and appends the station overlay param', async () => {
+    window.history.pushState({}, '', '/meteorology?source=IFS&validTime=2026-06-05T18:00:00Z')
 
     render(<RedirectMatrixHarness />)
 
     const { params } = await landingParams()
     expect(params.get('source')).toBe('IFS')
-    expect(params.get('time')).toBe('2026-06-05T18:00:00Z')
-    expect(params.get('layer')).toBe('met-stations')
+    expect(params.get('validTime')).toBe('2026-06-05T18:00:00Z')
+    expect(params.get('metStations')).toBe('1')
+    expect(params.get('layer')).toBeNull()
+  })
+
+  it('preserves a valid hydrology layer when /meteorology enables station overlay', async () => {
+    window.history.pushState({}, '', '/meteorology?layer=flood-return-period&source=IFS&validTime=2026-06-05T18:00:00Z')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    expect(params.get('layer')).toBe('flood-return-period')
+    expect(params.get('source')).toBe('IFS')
+    expect(params.get('validTime')).toBe('2026-06-05T18:00:00Z')
+    expect(params.get('metStations')).toBe('1')
   })
 
   it('keeps the original search value when a semantic key collides', async () => {
-    window.history.pushState({}, '', '/meteorology?layer=foo')
+    window.history.pushState({}, '', '/meteorology?metStations=0')
 
     render(<RedirectMatrixHarness />)
 
     const { params } = await landingParams()
     // 同名键冲突时取原始 search 的值，语义参数不覆盖用户既有状态
-    expect(params.getAll('layer')).toEqual(['foo'])
+    expect(params.getAll('metStations')).toEqual(['0'])
   })
 
   it('lands a segment deep-link without basin context as /?segmentId=...', async () => {

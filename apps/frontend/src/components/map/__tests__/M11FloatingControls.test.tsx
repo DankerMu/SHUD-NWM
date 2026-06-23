@@ -42,17 +42,30 @@ const dischargeLayer: LayerState = {
 }
 
 describe('M11FloatingLayerSwitcher', () => {
-  it('offers discharge/met-stations and dispatches layer changes', async () => {
+  it('offers hydrology layers and dispatches hydrology layer changes separately from station overlay', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
-    render(<M11FloatingLayerSwitcher layer="discharge" onQueryChange={onQueryChange} />)
+    render(<M11FloatingLayerSwitcher layer="discharge" metStations={false} onQueryChange={onQueryChange} />)
 
     expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /重现期/, pressed: false })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /预警等级/, pressed: false })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /气象栅格/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: /重现期/ }))
+    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'flood-return-period' })
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
-    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
+    expect(onQueryChange).toHaveBeenCalledWith({ metStations: true })
+  })
+
+  it('dispatches false when disabling the station overlay toggle', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingLayerSwitcher layer="discharge" metStations onQueryChange={onQueryChange} />)
+
+    await user.click(screen.getByRole('button', { name: /气象代站/, pressed: true }))
+    expect(onQueryChange).toHaveBeenCalledWith({ metStations: false })
   })
 })
 
@@ -92,9 +105,10 @@ describe('M11FloatingLegend', () => {
     expect(screen.getByText('预警等级图例')).toBeInTheDocument()
   })
 
-  it('shows an honest note for met-stations (point cluster, no color ramp)', () => {
-    render(<M11FloatingLegend layer="met-stations" layers={[]} />)
-    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('点位聚合')
+  it('keeps the legend tied to the hydrology layer while stations are an overlay', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[{ ...dischargeLayer, legend: [] }]} />)
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
   })
 })
 

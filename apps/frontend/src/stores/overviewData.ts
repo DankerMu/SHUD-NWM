@@ -246,11 +246,11 @@ function cacheKey(path: string, params?: unknown) {
 function requestScopeQueryKey(query: M11QueryState) {
   // basinId 由 requestScope.basinId 单独匹配，故从序列化键中剔除：
   // 加 basinId 字段后键的输出与改动前字节完全一致，零缓存 churn（R1 缓解）。
-  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
+  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
 }
 
 function requestScopeDataKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap })
+  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap })
 }
 
 function basinRequestIdentityQuery(query: M11QueryState): M11QueryState {
@@ -624,7 +624,7 @@ async function fetchModel(modelId: string) {
 // 历史上 `/runs` 永远 append `flood_product_ready=true`，把 discharge 展示语义与洪频完整性强耦合
 // （m25 多流域改造副产品，design.md D6）。现在按 layer 三态门控：
 // - flood-return-period / warning-level → 强制 `true`（ranking / summary 需要洪频 ready 闸门）
-// - 其他（discharge / met-stations）→ 不注入该 param，让后端 frequency-ready ordering
+// - discharge → 不注入该 param，让后端 frequency-ready ordering
 //   选最新 run，避免洪频未跑完时 discharge 也选不到 run。
 // 注意：cache key 必须把 floodProductReady 纳入，否则 layer toggle 后命中前一个 layer 的缓存页，
 // 违反 spec scenario "Layer toggle re-evaluates flood_product_ready filter"。
@@ -636,7 +636,6 @@ function floodProductReadyForLayer(layer: M11QueryState['layer']): boolean | und
     case 'warning-level':
       return true
     case 'discharge':
-    case 'met-stations':
       return undefined
     default: {
       const _exhaustive: never = layer
@@ -1164,7 +1163,7 @@ async function fetchLineage(runId: string, riverNetworkVersionId: string, segmen
  * fetched on demand, not on overview bootstrap"）。runId + serialized query + basinId 构成稳定标识。
  */
 function floodRankingKey(runId: string, query: M11QueryState, basinId?: string | null) {
-  return `${runId}|${serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
+  return `${runId}|${serializeM11QueryState({ ...query, metStations: false, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
 }
 
 /**
@@ -1207,7 +1206,7 @@ export function releaseFloodRankingOnDemand(
     return
   }
   // runId 未知 → 按 query/basinId suffix 模糊清理（同 query 不同 run 都清掉）。
-  const suffix = `|${serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
+  const suffix = `|${serializeM11QueryState({ ...query, metStations: false, basemap: defaultM11QueryState.basemap })}|${basinId ?? ''}`
   for (const key of [...floodRankingInFlight.keys()]) {
     if (key.endsWith(suffix)) floodRankingInFlight.delete(key)
   }
@@ -1512,7 +1511,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       )
       const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(requestQuery)
-      // PR 5/7：与 loadOverview 对称的层级 gating —— discharge / met-* 下 latestRun 不再强制洪频 ready，
+      // PR 5/7：与 loadOverview 对称的层级 gating —— discharge 下 latestRun 不再强制洪频 ready，
       // 直接 fan-out flood ranking / timeline / lineage 会被后端 409 FLOOD_PRODUCT_UNAVAILABLE 兜底，
       // 进而塞进 partialErrors，让 BasinDetailPanels.qualityNote 出现「洪频不可用」UI 噪声。
       // floodLayerActive 把这些 eager call 与「当前 layer 实际依赖洪频」绑定，保证 spec scenario

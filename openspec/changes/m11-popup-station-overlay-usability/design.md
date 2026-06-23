@@ -217,6 +217,140 @@ Non-goals:
 - No query-state migration, station overlay render-order change, draggable
   window frame, backend API change, or new station variable support.
 
+## Issue #659 Fixture: Station Overlay Query State And Routing
+
+Fixture level: expanded
+Repair intensity: high
+Expanded trigger rationale:
+
+- This slice changes shareable URL state, legacy route semantics, active
+  frontend layer contracts, and station-overlay loading activation.
+- A partial migration would either keep emitting retired `layer=met-stations`
+  URLs or accidentally make station inventory requests while the overlay is
+  disabled.
+
+Change surface:
+
+- `apps/frontend/src/lib/m11/queryState.ts`
+- `apps/frontend/src/components/map/M11FloatingControls.tsx`
+- `apps/frontend/src/components/map/M11MapLibreSurface.tsx`
+- `apps/frontend/src/pages/OverviewPage.tsx`
+- `apps/frontend/src/components/m11/BasinDetailPanels.tsx`
+- `apps/frontend/src/pages/m11/M11Controls.tsx`
+- `apps/frontend/src/pages/m11/useStationLayer.ts`
+- `apps/frontend/src/stores/overviewData.ts`
+- `apps/frontend/src/lib/m11/overviewDataContracts.ts`
+- `apps/frontend/src/App.tsx`
+- Frontend unit/component route tests and mocked M11 route e2e expectations.
+
+Must preserve:
+
+- `layer` continues to choose only hydrology product layers:
+  `discharge`, `flood-return-period`, and `warning-level`.
+- Hydrology layer state remains serialized and shareable independently of
+  station overlay visibility.
+- Source/cycle strictness remains required for station-series curve requests
+  after a station click; station inventory loading must not claim source/cycle
+  filtering.
+- When `metStations=1` and valid basin contexts exist, station inventory
+  loading still runs from basin/model scope even if `source=best` or
+  `source=compare` has not resolved to concrete GFS/IFS; unresolved source
+  honesty belongs to the station-series curve after a station click.
+- Existing basin/model-scoped station inventory loading, pagination cap,
+  truncation honesty, and unresolved-source honesty remain intact.
+- Stale links and old route entry points continue to land on a usable map.
+
+Must add/change:
+
+- Add `metStations` boolean query state, serialized as `metStations=1` only
+  when enabled and omitted when disabled.
+- Parse stale `layer=met-stations` as `layer=discharge` plus
+  `metStations=true`; serialized canonical URLs must not contain
+  `layer=met-stations`.
+- Redirect `/meteorology` with `metStations=1` and preserve existing valid
+  hydrology `layer` values from the original query.
+- Replace the exclusive "流量 / 气象代站" layer choice with hydrology selection
+  plus an independent station overlay toggle.
+- Activate station overlay rendering/loading/status notes from `metStations`
+  rather than `state.layer`.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - URL query parameters and legacy
+  routes are user-facing contracts.
+- Config / project setup: not selected - no build or environment config
+  changes.
+- File IO / path safety / overwrite: not selected - no file system surface.
+- Schema / columns / units / field names: selected - `M11Layer` type and
+  overview layer labels/fallback legends are narrowed.
+- Auth / permissions / secrets: not selected - no auth boundary touched.
+- Concurrency / shared state / ordering: selected - URL replacement effects and
+  station-store fetch effects must not loop or keep stale overlay data.
+- Resource limits / large input / discovery: selected - station inventory
+  pagination/truncation cap must remain honest.
+- Legacy compatibility / examples: selected - `/meteorology` and
+  `layer=met-stations` links must continue to work.
+- Error handling / rollback / partial outputs: selected - inactive overlay,
+  unresolved source, missing basin contexts, and truncated inventory require
+  explicit honest states.
+- Release / packaging / dependency compatibility: not selected - no new
+  package.
+- Documentation / migration notes: selected - source GIS design doc must match
+  the new route/query semantics.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: selected - station overlay feature
+  rendering remains map/basin-context scoped, though CRS is unchanged.
+- Hydro-met time series / forcing windows: selected - station-series popup
+  source/cycle strictness must not be weakened by inventory-overlay changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no model runtime
+  or numerical output change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database query
+  contract changes.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler
+  or compute lifecycle surface.
+- External hydro-met providers / snapshot reproducibility: selected -
+  GFS/IFS/best/compare source resolution controls station-series identity.
+- Run manifest / QC provenance: not selected - no manifest or QC evidence
+  surface.
+- Published NHMS artifacts / display identity: selected - station and river
+  popup identities must stay source/basin/segment/station truthful.
+
+Required evidence:
+
+- Query-state tests show `metStations=1` parses/serializes as an enabled
+  overlay, disabled/default state omits it, stale `layer=met-stations`
+  normalizes to `layer=discharge&metStations=1`, and active serialization never
+  emits `layer=met-stations`.
+- Route tests show `/meteorology` redirects to `/?metStations=1`, preserves
+  original source/validTime parameters, and preserves an existing valid
+  hydrology `layer=flood-return-period` while enabling the station overlay.
+- Floating-control tests show hydrology layer selection dispatches only
+  hydrology `layer` values and the station toggle dispatches
+  `{ metStations: true/false }`.
+- Overview and basin-detail tests show station inventory loading occurs only
+  when `metStations=1` and valid basin contexts exist; inactive overlay does
+  not load, `best`/`compare` unresolved source does not block the inventory
+  overlay request, station-series popups still require concrete GFS/IFS before
+  requesting curves, and status notes appear only while the overlay is enabled.
+- Store/hook tests continue to cover pagination/truncation and missing basin
+  version honesty without an unbounded all-stations request.
+- `rg "layer=met-stations" apps/frontend/src apps/frontend/e2e` after the
+  implementation returns only legacy/stale test inputs or comments that
+  explicitly describe normalization, not active serializer/control output.
+- `cd apps/frontend && corepack pnpm test -- queryState M11FloatingControls M11Shell AppRoutes stationLayerData m11OverviewDataContracts`
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`
+
+Non-goals:
+
+- No MapLibre render-order/hit-priority changes beyond wiring station overlay
+  visibility to `metStations`; issue #660 owns hit-priority ordering.
+- No draggable or coexisting curve-window behavior; issue #661 owns that work.
+- No backend API or station-MVT endpoint change.
+
 ## Migration Plan
 
 1. Add the new query state and normalize old station-layer URLs.

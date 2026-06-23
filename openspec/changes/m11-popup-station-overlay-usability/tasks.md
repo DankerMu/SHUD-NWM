@@ -25,12 +25,35 @@ Issue #658 evidence rows:
 
 ## 2. Station Overlay State And Routing
 
-- [ ] 2.1 Add separate `metStations` query state parsing/serialization; normalize stale `layer=met-stations` URLs to a valid hydrology layer with station overlay enabled.
-- [ ] 2.2 Retire `met-stations` from the active hydrology layer contract in `M11Layer`, overview data contracts, fallback legends, legacy M11 controls, and tests; add verification that active code no longer serializes `layer=met-stations`.
-- [ ] 2.3 Update `/meteorology` legacy redirect semantics and `docs/spec/06_frontend_gis_design.md` to emit station overlay state instead of `layer=met-stations`, including tests for preserving existing query parameters and hydrology layer values.
-- [ ] 2.4 Update floating layer controls so hydrology layer selection remains single-choice and meteorological stations are controlled by an independent overlay toggle.
-- [ ] 2.5 Update overview and basin-detail station loading activation to depend on the overlay flag and visible/current basin contexts, preserving basin/model-scoped station inventory and honest empty/truncated states.
-- [ ] 2.6 Add station overlay loading tests for inactive overlay, unresolved source for station-series, missing basin contexts, paginated/truncated station inventory, and route-level status notes that appear only when `metStations=1`.
+- [x] 2.1 Add separate `metStations` query state parsing/serialization; normalize stale `layer=met-stations` URLs to a valid hydrology layer with station overlay enabled.
+- [x] 2.2 Retire `met-stations` from the active hydrology layer contract in `M11Layer`, overview data contracts, fallback legends, legacy M11 controls, and tests; add verification that active code no longer serializes `layer=met-stations`.
+- [x] 2.3 Update `/meteorology` legacy redirect semantics and `docs/spec/06_frontend_gis_design.md` to emit station overlay state instead of `layer=met-stations`, including tests for preserving existing query parameters and hydrology layer values.
+- [x] 2.4 Update floating layer controls so hydrology layer selection remains single-choice and meteorological stations are controlled by an independent overlay toggle.
+- [x] 2.5 Update overview and basin-detail station loading activation to depend on the overlay flag and visible/current basin contexts, preserving basin/model-scoped station inventory and honest empty/truncated states.
+- [x] 2.6 Add station overlay loading tests for inactive overlay, unresolved source for station-series, missing basin contexts, paginated/truncated station inventory, and route-level status notes that appear only when `metStations=1`.
+
+Issue #659 evidence rows:
+
+- Query input `?layer=met-stations` -> parser returns `layer=discharge` and
+  `metStations=true`; serializer returns `metStations=1` without
+  `layer=met-stations`.
+- Query input `?layer=flood-return-period&metStations=1` -> hydrology layer
+  remains `flood-return-period` while station overlay is enabled.
+- `/meteorology?source=IFS&validTime=2026-06-05T18:00:00Z` -> redirect target
+  preserves source/validTime and appends `metStations=1`, not
+  `layer=met-stations`.
+- `/meteorology?layer=flood-return-period&source=IFS&validTime=2026-06-05T18:00:00Z`
+  -> redirect target preserves the hydrology layer and source/validTime while
+  enabling `metStations=1`.
+- Floating controls: clicking hydrology choices dispatches hydrology `layer`
+  patches only; clicking the station overlay toggle dispatches `metStations`
+  patches only.
+- Overview and basin-detail station loading: inactive overlay does not call
+  `loadStationLayer`; enabled overlay with visible/current basin contexts does;
+  unresolved `best`/`compare` does not block the inventory overlay request;
+  missing basin contexts and truncated inventory render honest status notes only
+  while the overlay is enabled; station-series popups still wait for concrete
+  GFS/IFS before requesting curves.
 
 ## 3. Map Layer Ordering And Hit Behavior
 

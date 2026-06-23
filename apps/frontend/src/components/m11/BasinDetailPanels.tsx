@@ -30,6 +30,11 @@ function concreteSource(resolvedSource: string | null | undefined): HydroMetSour
   return null
 }
 
+function stationSeriesSourceAvailability(resolvedSource: string | null | undefined): HydroMetSource | 'GFS+IFS' | null {
+  if (resolvedSource === 'GFS' || resolvedSource === 'IFS' || resolvedSource === 'GFS+IFS') return resolvedSource
+  return null
+}
+
 /**
  * 流域详情就地化（M26 全屏单页）：取数 + 地图点选 → 弹窗的接线抽到此 hook。
  * 不再返回左右侧栏 ReactNode；只返回全屏地图所需 props + 弹窗 slot + honest 状态。
@@ -50,6 +55,7 @@ export function useBasinDetailMode({
       cycle: state.cycle,
       validTime: state.validTime,
       layer: state.layer,
+      metStations: false,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
@@ -129,6 +135,7 @@ export function useBasinDetailMode({
   )
 
   const resolvedSource = concreteSource(sourceSelection?.resolvedSource)
+  const stationSeriesSource = stationSeriesSourceAvailability(sourceSelection?.resolvedSource)
 
   // 两类曲线面板互斥状态：river 与 station 各持选中要素；窗口统一居中呈现。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number] } | null>(null)
@@ -185,10 +192,8 @@ export function useBasinDetailMode({
   const backToOverview = useCallback(() => onQueryChange({ basinId: null, segmentId: null }), [onQueryChange])
 
   const stationLayer = useMetStationLayer({
-    active: state.layer === 'met-stations',
+    active: state.metStations,
     basinContexts: [{ basinId, basinVersionId: state.basinVersionId }],
-    resolvedSource: sourceSelection?.resolvedSource ?? null,
-    cycle: state.cycle,
   })
 
   // 切流域时清掉残留 popup。
@@ -214,7 +219,7 @@ export function useBasinDetailMode({
     <M11RiverForecastPanel basinId={basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
   ) : null
   const stationPanel = stationPopup ? (
-    <M11StationForcingPopup basinId={basinId} initialSource={resolvedSource} station={stationPopup.station} onClose={() => setStationPopup(null)} />
+    <M11StationForcingPopup basinId={basinId} initialSource={stationSeriesSource} station={stationPopup.station} onClose={() => setStationPopup(null)} />
   ) : null
 
   return {

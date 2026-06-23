@@ -20,6 +20,7 @@ describe('M11 query state helpers', () => {
       cycle: '2026-05-18T00:00:00.000Z',
       validTime: '2026-05-18T06:00:00.000Z',
       layer: 'warning-level',
+      metStations: false,
       basemap: 'satellite',
       basinVersionId: 'bv-001',
       riverNetworkVersionId: 'rn-v1',
@@ -33,7 +34,7 @@ describe('M11 query state helpers', () => {
   })
 
   it('normalizes invalid values to documented defaults', () => {
-    const state = parseM11QueryState('source=unknown&basemap=bad&warningLevel=invalid&cycle=not-a-date&q=')
+    const state = parseM11QueryState('source=unknown&basemap=bad&warningLevel=invalid&cycle=not-a-date&metStations=0&q=')
 
     expect(state).toEqual(defaultM11QueryState)
     expect(serializeM11QueryState(state)).toBe('')
@@ -138,6 +139,24 @@ describe('M11 query state helpers', () => {
     expect(serializeM11QueryState(state)).not.toContain(retiredLayerId)
     // 需要 URL 替换：URL 上仍带退役 layer，但 serialize 出的 canonical 串里不再含该值。
     expect(needsM11QueryReplacement(`?layer=${retiredLayerId}`)).toBe(true)
+  })
+
+  it('normalizes the legacy met-stations layer into a station overlay query state', () => {
+    const state = parseM11QueryState('layer=met-stations')
+
+    expect(state.layer).toBe('discharge')
+    expect(state.metStations).toBe(true)
+    expect(serializeM11QueryState(state)).toBe('metStations=1')
+    expect(serializeM11QueryState(state)).not.toContain('layer=met-stations')
+    expect(needsM11QueryReplacement('?layer=met-stations')).toBe(true)
+  })
+
+  it('keeps a valid hydrology layer while enabling the station overlay', () => {
+    const state = parseM11QueryState('layer=flood-return-period&metStations=1')
+
+    expect(state.layer).toBe('flood-return-period')
+    expect(state.metStations).toBe(true)
+    expect(serializeM11QueryState(state)).toBe('layer=flood-return-period&metStations=1')
   })
 
   it('can explicitly clear segment identity when a handoff changes basin version', () => {

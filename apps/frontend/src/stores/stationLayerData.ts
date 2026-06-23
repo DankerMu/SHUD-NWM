@@ -8,7 +8,6 @@ import {
   fetchHydroMetStationsByIdentity,
   type HydroMetStation,
 } from '@/pages/hydroMet/bootstrap'
-import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 /**
@@ -35,16 +34,13 @@ export interface StationLayerBasinContext {
 
 export interface StationLayerRequest {
   basinContexts: StationLayerBasinContext[]
-  /** 已解析的具体源；store 不接受 best/compare（类型即 GFS/IFS）。 */
-  resolvedSource: HydroMetSource
-  cycle: string | null
 }
 
 interface StationLayerDataState {
   data: StationLayerData | null
   loading: boolean
   error: string | null
-  /** 当前已解析快照的请求键（basinId+source+cycle）；用于 UI 判定数据是否匹配当前请求。 */
+  /** 当前已解析快照的请求键（basinId+basinVersionId）；用于 UI 判定数据是否匹配当前请求。 */
   requestKey: string | null
   loadStationLayer: (request: StationLayerRequest) => Promise<StationLayerData>
   clear: () => void
@@ -66,10 +62,9 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
 }
 
 export function stationLayerRequestKey(request: StationLayerRequest) {
-  const basinKey = normalizeBasinContexts(request.basinContexts)
+  return normalizeBasinContexts(request.basinContexts)
     .map((context) => `${context.basinId}:${context.basinVersionId ?? 'missing'}`)
     .join(',')
-  return `${basinKey}::${request.resolvedSource}::${request.cycle ?? 'latest'}`
 }
 
 const inFlight = new Map<string, Promise<StationLayerData>>()

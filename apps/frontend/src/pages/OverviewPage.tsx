@@ -170,7 +170,7 @@ function M11FullscreenMap({
         onOverlayHover={onOverlayHover}
         onOverlayClick={onOverlayClick}
       />
-      <M11FloatingLayerSwitcher layer={state.layer} onQueryChange={onQueryChange} />
+      <M11FloatingLayerSwitcher layer={state.layer} metStations={state.metStations} onQueryChange={onQueryChange} />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11OpsLink visible={opsVisible} />
       {children}
@@ -229,8 +229,8 @@ function BasinDetailMode({
 
 const NONE_VISIBLE_SENTINEL = '__none__'
 
-function concreteHydroMetSource(resolvedSource: string | null | undefined): HydroMetSource | null {
-  if (resolvedSource === 'GFS' || resolvedSource === 'IFS') return resolvedSource
+function stationSeriesSourceAvailability(resolvedSource: string | null | undefined): HydroMetSource | 'GFS+IFS' | null {
+  if (resolvedSource === 'GFS' || resolvedSource === 'IFS' || resolvedSource === 'GFS+IFS') return resolvedSource
   return null
 }
 
@@ -241,6 +241,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       cycle: state.cycle,
       validTime: state.validTime,
       layer: state.layer,
+      metStations: false,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
@@ -424,7 +425,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const stationForecastPanel = stationPopup ? (
     <M11StationForcingPopup
       basinId={stationPopup.basinId}
-      initialSource={concreteHydroMetSource(sourceSelection?.resolvedSource)}
+      initialSource={stationSeriesSourceAvailability(sourceSelection?.resolvedSource)}
       station={stationPopup.station}
       onClose={() => setStationPopup(null)}
     />
@@ -433,10 +434,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 全国总览开代站图层：按当前总览中的所有可见流域版本取代站点位；
   // 点位展示不依赖 latest-product ready，避免某个流域 forcing 曲线未就绪时站点也消失。
   const stationLayer = useMetStationLayer({
-    active: state.layer === 'met-stations',
+    active: state.metStations,
     basinContexts: stationLayerBasinContexts,
-    resolvedSource: sourceSelection?.resolvedSource ?? null,
-    cycle: state.cycle,
   })
 
   // 「mapBootstrap 尚未首次落定」单一信号：阶段 1 完成且 overview.bootstrap 已写入即解锁。
@@ -482,7 +481,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     >
       {riverForecastPanel}
       {stationForecastPanel}
-      {state.layer === 'met-stations' && stationLayer.statusNote ? (
+      {state.metStations && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
       ) : surfaceSettling ? (

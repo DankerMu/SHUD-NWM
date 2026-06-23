@@ -1,7 +1,6 @@
 import { useEffect, useMemo } from 'react'
 
 import type { M11StationFeatureCollection } from '@/components/map/M11MapLibreSurface'
-import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { getHydroMetStationCoordinates } from '@/lib/hydroMet/runtime'
 import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import {
@@ -11,7 +10,7 @@ import {
 } from '@/stores/stationLayerData'
 
 export interface MetStationLayerModel {
-  /** 该图层是否激活（state.layer==='met-stations'）。 */
+  /** 气象代站叠加层是否激活（state.metStations）。 */
   active: boolean
   featureCollection: M11StationFeatureCollection | null
   loading: boolean
@@ -52,20 +51,15 @@ function buildFeatureCollection(stations: HydroMetStation[], stationBasinIds: Re
 }
 
 /**
- * 代站图层数据接线（M26-3）。仅在图层激活且拿到可见流域版本 + 已解析 GFS/IFS 时取数；
- * 源未解析（best 未落）或无流域版本时不取数，给 honest 空态文案。truncated 显式标注。
+ * 代站图层数据接线（M26-3）。仅在叠加层激活且拿到可见/当前流域上下文时取数；
+ * inventory 位置清单不依赖 source/cycle，truncated 显式标注。
  */
 export function useMetStationLayer({
   active,
   basinContexts,
-  resolvedSource,
-  cycle,
 }: {
   active: boolean
   basinContexts: StationLayerBasinContext[]
-  /** basin detail 的 resolvedSource；best/compare 未解析时为非 GFS/IFS（如 'Unknown'/'GFS+IFS'）。 */
-  resolvedSource: string | null
-  cycle: string | null
 }): MetStationLayerModel {
   const data = useStationLayerDataStore((store) => store.data)
   const loading = useStationLayerDataStore((store) => store.loading)
@@ -74,8 +68,6 @@ export function useMetStationLayer({
   const loadStationLayer = useStationLayerDataStore((store) => store.loadStationLayer)
   const clear = useStationLayerDataStore((store) => store.clear)
 
-  const concreteSource: HydroMetSource | null =
-    resolvedSource === 'GFS' || resolvedSource === 'IFS' ? resolvedSource : null
   const requestContexts = useMemo(
     () =>
       basinContexts
@@ -86,19 +78,17 @@ export function useMetStationLayer({
         .filter((context) => context.basinId.length > 0),
     [basinContexts],
   )
-  const shouldFetch = active && requestContexts.length > 0 && Boolean(concreteSource)
-  const expectedKey = shouldFetch && concreteSource
-    ? stationLayerRequestKey({ basinContexts: requestContexts, resolvedSource: concreteSource, cycle })
-    : null
+  const shouldFetch = active && requestContexts.length > 0
+  const expectedKey = shouldFetch ? stationLayerRequestKey({ basinContexts: requestContexts }) : null
 
   useEffect(() => {
-    if (!shouldFetch || !concreteSource) {
-      // 不取数分支（关闭图层 / 无 basinId / 源未解析）：清掉过期数据，避免误展示别的流域代站。
+    if (!shouldFetch) {
+      // 不取数分支（关闭 overlay / 无 basinId）：关闭时清掉过期数据，避免误展示别的流域代站。
       if (!active) clear()
       return
     }
-    void loadStationLayer({ basinContexts: requestContexts, resolvedSource: concreteSource, cycle }).catch(() => undefined)
-  }, [active, concreteSource, cycle, clear, loadStationLayer, requestContexts, shouldFetch])
+    void loadStationLayer({ basinContexts: requestContexts }).catch(() => undefined)
+  }, [active, clear, loadStationLayer, requestContexts, shouldFetch])
 
   const matches = expectedKey !== null && requestKey === expectedKey
   const currentData = matches ? data : null
@@ -110,7 +100,6 @@ export function useMetStationLayer({
   const statusNote = (() => {
     if (!active) return null
     if (requestContexts.length === 0) return '暂无可用流域版本以加载气象代站'
-    if (!concreteSource) return '等待 Best Available 解析到具体源（GFS/IFS）后加载气象代站'
     if (loading && !currentData) return '气象代站加载中'
     if (error && !currentData) return error
     if (currentData?.truncated) return `已加载 ${currentData.loaded}/${currentData.total} 个代站，列表已截断`

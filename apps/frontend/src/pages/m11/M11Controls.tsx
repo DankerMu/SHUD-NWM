@@ -98,12 +98,7 @@ const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   discharge: getM11LayerLegend('discharge'),
   'flood-return-period': getM11LayerLegend('flood-return-period'),
   'warning-level': getM11LayerLegend('warning-level'),
-  'met-stations': [],
 }
-
-const meteorologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
-  { value: 'met-stations', label: '气象代站', description: '点位代站聚合图层 / clustered GeoJSON' },
-]
 
 export function M11MapSurface({
   state,
@@ -254,27 +249,23 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
 
       <LayerGroupTitle title="气象图层" />
       <div className="space-y-1">
-        {meteorologyLayers.map((item) => {
-          const selected = state.layer === item.value
-          return (
-            <button
-              key={item.value}
-              type="button"
-              className={cn(
-                'flex w-full cursor-pointer items-center justify-between rounded border px-3 py-2 text-left transition-colors',
-                selected ? 'border-primary-600 bg-primary-50 text-primary-700' : 'border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50',
-              )}
-              aria-pressed={selected}
-              onClick={() => onQueryChange?.({ layer: item.value })}
-            >
-              <span>
-                <span className="block text-sm font-medium">{item.label}</span>
-                <span className="block text-xs text-neutral-700">{item.description}</span>
-              </span>
-              <span className={cn('h-2.5 w-2.5 rounded-full', selected ? 'bg-success' : 'bg-neutral-300')} aria-hidden="true" />
-            </button>
-          )
-        })}
+        <button
+          type="button"
+          className={cn(
+            'flex w-full cursor-pointer items-center justify-between rounded border px-3 py-2 text-left transition-colors',
+            state.metStations
+              ? 'border-primary-600 bg-primary-50 text-primary-700'
+              : 'border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50',
+          )}
+          aria-pressed={state.metStations}
+          onClick={() => onQueryChange?.({ metStations: !state.metStations })}
+        >
+          <span>
+            <span className="block text-sm font-medium">气象代站</span>
+            <span className="block text-xs text-neutral-700">点位代站聚合图层 / clustered GeoJSON</span>
+          </span>
+          <span className={cn('h-2.5 w-2.5 rounded-full', state.metStations ? 'bg-success' : 'bg-neutral-300')} aria-hidden="true" />
+        </button>
       </div>
 
       <LayerGroupTitle title="基础图层" />
@@ -302,9 +293,7 @@ export function LayerLegendPanel({ state, layers = [] }: SharedControlProps) {
       ? '预警等级图例'
       : state.layer === 'flood-return-period'
         ? '重现期图例'
-        : state.layer === 'met-stations'
-          ? '气象代站图例'
-          : '径流量图例'
+        : '径流量图例'
 
   return (
     <section className="space-y-2" aria-label="M11 图例">

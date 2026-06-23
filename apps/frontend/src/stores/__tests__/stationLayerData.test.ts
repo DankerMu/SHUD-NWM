@@ -69,8 +69,6 @@ describe('stationLayerData store (M26-3)', () => {
         { basinId: 'heihe', basinVersionId: 'bv-heihe' },
         { basinId: 'qhh', basinVersionId: 'bv-qhh' },
       ],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(2095)
@@ -98,8 +96,6 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'china', basinVersionId: 'bv-cn' }],
-      resolvedSource: 'IFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(12000)
@@ -113,8 +109,6 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(386)
@@ -138,8 +132,6 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'qhh', basinVersionId: null }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(clientGetMock).toHaveBeenCalledWith(
@@ -160,8 +152,6 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'empty', basinVersionId: 'bv-empty' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.total).toBe(0)
@@ -177,8 +167,6 @@ describe('stationLayerData store (M26-3)', () => {
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'nocount', basinVersionId: 'bv-nocount' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     expect(data.loaded).toBe(386)
@@ -196,8 +184,6 @@ describe('stationLayerData store (M26-3)', () => {
     await expect(
       useStationLayerDataStore.getState().loadStationLayer({
         basinContexts: [{ basinId: 'heihe', basinVersionId: 'bv-heihe' }],
-        resolvedSource: 'GFS',
-        cycle: null,
       }),
     ).rejects.toThrow('第二页加载失败')
 
@@ -209,7 +195,7 @@ describe('stationLayerData store (M26-3)', () => {
   it('dedupes concurrent identical requests', async () => {
     fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage(stations('qhh', 386, 0), 386))
 
-    const request = { basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }], resolvedSource: 'GFS' as const, cycle: null }
+    const request = { basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }] }
     const [a, b] = await Promise.all([
       useStationLayerDataStore.getState().loadStationLayer(request),
       useStationLayerDataStore.getState().loadStationLayer(request),
@@ -233,13 +219,9 @@ describe('stationLayerData store (M26-3)', () => {
     const store = useStationLayerDataStore.getState()
     const firstPromise = store.loadStationLayer({
       basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     }).catch(() => undefined)
     const secondData = await store.loadStationLayer({
       basinContexts: [{ basinId: 'heihe', basinVersionId: 'bv-heihe' }],
-      resolvedSource: 'GFS',
-      cycle: null,
     })
 
     // 让过期的第一个请求晚一步 resolve。
@@ -252,7 +234,7 @@ describe('stationLayerData store (M26-3)', () => {
   })
 
   it('surfaces an error when no basin version identity is available', async () => {
-    const request = { basinContexts: [], resolvedSource: 'GFS' as const, cycle: null }
+    const request = { basinContexts: [] }
 
     await expect(
       useStationLayerDataStore.getState().loadStationLayer(request),

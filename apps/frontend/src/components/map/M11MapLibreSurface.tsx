@@ -42,7 +42,7 @@ import {
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
-  layerId: M11Layer | 'basin-boundaries' | 'basin-river-segments'
+  layerId: M11Layer | 'met-stations' | 'basin-boundaries' | 'basin-river-segments'
   event: MapLayerMouseEvent
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
@@ -101,6 +101,7 @@ interface M11MapLibreSurfaceProps {
     | components['schemas']['GeoJsonLineString']
     | components['schemas']['GeoJsonMultiLineString']
     | null
+  metStations?: boolean
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   /** 数据加载中（overview/basin 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
@@ -211,6 +212,7 @@ export function M11MapLibreSurface({
   meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
+  metStations,
   stationFeatureCollection = null,
   popup = null,
   loading = false,
@@ -282,8 +284,8 @@ export function M11MapLibreSurface({
       m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData, basinRiverFeatureCollection.features.length > 0),
     [basinRiverFeatureCollection.features.length, layers, overlay, overlayData, overlayUnavailableReason, state],
   )
-  // 代站图层仅在选中该图层模式且有非空 features 时渲染/注册（关闭图层不注册 source/layer）。
-  const showStationLayer = state.layer === 'met-stations' && (stationFeatureCollection?.features.length ?? 0) > 0
+  // 代站图层由独立 overlay 状态控制，有非空 features 时渲染/注册（关闭 overlay 不注册 source/layer）。
+  const showStationLayer = (metStations ?? state.metStations) && (stationFeatureCollection?.features.length ?? 0) > 0
   const interactiveLayerIds = [
     ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
     ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
@@ -1342,8 +1344,6 @@ function m11SelectedLayerUnavailableReason(
   hasBasinRiverNetwork = false,
 ) {
   if (overlay && (overlay.source.type === 'vector' || overlayData)) return null
-  // 代站为独立 clustered-GeoJSON 图层，不走 MVT overlay 注册路径；其空态/truncation 由页面层诚实标注。
-  if (state.layer === 'met-stations') return null
   if (hasBasinRiverNetwork && (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level')) {
     return null
   }

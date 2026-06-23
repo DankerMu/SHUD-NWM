@@ -325,7 +325,6 @@ const layerLabels: Record<M11Layer, string> = {
   discharge: 'Discharge',
   'flood-return-period': 'Flood return period',
   'warning-level': 'Warning level',
-  'met-stations': 'Meteorological stations',
 }
 
 export function createSourceScenarioSelection(
@@ -1348,8 +1347,7 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
 export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 'returnPeriod' | 'warningLevel'>, layer: M11Layer) {
   if (layer === 'warning-level') return m11WarningLevelColor(row.warningLevel)
   if (layer === 'flood-return-period') return m11ReturnPeriodColor(row.returnPeriod)
-  if (layer === 'discharge') return m11DischargeColor(row.currentQ)
-  return '#94A3B8'
+  return m11DischargeColor(row.currentQ)
 }
 
 // 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同源（ColorBrewer 蓝系、log 阶分桶）。
