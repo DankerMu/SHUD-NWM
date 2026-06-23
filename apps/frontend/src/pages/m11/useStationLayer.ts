@@ -16,6 +16,7 @@ export interface MetStationLayerModel {
   loading: boolean
   error: string | null
   total: number
+  totalKnown: boolean
   loaded: number
   truncated: boolean
   /** honest 空态/状态文案；无可渲染数据时给出原因，禁止用空图层冒充完整。 */
@@ -68,7 +69,7 @@ export function useMetStationLayer({
   const loadStationLayer = useStationLayerDataStore((store) => store.loadStationLayer)
   const clear = useStationLayerDataStore((store) => store.clear)
 
-  const requestContexts = useMemo(
+  const normalizedContexts = useMemo(
     () =>
       basinContexts
         .map((context) => ({
@@ -78,6 +79,11 @@ export function useMetStationLayer({
         .filter((context) => context.basinId.length > 0),
     [basinContexts],
   )
+  const requestContexts = useMemo(
+    () => normalizedContexts.filter((context) => context.basinVersionId !== null),
+    [normalizedContexts],
+  )
+  const hasMissingIdentity = normalizedContexts.length > requestContexts.length
   const shouldFetch = active && requestContexts.length > 0
   const expectedKey = shouldFetch ? stationLayerRequestKey({ basinContexts: requestContexts }) : null
   const stableRequestContexts = useMemo(() => requestContexts, [expectedKey])
@@ -104,7 +110,11 @@ export function useMetStationLayer({
     if (requestContexts.length === 0) return '暂无可用流域版本以加载气象代站'
     if (loading && !currentData) return '气象代站加载中'
     if (error && !currentData) return error
-    if (currentData?.truncated) return `已加载 ${currentData.loaded}/${currentData.total} 个代站，列表已截断`
+    if (currentData?.truncated) {
+      if (!currentData.totalKnown) return `已加载 ${currentData.loaded} 个代站，列表已截断（总数未完全统计）`
+      return `已加载 ${currentData.loaded}/${currentData.total} 个代站，列表已截断`
+    }
+    if (hasMissingIdentity) return '部分流域缺少可用流域版本，代站图层仅显示已解析流域'
     return null
   })()
 
@@ -114,6 +124,7 @@ export function useMetStationLayer({
     loading,
     error,
     total: currentData?.total ?? 0,
+    totalKnown: currentData?.totalKnown ?? true,
     loaded: currentData?.loaded ?? 0,
     truncated: currentData?.truncated ?? false,
     statusNote,

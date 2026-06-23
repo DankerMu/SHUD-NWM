@@ -584,6 +584,7 @@ function stationLayerStoreSnapshot({
       ],
       stationBasinIds: { [stationId]: basinId },
       total: 1,
+      totalKnown: true,
       loaded: 1,
       truncated: false,
     },
@@ -1908,8 +1909,8 @@ describe('M11 visual foundation shell', () => {
 
   it('clears a basin-detail station popup when the station overlay is disabled', async () => {
     const user = userEvent.setup()
-    const query = parseM11QueryState('?basinId=qhh&metStations=1')
-    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'qhh', basinVersionId: null })
+    const query = parseM11QueryState('?basinId=qhh&basinVersionId=qhh_v1&metStations=1')
+    const stationSnapshot = stationLayerStoreSnapshot({ basinId: 'qhh', basinVersionId: 'qhh_v1' })
     useStationLayerDataStore.setState({
       ...useStationLayerDataStore.getInitialState(),
       ...stationSnapshot,
@@ -1929,7 +1930,7 @@ describe('M11 visual foundation shell', () => {
     expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
 
     await act(async () => {
-      window.history.pushState({}, '', '/?basinId=qhh&metStations=1')
+      window.history.pushState({}, '', '/?basinId=qhh&basinVersionId=qhh_v1&metStations=1')
       window.dispatchEvent(new PopStateEvent('popstate'))
     })
     expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
@@ -2325,6 +2326,42 @@ describe('M11 visual foundation shell', () => {
       expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('暂无可用流域版本')
     })
 
+    it('does not fetch station inventory for basin contexts missing version identity', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'heihe', basinVersionId: null },
+        { basinId: 'qhh', basinVersionId: '' },
+      ]} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('暂无可用流域版本')
+    })
+
+    it('fetches resolved station identities while reporting skipped missing-version basins', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'heihe', basinVersionId: 'heihe_v1' },
+        { basinId: 'qhh', basinVersionId: null },
+      ]} />)
+
+      expect(loadStationLayer).toHaveBeenCalledWith({
+        basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }],
+      })
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('仅显示已解析流域')
+    })
+
     it('fetches while the source is unresolved because inventory is basin-scoped', () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)
       useStationLayerDataStore.setState({
@@ -2364,6 +2401,7 @@ describe('M11 visual foundation shell', () => {
           stations: [],
           stationBasinIds: {},
           total: 12000,
+          totalKnown: true,
           loaded: 5000,
           truncated: true,
         },
@@ -2376,6 +2414,33 @@ describe('M11 visual foundation shell', () => {
       expect(harness).toHaveAttribute('data-truncated', 'true')
       expect(harness.getAttribute('data-status')).toContain('5000/12000')
       expect(harness.getAttribute('data-status')).toContain('截断')
+    })
+
+    it('does not show a fake denominator when truncation skips remaining basin totals', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          stationBasinIds: {},
+          total: 5000,
+          totalKnown: false,
+          loaded: 5000,
+          truncated: true,
+        },
+        requestKey: 'first:first_v1,second:second_v1',
+      })
+
+      render(<Harness active basinContexts={[
+        { basinId: 'first', basinVersionId: 'first_v1' },
+        { basinId: 'second', basinVersionId: 'second_v1' },
+      ]} />)
+
+      const status = screen.getByTestId('harness').getAttribute('data-status') ?? ''
+      expect(status).toContain('已加载 5000 个代站')
+      expect(status).toContain('总数未完全统计')
+      expect(status).not.toContain('5000/5000')
     })
   })
 })

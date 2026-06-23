@@ -1732,6 +1732,7 @@ describe('App route state', () => {
         stations: hydroMetStationPage.items,
         stationBasinIds: { qhh_forc_001: 'basin-demo' },
         total: 1,
+        totalKnown: true,
         loaded: 1,
         truncated: false,
       },

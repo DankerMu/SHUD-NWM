@@ -1,8 +1,6 @@
 import { create } from 'zustand'
 
-import { client } from '@/api/client'
-import { getApiErrorMessage, unwrapApiData } from '@/api/response'
-import type { components } from '@/api/types'
+import { getApiErrorMessage } from '@/api/response'
 import {
   HYDRO_MET_STATION_LIMIT,
   fetchHydroMetStationsByIdentity,
@@ -17,12 +15,11 @@ import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 export const STATION_CLIENT_CAP = 5000
 export const STATION_PAGE_LIMIT = HYDRO_MET_STATION_LIMIT
 
-type ApiBasinVersion = components['schemas']['BasinVersion']
-
 export interface StationLayerData {
   stations: HydroMetStation[]
   stationBasinIds: Record<string, string>
   total: number
+  totalKnown: boolean
   loaded: number
   truncated: boolean
 }
@@ -46,14 +43,14 @@ interface StationLayerDataState {
   clear: () => void
 }
 
-function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
+function normalizeBasinContexts(contexts: StationLayerBasinContext[]): Array<StationLayerBasinContext & { basinVersionId: string }> {
   const seen = new Set<string>()
-  const normalized: StationLayerBasinContext[] = []
+  const normalized: Array<StationLayerBasinContext & { basinVersionId: string }> = []
   for (const context of contexts) {
     const basinId = context.basinId.trim()
     const basinVersionId = context.basinVersionId?.trim() || null
-    if (!basinId) continue
-    const key = `${basinId}::${basinVersionId ?? ''}`
+    if (!basinId || !basinVersionId) continue
+    const key = `${basinId}::${basinVersionId}`
     if (seen.has(key)) continue
     seen.add(key)
     normalized.push({ basinId, basinVersionId })
@@ -63,7 +60,7 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]) {
 
 export function stationLayerRequestKey(request: StationLayerRequest) {
   return normalizeBasinContexts(request.basinContexts)
-    .map((context) => `${context.basinId}:${context.basinVersionId ?? 'missing'}`)
+    .map((context) => `${context.basinId}:${context.basinVersionId}`)
     .join(',')
 }
 
@@ -76,22 +73,24 @@ let activeRequestKey: string | null = null
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
-  const contexts = await resolveStationBasinContexts(normalizeBasinContexts(request.basinContexts))
+  const contexts = normalizeBasinContexts(request.basinContexts)
   if (contexts.length === 0) throw new Error('代站图层缺少可用流域版本身份')
 
   const stations: HydroMetStation[] = []
   const stationBasinIds: Record<string, string> = {}
   let total = 0
+  let totalKnown = true
   let truncated = false
 
   for (const context of contexts) {
     if (stations.length >= STATION_CLIENT_CAP) {
       truncated = true
+      totalKnown = false
       break
     }
 
     const firstPage = await fetchHydroMetStationsByIdentity(
-      { basinVersionId: context.basinVersionId },
+      { basinVersionId: context.basinVersionId as string },
       { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
     )
     const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
@@ -104,7 +103,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
       const remainingCap = STATION_CLIENT_CAP - stations.length
       const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
       const page = await fetchHydroMetStationsByIdentity(
-        { basinVersionId: context.basinVersionId },
+        { basinVersionId: context.basinVersionId as string },
         { limit: pageLimit, offset },
       )
       if (page.items.length === 0) break
@@ -120,29 +119,10 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     stations,
     stationBasinIds,
     total,
+    totalKnown,
     loaded,
     truncated: truncated || loaded < total,
   }
-}
-
-async function resolveStationBasinContexts(contexts: StationLayerBasinContext[]): Promise<StationLayerBasinContext[]> {
-  const resolved = await Promise.all(
-    contexts.map(async (context) => ({
-      basinId: context.basinId,
-      basinVersionId: context.basinVersionId ?? (await fetchDefaultBasinVersionId(context.basinId)),
-    })),
-  )
-  return resolved.filter((context): context is StationLayerBasinContext & { basinVersionId: string } => Boolean(context.basinVersionId))
-}
-
-async function fetchDefaultBasinVersionId(basinId: string): Promise<string | null> {
-  const { data, error } = await client.GET('/api/v1/basins/{basin_id}/versions', {
-    params: { path: { basin_id: basinId }, query: { limit: 20, offset: 0 } },
-  })
-  if (error) throw new Error(getApiErrorMessage(error, '获取流域版本失败'))
-  const versions = unwrapApiData<ApiBasinVersion[]>(data, '获取流域版本失败')
-  const selected = versions.find((version) => version.active_flag) ?? versions[0] ?? null
-  return selected?.basin_version_id ?? null
 }
 
 function appendStations(
