@@ -253,7 +253,7 @@ STRUCTURAL_TS_IMPORT_PATTERN = re.compile(
     re.MULTILINE,
 )
 STRUCTURAL_PUBLIC_PY_PATTERN = re.compile(
-    r"^\s*(?:async\s+def|def|class)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\b",
+    r"^(?:async\s+def|def|class)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\b",
     re.MULTILINE,
 )
 STRUCTURAL_PUBLIC_TS_PATTERN = re.compile(
@@ -335,6 +335,18 @@ class _StructuralBudgetExemption:
 
 
 @dataclass(frozen=True)
+class _StructuralUnknownLineCountFile:
+    relative_path: str
+    line_count: int
+    line_count_is_truncated: bool
+    line_count_lower_bound: int
+    size_bytes: int | None
+    module: str
+    review_reason: str
+    owner_action: str
+
+
+@dataclass(frozen=True)
 class _StructuralOwnershipGrowthSignal:
     relative_path: str
     module: str
@@ -366,6 +378,12 @@ class _StructuralPhysicalLineCount:
     line_count_is_truncated: bool
     line_count_lower_bound: int
     size_bytes: int | None
+
+
+@dataclass(frozen=True)
+class _BoundedGitBlobText:
+    text: str
+    truncated: bool
 
 
 @dataclass(frozen=True)
@@ -3337,6 +3355,7 @@ def _structural_file_budget_summary(
     mandatory_files: list[_StructuralBudgetFile] = []
     yellow_zone_files: list[_StructuralBudgetFile] = []
     governed_exemptions: list[_StructuralBudgetExemption] = []
+    unknown_line_count_files: list[_StructuralUnknownLineCountFile] = []
     ownership_growth_signals: list[_StructuralOwnershipGrowthSignal] = []
 
     for relative_path in _structural_tracked_source_paths(root):
@@ -3346,10 +3365,34 @@ def _structural_file_budget_summary(
         line_count_result = _structural_physical_line_count(path)
         if line_count_result is None:
             continue
+        module = _module_for_relative(relative_path)
+        if (
+            line_count_result.line_count_is_truncated
+            and line_count_result.line_count_lower_bound
+            <= STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES
+        ):
+            unknown_line_count_files.append(
+                _StructuralUnknownLineCountFile(
+                    relative_path=relative_path,
+                    line_count=line_count_result.line_count,
+                    line_count_is_truncated=line_count_result.line_count_is_truncated,
+                    line_count_lower_bound=line_count_result.line_count_lower_bound,
+                    size_bytes=line_count_result.size_bytes,
+                    module=module,
+                    review_reason=(
+                        "line-count scan hit the byte cap before observing enough "
+                        "physical lines to classify structural budget threshold"
+                    ),
+                    owner_action=(
+                        "Inspect physical line count manually before applying "
+                        "mandatory-governance or yellow-zone ownership rules."
+                    ),
+                )
+            )
+            continue
         line_count = line_count_result.line_count
         if line_count < STRUCTURAL_FILE_BUDGET_YELLOW_MIN_LINES:
             continue
-        module = _module_for_relative(relative_path)
         header_text = _read_structural_header_text(path) or ""
         exemption = _structural_source_exemption(relative_path, header_text)
         if exemption is not None:
@@ -3370,7 +3413,7 @@ def _structural_file_budget_summary(
         text = _read_structural_analysis_text(path)
         import_families = _structural_import_families(relative_path, text) if text is not None else ()
         ownership_surface_signals = (
-            _structural_ownership_surface_signals(text, import_families)
+            _structural_ownership_surface_signals(relative_path, text, import_families)
             if text is not None
             else ()
         )
@@ -3407,6 +3450,7 @@ def _structural_file_budget_summary(
     mandatory_files.sort(key=lambda item: (-item.line_count, item.relative_path))
     yellow_zone_files.sort(key=lambda item: (-item.line_count, item.relative_path))
     governed_exemptions.sort(key=lambda item: (-item.line_count, item.relative_path))
+    unknown_line_count_files.sort(key=lambda item: (-item.line_count_lower_bound, item.relative_path))
     ownership_growth_signals.sort(key=lambda item: (item.relative_path, item.signal_type, item.detail))
 
     return {
@@ -3421,11 +3465,15 @@ def _structural_file_budget_summary(
         "mandatory_governance_count": len(mandatory_files),
         "yellow_zone_count": len(yellow_zone_files),
         "governed_exemption_count": len(governed_exemptions),
+        "unknown_line_count_count": len(unknown_line_count_files),
         "ownership_growth_signal_count": len(ownership_growth_signals),
         "oversized_files": [_structural_budget_file_record(item) for item in mandatory_files],
         "yellow_zone_files": [_structural_budget_file_record(item) for item in yellow_zone_files],
         "governed_exemptions": [
             _structural_budget_exemption_record(item) for item in governed_exemptions
+        ],
+        "unknown_line_count_files": [
+            _structural_unknown_line_count_file_record(item) for item in unknown_line_count_files
         ],
         "ownership_growth_signals": [
             _structural_growth_signal_record(item) for item in ownership_growth_signals
@@ -3542,6 +3590,7 @@ def _structural_file_budget_markdown_lines(payload: object) -> list[str]:
             f"- Mandatory-governance files: `{payload.get('mandatory_governance_count', 0)}`",
             f"- Yellow-zone files: `{payload.get('yellow_zone_count', 0)}`",
             f"- Governed exemptions: `{payload.get('governed_exemption_count', 0)}`",
+            f"- Unknown line-count files: `{payload.get('unknown_line_count_count', 0)}`",
             f"- Ownership-growth signals: `{payload.get('ownership_growth_signal_count', 0)}`",
         ]
     )
@@ -3649,12 +3698,8 @@ def _structural_physical_line_count(path: Path) -> _StructuralPhysicalLineCount 
     if saw_bytes and last_byte != b"\n":
         line_count += 1
     truncated = size_bytes > scan_limit if size_bytes is not None else remaining == 0
-    if truncated:
-        effective_line_count = max(line_count, STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1)
-    else:
-        effective_line_count = line_count
     return _StructuralPhysicalLineCount(
-        line_count=effective_line_count,
+        line_count=line_count,
         line_count_is_truncated=truncated,
         line_count_lower_bound=line_count,
         size_bytes=size_bytes,
@@ -3757,6 +3802,20 @@ def _structural_import_families(relative_path: str, text: str) -> tuple[str, ...
     return ()
 
 
+def _structural_bounded_import_families(
+    relative_path: str,
+    blob: _BoundedGitBlobText,
+) -> tuple[str, ...]:
+    suffix = Path(relative_path).suffix
+    if suffix == ".py" and blob.truncated:
+        added_lines = tuple(
+            _StructuralAddedLine(line_number=None, text=line)
+            for line in blob.text.splitlines()
+        )
+        return _structural_python_added_import_families(added_lines)
+    return _structural_import_families(relative_path, blob.text)
+
+
 def _structural_python_import_families(text: str) -> tuple[str, ...]:
     try:
         tree = ast.parse(text)
@@ -3781,11 +3840,65 @@ def _structural_python_import_families_from_tree(tree: ast.AST) -> tuple[str, ..
 
 def _structural_ts_import_families(text: str) -> tuple[str, ...]:
     families: set[str] = set()
+    ignored_spans = _structural_ts_ignored_spans(text)
     for match in STRUCTURAL_TS_IMPORT_PATTERN.finditer(text):
+        if _structural_ts_import_match_is_ignored(match, ignored_spans):
+            continue
         module = match.group("import") or match.group("require") or match.group("dynamic")
         if module:
             families.add(_structural_import_family(module))
     return tuple(sorted(family for family in families if family))
+
+
+def _structural_ts_ignored_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < length else ""
+        if char == "/" and next_char == "/":
+            start = index
+            index += 2
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            spans.append((start, index))
+            continue
+        if char == "/" and next_char == "*":
+            start = index
+            index += 2
+            while index + 1 < length and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            index = min(index + 2, length)
+            spans.append((start, index))
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            start = index
+            index += 1
+            while index < length:
+                if text[index] == "\\":
+                    index += 2
+                    continue
+                if text[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            spans.append((start, index))
+            continue
+        index += 1
+    return tuple(spans)
+
+
+def _structural_ts_import_match_is_ignored(
+    match: re.Match[str],
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> bool:
+    keyword_match = re.search(r"\b(?:import|require)\b", match.group(0))
+    if keyword_match is None:
+        return False
+    keyword_position = match.start() + keyword_match.start()
+    return any(start <= keyword_position < end for start, end in ignored_spans)
 
 
 def _structural_added_import_families(
@@ -3880,13 +3993,14 @@ def _structural_import_family(module: str) -> str:
 
 
 def _structural_ownership_surface_signals(
+    relative_path: str,
     text: str,
     import_families: tuple[str, ...],
 ) -> tuple[str, ...]:
     signals: list[str] = []
     if len(import_families) >= STRUCTURAL_IMPORT_FAMILY_MIXED_COUNT:
         signals.append("many-import-families")
-    if _structural_public_entrypoint_names(text):
+    if _structural_public_entrypoint_names(relative_path, text):
         signals.append("public-entrypoint-surface")
     if STRUCTURAL_COMPATIBILITY_PATTERN.search(text):
         signals.append("compatibility-surface")
@@ -3895,11 +4009,41 @@ def _structural_ownership_surface_signals(
     return tuple(signals)
 
 
-def _structural_public_entrypoint_names(text: str) -> tuple[str, ...]:
-    names = {match.group("name") for match in STRUCTURAL_PUBLIC_PY_PATTERN.finditer(text)}
-    names.update(match.group("name") for match in STRUCTURAL_PUBLIC_TS_PATTERN.finditer(text))
+def _structural_public_entrypoint_names(
+    relative_path: str,
+    text: str,
+    *,
+    python_partial: bool = False,
+) -> tuple[str, ...]:
+    suffix = Path(relative_path).suffix
+    names: set[str] = set()
+    if suffix == ".py":
+        names.update(_structural_python_public_entrypoint_names(text, partial=python_partial))
+    elif suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        names.update(match.group("name") for match in STRUCTURAL_PUBLIC_TS_PATTERN.finditer(text))
     if STRUCTURAL_ROUTE_ENTRYPOINT_PATTERN.search(text):
         names.add("http-route")
+    return tuple(sorted(name for name in names if name and not name.startswith("_")))
+
+
+def _structural_python_public_entrypoint_names(text: str, *, partial: bool) -> tuple[str, ...]:
+    if partial:
+        return tuple(
+            sorted(
+                match.group("name")
+                for match in STRUCTURAL_PUBLIC_PY_PATTERN.finditer(text)
+                if not match.group("name").startswith("_")
+            )
+        )
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _structural_python_public_entrypoint_names(text, partial=True)
+    names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef)
+    }
     return tuple(sorted(name for name in names if name and not name.startswith("_")))
 
 
@@ -3947,8 +4091,12 @@ def _structural_ownership_growth_signals(
             ]
         return []
     added_text = "\n".join(line.text for line in added_lines)
-    base_text = _git_blob_text(root, comparison_base_ref, record.relative_path) or ""
-    base_import_families = set(_structural_import_families(record.relative_path, base_text))
+    base_blob = _git_blob_text_prefix(root, comparison_base_ref, record.relative_path)
+    base_import_families = (
+        set(_structural_bounded_import_families(record.relative_path, base_blob))
+        if base_blob is not None
+        else set()
+    )
     current_import_families = _structural_current_import_families(root, record.relative_path)
     detected_import_families = (
         set(current_import_families)
@@ -3965,7 +4113,11 @@ def _structural_ownership_growth_signals(
                 "new import families: " + ", ".join(new_import_families),
             )
         )
-    public_names = _structural_public_entrypoint_names(added_text)
+    public_names = _structural_public_entrypoint_names(
+        record.relative_path,
+        added_text,
+        python_partial=True,
+    )
     if public_names:
         signals.append(
             _structural_growth_signal(
@@ -4153,8 +4305,9 @@ def _git_added_lines(
     )
 
 
-def _git_blob_text(root: Path, ref: str, relative_path: str) -> str | None:
+def _git_blob_text_prefix(root: Path, ref: str, relative_path: str) -> _BoundedGitBlobText | None:
     blob = f"{ref}:{relative_path}"
+    size_bytes: int | None = None
     try:
         size_result = subprocess.run(
             ["git", "cat-file", "-s", blob],
@@ -4164,23 +4317,52 @@ def _git_blob_text(root: Path, ref: str, relative_path: str) -> str | None:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        if int(size_result.stdout.strip()) > MAX_SCANNED_TEXT_FILE_BYTES:
-            return None
+        size_bytes = int(size_result.stdout.strip())
     except (OSError, ValueError, subprocess.CalledProcessError):
         return None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["git", "show", blob],
             cwd=root,
-            check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError:
         return None
-    return result.stdout
+    if process.stdout is None:
+        process.kill()
+        process.communicate()
+        return None
+    chunks: list[bytes] = []
+    remaining = MAX_SCANNED_TEXT_FILE_BYTES
+    truncated = size_bytes > MAX_SCANNED_TEXT_FILE_BYTES
+    try:
+        while remaining > 0:
+            chunk = process.stdout.read(min(HASH_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if truncated and process.poll() is None:
+            process.kill()
+        returncode = process.wait()
+        if returncode != 0 and not truncated:
+            return None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    return _BoundedGitBlobText(
+        text=b"".join(chunks).decode("utf-8", errors="replace"),
+        truncated=truncated,
+    )
+
+
+def _git_blob_text(root: Path, ref: str, relative_path: str) -> str | None:
+    blob = _git_blob_text_prefix(root, ref, relative_path)
+    if blob is None or blob.truncated:
+        return None
+    return blob.text
 
 
 def _structural_budget_file_record(item: _StructuralBudgetFile) -> dict[str, object]:
@@ -4211,6 +4393,22 @@ def _structural_budget_exemption_record(item: _StructuralBudgetExemption) -> dic
         "budget_class": "governed-exemption",
         "exemption_family": item.exemption_family,
         "exemption_reason": item.exemption_reason,
+    }
+
+
+def _structural_unknown_line_count_file_record(
+    item: _StructuralUnknownLineCountFile,
+) -> dict[str, object]:
+    return {
+        "path": item.relative_path,
+        "line_count": item.line_count,
+        "line_count_is_truncated": item.line_count_is_truncated,
+        "line_count_lower_bound": item.line_count_lower_bound,
+        "size_bytes": item.size_bytes,
+        "module": item.module,
+        "budget_class": "unknown-line-count",
+        "review_reason": item.review_reason,
+        "owner_action": item.owner_action,
     }
 
 

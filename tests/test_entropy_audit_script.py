@@ -50,10 +50,12 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "mandatory_governance_count",
         "yellow_zone_count",
         "governed_exemption_count",
+        "unknown_line_count_count",
         "ownership_growth_signal_count",
         "oversized_files",
         "yellow_zone_files",
         "governed_exemptions",
+        "unknown_line_count_files",
         "ownership_growth_signals",
         "top_oversized_modules",
         "comparison_base_ref",
@@ -363,6 +365,37 @@ def test_structural_file_budget_reports_root_lockfiles_as_dependency_exemptions(
         assert exemptions[lockfile_name]["exemption_family"] == "dependency-lockfile"
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "expected_family"),
+    [
+        ("data/catalog/source_payload.json", "data"),
+        ("tests/fixtures/api_payload.py", "fixture"),
+        ("schemas/contracts/hydro.yaml", "protocol"),
+        ("packages/contracts/hydro.proto", "protocol"),
+    ],
+)
+def test_structural_file_budget_exempts_data_fixture_and_protocol_sources(
+    tmp_path: Path,
+    relative_path: str,
+    expected_family: str,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / relative_path
+    if source_path.suffix == ".py":
+        _write(source_path, _structural_python_fixture(1001))
+    else:
+        _write(source_path, _structural_yaml_fixture(1001))
+    subprocess.run(["git", "add", relative_path], cwd=tmp_path, check=True)
+
+    budget = _structural_budget(tmp_path)
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    exemptions = _structural_records_by_path(budget["governed_exemptions"])
+    assert exemptions[relative_path]["budget_class"] == "governed-exemption"
+    assert exemptions[relative_path]["exemption_family"] == expected_family
+    assert relative_path not in oversized
+
+
 def test_structural_file_budget_markdown_keeps_existing_report_sections(tmp_path: Path) -> None:
     report = audit_repo_entropy.build_report(tmp_path)
 
@@ -424,6 +457,35 @@ def test_structural_ownership_growth_reports_new_surface_in_oversized_source(
     assert all("no immediate split" in str(signal["owner_action"]) for signal in signals)
 
 
+def test_structural_ownership_growth_ignores_nested_python_helper_entrypoint(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(
+        1001,
+        "import os",
+        "def existing_entrypoint():",
+        "    return os.name",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    changed_text = base_text.replace(
+        "    return os.name\n",
+        "    def local_helper():\n"
+        "        return os.name\n"
+        "    return local_helper()\n",
+    )
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path)
+
+    assert "public-entrypoint" not in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+
+
 def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
     tmp_path: Path,
 ) -> None:
@@ -463,6 +525,26 @@ def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
     assert comparison_base["requested"] == base_ref
     assert comparison_base["resolved"] == base_ref
     assert comparison_base["ref_kind"] == "explicit"
+
+
+def test_structural_ts_import_families_ignore_comments_and_string_literals() -> None:
+    families = audit_repo_entropy._structural_ts_import_families(
+        """
+        // require('comment-only')
+        /*
+        import blocked from 'block-comment-static';
+        import('block-comment-dynamic');
+        */
+        const quotedRequire = "require('string-only')";
+        const quotedDynamic = 'import("quoted-dynamic")';
+        const templated = `import('template-only')`;
+        import React from 'react';
+        const scoped = require('@scope/pkg/submodule');
+        const lazy = import('lodash/fp');
+        """
+    )
+
+    assert families == ("@scope/pkg", "lodash", "react")
 
 
 def test_structural_ownership_growth_cli_uses_explicit_base_ref_for_committed_diff(
@@ -556,6 +638,32 @@ def test_structural_file_budget_bounds_huge_source_reads(
     assert huge_record["ownership_surface_signals"] == []
 
 
+def test_structural_file_budget_records_truncated_unknown_line_count_without_mandatory(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "huge_single_line.py"
+    _write(
+        source_path,
+        "VALUE = '" + ("x" * audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES) + "'\n",
+    )
+    subprocess.run(["git", "add", "services/api/huge_single_line.py"], cwd=tmp_path, check=True)
+
+    budget = audit_repo_entropy._structural_file_budget_summary(tmp_path)
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    yellow = _structural_records_by_path(budget["yellow_zone_files"])
+    unknown = _structural_records_by_path(budget["unknown_line_count_files"])
+    assert "services/api/huge_single_line.py" not in oversized
+    assert "services/api/huge_single_line.py" not in yellow
+    unknown_record = unknown["services/api/huge_single_line.py"]
+    assert unknown_record["budget_class"] == "unknown-line-count"
+    assert unknown_record["line_count"] == 1
+    assert unknown_record["line_count_is_truncated"] is True
+    assert unknown_record["line_count_lower_bound"] == 1
+    assert budget["unknown_line_count_count"] == 1
+
+
 def test_structural_physical_line_count_does_not_read_beyond_scan_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -597,9 +705,7 @@ def test_structural_physical_line_count_does_not_read_beyond_scan_cap(
     line_count_result = audit_repo_entropy._structural_physical_line_count(source_path)
 
     assert line_count_result is not None
-    assert line_count_result.line_count == (
-        audit_repo_entropy.STRUCTURAL_FILE_BUDGET_MANDATORY_OVER_LINES + 1
-    )
+    assert line_count_result.line_count == 1
     assert line_count_result.line_count_is_truncated is True
     assert line_count_result.line_count_lower_bound == 1
     assert bytes_read == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
@@ -660,6 +766,37 @@ def test_structural_ownership_growth_detects_partial_python_import_diff(
         budget,
         "services/api/large.py",
     )
+
+
+@pytest.mark.parametrize(
+    ("added_import", "expected_new_import_signal"),
+    [
+        ("import requests.sessions", False),
+        ("import httpx", True),
+    ],
+)
+def test_structural_growth_uses_bounded_huge_base_import_prefix(
+    tmp_path: Path,
+    added_import: str,
+    expected_new_import_signal: bool,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    huge_line = "VALUE = '0123456789abcdef'\n"
+    repeat_count = audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES // len(huge_line) + 100
+    base_text = "import requests\n" + (huge_line * repeat_count)
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base huge oversized source with requests import")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, "import requests\n" + added_import + "\n" + (huge_line * repeat_count))
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    signals = _structural_growth_signal_types(budget, "services/api/large.py")
+
+    if expected_new_import_signal:
+        assert "new-import-family" in signals
+    else:
+        assert "new-import-family" not in signals
 
 
 def test_structural_growth_detects_multiline_and_indented_imports_in_huge_source(
