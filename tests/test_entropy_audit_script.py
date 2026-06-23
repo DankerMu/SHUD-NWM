@@ -1627,11 +1627,30 @@ def test_entropy_audit_topology_guardrails_do_not_suppress_writer_command_with_n
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
+def test_entropy_audit_topology_guardrails_ignore_comment_only_display_env_shell_lines(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "scripts/commented-example.sh",
+        """
+        # source infra/env/display.env
+        # uv run python scripts/node27_autopipeline.py
+        echo "documented but inactive"
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
+
+    assert findings == []
+
+
 @pytest.mark.parametrize(
     "writer_command",
     [
         "uv run python scripts/node27_ingest_run.py",
         "uv run python scripts/node27_refresh_coverage.py",
+        "uv run python -m scripts.node27_ingest_run",
+        "uv run python -m scripts.node27_refresh_coverage",
         "uv run python -m workers.model_registry.cli import-basins-registry",
         "nhms-model import-basins-registry",
     ],
@@ -1667,19 +1686,54 @@ def test_entropy_audit_topology_guardrails_flag_psql_mutation_after_display_env_
         """,
     )
     _write(
+        tmp_path / "scripts/psql-ddl.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" -c "drop table if exists met.tmp_demo"
+        """,
+    )
+    _write(
+        tmp_path / "scripts/psql-file.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" -f mutate.sql
+        """,
+    )
+    _write(
+        tmp_path / "scripts/psql-heredoc.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" <<SQL
+        delete from met.forcing_version where version_id = 'demo';
+        SQL
+        """,
+    )
+    _write(
         tmp_path / "scripts/psql-select.sh",
         """
         source infra/env/display.env
         psql "$DATABASE_URL" -c "select * from met.forcing_version limit 1"
         """,
     )
+    _write(
+        tmp_path / "scripts/psql-heredoc-select.sh",
+        """
+        source infra/env/display.env
+        psql "$DATABASE_URL" <<SQL
+        select * from met.forcing_version limit 1;
+        SQL
+        """,
+    )
 
     findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
-        ("scripts/psql-mutation.sh", 1)
-    ]
-    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+    assert {(finding["evidence_path"], finding["line"]) for finding in findings} == {
+        ("scripts/psql-mutation.sh", 1),
+        ("scripts/psql-ddl.sh", 1),
+        ("scripts/psql-file.sh", 1),
+        ("scripts/psql-heredoc.sh", 1),
+    }
+    assert all(finding["gate_eligible"] is True for finding in findings)
 
 
 def test_entropy_audit_topology_guardrails_do_not_allow_display_env_source_after_prohibition(
@@ -1845,11 +1899,16 @@ def test_entropy_audit_topology_guardrails_scan_active_openspec_but_skip_archive
         tmp_path / "openspec" / "changes" / "archive" / "old-topology" / "tasks.md",
         "Current NHMS production says node-22 is the active database writer.\n",
     )
+    _write(
+        tmp_path / "openspec" / "specs" / "production-topology-contract" / "spec.md",
+        "Current NHMS production says node-22 is the active database writer.\n",
+    )
 
     findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
 
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
-        ("openspec/changes/active-topology/tasks.md", 1)
+        ("openspec/changes/active-topology/tasks.md", 1),
+        ("openspec/specs/production-topology-contract/spec.md", 1),
     ]
 
 
@@ -1924,6 +1983,31 @@ def test_entropy_audit_topology_guardrails_allow_non_archive_superseded_document
         tmp_path / "openspec" / "changes" / "superseded-topology" / "tasks.md",
         """
         Historical / superseded: not current topology; retained for audit evidence.
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+
+
+def test_entropy_audit_topology_guardrails_allow_chinese_superseded_runbook_banner(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "two-node-production-e2e-plan.md",
+        """
+        # Two-Node Production-Like E2E Plan
+
+        > 2026-06-22 status: historical / superseded M22 evidence plan.
+        > 本文保留 M22 设计时代的两节点 E2E 证据边界，不是当前生产拓扑操作手册。
 
         Current NHMS production says node-22 is the active database writer.
         Operators should connect to node-22 local PostgreSQL on :55433.

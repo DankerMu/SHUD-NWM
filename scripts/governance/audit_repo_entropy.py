@@ -174,6 +174,10 @@ TOPOLOGY_DISPLAY_ENV_PATH_PATTERN = re.compile(
     r"(?![a-z0-9_.-])"
 )
 TOPOLOGY_DISPLAY_ENV_SOURCE_TO_WRITER_MAX_LINES = 120
+TOPOLOGY_PSQL_HEREDOC_MAX_LOOKAHEAD = 80
+TOPOLOGY_SQL_MUTATION_VERB_PATTERN = re.compile(
+    r"\b(?:insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|merge)\b"
+)
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
 AuditMode = Literal["report", "hard-gate"]
@@ -1010,6 +1014,7 @@ def _production_topology_scan_files(root: Path) -> Iterable[Path]:
         root / "docs" / "governance",
         root / "docs" / "runbooks",
         root / "openspec" / "changes",
+        root / "openspec" / "specs",
     ]
     files = [
         root / "AGENTS.md",
@@ -1093,9 +1098,12 @@ def _topology_top_context_declares_whole_document_non_current(
         "non current",
         "not current topology",
         "not current production topology",
+        "not current production runbook",
         "不反映当前",
         "不作为当前",
         "不用于当前",
+        "不是当前",
+        "不是 current",
         "非当前",
         "当前部署事实不同",
         "当前物理部署不同",
@@ -1129,9 +1137,13 @@ def _topology_line_declares_document_superseded(line: str) -> bool:
         for token in (
             "not current topology",
             "not current production topology",
+            "not current production runbook",
             "retained for audit evidence",
+            "audit evidence",
             "保留",
+            "审计证据",
             "不用于当前",
+            "不是当前",
         )
     )
 
@@ -1502,6 +1514,7 @@ def _topology_context_is_non_current(context: str) -> bool:
             "不应连接",
             "不作为当前",
             "不用于当前",
+            "不是当前",
         )
     )
     has_sunset = any(
@@ -1687,12 +1700,16 @@ def _topology_display_env_facts(lines: list[str]) -> _TopologyDisplayEnvFacts:
     writer_uses: list[_TopologyDisplayEnvWriterUse] = []
     for line_no, line in enumerate(lines, start=1):
         normalized = _topology_normalized(line)
+        if _topology_line_is_comment_only(normalized):
+            continue
         alias = _topology_line_display_env_alias_name(normalized)
         if alias is not None:
             aliases.add(alias)
         if _topology_line_sources_display_env(normalized, aliases):
             sources.append(_TopologyDisplayEnvSource(line_no=line_no, line=line))
-        if _topology_line_has_unnegated_data_plane_writer_or_mirror_use(normalized):
+        if _topology_line_has_unnegated_data_plane_writer_or_mirror_use(
+            normalized
+        ) or _topology_line_has_psql_context_mutation_command(lines, line_no - 1):
             writer_uses.append(_TopologyDisplayEnvWriterUse(line_no=line_no, line=line))
     return _TopologyDisplayEnvFacts(sources=tuple(sources), writer_uses=tuple(writer_uses))
 
@@ -1908,6 +1925,10 @@ def _topology_strip_shell_comment(line: str) -> str:
     return re.split(r"\s+#", line, maxsplit=1)[0].strip()
 
 
+def _topology_line_is_comment_only(line: str) -> bool:
+    return _topology_normalized(line).startswith("#")
+
+
 def _topology_line_has_data_plane_writer_command(line: str) -> bool:
     strong_command_terms = (
         "autopipe",
@@ -1917,6 +1938,10 @@ def _topology_line_has_data_plane_writer_command(line: str) -> bool:
         "node27_mirror_forcing",
         "node27_ingest_run.py",
         "node27_refresh_coverage.py",
+        "scripts.node27_autopipeline",
+        "scripts.node27_mirror_forcing",
+        "scripts.node27_ingest_run",
+        "scripts.node27_refresh_coverage",
         "n22_dsn",
     )
     if any(token in line for token in strong_command_terms):
@@ -1927,9 +1952,42 @@ def _topology_line_has_data_plane_writer_command(line: str) -> bool:
 
 
 def _topology_line_has_psql_mutation_command(line: str) -> bool:
-    if not re.search(r"(?:^|[\s;&|])psql(?:\s|$)", line):
+    if not _topology_line_invokes_psql(line):
         return False
-    return bool(re.search(r"\b(?:insert|update|delete|truncate)\b", line))
+    return bool(
+        TOPOLOGY_SQL_MUTATION_VERB_PATTERN.search(line)
+        or re.search(r"(?:^|[\s;&|])(?:-f|--file)(?:\s|=)", line)
+    )
+
+
+def _topology_line_has_psql_context_mutation_command(lines: list[str], index: int) -> bool:
+    line = _topology_strip_shell_comment(_topology_normalized(lines[index]))
+    if not _topology_line_invokes_psql(line):
+        return False
+    if _topology_line_has_psql_mutation_command(line):
+        return True
+    heredoc_token = _topology_psql_heredoc_token(line)
+    if heredoc_token is None:
+        return False
+    end = min(len(lines), index + TOPOLOGY_PSQL_HEREDOC_MAX_LOOKAHEAD + 1)
+    for body_line in lines[index + 1 : end]:
+        body = _topology_strip_shell_comment(_topology_normalized(body_line))
+        if not body:
+            continue
+        if body == heredoc_token:
+            return False
+        if TOPOLOGY_SQL_MUTATION_VERB_PATTERN.search(body):
+            return True
+    return False
+
+
+def _topology_line_invokes_psql(line: str) -> bool:
+    return bool(re.search(r"(?:^|[\s;&|])psql(?:\s|$)", line))
+
+
+def _topology_psql_heredoc_token(line: str) -> str | None:
+    match = re.search(r"<<-?\s*['\"]?(?P<token>[a-z_][a-z0-9_]*)['\"]?", line)
+    return match.group("token") if match else None
 
 
 def _topology_context_has_negative_writer_or_mirror_terms(context: str) -> bool:
