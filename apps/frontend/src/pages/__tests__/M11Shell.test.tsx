@@ -210,6 +210,13 @@ vi.mock('react-map-gl/maplibre', () => ({
               point: { x: 4, y: 4 },
             })
           }}
+          onMouseUp={() =>
+            onMouseMove?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [riverFeature, stationPointFeature],
+              point: { x: 6, y: 6 },
+            })
+          }
           onContextMenu={(event) => {
             event.preventDefault()
             onClick?.({
@@ -222,14 +229,14 @@ vi.mock('react-map-gl/maplibre', () => ({
           onDrag={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: canvasStyle }) },
-              features: [clusterFeature],
+              features: [riverFeature, clusterFeature],
               point: { x: 5, y: 5 },
             })
           }
           onDrop={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: canvasStyle }) },
-              features: [stationPointFeature],
+              features: [riverFeature, stationPointFeature],
               point: { x: 6, y: 6 },
             })
           }
@@ -2278,6 +2285,33 @@ describe('M11 visual foundation shell', () => {
       )
     })
 
+    it('keeps hydrology MVT registered while rendering station layers above it', async () => {
+      const layersWithDischargeMvt = layers.map((layer) =>
+        layer.layerId === 'discharge' ? { ...layer, metadata: dischargeNationalMvtMetadata } : layer,
+      )
+
+      render(<M11MapSurface state={metState} layers={layersWithDischargeMvt} stationFeatureCollection={stationFeatureCollection} />)
+
+      await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge'))
+      expect(mapSources.find((entry) => entry.id === 'm11-discharge-source')).toMatchObject({ type: 'vector' })
+      expect(mapSources.find((entry) => entry.id === 'm11-met-stations-source')).toMatchObject({ type: 'geojson', cluster: true })
+
+      const layerIds = mapLayers.map((layer) => layer.id)
+      const hydrologyTopIndex = Math.max(
+        layerIds.indexOf('m11-discharge-line-casing'),
+        layerIds.indexOf('m11-discharge-line'),
+        layerIds.indexOf('m11-discharge-line-hit'),
+      )
+      expect(hydrologyTopIndex).toBeGreaterThanOrEqual(0)
+      expect(layerIds.indexOf('clusters')).toBeGreaterThan(hydrologyTopIndex)
+      expect(layerIds.indexOf('cluster-count')).toBeGreaterThan(hydrologyTopIndex)
+      expect(layerIds.indexOf('met-stations-point')).toBeGreaterThan(hydrologyTopIndex)
+      expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute(
+        'data-interactive-layer-ids',
+        'met-stations-point,clusters,m11-discharge-line-hit',
+      )
+    })
+
     it('does not register the met-station source/layers when the layer is off', () => {
       render(<M11MapSurface state={state} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
 
@@ -2299,12 +2333,21 @@ describe('M11 visual foundation shell', () => {
       expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
     })
 
-    it('expands the cluster via getClusterExpansionZoom and flies to it on cluster click', () => {
-      render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
+    it('expands a cluster over a river without opening river or station popups', () => {
+      const onOverlayClick = vi.fn()
+      render(
+        <M11MapSurface
+          state={metState}
+          layers={layers}
+          stationFeatureCollection={stationFeatureCollection}
+          onOverlayClick={onOverlayClick}
+        />,
+      )
 
       fireEvent.drag(screen.getByTestId('mock-maplibre-map'))
       expect(clusterExpansionCalls).toEqual([{ id: 'm11-met-stations-source', clusterId: 7 }])
       expect(flyToCalls).toEqual([{ center: [101.5, 30.5], zoom: 9, duration: 450 }])
+      expect(onOverlayClick).not.toHaveBeenCalled()
     })
 
     it('expands a rendered cluster when the click event omits interactive features', async () => {
@@ -2319,16 +2362,24 @@ describe('M11 visual foundation shell', () => {
       expect(flyToCalls).toEqual([{ center: [101.5, 30.5], zoom: 9, duration: 450 }])
     })
 
-    it('dispatches met-station point clicks with station_id for downstream popups', () => {
+    it('prioritizes met-station point hover and click over overlapping river features', () => {
+      const onOverlayHover = vi.fn()
       const onOverlayClick = vi.fn()
       render(
         <M11MapSurface
           state={metState}
           layers={layers}
+          basinSegments={basinSegments}
           stationFeatureCollection={stationFeatureCollection}
+          onOverlayHover={onOverlayHover}
           onOverlayClick={onOverlayClick}
         />,
       )
+
+      fireEvent.mouseUp(screen.getByTestId('mock-maplibre-map'))
+      expect(onOverlayHover).toHaveBeenLastCalledWith(null)
+      expect(onOverlayHover).not.toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+      expect(screen.queryByTestId('m11-river-tooltip')).not.toBeInTheDocument()
 
       fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
       expect(onOverlayClick).toHaveBeenCalledWith(
@@ -2337,6 +2388,25 @@ describe('M11 visual foundation shell', () => {
           feature: expect.objectContaining({ properties: expect.objectContaining({ station_id: 'HMT-Y2-0237' }) }),
         }),
       )
+      expect(onOverlayClick).not.toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+      expect(flyToCalls).toHaveLength(0)
+    })
+
+    it('keeps exposed river pixels clickable while the station overlay is enabled', () => {
+      const onOverlayClick = vi.fn()
+      render(
+        <M11MapSurface
+          state={metState}
+          layers={layers}
+          basinSegments={basinSegments}
+          stationFeatureCollection={stationFeatureCollection}
+          onOverlayClick={onOverlayClick}
+        />,
+      )
+
+      fireEvent.keyDown(screen.getByTestId('mock-maplibre-map'), { key: 'Enter' })
+      expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+      expect(clusterExpansionCalls).toHaveLength(0)
       expect(flyToCalls).toHaveLength(0)
     })
 

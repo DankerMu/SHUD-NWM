@@ -287,10 +287,10 @@ export function M11MapLibreSurface({
   // 代站图层由独立 overlay 状态控制，有非空 features 时渲染/注册（关闭 overlay 不注册 source/layer）。
   const showStationLayer = (metStations ?? state.metStations) && (stationFeatureCollection?.features.length ?? 0) > 0
   const interactiveLayerIds = [
+    ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
     ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
     ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
     ...(renderableOverlay ? [`${renderableOverlay.layer.id}-hit`] : []),
-    ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
   ]
 
   useEffect(() => {
@@ -322,15 +322,7 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
-      if (riverFeature) {
-        const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
-        setHoveredRiverSegmentId(riverSegmentId)
-        onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
-      // 代站点 / cluster hover：cursor=pointer（#339 遗留 minor），但不触发 overlay hover 高亮。
+      // 代站点 / cluster hover 优先于河段命中；重叠像素上 station overlay 是最上层交互对象。
       if (showStationLayer) {
         const stationFeature =
           findRenderedFeature(event, mapRef.current, MET_STATION_POINT_LAYER_ID) ??
@@ -341,6 +333,14 @@ export function M11MapLibreSurface({
           event.target.getCanvas().style.cursor = 'pointer'
           return
         }
+      }
+      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      if (riverFeature) {
+        const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
+        setHoveredRiverSegmentId(riverSegmentId)
+        onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        event.target.getCanvas().style.cursor = 'pointer'
+        return
       }
       // 河段 hover 须先于 basin-fill（与点击优先级一致），否则河段高亮被 basin 抢走。
       const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
@@ -374,13 +374,8 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
-      if (riverFeature) {
-        onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-        return
-      }
       if (showStationLayer) {
-        // 点 cluster：用 source 运行时 API 取展开 zoom 后 flyTo。
+        // 点 cluster/代站优先于河段：重叠像素上 station overlay 位于 hydrology 上方。
         // 真实 MapLibre 可能不给 onClick event.features 填 cluster，因此用 queryRenderedFeatures 兜底命中。
         const clusterFeature = findRenderedFeature(event, mapRef.current, MET_STATION_CLUSTER_LAYER_ID)
         if (clusterFeature) {
@@ -393,6 +388,11 @@ export function M11MapLibreSurface({
           onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
           return
         }
+      }
+      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      if (riverFeature) {
+        onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        return
       }
       // 河段（流量 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
       // 否则总览（无 basinSegments）点河段会被底下的 basin-fill 抢走、永远到不了河段分支。

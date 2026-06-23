@@ -351,6 +351,98 @@ Non-goals:
 - No draggable or coexisting curve-window behavior; issue #661 owns that work.
 - No backend API or station-MVT endpoint change.
 
+## Issue #660 Fixture: Station Overlay Layer Ordering And Hit Priority
+
+Fixture level: expanded
+Repair intensity: medium
+Expanded trigger rationale:
+
+- This slice changes MapLibre render order and interaction dispatch order for
+  overlapping station and hydrology features.
+- A regression would either hide/disable hydrology while the station overlay is
+  enabled, or make station-over-river pixels open the wrong workflow.
+
+Change surface:
+
+- `apps/frontend/src/components/map/M11MapLibreSurface.tsx`
+- `apps/frontend/src/pages/__tests__/M11Shell.test.tsx`
+
+Must preserve:
+
+- Active hydrology MVT/GeoJSON river layers remain registered and visible while
+  station overlay source/layers are enabled.
+- Exposed river line pixels still dispatch the river forecast workflow.
+- Cluster clicks expand/fly to the cluster and do not open station forcing
+  popups.
+- Station inventory loading and route/query state remain owned by issue #659.
+
+Must add/change:
+
+- Station cluster/point layers render above active hydrology layers.
+- `interactiveLayerIds` includes `met-stations-point` and `clusters` ahead of
+  hydrology hit layers when station features are renderable.
+- Hover/click dispatch checks station point/cluster hits before hydrology
+  river hits for overlapped pixels.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no route, query, or external
+  API contract changes.
+- Config / project setup: not selected - no build or environment config
+  changes.
+- File IO / path safety / overwrite: not selected - no file system surface.
+- Schema / columns / units / field names: not selected - no data schema or
+  property contract change.
+- Auth / permissions / secrets: not selected - no auth boundary touched.
+- Concurrency / shared state / ordering: selected - MapLibre feature ordering
+  and dispatch precedence are the core behavior.
+- Resource limits / large input / discovery: not selected - station inventory
+  pagination/caps are unchanged.
+- Legacy compatibility / examples: selected - existing river click and cluster
+  expansion behavior must remain compatible.
+- Error handling / rollback / partial outputs: selected - cluster expansion
+  must fail closed without opening an incorrect popup.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or packaging change.
+- Documentation / migration notes: selected - fixture records the split from
+  #659 query-state work and #661 draggable-window work.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: selected - map layer order and feature hit
+  testing are geospatial UI behavior, though CRS and geometry contracts are
+  unchanged.
+- Hydro-met time series / forcing windows: selected - dispatch must preserve
+  station forcing versus river q_down workflow identity.
+- SHUD numerical runtime / conservation / NaN: not selected - no model runtime
+  or numerical output change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database query
+  contract changes.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler
+  or compute lifecycle surface.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider source/cycle semantics change.
+- Run manifest / QC provenance: not selected - no manifest or QC evidence
+  surface.
+- Published NHMS artifacts / display identity: selected - station and river
+  popup identities must remain truthful under overlapped map hits.
+
+Required evidence:
+
+- MapLibre surface tests show hydrology MVT remains registered while station
+  clustered-GeoJSON source/layers are also registered.
+- Tests assert station cluster/point layers render after the active hydrology
+  line/hit layers and interactive layer ids include station ids before
+  hydrology ids.
+- Tests assert cluster clicks call `getClusterExpansionZoom`/`flyTo` and do not
+  dispatch station popup opening.
+- Tests assert station-over-river hover/click prioritizes the station feature.
+- Tests assert exposed river pixels remain clickable with station overlay
+  enabled.
+- `cd apps/frontend && corepack pnpm test -- M11Shell AppRoutes`
+- `cd apps/frontend && corepack pnpm build`
+- `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`
+
 ## Migration Plan
 
 1. Add the new query state and normalize old station-layer URLs.
