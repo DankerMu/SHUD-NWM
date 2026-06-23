@@ -24,6 +24,7 @@ import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOvervi
 
 const BASIN_NOT_FOUND_REASON = 'Basin was not found.'
 const BASIN_FALLBACK_EXTENT: M11Bbox = { minLon: 73, minLat: 18, maxLon: 135, maxLat: 54 }
+type ActiveCurveWindow = 'river' | 'station'
 
 function concreteSource(resolvedSource: string | null | undefined): HydroMetSource | null {
   if (resolvedSource === 'GFS' || resolvedSource === 'IFS') return resolvedSource
@@ -137,9 +138,10 @@ export function useBasinDetailMode({
   const resolvedSource = concreteSource(sourceSelection?.resolvedSource)
   const stationSeriesSource = stationSeriesSourceAvailability(sourceSelection?.resolvedSource)
 
-  // 两类曲线面板互斥状态：river 与 station 各持选中要素；窗口统一居中呈现。
+  // 两类曲线面板独立持有选中要素；窗口可共存，active 状态只决定 z-index。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number] } | null>(null)
   const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation } | null>(null)
+  const [activeCurveWindow, setActiveCurveWindow] = useState<ActiveCurveWindow>('river')
 
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
   const handleMapOverlayClick = useCallback(
@@ -147,7 +149,7 @@ export function useBasinDetailMode({
       if (interaction.layerId === 'met-stations') {
         const stationId = mapFeatureStringProperty(interaction.feature, 'station_id')
         if (!stationId) return
-        setRiverPopup(null)
+        setActiveCurveWindow('station')
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
         })
@@ -161,7 +163,7 @@ export function useBasinDetailMode({
       const nextBasinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')
       const lngLat = popupAnchorFromInteraction(interaction)
       if (lngLat) {
-        setStationPopup(null)
+        setActiveCurveWindow('river')
         setRiverPopup({
           segment: {
             river_segment_id: nextSegmentId,
@@ -223,10 +225,23 @@ export function useBasinDetailMode({
   const popup: M11MapPopupSlot | null = null
 
   const riverPanel = riverPopup ? (
-    <M11RiverForecastPanel basinId={basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
+    <M11RiverForecastPanel
+      basinId={basinId}
+      segment={riverPopup.segment}
+      active={(activeCurveWindow === 'river' && Boolean(riverPopup)) || !stationPopup}
+      onActivate={() => setActiveCurveWindow('river')}
+      onClose={() => setRiverPopup(null)}
+    />
   ) : null
   const stationPanel = stationPopup ? (
-    <M11StationForcingPopup basinId={basinId} initialSource={stationSeriesSource} station={stationPopup.station} onClose={() => setStationPopup(null)} />
+    <M11StationForcingPopup
+      basinId={basinId}
+      initialSource={stationSeriesSource}
+      station={stationPopup.station}
+      active={(activeCurveWindow === 'station' && Boolean(stationPopup)) || !riverPopup}
+      onActivate={() => setActiveCurveWindow('station')}
+      onClose={() => setStationPopup(null)}
+    />
   ) : null
 
   return {

@@ -228,6 +228,7 @@ function BasinDetailMode({
 }
 
 const NONE_VISIBLE_SENTINEL = '__none__'
+type ActiveCurveWindow = 'river' | 'station'
 
 function stationSeriesSourceAvailability(resolvedSource: string | null | undefined): HydroMetSource | 'GFS+IFS' | null {
   if (resolvedSource === 'GFS' || resolvedSource === 'IFS' || resolvedSource === 'GFS+IFS') return resolvedSource
@@ -369,6 +370,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number]; basinId: string | null } | null>(null)
   const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; basinId: string | null } | null>(null)
+  const [activeCurveWindow, setActiveCurveWindow] = useState<ActiveCurveWindow>('river')
   // 点流域 → 相机飞到其 bbox（留在全国总览、不钻取/不锁定）。
   const [basinFit, setBasinFit] = useState<M11MapCameraFit | null>(null)
   // 切图层时清掉残留弹窗（弹窗只属于当前水文图层）。
@@ -385,7 +387,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       if (interaction.layerId === 'met-stations') {
         const stationId = mapFeatureStringProperty(interaction.feature, 'station_id')
         if (!stationId) return
-        setRiverPopup(null)
+        setActiveCurveWindow('station')
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
           basinId: mapFeatureStringProperty(interaction.feature, 'basin_id') ?? stationLayerBasinContexts[0]?.basinId ?? null,
@@ -400,7 +402,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         const riverNetworkVersionId = mapFeatureStringProperty(interaction.feature, 'river_network_version_id')
         const lngLat = popupAnchorFromInteraction(interaction)
         if (!segmentId || !basinVersionId || !riverNetworkVersionId || !lngLat) return
-        setStationPopup(null)
+        setActiveCurveWindow('river')
         setRiverPopup({
           segment: {
             river_segment_id: segmentId,
@@ -439,13 +441,21 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   )
 
   const riverForecastPanel = riverPopup ? (
-    <M11RiverForecastPanel basinId={riverPopup.basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
+    <M11RiverForecastPanel
+      basinId={riverPopup.basinId}
+      segment={riverPopup.segment}
+      active={(activeCurveWindow === 'river' && Boolean(riverPopup)) || !stationPopup}
+      onActivate={() => setActiveCurveWindow('river')}
+      onClose={() => setRiverPopup(null)}
+    />
   ) : null
   const stationForecastPanel = stationPopup ? (
     <M11StationForcingPopup
       basinId={stationPopup.basinId}
       initialSource={stationSeriesSourceAvailability(sourceSelection?.resolvedSource)}
       station={stationPopup.station}
+      active={(activeCurveWindow === 'station' && Boolean(stationPopup)) || !riverPopup}
+      onActivate={() => setActiveCurveWindow('station')}
       onClose={() => setStationPopup(null)}
     />
   ) : null

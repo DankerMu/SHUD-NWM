@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -198,8 +198,82 @@ function prcpSeries(body: Record<string, unknown>) {
   return (body.series as Record<string, unknown>[]).find((series) => series.variable === 'PRCP') as Record<string, unknown>
 }
 
+const originalViewport = { width: window.innerWidth, height: window.innerHeight }
+
+function setViewport(width: number, height: number) {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width })
+  Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height })
+  window.dispatchEvent(new Event('resize'))
+}
+
+function panelPosition(panel: HTMLElement) {
+  return {
+    x: Number.parseFloat(panel.style.left),
+    y: Number.parseFloat(panel.style.top),
+  }
+}
+
+async function positionedPanel(testId: string) {
+  const panel = await screen.findByTestId(testId)
+  await waitFor(() => expect(Number.isFinite(panelPosition(panel).x)).toBe(true))
+  return panel
+}
+
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  } as DOMRect
+}
+
+function expectRectInside(container: DOMRect, target: DOMRect) {
+  expect(target.left).toBeGreaterThanOrEqual(container.left)
+  expect(target.top).toBeGreaterThanOrEqual(container.top)
+  expect(target.right).toBeLessThanOrEqual(container.right)
+  expect(target.bottom).toBeLessThanOrEqual(container.bottom)
+}
+
+function mockCurveWindowRects({
+  containerTestId,
+  panelTestId,
+  handleTestId,
+  closeLabel,
+  panelWidth,
+  panelHeight,
+}: {
+  containerTestId: string
+  panelTestId: string
+  handleTestId: string
+  closeLabel: string
+  panelWidth: number
+  panelHeight: number
+}) {
+  const original = HTMLElement.prototype.getBoundingClientRect
+  return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function getBoundingClientRect(this: HTMLElement) {
+    const testId = this.getAttribute('data-testid')
+    const panel = document.querySelector(`[data-testid="${panelTestId}"]`) as HTMLElement | null
+    const current = panel ? panelPosition(panel) : { x: 0, y: 0 }
+    const left = Number.isFinite(current.x) ? current.x : 0
+    const top = Number.isFinite(current.y) ? current.y : 0
+
+    if (testId === containerTestId) return rect(0, 0, 900, 600)
+    if (testId === panelTestId) return rect(left, top, panelWidth, panelHeight)
+    if (testId === handleTestId) return rect(left, top, panelWidth, 72)
+    if (this.getAttribute('aria-label') === closeLabel) return rect(left + panelWidth - 44, top + 12, 28, 28)
+    return original.call(this)
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  setViewport(originalViewport.width, originalViewport.height)
   mockLatestProducts()
 })
 
@@ -230,7 +304,7 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(screen.getByTestId('m11-station-popup')).toHaveClass('aspect-video')
-    expect(screen.getByTestId('m11-station-popup')).toHaveClass('left-1/2')
+    expect(screen.getByTestId('m11-station-popup')).toHaveAttribute('data-m11-curve-window-kind', 'station')
     expect(screen.getByText('QHH 代站 1')).toBeInTheDocument()
     expect(screen.getByText('站点 ID qhh_forc_001')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
@@ -263,6 +337,100 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(1)
     expect(chart).toHaveTextContent('"name":"GFS"')
     expect(chart).toHaveTextContent('"name":"IFS"')
+  })
+
+  it('keeps station tabs and issue-time controls from starting drag while narrow viewport clamp stays reachable', async () => {
+    setViewport(360, 500)
+    const cycles = [DEFAULT_CYCLE, RETAINED_OUT_CYCLE]
+    mockLatestProducts(cycles)
+    mockSeriesBySource()
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    const panel = await positionedPanel('m11-station-popup')
+    const initial = panelPosition(panel)
+    expect(initial.x).toBe(12)
+    expect(initial.y).toBeGreaterThanOrEqual(12)
+    await screen.findByTestId('m11-station-popup-loaded')
+
+    fireEvent.pointerDown(screen.getByTestId('m11-station-variable-toggle-TEMP'), { button: 0, clientX: 40, clientY: 150 })
+    fireEvent.pointerMove(window, { clientX: 250, clientY: 220 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).toEqual(initial)
+
+    fireEvent.pointerDown(screen.getByTestId('m11-popup-issue-time'), { button: 0, clientX: 40, clientY: 100 })
+    fireEvent.pointerMove(window, { clientX: 250, clientY: 240 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).toEqual(initial)
+
+    const handle = screen.getByTestId('m11-station-popup-drag-handle')
+    fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+    fireEvent.pointerMove(window, { clientX: 4000, clientY: 4000 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel).x).toBe(12)
+    expect(panelPosition(panel).y).toBeCloseTo(500 - Math.min((360 - 24) * 9 / 16, 500 - 24) - 12)
+  })
+
+  it('keeps the station window, drag handle, and close button inside a nonzero map container', async () => {
+    setViewport(900, 600)
+    mockSeriesBySource()
+    const rectSpy = mockCurveWindowRects({
+      containerTestId: 'm11-map-container',
+      panelTestId: 'm11-station-popup',
+      handleTestId: 'm11-station-popup-drag-handle',
+      closeLabel: '关闭弹窗',
+      panelWidth: 378,
+      panelHeight: 213,
+    })
+
+    try {
+      render(
+        <section data-testid="m11-map-container">
+          <M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} onClose={() => undefined} />
+        </section>,
+      )
+
+      const panel = await positionedPanel('m11-station-popup')
+      const handle = screen.getByTestId('m11-station-popup-drag-handle')
+      const close = screen.getByLabelText('关闭弹窗')
+      const initial = panelPosition(panel)
+
+      fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+      fireEvent.pointerMove(window, { clientX: 5000, clientY: 5000 })
+      fireEvent.pointerUp(window)
+
+      const containerRect = screen.getByTestId('m11-map-container').getBoundingClientRect()
+      expectRectInside(containerRect, panel.getBoundingClientRect())
+      expectRectInside(containerRect, handle.getBoundingClientRect())
+      expectRectInside(containerRect, close.getBoundingClientRect())
+    } finally {
+      rectSpy.mockRestore()
+    }
+  })
+
+  it('resets station window placement when the station identity changes and reflects active z-index', async () => {
+    mockSeriesBySource()
+    const { rerender } = render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} active={false} />)
+
+    const panel = await positionedPanel('m11-station-popup')
+    const initial = panelPosition(panel)
+    expect(panel.style.zIndex).toBe('132')
+    const handle = screen.getByTestId('m11-station-popup-drag-handle')
+    fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
+    fireEvent.pointerMove(window, { clientX: initial.x + 220, clientY: initial.y + 140 })
+    fireEvent.pointerUp(window)
+    expect(panelPosition(panel)).not.toEqual(initial)
+
+    rerender(
+      <M11StationForcingPopup
+        basinId="basins_qhh"
+        initialSource="GFS"
+        station={{ station_id: 'qhh_forc_002', station_name: 'North Ridge station' }}
+        active
+      />,
+    )
+
+    await waitFor(() => expect(panelPosition(panel)).toEqual(initial))
+    expect(panel.style.zIndex).toBe('142')
   })
 
   it('switches the selected variable without adding another chart panel', async () => {

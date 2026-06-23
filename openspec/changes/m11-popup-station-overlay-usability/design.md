@@ -443,6 +443,111 @@ Required evidence:
 - `cd apps/frontend && corepack pnpm build`
 - `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`
 
+## Issue #661 Fixture: Draggable Coexisting Curve Windows
+
+Fixture level: expanded
+Repair intensity: medium
+Expanded trigger rationale:
+
+- This slice changes shared frontend window state, pointer interaction, and
+  side-by-side river/station comparison behavior.
+- A regression could make chart zoom/tabs/selectors start dragging, hide the
+  close controls off viewport, or reintroduce river/station mutual exclusion.
+
+Change surface:
+
+- `apps/frontend/src/components/map/M11DraggableCurveWindow.tsx`
+- `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`
+- `apps/frontend/src/components/map/M11StationForcingPopup.tsx`
+- `apps/frontend/src/pages/OverviewPage.tsx`
+- `apps/frontend/src/components/m11/BasinDetailPanels.tsx`
+- Focused component, route, and mocked display tests.
+
+Must preserve:
+
+- River q_down and station forcing data loading, strict identity validation,
+  honest empty/partial states, and dark issue-time selector behavior remain
+  unchanged.
+- Station overlay query state and MapLibre hit priority remain owned by issues
+  #659 and #660; this issue only consumes their click dispatch results.
+- Chart body, ECharts data zoom, station variable tabs, source/cycle controls,
+  and close buttons keep their native control behavior.
+
+Must add/change:
+
+- River and station panels use one shared draggable curve-window frame or hook.
+- Drag starts only from the header/handle and clamps within the map viewport.
+- River and station windows can coexist, close independently, and initially use
+  non-identical desktop placements with clamped narrow-viewport fallback.
+- Click, focus, or drag raises the active window above the other.
+- Selecting a different river or station resets only that window's placement;
+  the other visible window keeps its feature identity and position.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no route or API contract
+  change.
+- Config / project setup: not selected - no build or environment config
+  change.
+- File IO / path safety / overwrite: not selected - no filesystem surface.
+- Schema / columns / units / field names: not selected - no data schema change.
+- Auth / permissions / secrets: not selected - no auth boundary touched.
+- Concurrency / shared state / ordering: selected - two independent windows
+  share z-index, focus, pointer-drag, and identity-reset behavior.
+- Resource limits / large input / discovery: not selected - no new data fetch
+  scope or unbounded input.
+- Legacy compatibility / examples: selected - existing single-window tests and
+  route workflows must keep working while allowing coexistence.
+- Error handling / rollback / partial outputs: selected - close/clamp/focus
+  paths must fail without hiding the remaining window.
+- Release / packaging / dependency compatibility: not selected - no new
+  package.
+- Documentation / migration notes: selected - fixture records the split from
+  prior query-state and hit-priority issues.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: selected - windows are clamped to the map
+  viewport and triggered by map feature identities, though CRS is unchanged.
+- Hydro-met time series / forcing windows: selected - river q_down and station
+  forcing curve identities must remain truthful while windows coexist.
+- SHUD numerical runtime / conservation / NaN: not selected - no runtime or
+  numerical output change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database behavior
+  change.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler
+  or compute lifecycle surface.
+- External hydro-met providers / snapshot reproducibility: not selected -
+  source/cycle provider semantics are unchanged.
+- Run manifest / QC provenance: not selected - no manifest or QC evidence
+  surface.
+- Published NHMS artifacts / display identity: selected - selected river and
+  station identities must remain independent and honest across close/reset
+  behavior.
+
+Required evidence:
+
+- Component tests prove header-only drag, chart/control interactions do not
+  drag, desktop and narrow viewport clamp behavior, non-zero container
+  bounding-box reachability for the drag handle and close button, active
+  z-index props, and identity-based position reset for river and station
+  windows.
+- Route mocked tests prove overview and basin-detail river-then-station and
+  station-then-river workflows leave both windows visible, closing one does not
+  close the other, default positions are not identical on desktop, and clicking
+  either window raises it.
+- Existing issue-time selector and curve-loading tests continue to pass for
+  river and station panels.
+- `cd apps/frontend && corepack pnpm test -- M11RiverForecastPanel M11StationForcingPopup AppRoutes`
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `openspec validate m11-popup-station-overlay-usability --strict --no-interactive`
+
+Non-goals:
+
+- No backend API change, station-MVT endpoint change, route/query migration, or
+  MapLibre hit-priority change.
+
 ## Migration Plan
 
 1. Add the new query state and normalize old station-layer URLs.

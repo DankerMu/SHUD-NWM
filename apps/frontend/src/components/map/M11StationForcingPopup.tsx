@@ -3,10 +3,10 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { CloudRain } from 'lucide-react'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { M11DraggableCurveWindow } from '@/components/map/M11DraggableCurveWindow'
 import {
   formatIssueTime,
   M11IssueTimeSelect,
-  M11_POPUP_GLASS,
   M11PopupEmpty,
   M11PopupHeader,
   M11PopupLoading,
@@ -125,7 +125,7 @@ async function loadSource(
 }
 
 /**
- * 代站五要素 forcing 曲线面板（M26 全屏单页）。与河段流量曲线同样使用居中 16:9 玻璃窗。
+ * 代站五要素 forcing 曲线面板（M26 全屏单页）。与河段流量曲线同样使用可拖拽玻璃曲线窗。
  * 每次只展示一个要素；该要素内 GFS + IFS 同轴双绘，不做 source 切换。
  * honest 红线：单源失败只列 partial reason；两源都不可绘制才进入空态，绝不绘制错身份数据。
  */
@@ -133,11 +133,15 @@ export function M11StationForcingPopup({
   basinId,
   initialSource,
   station,
+  active = true,
+  onActivate,
   onClose,
 }: {
   basinId: string | null
   initialSource: HydroMetSource | 'GFS+IFS' | null
   station: M11StationPopupStation
+  active?: boolean
+  onActivate?: () => void
   onClose?: () => void
 }) {
   const [state, setState] = useState<StationPanelState>({ loading: true, results: [] })
@@ -173,22 +177,25 @@ export function M11StationForcingPopup({
   const failedReasons = state.results.filter((result) => result.reason).map((result) => result.reason as string)
   const showInitialLoading = state.loading && state.results.length === 0
 
+  const header = (
+    <M11PopupHeader
+      icon={CloudRain}
+      title={displayName.title}
+      subtitle="气象代站五要素 forcing · GFS+IFS"
+      meta={displayName.meta}
+      onClose={onClose}
+    />
+  )
+
   return (
-    <aside
-      className={cn(
-        'absolute left-1/2 top-1/2 z-[130] flex aspect-video w-[min(44rem,46vw)] max-h-[82vh] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
-        M11_POPUP_GLASS,
-      )}
-      data-testid="m11-station-popup"
+    <M11DraggableCurveWindow
+      kind="station"
+      identityKey={station.station_id}
+      active={active}
+      onActivate={onActivate}
+      testId="m11-station-popup"
+      header={header}
     >
-      <div className="h-px shrink-0 bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
-      <M11PopupHeader
-        icon={CloudRain}
-        title={displayName.title}
-        subtitle="气象代站五要素 forcing · GFS+IFS"
-        meta={displayName.meta}
-        onClose={onClose}
-      />
       <StationVariableSelector
         issueTimes={issueTimes}
         selectedCycle={selectedCycle}
@@ -212,7 +219,7 @@ export function M11StationForcingPopup({
           loading={state.loading}
         />
       )}
-    </aside>
+    </M11DraggableCurveWindow>
   )
 }
 
