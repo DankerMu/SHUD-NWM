@@ -56,7 +56,11 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "governed_exemptions",
         "ownership_growth_signals",
         "top_oversized_modules",
+        "comparison_base_ref",
     } <= set(structural_budget)
+    comparison_base = structural_budget["comparison_base_ref"]
+    assert isinstance(comparison_base, dict)
+    assert {"requested", "requested_source", "resolved", "ref_kind", "status"} <= set(comparison_base)
     thresholds = structural_budget["thresholds"]
     assert isinstance(thresholds, dict)
     assert thresholds["yellow_zone_min_physical_lines"] == 500
@@ -307,6 +311,55 @@ def test_structural_file_budget_classifies_tracked_source_thresholds_and_exempti
     assert budget["top_oversized_modules"][0]["module"] == "services/api"
 
 
+def test_structural_file_budget_does_not_exempt_implementation_roots_with_data_or_schema_labels(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "workers" / "data_adapters" / "gfs_adapter.py",
+        _structural_python_fixture(1001),
+    )
+    _write(
+        tmp_path / "services" / "api" / "schema_validator.py",
+        _structural_python_fixture(1001),
+    )
+    subprocess.run(
+        ["git", "add", "workers/data_adapters/gfs_adapter.py", "services/api/schema_validator.py"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    budget = _structural_budget(tmp_path)
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    exemptions = _structural_records_by_path(budget["governed_exemptions"])
+    assert oversized["workers/data_adapters/gfs_adapter.py"]["budget_class"] == "mandatory-governance"
+    assert oversized["services/api/schema_validator.py"]["budget_class"] == "mandatory-governance"
+    assert "workers/data_adapters/gfs_adapter.py" not in exemptions
+    assert "services/api/schema_validator.py" not in exemptions
+
+
+def test_structural_file_budget_reports_root_lockfiles_as_dependency_exemptions(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    for lockfile_name in audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES:
+        _write(tmp_path / lockfile_name, _structural_yaml_fixture(1001, "lockfileVersion: 'test'"))
+    subprocess.run(
+        ["git", "add", *sorted(audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES)],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    budget = _structural_budget(tmp_path)
+
+    exemptions = _structural_records_by_path(budget["governed_exemptions"])
+    assert set(audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES) <= set(exemptions)
+    for lockfile_name in audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES:
+        assert exemptions[lockfile_name]["line_count"] == 1001
+        assert exemptions[lockfile_name]["exemption_family"] == "dependency-lockfile"
+
+
 def test_structural_file_budget_markdown_keeps_existing_report_sections(tmp_path: Path) -> None:
     report = audit_repo_entropy.build_report(tmp_path)
 
@@ -366,6 +419,122 @@ def test_structural_ownership_growth_reports_new_surface_in_oversized_source(
     assert expected_signal in {signal["signal_type"] for signal in signals}
     assert all("inventory" in str(signal["owner_action"]) for signal in signals)
     assert all("no immediate split" in str(signal["owner_action"]) for signal in signals)
+
+
+def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        source_path,
+        base_text
+        + "\n".join(
+            (
+                "import requests",
+                "def public_entrypoint():",
+                "    return requests.__name__",
+            )
+        )
+        + "\n",
+    )
+    _commit_all(tmp_path, "add ownership surface")
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    assert status.stdout == b""
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    signals = _structural_growth_signal_types(budget, "services/api/large.py")
+
+    assert {"new-import-family", "public-entrypoint"} <= signals
+    comparison_base = budget["comparison_base_ref"]
+    assert isinstance(comparison_base, dict)
+    assert comparison_base["requested"] == base_ref
+    assert comparison_base["resolved"] == base_ref
+    assert comparison_base["ref_kind"] == "explicit"
+
+
+def test_structural_file_budget_bounds_huge_source_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "huge.py"
+    huge_line = "VALUE = '0123456789abcdef'\n"
+    repeat_count = audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES // len(huge_line) + 100
+    _write(source_path, huge_line * repeat_count)
+    subprocess.run(["git", "add", "services/api/huge.py"], cwd=tmp_path, check=True)
+    original_read_text = Path.read_text
+
+    def guarded_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == source_path:
+            raise AssertionError("structural scan must not read huge source with Path.read_text")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    budget = audit_repo_entropy._structural_file_budget_summary(tmp_path)
+
+    oversized = _structural_records_by_path(budget["oversized_files"])
+    huge_record = oversized["services/api/huge.py"]
+    assert huge_record["budget_class"] == "mandatory-governance"
+    assert huge_record["line_count"] == repeat_count
+    assert huge_record["import_families"] == []
+    assert huge_record["ownership_surface_signals"] == []
+
+
+def test_structural_ownership_growth_details_do_not_leak_added_source_literals(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    base_text = _structural_python_fixture(1001, "import os")
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    parser_secret = "sk_live_parser_validator_secret"
+    compat_secret = "sk_live_compat_secret"
+    _write(
+        source_path,
+        base_text
+        + "\n".join(
+            (
+                f"SECRET_SCHEMA_VALUE = '{parser_secret}'  # schema validator",
+                f"LEGACY_COMPAT_SECRET = '{compat_secret}'  # compatibility alias",
+            )
+        )
+        + "\n",
+    )
+
+    report = audit_repo_entropy.build_report(tmp_path, structural_base_ref=base_ref)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    budget = metadata["structural_file_budget"]
+    assert isinstance(budget, dict)
+    structural_json = json.dumps(budget, sort_keys=True)
+    markdown = audit_repo_entropy.render_markdown(report)
+
+    assert "parser-validator-responsibility" in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
+    assert "compatibility-symbol" in _structural_growth_signal_types(budget, "services/api/large.py")
+    assert parser_secret not in structural_json
+    assert compat_secret not in structural_json
+    assert parser_secret not in markdown
+    assert compat_secret not in markdown
+    for signal in budget["ownership_growth_signals"]:
+        assert isinstance(signal, dict)
+        if signal["path"] == "services/api/large.py":
+            assert "matching added line" in str(signal["detail"])
 
 
 def test_structural_file_budget_report_and_hard_gate_commands_do_not_write_baseline(
@@ -5426,8 +5595,8 @@ def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
     return sorted(path for path in baseline_dir.glob("*.json") if path.name != "latest.json")
 
 
-def _structural_budget(root: Path) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root)
+def _structural_budget(root: Path, *, structural_base_ref: str | None = None) -> dict[str, object]:
+    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     budget = metadata["structural_file_budget"]
@@ -5452,6 +5621,17 @@ def _structural_growth_signal_types(budget: dict[str, object], path: str) -> set
         for signal in signals
         if isinstance(signal, dict) and signal["path"] == path
     }
+
+
+def _git_rev_parse(root: Path, ref: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", ref],
+        cwd=root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return result.stdout.strip()
 
 
 def _structural_python_fixture(line_count: int, *header_lines: str) -> str:
