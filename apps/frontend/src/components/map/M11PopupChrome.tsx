@@ -2,6 +2,13 @@ import type { ReactNode } from 'react'
 import { Loader2, X } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { M11_POPUP_SOURCES } from '@/components/map/useHydroMetPopupProduct'
 
@@ -70,6 +77,73 @@ export function M11PopupHeader({
   )
 }
 
+export function M11IssueTimeSelect({
+  issueTimes,
+  issueTime,
+  unavailableIssueTimes = [],
+  disabled = false,
+  ariaLabel = '起报时间选择',
+  testId = 'm11-popup-issue-time',
+  onIssueTimeChange,
+  triggerClassName,
+}: {
+  issueTimes: string[]
+  issueTime: string | null
+  unavailableIssueTimes?: string[]
+  disabled?: boolean
+  ariaLabel?: string
+  testId?: string
+  onIssueTimeChange?: (issueTime: string) => void
+  triggerClassName?: string
+}) {
+  if (issueTimes.length === 0) return null
+
+  const unavailableSet = new Set(unavailableIssueTimes)
+  const selectedValue = issueTime && issueTimes.includes(issueTime) ? issueTime : issueTimes[0]
+
+  return (
+    <Select
+      value={selectedValue}
+      onValueChange={(value) => onIssueTimeChange?.(value)}
+      disabled={disabled || !onIssueTimeChange}
+    >
+      <SelectTrigger
+        aria-label={ariaLabel}
+        data-testid={testId}
+        className={cn(
+          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50',
+          triggerClassName,
+        )}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent
+        data-testid={`${testId}-content`}
+        className="z-[180] border-white/15 bg-slate-950/95 text-slate-100 shadow-[0_18px_48px_-16px_rgba(8,14,32,0.95)] ring-1 ring-cyan-400/15 backdrop-blur-xl"
+      >
+        {issueTimes.map((time) => {
+          const unavailable = unavailableSet.has(time)
+          const label = `${formatIssueTime(time)}${unavailable ? ' · 磁盘保留不可用' : ''}`
+          return (
+            <SelectItem
+              key={time}
+              value={time}
+              disabled={unavailable}
+              data-retention-unavailable={unavailable || undefined}
+              className={cn(
+                'font-mono text-[11px] text-slate-100 focus:bg-cyan-400/15 focus:text-cyan-50 data-[state=checked]:bg-cyan-400/10 data-[state=checked]:text-cyan-100 disabled:text-amber-100 disabled:opacity-70',
+                unavailable && 'text-amber-100',
+              )}
+            >
+              {label}
+            </SelectItem>
+          )
+        })}
+      </SelectContent>
+    </Select>
+  )
+}
+
 /**
  * 弹窗内 source（GFS/IFS）+ 起报时间选择条。
  * 起报时间因后端仅 latest-product 至多一项；为空时诚实显示「暂无可用起报时间」。
@@ -89,7 +163,6 @@ export function M11PopupSourceControls({
   unavailableIssueTimes?: string[]
   onIssueTimeChange?: (issueTime: string) => void
 }) {
-  const unavailableSet = new Set(unavailableIssueTimes)
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
       <div className="inline-flex items-center rounded-lg bg-white/5 p-0.5 ring-1 ring-inset ring-white/10" role="group" aria-label="预报源选择">
@@ -111,32 +184,24 @@ export function M11PopupSourceControls({
           </button>
         ))}
       </div>
-      <label className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-[11px] text-slate-400">
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-[11px] text-slate-400">
         <span className="shrink-0 uppercase tracking-wide">起报</span>
         {issueTimes.length > 0 ? (
-          <select
-            aria-label="起报时间选择"
-            data-testid="m11-popup-issue-time"
-            className="h-7 min-w-0 max-w-[12rem] flex-1 cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none"
-            value={issueTime ?? issueTimes[0]}
-            onChange={(event) => onIssueTimeChange?.(event.target.value)}
+          <M11IssueTimeSelect
+            testId="m11-popup-issue-time"
+            issueTimes={issueTimes}
+            issueTime={issueTime}
+            unavailableIssueTimes={unavailableIssueTimes}
+            onIssueTimeChange={onIssueTimeChange}
             disabled={!onIssueTimeChange}
-          >
-            {issueTimes.map((time) => {
-              const unavailable = unavailableSet.has(time)
-              return (
-                <option key={time} value={time} disabled={unavailable} data-retention-unavailable={unavailable || undefined}>
-                  {formatIssueTime(time)}{unavailable ? ' · 磁盘保留不可用' : ''}
-                </option>
-              )
-            })}
-          </select>
+            triggerClassName="w-auto flex-1"
+          />
         ) : (
           <span className="text-slate-500" data-testid="m11-popup-issue-time-empty">
             暂无可用起报时间
           </span>
         )}
-      </label>
+      </div>
     </div>
   )
 }

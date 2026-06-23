@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
+import { formatIssueTime, M11PopupSourceControls } from '@/components/map/M11PopupChrome'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
@@ -109,6 +111,14 @@ function mockForecastBySource(opts: { ifsSegmentId?: string } = {}) {
   }) as never)
 }
 
+async function openIssueTimeSelect(user: ReturnType<typeof userEvent.setup>, testId: string) {
+  const trigger = await screen.findByTestId(testId)
+  await user.click(trigger)
+  const content = await screen.findByTestId(`${testId}-content`)
+  expect(content).toHaveClass('bg-slate-950/95')
+  return { trigger, content }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(fetchHydroMetLatestProduct).mockImplementation((async ({ source }: { source: HydroMetSource }) => product(source)) as never)
@@ -188,6 +198,7 @@ describe('M11RiverForecastPanel', () => {
   })
 
   it('restores the 起报时间 selector from available_issue_times and reloads both sources on change', async () => {
+    const user = userEvent.setup()
     const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z', '2026-05-20T00:00:00Z']
     // 后端如实回显所请求的 cycle（cycle=null → 最新一轮）
     vi.mocked(fetchHydroMetLatestProduct).mockImplementation(
@@ -199,15 +210,16 @@ describe('M11RiverForecastPanel', () => {
 
     // 初次加载用最新一轮（cycle=null）
     await screen.findByTestId('m11-river-panel-chart')
-    const select = (await screen.findByTestId('m11-river-panel-cycle')) as HTMLSelectElement
-    expect(select.querySelectorAll('option')).toHaveLength(cycles.length) // 双源一致 → 单一列表列出全部时次
-    expect(select.value).toBe(cycles[0])
-    expect(select).not.toBeDisabled() // 加载完成后可交互（加载间隙 disabled，规避选到上一河段的 stale 列表）
+    const { trigger } = await openIssueTimeSelect(user, 'm11-river-panel-cycle')
+    expect(trigger).toHaveTextContent(formatIssueTime(cycles[0]))
+    expect(screen.getAllByRole('option')).toHaveLength(cycles.length) // 双源一致 → 单一列表列出全部时次
+    expect(trigger).not.toBeDisabled() // 加载完成后可交互（加载间隙 disabled，规避选到上一河段的 stale 列表）
+    expect(screen.getByTestId('m11-river-forecast-panel')).toBeInTheDocument()
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: null }))
 
     // 切到第二个起报时次 → GFS+IFS 都用该 cycle 重载
     vi.mocked(fetchHydroMetLatestProduct).mockClear()
-    fireEvent.change(select, { target: { value: cycles[1] } })
+    await user.click(screen.getByRole('option', { name: formatIssueTime(cycles[1]) }))
     await waitFor(() => {
       expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: cycles[1] }))
       expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: cycles[1] }))
@@ -215,6 +227,7 @@ describe('M11RiverForecastPanel', () => {
   })
 
   it('honestly flags a cycle that fell out of the backend window instead of silently showing latest', async () => {
+    const user = userEvent.setup()
     const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z']
     // 后端对任何请求都回退到最新一轮（rows[0]）：模拟所选时次滑出 limit=12 候选窗口
     vi.mocked(fetchHydroMetLatestProduct).mockImplementation(
@@ -225,8 +238,8 @@ describe('M11RiverForecastPanel', () => {
     render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
 
     await screen.findByTestId('m11-river-panel-chart') // 初次（最新）正常渲染
-    const select = (await screen.findByTestId('m11-river-panel-cycle')) as HTMLSelectElement
-    fireEvent.change(select, { target: { value: cycles[1] } }) // 选旧时次；后端仍回最新
+    await openIssueTimeSelect(user, 'm11-river-panel-cycle')
+    await user.click(screen.getByRole('option', { name: formatIssueTime(cycles[1]) })) // 选旧时次；后端仍回最新
 
     // honest 红线：不静默画最新数据，而是标注该起报不可用
     const empty = await screen.findByTestId('m11-river-panel-empty')
@@ -240,5 +253,42 @@ describe('M11RiverForecastPanel', () => {
     expect(screen.getByTestId('m11-river-panel-empty')).toHaveTextContent('请选择流域')
     expect(screen.queryByTestId('mock-forecast-echarts')).not.toBeInTheDocument()
     expect(vi.mocked(fetchHydroMetLatestProduct)).not.toHaveBeenCalled()
+  })
+})
+
+describe('M11PopupSourceControls', () => {
+  it('keeps source buttons and exposes disabled unavailable issue times in the dark selector', async () => {
+    const user = userEvent.setup()
+    const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z']
+    const onSourceChange = vi.fn()
+    const onIssueTimeChange = vi.fn()
+
+    render(
+      <M11PopupSourceControls
+        source="GFS"
+        onSourceChange={onSourceChange}
+        issueTimes={cycles}
+        issueTime={cycles[0]}
+        unavailableIssueTimes={[cycles[1]]}
+        onIssueTimeChange={onIssueTimeChange}
+      />,
+    )
+
+    expect(screen.getByTestId('m11-popup-source-GFS')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('m11-popup-source-IFS')).toHaveAttribute('aria-pressed', 'false')
+    await user.click(screen.getByTestId('m11-popup-source-IFS'))
+    expect(onSourceChange).toHaveBeenCalledWith('IFS')
+
+    const trigger = screen.getByTestId('m11-popup-issue-time')
+    expect(trigger).toHaveAccessibleName('起报时间选择')
+    await user.click(trigger)
+    const content = await screen.findByTestId('m11-popup-issue-time-content')
+    expect(content).toHaveClass('bg-slate-950/95')
+
+    const unavailableOption = screen.getByRole('option', { name: /05-20 12:00 UTC.*磁盘保留不可用/ })
+    expect(unavailableOption).toHaveAttribute('aria-disabled', 'true')
+    expect(unavailableOption).toHaveAttribute('data-retention-unavailable', 'true')
+    fireEvent.click(unavailableOption)
+    expect(onIssueTimeChange).not.toHaveBeenCalled()
   })
 })

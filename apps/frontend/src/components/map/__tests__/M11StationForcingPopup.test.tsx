@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
+import { formatIssueTime } from '@/components/map/M11PopupChrome'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT, HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
@@ -279,13 +280,18 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
     await screen.findByTestId('m11-station-popup-loaded')
 
-    await user.selectOptions(screen.getByTestId('m11-popup-issue-time'), RETAINED_OUT_CYCLE)
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    const content = await screen.findByTestId('m11-popup-issue-time-content')
+    expect(content).toHaveClass('bg-slate-950/95')
+    await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
 
     await waitFor(() => {
       expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('GFS：该起报 05-20 00:00 UTC')
     })
     expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('磁盘保留窗口')
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-station-variable-toggle-Press')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Press' })).not.toBeInTheDocument()
     const chart = screen.getByTestId('mock-station-echarts')
     expect(chart).not.toHaveTextContent('"name":"GFS"')
     expect(chart).toHaveTextContent('"name":"IFS"')
