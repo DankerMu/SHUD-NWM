@@ -13,7 +13,7 @@ import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/stores/modelAssets'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
-import { useStationLayerDataStore } from '@/stores/stationLayerData'
+import { stationLayerRequestKey, useStationLayerDataStore } from '@/stores/stationLayerData'
 import { _clearHydroMetLatestProductIdentityCache } from '@/pages/hydroMet/bootstrap'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
@@ -1774,7 +1774,7 @@ describe('App route state', () => {
         loaded: 1,
         truncated: false,
       },
-      requestKey: 'basin-demo:bv-001',
+      requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'basin-demo', basinVersionId: 'bv-001' }] }),
     })
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&basinVersionId=bv-001', 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),

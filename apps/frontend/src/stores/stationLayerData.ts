@@ -50,7 +50,7 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]): Array<Sta
     const basinId = context.basinId.trim()
     const basinVersionId = context.basinVersionId?.trim() || null
     if (!basinId || !basinVersionId) continue
-    const key = `${basinId}::${basinVersionId}`
+    const key = JSON.stringify([basinId, basinVersionId])
     if (seen.has(key)) continue
     seen.add(key)
     normalized.push({ basinId, basinVersionId })
@@ -59,9 +59,9 @@ function normalizeBasinContexts(contexts: StationLayerBasinContext[]): Array<Sta
 }
 
 export function stationLayerRequestKey(request: StationLayerRequest) {
-  return normalizeBasinContexts(request.basinContexts)
-    .map((context) => `${context.basinId}:${context.basinVersionId}`)
-    .join(',')
+  return JSON.stringify(
+    normalizeBasinContexts(request.basinContexts).map(({ basinId, basinVersionId }) => [basinId, basinVersionId]),
+  )
 }
 
 const inFlight = new Map<string, Promise<StationLayerData>>()

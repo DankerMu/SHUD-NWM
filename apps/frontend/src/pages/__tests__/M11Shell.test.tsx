@@ -2527,7 +2527,7 @@ describe('M11 visual foundation shell', () => {
           loaded: 5000,
           truncated: true,
         },
-        requestKey: 'heihe:heihe_v1',
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
       })
 
       render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
@@ -2551,7 +2551,12 @@ describe('M11 visual foundation shell', () => {
           loaded: 5000,
           truncated: true,
         },
-        requestKey: 'first:first_v1,second:second_v1',
+        requestKey: stationLayerRequestKey({
+          basinContexts: [
+            { basinId: 'first', basinVersionId: 'first_v1' },
+            { basinId: 'second', basinVersionId: 'second_v1' },
+          ],
+        }),
       })
 
       render(<Harness active basinContexts={[
@@ -2578,7 +2583,7 @@ describe('M11 visual foundation shell', () => {
           loaded: 0,
           truncated: false,
         },
-        requestKey: 'heihe:heihe_v1',
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
       })
 
       render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
@@ -2611,7 +2616,7 @@ describe('M11 visual foundation shell', () => {
           loaded: 1,
           truncated: false,
         },
-        requestKey: 'heihe:heihe_v1',
+        requestKey: stationLayerRequestKey({ basinContexts: [{ basinId: 'heihe', basinVersionId: 'heihe_v1' }] }),
       })
 
       render(<Harness active basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
