@@ -30,6 +30,8 @@ const roleOptions: Array<{ value: AuthRole; label: string }> = [
   { value: 'sys_admin', label: 'Sys Admin' },
 ]
 
+const toastDuration = import.meta.env.MODE === 'test' ? Number.POSITIVE_INFINITY : undefined
+
 interface AppShellProps {
   children: ReactNode
 }
@@ -51,7 +53,7 @@ export function AppShell({ children }: AppShellProps) {
   }, [fetchRuntimeConfig, runtimeConfig, runtimeConfigError])
 
   return (
-    <ToastProvider>
+    <ToastProvider duration={toastDuration}>
       <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         <SiteHeader />
         <main className="relative min-h-0 w-full flex-1 overflow-hidden">
