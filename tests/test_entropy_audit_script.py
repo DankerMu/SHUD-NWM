@@ -417,9 +417,10 @@ def test_structural_ownership_growth_ignores_oversized_bugfix_only_edit(
     base_text = _structural_python_fixture(1001, "import os")
     _write(source_path, base_text)
     _commit_all(tmp_path, "initial oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
     _write(source_path, base_text + "BUGFIX_SENTINEL = True\n")
 
-    budget = _structural_budget(tmp_path)
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert "services/api/large.py" in _structural_records_by_path(budget["oversized_files"])
     assert _structural_growth_signal_types(budget, "services/api/large.py") == set()
@@ -444,9 +445,10 @@ def test_structural_ownership_growth_reports_new_surface_in_oversized_source(
     base_text = _structural_python_fixture(1001, "import os")
     _write(source_path, base_text)
     _commit_all(tmp_path, "initial oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
     _write(source_path, base_text + "\n".join(added_lines) + "\n")
 
-    budget = _structural_budget(tmp_path)
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
     signals = [
         signal
         for signal in budget["ownership_growth_signals"]
@@ -471,6 +473,7 @@ def test_structural_ownership_growth_ignores_nested_python_helper_entrypoint(
     )
     _write(source_path, base_text)
     _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
     changed_text = base_text.replace(
         "    return os.name\n",
         "    def local_helper():\n"
@@ -479,7 +482,7 @@ def test_structural_ownership_growth_ignores_nested_python_helper_entrypoint(
     )
     _write(source_path, changed_text)
 
-    budget = _structural_budget(tmp_path)
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
     assert "public-entrypoint" not in _structural_growth_signal_types(
         budget,
@@ -522,6 +525,82 @@ def test_structural_ownership_growth_reports_python_public_class_method_addition
     )
 
     assert signal_details == ["new public surface tokens: method:Controller.handle"]
+
+
+def test_structural_ownership_growth_reports_huge_python_public_class_method_addition(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    padding = [f"    PAD_{index} = '{'x' * 1024}'" for index in range(1_030)]
+    base_lines = [
+        "import os",
+        "",
+        "class Controller:",
+        "    def existing(self) -> str:",
+        "        return os.name",
+        "",
+        *padding,
+    ]
+    changed_lines = [
+        "import os",
+        "",
+        "class Controller:",
+        "    def existing(self) -> str:",
+        "        return os.name",
+        "",
+        "    def handle(self) -> str:",
+        "        return os.name",
+        "",
+        *padding,
+    ]
+    _write(source_path, "\n".join(base_lines) + "\n")
+    _commit_all(tmp_path, "base huge oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, "\n".join(changed_lines) + "\n")
+
+    assert source_path.stat().st_size > audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert _structural_growth_signal_details(
+        budget,
+        "services/api/large.py",
+        "public-entrypoint",
+    ) == ["new public surface tokens: method:Controller.handle"]
+
+
+def test_structural_ownership_growth_ignores_huge_python_local_helper(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    source_path = tmp_path / "services" / "api" / "large.py"
+    padding = [f"VALUE_{index} = '{'x' * 1024}'" for index in range(1_030)]
+    base_lines = [
+        "def existing() -> int:",
+        "    return 1",
+        "",
+        *padding,
+    ]
+    changed_lines = [
+        "def existing() -> int:",
+        "    def local_helper() -> int:",
+        "        return 1",
+        "    return local_helper()",
+        "",
+        *padding,
+    ]
+    _write(source_path, "\n".join(base_lines) + "\n")
+    _commit_all(tmp_path, "base huge oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, "\n".join(changed_lines) + "\n")
+
+    assert source_path.stat().st_size > audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert "public-entrypoint" not in _structural_growth_signal_types(
+        budget,
+        "services/api/large.py",
+    )
 
 
 @pytest.mark.parametrize(
@@ -615,6 +694,58 @@ def test_structural_ownership_growth_reports_js_ts_public_exports(
     assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
         expected_detail
     ]
+
+
+def test_structural_ownership_growth_reports_cjs_export_after_nested_object(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "apps/frontend/src/large.js"
+    source_path = tmp_path / relative_path
+    base_text = _structural_ts_private_fixture(
+        1001,
+        "const handler = () => null;",
+        "module.exports = { config: { enabled: true }, \"default\": handler };",
+    )
+    changed_text = _structural_ts_private_fixture(
+        1001,
+        "const handler = () => null;",
+        "module.exports = { config: { enabled: true }, \"default\": handler, handler };",
+    )
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, changed_text)
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+
+    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
+        "new public surface tokens: export:handler"
+    ]
+
+
+def test_structural_ownership_growth_public_export_detail_is_bounded(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    relative_path = "apps/frontend/src/large.ts"
+    source_path = tmp_path / relative_path
+    base_text = _structural_ts_private_fixture(1001)
+    added_exports = "\n".join(f"export const handler{index:02d} = {index};" for index in range(30))
+    _write(source_path, base_text)
+    _commit_all(tmp_path, "base oversized source")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(source_path, base_text + added_exports + "\n")
+
+    budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
+    details = _structural_growth_signal_details(budget, relative_path, "public-entrypoint")
+
+    assert len(details) == 1
+    assert details[0].startswith("new public surface tokens (30 total): ")
+    assert "(+10 more)" in details[0]
+    assert "export:handler00" in details[0]
+    assert "export:handler29" not in details[0]
+    assert len(details[0]) < 500
 
 
 def test_structural_ownership_growth_ignores_existing_ts_public_signature_edit(
@@ -722,18 +853,32 @@ def test_structural_ts_import_families_ignore_many_comment_and_string_literals_q
     assert elapsed < 2.0
 
 
+def test_structural_ts_import_families_ignore_many_nonmatching_import_lines_quickly() -> None:
+    text = "\n".join(f"import value{index}" for index in range(6_000))
+
+    started_at = time.perf_counter()
+    families = audit_repo_entropy._structural_ts_import_families(text)
+    elapsed = time.perf_counter() - started_at
+
+    assert families == ()
+    assert elapsed < 2.0
+
+
 def test_structural_ts_import_families_still_detect_real_import_forms() -> None:
     families = audit_repo_entropy._structural_ts_import_families(
         """
         // import('comment-only')
         const quotedRequire = "require('string-only')";
         import { createApp } from '@scope/app/runtime';
+        import {
+          createRouter,
+        } from 'vue-router';
         const express = require('express');
         const lazy = import('lodash/fp');
         """
     )
 
-    assert families == ("@scope/app", "express", "lodash")
+    assert families == ("@scope/app", "express", "lodash", "vue-router")
 
 
 def test_structural_ownership_growth_cli_uses_explicit_base_ref_for_committed_diff(

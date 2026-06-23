@@ -188,6 +188,9 @@ MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
 HASH_CHUNK_BYTES = 1_048_576
 STRUCTURAL_DIFF_READ_CHUNK_BYTES = 65_536
 STRUCTURAL_DIFF_MAX_LINE_BYTES = 65_536
+STRUCTURAL_TS_STATIC_IMPORT_MAX_BLOCK_LINES = 80
+STRUCTURAL_PYTHON_CONTEXT_MAX_LINES = 200
+STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT = 20
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
 LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
     r"(?P<token>"
@@ -246,15 +249,21 @@ TOPOLOGY_PSQL_HEREDOC_MAX_LOOKAHEAD = 80
 TOPOLOGY_SQL_MUTATION_VERB_PATTERN = re.compile(
     r"\b(?:insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|merge)\b"
 )
-STRUCTURAL_TS_IMPORT_PATTERN = re.compile(
-    r"^\s*import(?:\s+type)?(?:[\s\w*{},]+?\s+from\s+)?['\"](?P<import>[^'\"]+)['\"]"
-    r"|require\(\s*['\"](?P<require>[^'\"]+)['\"]\s*\)"
-    r"|import\(\s*['\"](?P<dynamic>[^'\"]+)['\"]\s*\)",
-    re.MULTILINE,
+STRUCTURAL_TS_STATIC_BARE_IMPORT_PATTERN = re.compile(
+    r"^\s*import(?:[ \t]+type)?[ \t]*(?P<quote>['\"])(?P<module>[^'\"]+)(?P=quote)"
 )
-STRUCTURAL_PUBLIC_PY_PATTERN = re.compile(
-    r"^(?:async\s+def|def|class)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\b",
-    re.MULTILINE,
+STRUCTURAL_TS_STATIC_FROM_IMPORT_PATTERN = re.compile(
+    r"\bfrom[ \t]*(?P<quote>['\"])(?P<module>[^'\"]+)(?P=quote)"
+)
+STRUCTURAL_TS_REQUIRE_PATTERN = re.compile(
+    r"\brequire[ \t]*\([ \t]*(?P<quote>['\"])(?P<module>[^'\"]+)(?P=quote)[ \t]*\)"
+)
+STRUCTURAL_TS_DYNAMIC_IMPORT_PATTERN = re.compile(
+    r"\bimport[ \t]*\([ \t]*(?P<quote>['\"])(?P<module>[^'\"]+)(?P=quote)[ \t]*\)"
+)
+STRUCTURAL_PYTHON_DECLARATION_PATTERN = re.compile(
+    r"^(?P<indent>[ \t]*)(?:(?P<class>class)|(?:(?:async[ \t]+)?def))[ \t]+"
+    r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\b"
 )
 STRUCTURAL_PUBLIC_TS_PATTERN = re.compile(
     r"^\s*export\s+(?P<default>default\s+)?(?:async\s+)?"
@@ -270,9 +279,9 @@ STRUCTURAL_CJS_EXPORTS_ASSIGNMENT_PATTERN = re.compile(
     r"^\s*(?:module\.)?exports\.(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=",
     re.MULTILINE,
 )
-STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_PATTERN = re.compile(
-    r"^\s*module\.exports\s*=\s*{\s*(?P<body>[^}]+)\s*}",
-    re.MULTILINE | re.DOTALL,
+STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_START_PATTERN = re.compile(
+    r"^\s*module\.exports\s*=\s*{",
+    re.MULTILINE,
 )
 STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN = re.compile(
     r"^\s*module\.exports\s*=(?!\s*{)",
@@ -3858,13 +3867,94 @@ def _structural_python_import_families_from_tree(tree: ast.AST) -> tuple[str, ..
 def _structural_ts_import_families(text: str) -> tuple[str, ...]:
     families: set[str] = set()
     ignored_spans = _structural_ts_ignored_spans(text)
-    for match in STRUCTURAL_TS_IMPORT_PATTERN.finditer(text):
-        if _structural_ts_import_match_is_ignored(match, ignored_spans):
+    lines = tuple(_structural_line_spans(text))
+    for line_start, line in lines:
+        for pattern in (STRUCTURAL_TS_REQUIRE_PATTERN, STRUCTURAL_TS_DYNAMIC_IMPORT_PATTERN):
+            for match in pattern.finditer(line):
+                if _structural_ts_position_is_ignored(line_start + match.start(), ignored_spans):
+                    continue
+                families.add(_structural_import_family(match.group("module")))
+    for block_start, block_text in _structural_ts_static_import_blocks(lines, ignored_spans):
+        if _structural_ts_position_is_ignored(block_start, ignored_spans):
             continue
-        module = match.group("import") or match.group("require") or match.group("dynamic")
+        module = _structural_ts_static_import_module(block_text)
         if module:
             families.add(_structural_import_family(module))
     return tuple(sorted(family for family in families if family))
+
+
+def _structural_line_spans(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    position = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        lines.append((position, line))
+        position += len(raw_line)
+    return lines
+
+
+def _structural_ts_static_import_blocks(
+    lines: tuple[tuple[int, str], ...],
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, str], ...]:
+    blocks: list[tuple[int, str]] = []
+    index = 0
+    while index < len(lines):
+        line_start, line = lines[index]
+        stripped = line.strip()
+        if not _structural_ts_line_starts_static_import(stripped):
+            index += 1
+            continue
+        import_column = line.find("import")
+        import_position = line_start + max(import_column, 0)
+        if _structural_ts_position_is_ignored(import_position, ignored_spans):
+            index += 1
+            continue
+        block_lines = [line]
+        if _structural_ts_static_import_module(line):
+            blocks.append((import_position, line))
+            index += 1
+            continue
+        if not _structural_ts_static_import_can_continue(stripped):
+            index += 1
+            continue
+        block_end = min(len(lines), index + STRUCTURAL_TS_STATIC_IMPORT_MAX_BLOCK_LINES)
+        scan_index = index + 1
+        while scan_index < block_end:
+            _, next_line = lines[scan_index]
+            block_lines.append(next_line)
+            block_text = "\n".join(block_lines)
+            if _structural_ts_static_import_module(block_text):
+                blocks.append((import_position, block_text))
+                break
+            if next_line.rstrip().endswith(";"):
+                break
+            scan_index += 1
+        index += 1
+    return tuple(blocks)
+
+
+def _structural_ts_line_starts_static_import(stripped: str) -> bool:
+    if not stripped.startswith("import"):
+        return False
+    next_char = stripped[6:7]
+    if next_char and not next_char.isspace() and next_char not in {"'", '"'}:
+        return False
+    return not stripped.startswith("import(")
+
+
+def _structural_ts_static_import_can_continue(stripped: str) -> bool:
+    return any(token in stripped for token in ("{", "}", "*", ",", " from ", "\tfrom\t"))
+
+
+def _structural_ts_static_import_module(block_text: str) -> str | None:
+    bare_match = STRUCTURAL_TS_STATIC_BARE_IMPORT_PATTERN.match(block_text)
+    if bare_match:
+        return bare_match.group("module")
+    from_match = STRUCTURAL_TS_STATIC_FROM_IMPORT_PATTERN.search(block_text)
+    if from_match:
+        return from_match.group("module")
+    return None
 
 
 def _structural_ts_ignored_spans(text: str) -> tuple[tuple[int, int], ...]:
@@ -3905,17 +3995,6 @@ def _structural_ts_ignored_spans(text: str) -> tuple[tuple[int, int], ...]:
             continue
         index += 1
     return tuple(spans)
-
-
-def _structural_ts_import_match_is_ignored(
-    match: re.Match[str],
-    ignored_spans: tuple[tuple[int, int], ...],
-) -> bool:
-    keyword_match = re.search(r"\b(?:import|require)\b", match.group(0))
-    if keyword_match is None:
-        return False
-    keyword_position = match.start() + keyword_match.start()
-    return _structural_ts_position_is_ignored(keyword_position, ignored_spans)
 
 
 def _structural_ts_position_is_ignored(
@@ -4125,12 +4204,8 @@ def _structural_python_public_surface_tokens(text: str, *, partial: bool) -> tup
 def _structural_python_partial_public_surface_tokens(text: str) -> tuple[str, ...]:
     tokens: set[str] = set()
     contexts: list[tuple[str, int, str]] = []
-    pattern = re.compile(
-        r"^(?P<indent>[ \t]*)(?:(?P<class>class)|(?:(?:async\s+)?def))\s+"
-        r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\b"
-    )
     for line in text.splitlines():
-        match = pattern.match(line)
+        match = STRUCTURAL_PYTHON_DECLARATION_PATTERN.match(line)
         if match is None:
             continue
         indent = len(match.group("indent").expandtabs(4))
@@ -4177,10 +4252,8 @@ def _structural_ts_public_surface_tokens(text: str) -> tuple[str, ...]:
     for match in STRUCTURAL_CJS_EXPORTS_ASSIGNMENT_PATTERN.finditer(text):
         if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
             tokens.add(f"export:{match.group('name')}")
-    for match in STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_PATTERN.finditer(text):
-        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
-            continue
-        tokens.update(_structural_cjs_object_export_tokens(match.group("body")))
+    for body in _structural_cjs_module_exports_object_bodies(text, ignored_spans):
+        tokens.update(_structural_cjs_object_export_tokens(body))
     for match in STRUCTURAL_CJS_MODULE_EXPORTS_DEFAULT_PATTERN.finditer(text):
         if not _structural_ts_position_is_ignored(match.start(), ignored_spans):
             tokens.add("export:default")
@@ -4209,18 +4282,62 @@ def _structural_ts_named_export_tokens(body: str) -> set[str]:
     return tokens
 
 
+def _structural_cjs_module_exports_object_bodies(
+    text: str,
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> tuple[str, ...]:
+    bodies: list[str] = []
+    for match in STRUCTURAL_CJS_MODULE_EXPORTS_OBJECT_START_PATTERN.finditer(text):
+        if _structural_ts_position_is_ignored(match.start(), ignored_spans):
+            continue
+        body = _structural_balanced_brace_body(text, match.end() - 1, ignored_spans)
+        if body is not None:
+            bodies.append(body)
+    return tuple(bodies)
+
+
+def _structural_balanced_brace_body(
+    text: str,
+    open_brace_index: int,
+    ignored_spans: tuple[tuple[int, int], ...],
+) -> str | None:
+    if open_brace_index >= len(text) or text[open_brace_index] != "{":
+        return None
+    depth = 0
+    body_start = open_brace_index + 1
+    index = open_brace_index
+    span_index = 0
+    while index < len(text):
+        while span_index < len(ignored_spans) and ignored_spans[span_index][1] <= index:
+            span_index += 1
+        if span_index < len(ignored_spans):
+            span_start, span_end = ignored_spans[span_index]
+            if span_start <= index < span_end:
+                index = span_end
+                continue
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[body_start:index]
+        index += 1
+    return None
+
+
 def _structural_cjs_object_export_tokens(body: str) -> set[str]:
     tokens: set[str] = set()
     identifier = r"[A-Za-z_$][A-Za-z0-9_$]*"
-    for item in body.split(","):
+    for item in _structural_split_top_level_object_items(body):
         normalized = item.strip()
         if not normalized or normalized.startswith("..."):
             continue
-        quoted_match = re.match(r"['\"](?P<name>[^'\"]+)['\"]\s*:", normalized)
+        quoted_match = re.match(r"(?P<quote>['\"])(?P<name>[^'\"]+)(?P=quote)[ \t]*:", normalized)
         if quoted_match:
             name = quoted_match.group("name")
         else:
-            name_match = re.match(rf"(?P<name>{identifier})\b(?:\s*:)?", normalized)
+            name_match = re.match(rf"(?P<name>{identifier})\b(?:[ \t]*[:(=]|$)", normalized)
             if name_match is None:
                 continue
             name = name_match.group("name")
@@ -4229,6 +4346,44 @@ def _structural_cjs_object_export_tokens(body: str) -> set[str]:
         elif re.fullmatch(identifier, name):
             tokens.add(f"export:{name}")
     return tokens
+
+
+def _structural_split_top_level_object_items(body: str) -> tuple[str, ...]:
+    ignored_spans = _structural_ts_ignored_spans(body)
+    items: list[str] = []
+    item_start = 0
+    index = 0
+    span_index = 0
+    brace_depth = 0
+    bracket_depth = 0
+    paren_depth = 0
+    while index < len(body):
+        while span_index < len(ignored_spans) and ignored_spans[span_index][1] <= index:
+            span_index += 1
+        if span_index < len(ignored_spans):
+            span_start, span_end = ignored_spans[span_index]
+            if span_start <= index < span_end:
+                index = span_end
+                continue
+        char = body[index]
+        if char == "{":
+            brace_depth += 1
+        elif char == "}" and brace_depth:
+            brace_depth -= 1
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif char == "(":
+            paren_depth += 1
+        elif char == ")" and paren_depth:
+            paren_depth -= 1
+        elif char == "," and not (brace_depth or bracket_depth or paren_depth):
+            items.append(body[item_start:index])
+            item_start = index + 1
+        index += 1
+    items.append(body[item_start:])
+    return tuple(items)
 
 
 def _structural_budget_review_reason(
@@ -4299,7 +4454,9 @@ def _structural_ownership_growth_signals(
         )
     current_public_tokens = _structural_current_public_surface_tokens(root, record.relative_path)
     public_tokens = _structural_new_public_surface_tokens(
+        root,
         record.relative_path,
+        added_lines,
         added_text,
         base_blob,
         current_public_tokens,
@@ -4309,7 +4466,7 @@ def _structural_ownership_growth_signals(
             _structural_growth_signal(
                 record,
                 "public-entrypoint",
-                "new public surface tokens: " + ", ".join(public_tokens),
+                _structural_public_surface_detail(public_tokens),
             )
         )
     compatibility_lines = _matching_structural_added_lines(added_lines, STRUCTURAL_COMPATIBILITY_PATTERN)
@@ -4343,15 +4500,104 @@ def _structural_ownership_growth_signals(
 
 
 def _structural_new_public_surface_tokens(
+    root: Path,
     relative_path: str,
+    added_lines: tuple[_StructuralAddedLine, ...],
     added_text: str,
     base_blob: _BoundedGitBlobText | None,
     current_public_tokens: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
+    base_public_tokens = (
+        set(_structural_bounded_public_surface_tokens(relative_path, base_blob))
+        if base_blob is not None
+        else set()
+    )
     if base_blob is not None and current_public_tokens is not None:
-        base_public_tokens = set(_structural_bounded_public_surface_tokens(relative_path, base_blob))
         return tuple(sorted(set(current_public_tokens) - base_public_tokens))
-    return _structural_public_surface_tokens(relative_path, added_text, python_partial=True)
+    detected_tokens = set(_structural_public_surface_tokens(relative_path, added_text, python_partial=True))
+    if Path(relative_path).suffix == ".py":
+        detected_tokens.update(
+            _structural_python_current_context_public_surface_tokens(root / relative_path, added_lines)
+        )
+    return tuple(sorted(detected_tokens - base_public_tokens))
+
+
+def _structural_public_surface_detail(public_tokens: tuple[str, ...]) -> str:
+    if len(public_tokens) <= STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT:
+        return "new public surface tokens: " + ", ".join(public_tokens)
+    shown = public_tokens[:STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT]
+    remaining = len(public_tokens) - len(shown)
+    return (
+        f"new public surface tokens ({len(public_tokens)} total): "
+        + ", ".join(shown)
+        + f" (+{remaining} more)"
+    )
+
+
+def _structural_python_current_context_public_surface_tokens(
+    path: Path,
+    added_lines: tuple[_StructuralAddedLine, ...],
+) -> tuple[str, ...]:
+    target_lines = sorted(
+        {
+            line.line_number
+            for line in added_lines
+            if line.line_number is not None and STRUCTURAL_PYTHON_DECLARATION_PATTERN.match(line.text)
+        }
+    )
+    if not target_lines:
+        return ()
+    ranges = [
+        (
+            max(1, line_number - STRUCTURAL_PYTHON_CONTEXT_MAX_LINES),
+            line_number,
+        )
+        for line_number in target_lines
+    ]
+    tokens: set[str] = set()
+    for context_text in _read_structural_python_line_ranges(path, ranges):
+        tokens.update(_structural_python_partial_public_surface_tokens(context_text))
+    return tuple(sorted(tokens))
+
+
+def _read_structural_python_line_ranges(
+    path: Path,
+    ranges: list[tuple[int, int]],
+) -> tuple[str, ...]:
+    merged_ranges: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if not merged_ranges or start > merged_ranges[-1][1] + 1:
+            merged_ranges.append((start, end))
+            continue
+        previous_start, previous_end = merged_ranges[-1]
+        merged_ranges[-1] = (previous_start, max(previous_end, end))
+    if not merged_ranges:
+        return ()
+    max_end = merged_ranges[-1][1]
+    range_index = 0
+    line_number = 1
+    bytes_read = 0
+    selected_lines: list[list[str]] = [[] for _ in merged_ranges]
+    try:
+        with path.open("rb") as handle:
+            while line_number <= max_end:
+                raw_line = handle.readline(STRUCTURAL_DIFF_MAX_LINE_BYTES + 1)
+                if not raw_line:
+                    break
+                bytes_read += len(raw_line)
+                if bytes_read > MAX_SCANNED_TEXT_FILE_BYTES:
+                    break
+                while range_index < len(merged_ranges) and line_number > merged_ranges[range_index][1]:
+                    range_index += 1
+                if range_index >= len(merged_ranges):
+                    break
+                start, end = merged_ranges[range_index]
+                if start <= line_number <= end:
+                    selected_lines[range_index].append(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+                line_number += 1
+    except OSError:
+        return ()
+    return tuple("\n".join(lines) for lines in selected_lines if lines)
 
 
 def _structural_diff_truncation_detail(added_result: _StructuralAddedLines) -> str:
