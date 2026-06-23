@@ -63,11 +63,18 @@
   retention reasons, removal conditions, caller migration paths, and
   verification commands. See
   `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`.
-- [ ] 2.3 Add guard tests that fail on new facade re-exports, new monkeypatch
+- [x] 2.3 Add guard tests that fail on new facade re-exports, new monkeypatch
   aliases, new non-forwarding facade implementation, or new import-family
   growth unless the corresponding inventory is updated.
-  Evidence: positive fixtures fail with stable messages; current repository
-  passes.
+  Evidence: `scripts/governance/audit_repo_entropy.py` now emits the
+  report-only `compatibility_facade_guard` metadata section and
+  `compatibility-facade-growth.*.inventory-required` findings when
+  `scheduler.py` or `chain.py` grows facade surface without matching inventory
+  coverage. `tests/test_entropy_audit_script.py` covers current-repo zero
+  signals, scheduler owner-module re-export, scheduler imported symbol,
+  scheduler private monkeypatch alias, guard-hook-only inventory matching,
+  chain non-forwarding local implementation, async local implementation, chain
+  project import-family growth, and inventory-update pass-through.
 
 ## 3. Production Closure Lane Decomposition
 
