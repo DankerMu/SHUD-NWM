@@ -305,6 +305,53 @@ describe('M11StationForcingPopup', () => {
     expect(chart).toHaveTextContent('"name":"IFS"')
   })
 
+  it('keeps a stale selected cycle honest and reloads both source identities when latest is selected', async () => {
+    const user = userEvent.setup()
+    const initialCycles = [DEFAULT_CYCLE, RETAINED_OUT_CYCLE]
+    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(async (request) => {
+      if (request.cycle === RETAINED_OUT_CYCLE) return productFor(request.source, DEFAULT_CYCLE, [DEFAULT_CYCLE])
+      const issueTimes = request.cycle === DEFAULT_CYCLE ? [DEFAULT_CYCLE] : initialCycles
+      return productFor(request.source, DEFAULT_CYCLE, issueTimes)
+    })
+    mockSeriesBySource()
+
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+    await screen.findByTestId('m11-station-variable-PRCP-chart')
+
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
+
+    const empty = await screen.findByTestId('m11-station-popup-empty')
+    expect(empty).toHaveTextContent(/起报.*已不可用/)
+    expect(screen.getByTestId('m11-popup-issue-time')).toHaveTextContent(formatIssueTime(RETAINED_OUT_CYCLE))
+
+    await user.click(screen.getByTestId('m11-popup-issue-time'))
+    const staleOption = screen.getByRole('option', { name: /05-20 00:00 UTC.*磁盘保留不可用/ })
+    expect(staleOption).toHaveAttribute('aria-disabled', 'true')
+
+    vi.mocked(fetchHydroMetLatestProduct).mockClear()
+    vi.mocked(client.GET).mockClear()
+    await user.click(screen.getByRole('option', { name: formatIssueTime(DEFAULT_CYCLE) }))
+
+    await waitFor(() => {
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: DEFAULT_CYCLE }))
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: DEFAULT_CYCLE }))
+      expect(client.GET).toHaveBeenCalledTimes(2)
+    })
+
+    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
+      expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
+        expect.objectContaining({
+          cycle_time: DEFAULT_CYCLE,
+          forcing_version_id: forcingVersionFor(source, DEFAULT_CYCLE),
+          model_id: 'm-1',
+        }),
+      )
+    }
+    expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
+  })
+
   it('shows an empty state and draws no curve when station_id mismatches for both sources', async () => {
     mockSeriesBySource((source, query) => seriesResponseFor(source, { ...seriesOverridesFromQuery(query), station_id: 'OTHER' }))
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)

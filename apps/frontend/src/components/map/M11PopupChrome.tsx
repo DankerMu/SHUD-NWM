@@ -98,8 +98,10 @@ export function M11IssueTimeSelect({
 }) {
   if (issueTimes.length === 0) return null
 
-  const unavailableSet = new Set(unavailableIssueTimes)
-  const selectedValue = issueTime && issueTimes.includes(issueTime) ? issueTime : issueTimes[0]
+  const retainedIssueTime = issueTime && !issueTimes.includes(issueTime) ? issueTime : null
+  const visibleIssueTimes = retainedIssueTime ? [retainedIssueTime, ...issueTimes] : issueTimes
+  const unavailableSet = new Set(retainedIssueTime ? [retainedIssueTime, ...unavailableIssueTimes] : unavailableIssueTimes)
+  const selectedValue = issueTime && visibleIssueTimes.includes(issueTime) ? issueTime : issueTimes[0]
 
   return (
     <Select
@@ -121,7 +123,7 @@ export function M11IssueTimeSelect({
         data-testid={`${testId}-content`}
         className="z-[180] border-white/15 bg-slate-950/95 text-slate-100 shadow-[0_18px_48px_-16px_rgba(8,14,32,0.95)] ring-1 ring-cyan-400/15 backdrop-blur-xl"
       >
-        {issueTimes.map((time) => {
+        {visibleIssueTimes.map((time) => {
           const unavailable = unavailableSet.has(time)
           const label = `${formatIssueTime(time)}${unavailable ? ' · 磁盘保留不可用' : ''}`
           return (

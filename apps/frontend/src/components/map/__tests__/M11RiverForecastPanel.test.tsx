@@ -226,25 +226,43 @@ describe('M11RiverForecastPanel', () => {
     })
   })
 
-  it('honestly flags a cycle that fell out of the backend window instead of silently showing latest', async () => {
+  it('keeps a stale selected cycle honest and recoverable when it drops out of available_issue_times', async () => {
     const user = userEvent.setup()
-    const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z']
-    // 后端对任何请求都回退到最新一轮（rows[0]）：模拟所选时次滑出 limit=12 候选窗口
+    const latestCycle = '2026-05-21T00:00:00Z'
+    const staleCycle = '2026-05-20T12:00:00Z'
+    const initialCycles = [latestCycle, staleCycle]
+    // 选中的旧时次滑出候选窗口后，后端回退到 latest，且 refreshed available_issue_times 只剩 latest。
     vi.mocked(fetchHydroMetLatestProduct).mockImplementation(
-      (async ({ source }: { source: HydroMetSource }) =>
-        product(source, { available_issue_times: cycles, cycle_time: cycles[0] })) as never,
+      (async ({ source, cycle }: { source: HydroMetSource; cycle: string | null }) => {
+        const availableIssueTimes = cycle === staleCycle || cycle === latestCycle ? [latestCycle] : initialCycles
+        return product(source, { available_issue_times: availableIssueTimes, cycle_time: latestCycle })
+      }) as never,
     )
     mockForecastBySource()
     render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
 
     await screen.findByTestId('m11-river-panel-chart') // 初次（最新）正常渲染
     await openIssueTimeSelect(user, 'm11-river-panel-cycle')
-    await user.click(screen.getByRole('option', { name: formatIssueTime(cycles[1]) })) // 选旧时次；后端仍回最新
+    await user.click(screen.getByRole('option', { name: formatIssueTime(staleCycle) })) // 选旧时次；后端仍回最新
 
-    // honest 红线：不静默画最新数据，而是标注该起报不可用
+    // honest 红线：不静默画 latest 数据，也不把 selector 假显示成 latest。
     const empty = await screen.findByTestId('m11-river-panel-empty')
     expect(empty.textContent).toMatch(/起报.*已不可用/)
     expect(screen.queryByTestId('m11-river-panel-chart')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-river-panel-cycle')).toHaveTextContent(formatIssueTime(staleCycle))
+
+    await openIssueTimeSelect(user, 'm11-river-panel-cycle')
+    const staleOption = screen.getByRole('option', { name: /05-20 12:00 UTC.*磁盘保留不可用/ })
+    expect(staleOption).toHaveAttribute('aria-disabled', 'true')
+
+    vi.mocked(fetchHydroMetLatestProduct).mockClear()
+    vi.mocked(client.GET).mockClear()
+    await user.click(screen.getByRole('option', { name: formatIssueTime(latestCycle) }))
+    await waitFor(() => {
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', cycle: latestCycle }))
+      expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: latestCycle }))
+    })
+    await screen.findByTestId('m11-river-panel-chart')
   })
 
   it('shows honest empty state and resolves no product when basinId=null', () => {
