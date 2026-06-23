@@ -157,7 +157,7 @@ function appendStations(
   }
 }
 
-export const useStationLayerDataStore = create<StationLayerDataState>((set) => ({
+export const useStationLayerDataStore = create<StationLayerDataState>((set, get) => ({
   data: null,
   loading: false,
   error: null,
@@ -170,6 +170,8 @@ export const useStationLayerDataStore = create<StationLayerDataState>((set) => (
   },
   loadStationLayer: async (request) => {
     const key = stationLayerRequestKey(request)
+    const current = get()
+    if (!current.loading && current.requestKey === key && current.data) return current.data
     const existing = inFlight.get(key)
     if (existing && activeRequestKey === key) return existing
 
@@ -177,7 +179,8 @@ export const useStationLayerDataStore = create<StationLayerDataState>((set) => (
     activeRequestKey = key
     set({ loading: true, error: null })
 
-    const load = (async () => {
+    let load!: Promise<StationLayerData>
+    load = (async () => {
       try {
         const data = await fetchAllStations(request)
         if (nonce === requestNonce && activeRequestKey === key) {

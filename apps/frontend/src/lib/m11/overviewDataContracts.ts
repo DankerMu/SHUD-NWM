@@ -1,6 +1,6 @@
 import type { components } from '@/api/types'
 import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
-import { m11QueryHref } from '@/lib/m11/queryState'
+import { defaultM11QueryState, m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -756,7 +756,7 @@ export function filterBasinSegmentRows(
 }
 
 export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'basemap' | 'q'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'metStations' | 'basemap' | 'q'>
   basin?: ApiBasin | null
   basinVersionId: string
   segmentId: string
@@ -834,10 +834,12 @@ export function normalizeSelectedSegmentDetail(input: {
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
     handoffUrl: m11QueryHref('/', {
+      ...defaultM11QueryState,
       source: handoffSource,
       cycle: selectionQuery.cycle,
       validTime: effectiveValidTime,
       layer: input.query.layer,
+      metStations: input.query.metStations,
       basemap: input.query.basemap,
       basinVersionId: input.basinVersionId,
       riverNetworkVersionId:

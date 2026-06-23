@@ -80,6 +80,9 @@ export function useMetStationLayer({
   )
   const shouldFetch = active && requestContexts.length > 0
   const expectedKey = shouldFetch ? stationLayerRequestKey({ basinContexts: requestContexts }) : null
+  const stableRequestContexts = useMemo(() => requestContexts, [expectedKey])
+  const matches = expectedKey !== null && requestKey === expectedKey
+  const currentData = matches ? data : null
 
   useEffect(() => {
     if (!shouldFetch) {
@@ -87,11 +90,10 @@ export function useMetStationLayer({
       if (!active) clear()
       return
     }
-    void loadStationLayer({ basinContexts: requestContexts }).catch(() => undefined)
-  }, [active, clear, loadStationLayer, requestContexts, shouldFetch])
+    if (matches && (data || error)) return
+    void loadStationLayer({ basinContexts: stableRequestContexts }).catch(() => undefined)
+  }, [active, clear, data, error, loadStationLayer, matches, shouldFetch, stableRequestContexts])
 
-  const matches = expectedKey !== null && requestKey === expectedKey
-  const currentData = matches ? data : null
   const featureCollection = useMemo(
     () => (currentData ? buildFeatureCollection(currentData.stations, currentData.stationBasinIds) : null),
     [currentData],

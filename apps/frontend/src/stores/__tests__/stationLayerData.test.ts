@@ -205,6 +205,20 @@ describe('stationLayerData store (M26-3)', () => {
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
   })
 
+  it('returns settled matching data without refetching the same station inventory key', async () => {
+    fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage(stations('qhh', 2, 0), 2))
+
+    const first = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
+    })
+    const second = await useStationLayerDataStore.getState().loadStationLayer({
+      basinContexts: [{ basinId: 'qhh', basinVersionId: 'bv-qhh' }],
+    })
+
+    expect(second).toBe(first)
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(1)
+  })
+
   it('does not overwrite a newer request with a stale earlier response', async () => {
     let resolveFirst: ((value: unknown) => void) | null = null
     fetchHydroMetStationsByIdentityMock

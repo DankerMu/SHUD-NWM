@@ -1434,6 +1434,43 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
   })
 
+  it('shows missing-basin station status only when metStations overlay is enabled', () => {
+    window.history.pushState({}, '', '/?metStations=1')
+    const overlayQuery = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({
+      overview: matchedEmptyOverviewSnapshot(overlayQuery),
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    const { unmount } = render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.getByTestId('m11-met-station-status')).toHaveTextContent('暂无可用流域版本')
+    expect(screen.queryByTestId('m11-overview-empty')).not.toBeInTheDocument()
+
+    unmount()
+    window.history.pushState({}, '', '/')
+    const hydrologyOnlyQuery = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({
+      overview: matchedEmptyOverviewSnapshot(hydrologyOnlyQuery),
+      mapBootstrapLoading: false,
+      enrichmentLoading: false,
+    })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.queryByTestId('m11-met-station-status')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
+  })
+
   // PR #589 round-2 C1：阶段 1 reject（bootstrapError !=null + overview.bootstrap=null）→
   // surfaceSettling 必须退出（spec scenario "Map bootstrap rejection"：MUST render bootstrap
   // failed state rather than indefinite spinner）。bootstrapError 必须从 m11-overview-empty 透出。
@@ -1664,6 +1701,44 @@ describe('M11 visual foundation shell', () => {
       // 无 act() / setState-after-unmount 警告。
       expect(consoleErrorSpy).not.toHaveBeenCalled()
       consoleErrorSpy.mockRestore()
+    })
+
+    it('does not restart an in-flight flood ranking request when only metStations changes', async () => {
+      window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period')
+      const initialQuery = parseM11QueryState(window.location.search)
+      useOverviewDataStore.setState({
+        overview: snapshotWithRunId(initialQuery, 'run-gfs-overlay'),
+        mapBootstrapLoading: false,
+        enrichmentLoading: false,
+      })
+      const rankingState = { rankingCalls: 0 }
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        if (path === '/api/v1/flood-alerts/ranking') {
+          rankingState.rankingCalls += 1
+          return new Promise(() => undefined) as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+      const user = userEvent.setup()
+
+      const { unmount } = render(
+        <BrowserRouter>
+          <OverviewPage />
+        </BrowserRouter>,
+      )
+
+      await waitFor(() => expect(_floodRankingInFlightSize()).toBe(1))
+      expect(rankingState.rankingCalls).toBe(1)
+
+      await user.click(screen.getByRole('button', { name: /气象代站/ }))
+      await waitFor(() => expect(window.location.search).toContain('metStations=1'))
+
+      expect(_floodRankingInFlightSize()).toBe(1)
+      expect(rankingState.rankingCalls).toBe(1)
+
+      unmount()
+      expect(_floodRankingInFlightSize()).toBe(0)
     })
 
     it('clears the in-flight ranking entry on unmount mid-flight without setState-after-unmount warning', async () => {
@@ -1911,11 +1986,11 @@ describe('M11 visual foundation shell', () => {
   it('updates valid time from slider and cleans up bounded playback timers', async () => {
     vi.useFakeTimers()
     const onQueryChange = vi.fn((patch: M11QueryPatch) => {
-      currentState = { ...currentState, ...patch }
+      currentState = { ...currentState, ...patch } as M11QueryState
       rerender(<M11Timeline state={currentState} layers={layers} onQueryChange={onQueryChange} />)
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
-    let currentState = state
+    let currentState: M11QueryState = state
     const { rerender, unmount } = render(<M11Timeline state={currentState} layers={layers} onQueryChange={onQueryChange} />)
 
     fireEvent.change(screen.getByRole('slider', { name: '有效时间滑块' }), { target: { value: '2' } })
@@ -2102,6 +2177,36 @@ describe('M11 visual foundation shell', () => {
         />
       )
     }
+
+    it('does not fetch station inventory while the overlay is inactive', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      const clear = vi.fn()
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear,
+      })
+
+      render(<Harness active={false} basinContexts={[{ basinId: 'heihe', basinVersionId: 'heihe_v1' }]} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(clear).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toBe('')
+    })
+
+    it('shows an honest status and avoids unbounded inventory requests when basin contexts are missing', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinContexts={[]} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('暂无可用流域版本')
+    })
 
     it('fetches while the source is unresolved because inventory is basin-scoped', () => {
       const loadStationLayer = vi.fn().mockResolvedValue(undefined)

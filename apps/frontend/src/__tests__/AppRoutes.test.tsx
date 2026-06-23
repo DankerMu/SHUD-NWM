@@ -16,7 +16,7 @@ import { useOverviewDataStore } from '@/stores/overviewData'
 import { useStationLayerDataStore } from '@/stores/stationLayerData'
 import { _clearHydroMetLatestProductIdentityCache } from '@/pages/hydroMet/bootstrap'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
-import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
+import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
@@ -1263,6 +1263,7 @@ describe('App route state', () => {
       contextHandoff(
         '/monitoring',
         {
+          ...defaultM11QueryState,
           ...overviewSnapshot(m11Layers).requestScope,
           source: 'best',
           layer: 'discharge',
@@ -1277,6 +1278,7 @@ describe('App route state', () => {
       contextHandoff(
         '/flood-alerts',
         {
+          ...defaultM11QueryState,
           ...overviewSnapshot(m11Layers).requestScope,
           source: 'best',
           layer: 'discharge',
@@ -1299,7 +1301,13 @@ describe('App route state', () => {
       validTime: null,
       provenanceLabel: 'Best Available (IFS) / cycle 2026-05-19T00:00:00.000Z / current valid time',
     }
-    const scope = { ...overviewSnapshot(m11Layers).requestScope, source: 'best' as const, layer: 'discharge' as const, basemap: 'vector' as const }
+    const scope = {
+      ...defaultM11QueryState,
+      ...overviewSnapshot(m11Layers).requestScope,
+      source: 'best' as const,
+      layer: 'discharge' as const,
+      basemap: 'vector' as const,
+    }
     expect(contextHandoff('/monitoring', scope, ifsSelection)).toMatchObject({
       href: '/monitoring?source=ifs&cycle=2026-05-19T00%3A00%3A00.000Z',
     })
@@ -1317,6 +1325,7 @@ describe('App route state', () => {
       provenanceLabel: 'GFS+IFS / cycle 2026-05-18T00:00:00.000Z / valid 2026-05-18T06:00:00.000Z',
     }
     const scope = {
+      ...defaultM11QueryState,
       ...overviewSnapshot(m11Layers).requestScope,
       source: 'compare' as const,
       layer: 'discharge' as const,

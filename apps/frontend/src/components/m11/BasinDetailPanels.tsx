@@ -191,9 +191,13 @@ export function useBasinDetailMode({
 
   const backToOverview = useCallback(() => onQueryChange({ basinId: null, segmentId: null }), [onQueryChange])
 
+  const stationLayerBasinContexts = useMemo(
+    () => [{ basinId, basinVersionId: state.basinVersionId }],
+    [basinId, state.basinVersionId],
+  )
   const stationLayer = useMetStationLayer({
     active: state.metStations,
-    basinContexts: [{ basinId, basinVersionId: state.basinVersionId }],
+    basinContexts: stationLayerBasinContexts,
   })
 
   // 切流域时清掉残留 popup。
