@@ -288,6 +288,14 @@ describe('M11StationForcingPopup', () => {
     await waitFor(() => {
       expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('GFS：该起报 05-20 00:00 UTC')
     })
+    const retainedCycleQueries = vi.mocked(client.GET).mock.calls
+      .map(([, init]) => getSeriesQuery(init))
+      .filter((query) => query.cycle_time === RETAINED_OUT_CYCLE)
+    for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
+      expect(retainedCycleQueries.find((query) => sourceFromQuery(query) === source)).toEqual(
+        expect.objectContaining({ cycle_time: RETAINED_OUT_CYCLE }),
+      )
+    }
     expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('磁盘保留窗口')
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
     expect(screen.queryByTestId('m11-station-variable-toggle-Press')).not.toBeInTheDocument()
