@@ -82,8 +82,9 @@
 ## 3. Production Closure Lane Decomposition
 
 - [x] 3.1 Define the `two_node_e2e_evidence` lane inventory and contracts.
-  Evidence: Docker preflight/security, readonly DB, API/browser, logs,
-  producer identity, source artifact, manual ops receipt, and final/source-scope
+  Evidence: metadata, Docker preflight/security, readonly DB, API/browser,
+  logs, Slurm, compute summary, display summary, manual ops receipt,
+  source-scope/cross-plane, producer identity/source artifact, and final
   aggregation surfaces each have owner module plans, input contracts,
   output/result shapes, blocker/finding code namespaces, focused verification
   commands, retention conditions, and extraction readiness notes. See

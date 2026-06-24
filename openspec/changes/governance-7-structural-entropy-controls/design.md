@@ -174,9 +174,10 @@ Must preserve:
 Must add/change:
 
 - Record the lane owner-module plan, input/output contract, blocker/finding
-  namespace, and focused verification command for Docker preflight/security,
-  readonly DB, API/browser proof, logs, producer identity/source artifacts,
-  manual ops receipts, and final/source-scope aggregation surfaces in
+  namespace, and focused verification command for metadata, Docker
+  preflight/security, readonly DB, API/browser proof, logs, Slurm, compute
+  summary, display summary, manual ops receipts, source-scope/cross-plane,
+  producer identity/source artifacts, and final aggregation surfaces in
   `two_node_e2e_evidence`.
 - Make a future extraction issue able to choose a lane without making new
   product decisions.
@@ -232,13 +233,15 @@ Required #672 evidence:
   verification command, retention condition, and extraction readiness note.
 - Inventory verification input/output: given
   `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`, the documented
-  lane set is exactly the #672 two-node E2E evidence set (Docker preflight,
-  Docker security, readonly DB, API proof, browser proof, logs, producer
-  identity/source artifacts, manual ops receipt, source-scope/cross-plane, and
-  final aggregation), and every row includes owner module plan, input contract,
-  output/result shape, blocker/finding namespace, focused verification command,
-  retention condition, and extraction readiness note. The inventory must not
-  include #673 readiness-validation rows or #674 implementation-extraction rows.
+  runtime lane-summary set matches `FINAL_REQUIRED_LANES` for #672
+  (`metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`,
+  `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`,
+  and `display_summary`). The inventory also covers the shared
+  producer-identity/source-artifact surface and final aggregation surface, and
+  every row includes owner module plan, input contract, output/result shape,
+  blocker/finding namespace, focused verification command, retention condition,
+  and extraction readiness note. The inventory must not include #673
+  readiness-validation rows or #674 implementation-extraction rows.
 - Cross-lane contracts document strict identity, current-run binding,
   producer/source-artifact proof, redaction, path/log URI safety, and final
   aggregation status semantics.
