@@ -6503,6 +6503,59 @@ for _scheduler_candidate_facade_name, _scheduler_candidate_owner_value in (
 del _scheduler_candidate_facade_name, _scheduler_candidate_owner_value
 
 
+_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES = MappingProxyType(
+    {
+        "_restart_compatible_candidate_cohorts": "restart_compatible_candidate_cohorts",
+        "_candidate_restart_stage": "candidate_restart_stage",
+        "_candidate_restart_cohort_key": "candidate_restart_cohort_key",
+        "_candidate_execution_cohort_run_id": "candidate_execution_cohort_run_id",
+        "_candidate_execution_cohorts": "candidate_execution_cohorts",
+        "_candidate_execution_cohort_run_id_for_candidate": "candidate_execution_cohort_run_id_for_candidate",
+    }
+)
+_SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES = tuple(_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES)
+_SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES = MappingProxyType(
+    {
+        "_produce_forcing_for_candidates": "produce_forcing_for_candidates",
+        "_execute_candidates": "execute_candidates",
+        "_execute_candidate_cohort": "execute_candidate_cohort",
+        "_scheduler_execution_context": "SchedulerExecutionContext",
+    }
+)
+_SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES = tuple(_SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES)
+_SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING = tuple(
+    owner_name
+    for owner_name in (
+        *_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES.values(),
+        *_SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES.values(),
+    )
+    if not hasattr(_scheduler_execution, owner_name)
+)
+_SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING = (
+    *tuple(name for name in _SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES if name not in globals()),
+    *tuple(name for name in _SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES if not hasattr(ProductionScheduler, name)),
+)
+if _SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "scheduler execution compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING)}"
+    )
+if _SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler execution compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING)}"
+    )
+_SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_execution, owner_name)
+        for facade_name, owner_name in _SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES}
+)
+
+
 def _bounded_evidence_payload(
     payload: Mapping[str, Any],
     *,
