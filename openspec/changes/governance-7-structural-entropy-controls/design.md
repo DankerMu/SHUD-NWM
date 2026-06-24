@@ -814,6 +814,70 @@ Required #679 evidence:
   --no-interactive` passes.
 - Markdown lint for `docs/governance/DOC_STATUS.md` passes.
 
+## Issue #680 Fixture
+
+Fixture level: expanded. This issue changes the report-only entropy audit
+classifier and focused tests for archive/superseded marker semantics. It does
+not materialize markers in archive files, write a baseline, or enable any CI
+hard gate.
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` route/path allowlist
+  classification for archive/superseded material.
+- `tests/test_entropy_audit_script.py` focused archive marker coverage.
+- Governance-7 OpenSpec task/fixture evidence for #680.
+
+Must preserve:
+
+- Report-only mode remains non-mutating and never writes
+  `.entropy-baseline/latest.json`.
+- Missing or incomplete archive markers remain visible for triage.
+- Complete markers can narrow allowlisting, but archive paths are not globally
+  suppressed.
+- Active/current docs without archive markers remain budget-counted.
+- Marker materialization in existing archive files remains #681 scope.
+
+Must add/change:
+
+- Use the #679 marker contract (`status`, `current_authority`,
+  `superseded_by`, `status_since`, `archive_scope`, `retained_for`) when
+  classifying archive/superseded route/path findings.
+- Add tests for complete marker allowlisting, missing marker visibility,
+  incomplete marker visibility, and no global archive ignore.
+- Keep allowlist keys stable and explainable for complete governed archive
+  evidence.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - report JSON fields and CLI output
+  classification change.
+- Config / project setup: not selected - no config change.
+- File IO / path safety / overwrite: selected - audit scans bounded tracked text
+  and must not write baseline state.
+- Schema / columns / units / field names: selected - marker fields and finding
+  allowlist/budget fields are report contracts.
+- Auth / permissions / secrets: not selected.
+- Concurrency / shared state / ordering: not selected.
+- Resource limits / large input / discovery: selected - archive scanning must
+  stay bounded and path-scoped, not a broad unbounded discovery change.
+- Legacy compatibility / examples: selected - archive evidence remains visible
+  and current-looking text is not silently suppressed.
+- Error handling / rollback / partial outputs: not selected - report-only
+  classifier, no writes.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected - classifier must match #679
+  documented marker semantics and #681 materialization contract.
+
+Required #680 evidence:
+
+- `uv run pytest -q tests/test_entropy_audit_script.py` passes.
+- `uv run ruff check scripts/governance/audit_repo_entropy.py
+  tests/test_entropy_audit_script.py` passes.
+- `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive` passes.
+- `.entropy-baseline/latest.json` remains unchanged.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis

@@ -5027,10 +5027,13 @@ def test_non_empty_unknown_allowlist_reason_uses_stable_slug_and_skips_budget() 
     assert record["gate_eligible"] is False
 
 
-def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
+def test_complete_archive_marker_allowlists_archived_retired_path_tokens_without_budget_count(
     tmp_path: Path,
 ) -> None:
-    _write(tmp_path / "docs" / "archived" / "m22.md", "Historical evidence mentions apps/web.\n")
+    _write(
+        tmp_path / "docs" / "archived" / "m22.md",
+        _complete_archive_status_front_matter("Historical evidence mentions apps/web.\n"),
+    )
     _write(
         tmp_path / "docs" / "governance" / "LEGACY_DEAD_CODE_INVENTORY.md",
         "Inventory keeps workers/sbatch_templates as retired evidence.\n",
@@ -5042,10 +5045,8 @@ def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
     }
 
     archived = findings["docs/archived/m22.md"]
-    assert archived["allowlist_reason"] == "governed archived evidence documents retired placeholder paths"
-    assert archived["allowlist_key"] == (
-        "placeholder-path-token:governed-archived-retired-placeholder-evidence"
-    )
+    assert archived["allowlist_reason"] == audit_repo_entropy.COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON
+    assert archived["allowlist_key"] == "placeholder-path-token:complete-archive-status-marker"
     assert archived["allowlist_state"] == "allowlisted"
     assert archived["budget_counted"] is False
     assert archived["gate_eligible"] is False
@@ -5054,6 +5055,42 @@ def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
     assert inventory["allowlist_key"] == "placeholder-path-token:governance-retired-placeholder-inventory"
     assert inventory["budget_counted"] is False
     assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
+
+
+def test_archived_retired_path_tokens_without_marker_remain_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "archived" / "m22.md", "Historical evidence mentions apps/web.\n")
+
+    findings = _findings_by_check(tmp_path, "placeholder-path-token")
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m22.md"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_incomplete_archive_marker_retired_path_tokens_remain_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "archived" / "m22.md",
+        """
+        ---
+        status: archived
+        superseded_by: none
+        status_since: 2026-06-24
+        archive_scope: whole-document
+        retained_for: audit evidence
+        ---
+        Historical evidence mentions apps/web.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "placeholder-path-token")
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m22.md"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
 
 
 def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_without_budget_count(
@@ -6410,6 +6447,163 @@ def test_route_authority_explicit_route_valued_allowlist_contexts_still_allowlis
     assert finding["allowlist_state"] == "allowlisted"
     assert finding["budget_counted"] is False
     assert finding["gate_eligible"] is False
+
+
+def test_archive_route_token_without_complete_marker_remains_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "archived" / "m26.md", "Current route link ?next=/hydro-met.\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m26.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/hydro-met"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_complete_archive_marker_allowlists_section_route_token_without_global_archive_ignore(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "archive" / "m26-route-notes.md",
+        """
+        Archive status:
+        - status: superseded
+        - current_authority: docs/governance/DOC_STATUS.md#display-route-authority-m26-single-map
+        - superseded_by: openspec/specs/single-map-shell-routing/spec.md
+        - status_since: 2026-06-24
+        - archive_scope: section
+        - retained_for: compatibility evidence
+
+        # Preserved route evidence
+
+        Current route link ?next=/hydro-met.
+
+        # Current-looking appendix
+
+        Current page component HydroMetPage is active.
+        """,
+    )
+
+    by_token = _route_authority_findings_by_token(_route_authority_findings(tmp_path))
+
+    assert set(by_token) == {"/hydro-met", "HydroMetPage"}
+    archived = by_token["/hydro-met"]
+    assert archived["allowlist_reason"] == audit_repo_entropy.COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON
+    assert archived["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
+    assert archived["allowlist_state"] == "allowlisted"
+    assert archived["budget_counted"] is False
+    assert archived["gate_eligible"] is False
+    _assert_unallowlisted_budget_counted_report_only_finding(by_token["HydroMetPage"])
+
+
+def test_fenced_archive_status_example_does_not_allowlist_current_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        ```text
+        Archive status:
+        - status: superseded
+        - current_authority: docs/governance/DOC_STATUS.md#display-route-authority-m26-single-map
+        - superseded_by: openspec/specs/single-map-shell-routing/spec.md
+        - status_since: 2026-06-24
+        - archive_scope: section
+        - retained_for: compatibility evidence
+        ```
+
+        Current route link ?next=/hydro-met.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/runbooks/current.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/hydro-met"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_archive_expanded_route_token_without_marker_remains_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "archived" / "m26.md", "Current route link ?next=/forecast.\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m26.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/forecast"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_complete_archive_marker_allowlists_expanded_archive_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "archived" / "m26.md",
+        _complete_archive_status_front_matter("Current route link ?next=/meteorology.\n"),
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m26.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/meteorology"
+    assert findings[0]["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
+    assert findings[0]["allowlist_state"] == "allowlisted"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
+
+
+def test_archived_openspec_expanded_route_token_without_marker_remains_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
+        "Current route link ?next=/forecast.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/forecast"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_complete_archive_marker_allowlists_archived_openspec_expanded_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
+        _complete_archive_status_front_matter("Current route link ?next=/meteorology.\n"),
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/meteorology"
+    assert findings[0]["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
+    assert findings[0]["allowlist_state"] == "allowlisted"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
+
+
+def test_current_active_doc_route_tokens_without_archive_marker_remain_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "current.md", "Current route link ?next=/hydro-met.\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/current.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/hydro-met"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
 
 
 def test_route_authority_current_runbook_allowlist_contexts_are_distinct(
@@ -7818,6 +8012,23 @@ def _file_bytes_by_relative_path(root: Path) -> dict[str, bytes]:
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+
+
+def _complete_archive_status_front_matter(body: str) -> str:
+    return f"""
+    ---
+    status: archived
+    current_authority:
+      - path: docs/governance/DOC_STATUS.md
+        section: Archive And Supersession Markers
+        reason: archive marker semantics
+    superseded_by: none
+    status_since: 2026-06-24
+    archive_scope: whole-document
+    retained_for: audit evidence
+    ---
+    {body}
+    """
 
 
 def _append_inventory_line(root: Path, relative_path: str, line: str) -> None:
