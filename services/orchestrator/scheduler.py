@@ -34,6 +34,7 @@ from services.orchestrator import scheduler_candidates as _scheduler_candidates
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence
 from services.orchestrator import scheduler_execution as _scheduler_execution
+from services.orchestrator import scheduler_lease as _scheduler_lease_module
 from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
     ForecastOrchestrator,
@@ -53,7 +54,7 @@ from services.orchestrator.reservation import (
     timed_submission,
 )
 from services.orchestrator.retention import RetentionConfig, run_retention
-from services.orchestrator.scheduler_lease import (
+from services.orchestrator.scheduler_lease import (  # noqa: F401
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
     MAX_LOCK_PAYLOAD_BYTES,
@@ -483,19 +484,63 @@ _SCHEDULER_STATE_COMPAT_EXPORTS = tuple(
 
 # Compatibility re-exports for downstream imports and monkeypatch paths that
 # still target services.orchestrator.scheduler after lease extraction.
-_SCHEDULER_LEASE_COMPAT_EXPORTS = (
-    FileSchedulerLease,
-    LOCK_OWNER,
-    LOCK_SCHEMA_VERSION,
-    MAX_LOCK_PAYLOAD_BYTES,
-    PostgresSchedulerLease,
-    UnsafeSchedulerLockError,
-    _LeaseHeartbeat,
-    _default_owner_liveness_probe,
-    _open_lock_parent_directory,
-    _open_regular_guard_file,
-    _postgres_advisory_lock_key,
-    _unlink_lock_file,
+_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES = (
+    "FileSchedulerLease",
+    "LOCK_OWNER",
+    "LOCK_SCHEMA_VERSION",
+    "MAX_LOCK_PAYLOAD_BYTES",
+    "PostgresSchedulerLease",
+    "RECONCILE_DB_CONNECT_TIMEOUT_SECONDS",
+    "UnsafeSchedulerLockError",
+    "_LeaseHeartbeat",
+    "_default_owner_liveness_probe",
+    "_open_lock_parent_directory",
+    "_open_regular_guard_file",
+    "_postgres_advisory_lock_key",
+    "_unlink_lock_file",
+)
+_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES = (
+    "_default_owner_liveness_probe",
+    "_unlink_lock_file",
+    "_open_lock_parent_directory",
+    "_open_regular_guard_file",
+    "_postgres_advisory_lock_key",
+)
+_SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING = tuple(
+    name for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES if not hasattr(_scheduler_lease_module, name)
+)
+_SCHEDULER_LEASE_COMPAT_FACADE_MISSING = tuple(
+    name for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES if name not in globals()
+)
+if _SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING:
+    raise RuntimeError(
+        "scheduler lease compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING)}"
+    )
+if _SCHEDULER_LEASE_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler lease compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_LEASE_COMPAT_FACADE_MISSING)}"
+    )
+_SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS = MappingProxyType(
+    {name: getattr(_scheduler_lease_module, name) for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES}
+)
+_SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES}
+)
+if set(getattr(_scheduler_lease_module, "__all__", ())) != set(_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES):
+    raise RuntimeError("scheduler lease compatibility names drifted from owner __all__")
+if not set(_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES).issubset(_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES):
+    raise RuntimeError("scheduler lease compatibility lookup names are not fully re-exported")
+for _scheduler_lease_direct_name, _scheduler_lease_owner_value in _SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS.items():
+    if _SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[_scheduler_lease_direct_name] is not _scheduler_lease_owner_value:
+        raise RuntimeError(
+            "scheduler lease direct re-export drifted from owner module: "
+            f"{_scheduler_lease_direct_name}"
+        )
+del _scheduler_lease_direct_name, _scheduler_lease_owner_value
+_SCHEDULER_LEASE_COMPAT_EXPORTS = tuple(
+    _SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
 )
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")

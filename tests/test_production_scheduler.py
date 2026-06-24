@@ -14,6 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator.chain import (
     M3_STAGES,
@@ -280,6 +281,58 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
         "_SCHEDULER_STATE_COMPAT_WRAPPER_NAMES",
     ):
         assert token in inventory_text
+
+
+def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory() -> None:
+    reexport_names = scheduler_module._SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
+    lookup_names = scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES
+
+    assert len(reexport_names) == len(set(reexport_names))
+    assert len(lookup_names) == len(set(lookup_names))
+    assert set(lookup_names).issubset(reexport_names)
+    assert set(reexport_names) == set(scheduler_lease_module.__all__)
+    assert set(reexport_names) == set(scheduler_module._SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS)
+    assert set(reexport_names) == set(scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS)
+    assert scheduler_module._SCHEDULER_LEASE_COMPAT_EXPORTS == tuple(
+        scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] for name in reexport_names
+    )
+
+    for name in reexport_names:
+        assert hasattr(scheduler_lease_module, name)
+        assert scheduler_module._SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS[name] is getattr(
+            scheduler_lease_module,
+            name,
+        )
+        assert scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] is getattr(
+            scheduler_module,
+            name,
+        )
+        assert getattr(scheduler_module, name) is getattr(scheduler_lease_module, name)
+    for name in lookup_names:
+        assert callable(getattr(scheduler_lease_module, name))
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES",
+        "_SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS",
+        "_SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS",
+        "_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES",
+    ):
+        assert token in inventory_text
+
+
+def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
+    monkeypatch: Any,
+) -> None:
+    for name in scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES:
+        fallback = getattr(scheduler_lease_module, name)
+
+        def patched(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        with monkeypatch.context() as patch_context:
+            patch_context.setattr(scheduler_module, name, patched)
+            assert scheduler_lease_module._scheduler_compat_function(name, fallback) is patched
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:

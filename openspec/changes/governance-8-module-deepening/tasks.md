@@ -72,12 +72,49 @@
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory groups `scheduler-state-monkeypatch-bindings` and
     `candidate-state-reexports`, or state that no state facade surface changed and prove it with compatibility tests.
-- [ ] 1.3 Scheduler lease owner-family completion.
+- [x] 1.3 Scheduler lease owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_lease` lease classes/constants, compat lookup names, heartbeat/guard-file helpers.
   - Dependencies: 1.1.
   - Out of Scope: scheduler state, discovery, candidate construction, execution, evidence, cancellation/status proof.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `scheduler-lease-reexports`.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because lease acquisition/renewal/release and scheduler
+    heartbeat behavior guard the single-run scheduler mutation boundary while old scheduler imports and monkeypatch paths
+    must stay compatible after lease extraction.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler` lock behavior and legacy
+    `services.orchestrator.scheduler` lease imports stay stable); Legacy compatibility / examples (old private
+    guard-file, liveness, unlink, heartbeat, and Postgres lock-key monkeypatches keep working); File IO / path safety /
+    overwrite (lock parent, guard file, symlink, stale lock, and atomic renew behavior stay safe); Concurrency / shared
+    state / ordering (file lock guard, stale-lock CAS, heartbeat renewal/loss, and Postgres advisory lock semantics stay
+    equivalent); Config / project setup (`scheduler_lock_backend`, `database_url`, workspace-root lock paths, and bounded
+    DB connect timeout stay compatible); Resource limits / large input (oversized lock payload rejection remains bounded);
+    Error handling / rollback / partial outputs (unsafe lock paths return stable contention evidence without mutation);
+    Documentation / migration notes (inventory group remains the owner/removal authority).
+    Not Selected: Scheduler state/candidate evidence fields, discovery/backfill selection, candidate construction,
+    execution/cohort semantics, evidence serialization/write safety beyond lease-loss proof, cancellation/status proof,
+    Auth / permissions / secrets, Release / packaging / dependency compatibility, Geospatial / CRS / basin geometry,
+    Hydro-met time series / forcing windows, SHUD numerical runtime / conservation / NaN, PostGIS / TimescaleDB domain
+    behavior beyond advisory-lock acquisition, Slurm production lifecycle / mock-vs-real parity, External hydro-met
+    providers / snapshot reproducibility, Run manifest / QC provenance, Published NHMS artifacts / display identity.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_lease` owns lease classes/constants,
+    heartbeat, guard-file, liveness, unlink, and Postgres advisory lock-key behavior, while
+    `services.orchestrator.scheduler` exposes only inventoried lease compatibility names and old monkeypatch lookup paths.
+    Source-of-truth identity/contract: scheduler-lease owner module plus inventory group `scheduler-lease-reexports`.
+    Surfaces: Producers: `services/orchestrator/scheduler_lease.py`; Compatibility facade:
+    `services/orchestrator/scheduler.py`; Validators/preflight: focused scheduler/gateway tests and compatibility-facade
+    guard; Storage/cache/query: lock file/guard file and optional Postgres advisory lock; Public routes/entrypoints:
+    `ProductionScheduler`, `ProductionSchedulerConfig`, and legacy scheduler lease imports; Failure paths/rollback/stale
+    state: unsafe lock evidence, stale lock CAS, heartbeat lease-loss boundary, and Postgres lock contention/unavailable
+    evidence.
+  - Regression Rows: scheduler facade lease export names match the owner module, owner `__all__`, and inventory group;
+    `scheduler_lease._scheduler_compat_function` resolves inventoried old scheduler monkeypatch names for liveness,
+    unlink, parent/guard open, and Postgres lock-key helpers; file lock guard rejects symlink/non-regular/oversized/stale
+    unowned lock paths without mutating outside the workspace; atomic renew and stale-lock CAS preserve lock identity and
+    avoid empty/half-written locks; heartbeat loss fences submission and healthy heartbeat does not fence a pass; Postgres
+    advisory lock backend uses the scheduler compat lock-key lookup and does not touch file guard helpers; no state/
+    discovery/candidate-construction/execution/evidence/cancellation inventory groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `scheduler-lease-reexports`, or state that no lease facade
+    surface changed and prove it with compatibility tests.
 - [ ] 1.4 Scheduler discovery owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_discovery` and forwarding methods for cycle discovery/backfill/source windows.
   - Dependencies: 1.1.
