@@ -52,13 +52,13 @@ Hindcast SHUD runtime SHALL NOT start from metadata-only forcing placeholders.
 
 ### Requirement: Legacy template use is explicit
 
-Legacy `workers/sbatch_templates` SHALL NOT be a silent production dependency.
+Legacy worker sbatch template placeholders SHALL NOT be a silent production dependency.
 
 #### Scenario: Production template directory is canonical
 
 - **WHEN** production defaults or mapping tests run
 - **THEN** the template directory MUST resolve to `infra/sbatch`
-- **AND** any remaining `workers/sbatch_templates` use MUST be documented as legacy/test-only or removed
+- **AND** any remaining retired worker sbatch template use MUST be documented as legacy/test-only or removed
 - **AND** rendered `script` payload support MUST be documented as non-production or replaced with an explicit safe mode
 
 ### Requirement: Fake Slurm coverage exercises production gateway commands
@@ -70,4 +70,3 @@ The real gateway test suite SHALL cover the fake command matrix needed to valida
 - **WHEN** the issue #124 verification suite runs
 - **THEN** fake or monkeypatched `sbatch`, `sacct`, `scancel`, and `sinfo` behavior MUST be covered
 - **AND** tests MUST cover submit, status, array task status, log fetch, and cancel behavior for production job types
-

@@ -8,7 +8,7 @@ Implementation planning and README documentation SHALL name the canonical source
 
 #### Scenario: Frontend path is canonical
 - **WHEN** a developer follows project docs for frontend work
-- **THEN** the docs MUST point to `apps/frontend` and not to stale `apps/web` paths
+- **THEN** the docs MUST point to `apps/frontend` and not to retired frontend placeholder paths
 
 #### Scenario: Worker paths are canonical
 - **WHEN** a developer follows project docs for worker modules
@@ -50,4 +50,3 @@ The hardening stage SHALL record the exact verification commands and outcomes re
 #### Scenario: Release acceptance cites commands
 - **WHEN** the hardening change is considered complete
 - **THEN** documentation or issue checklists MUST include Python tests, ruff, frontend tests, frontend build, bundle check, and relevant E2E/contract tests with pass/fail outcomes
-

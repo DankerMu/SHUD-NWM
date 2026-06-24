@@ -52,7 +52,7 @@ The entropy audit SHALL provide summary counts by check id, priority, role, allo
 The repository SHALL provide an audit or test guard that checks tracked files for retired active-tree paths.
 
 #### Scenario: retired placeholder path is reintroduced
-- **WHEN** `git ls-files` contains a retired active-tree path such as `apps/web` or `workers/sbatch_templates`
+- **WHEN** `git ls-files` contains a retired active-tree frontend or Slurm-template placeholder path
 - **THEN** the guard reports a governance finding or test failure
 
 ### Requirement: Governance audit remains report-only in CI
@@ -62,4 +62,3 @@ Governance-5 E1 SHALL NOT enable hard-gate mode in CI.
 #### Scenario: governance workflow runs after E1
 - **WHEN** `.github/workflows/governance.yml` invokes the entropy audit
 - **THEN** it runs report mode only and does not pass `--mode hard-gate`
-

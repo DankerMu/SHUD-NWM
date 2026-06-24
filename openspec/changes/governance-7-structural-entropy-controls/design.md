@@ -469,6 +469,81 @@ Required #674 evidence:
 - `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`
   passes.
 
+## Issue #675 Fixture
+
+Fixture level: standard. The issue cleans active OpenSpec wording only, so the
+mandatory triggers are active document entropy, current route authority,
+retired-path token handling, and OpenSpec validation. It does not change source
+code, archived OpenSpec material, governance docs, or runtime behavior.
+
+Change surface:
+
+- Active OpenSpec specs under `openspec/specs/**`.
+- Task 4.1 evidence in this OpenSpec change.
+
+Must preserve:
+
+- Useful historical product and migration evidence remains present; cleanup
+  must not delete scenarios merely to reduce audit counts.
+- Current display route authority remains `/` as the single-map display
+  entrypoint; legacy display paths are described only as redirect aliases,
+  compatibility context, or historical evidence.
+- Retired active-tree paths are either rewritten to current canonical paths or
+  described without re-presenting the retired path token as current active
+  guidance.
+- Archive material, current governance docs, source comments, and runtime code
+  remain out of scope.
+
+Must add/change:
+
+- Rewrite active `openspec/specs/**` route/path findings to canonical current
+  terms or machine-readable compatibility/historical context.
+- Re-run the report-only entropy audit and record the active
+  `openspec/specs/**` before/after finding delta.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no API or CLI behavior change.
+- Config / project setup: not selected - no config or environment change.
+- File IO / path safety / overwrite: not selected - no runtime file IO change.
+- Schema / columns / units / field names: not selected - no runtime schema
+  change; only OpenSpec wording changes.
+- Auth / permissions / secrets: not selected - no auth or secret handling
+  change.
+- Concurrency / shared state / ordering: not selected - documentation only.
+- Resource limits / large input / discovery: selected - the entropy audit scans
+  tracked text and must remain report-only without baseline writes.
+- Legacy compatibility / examples: selected - the change preserves legacy route
+  and retired-path evidence as compatibility or historical context where still
+  useful.
+- Error handling / rollback / partial outputs: not selected - no runtime errors.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected - the issue is active-spec cleanup.
+
+Domain packs:
+
+- Published NHMS artifacts / display identity: selected - display route wording
+  must follow M26 single-map authority and not treat legacy aliases as active
+  independent pages.
+- Slurm production lifecycle / mock-vs-real parity: selected only for retired
+  Slurm template path wording; no Slurm runtime behavior changes.
+- Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+  SHUD numerical runtime, PostGIS / TimescaleDB domain behavior, external
+  provider snapshot reproducibility, and run manifest/QC provenance: not
+  selected - no scientific/runtime contract changes.
+
+Required #675 evidence:
+
+- The report-only entropy audit before cleanup lists active
+  `openspec/specs/**` route/path findings.
+- After cleanup, active `openspec/specs/**` unallowlisted or budget-counted
+  route/path findings are zero or each remaining active finding maps to an
+  explicit follow-up owner issue; allowlisted historical/compatibility findings
+  do not need follow-up owners.
+- `openspec validate --all --strict --no-interactive` passes.
+- `uv run python scripts/governance/audit_repo_entropy.py --format json`
+  passes and does not write `.entropy-baseline/latest.json`.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis

@@ -10,7 +10,7 @@ The QHH latest-product API SHALL support strict identity filters for cross-plane
 #### Scenario: Source-only latest browsing
 - **WHEN** a caller requests `/api/v1/mvp/qhh/latest-product?source=GFS`
 - **THEN** the API can return the newest ready QHH product for that source using the existing latest selection semantics
-- **AND** the response includes product identity fields needed by `/hydro-met`.
+- **AND** the response includes product identity fields needed by the current `/` single-map display entrypoint and its `/hydro-met` legacy redirect alias.
 
 #### Scenario: Strict run identity query
 - **WHEN** a caller requests latest-product with `source`, `run_id`, `cycle_time`, and `model_id`
@@ -33,7 +33,7 @@ The latest-product response SHALL carry enough identity fields to bind 22 comput
 - **AND** station and segment counts remain present when available.
 
 #### Scenario: Backend accepts complete strict filters for downstream consumers
-- **WHEN** a downstream consumer such as `/hydro-met` or cross-plane E2E has `source`, `cycle_time`, `run_id`, and `model_id`
+- **WHEN** a downstream consumer such as the current `/` single-map display entrypoint, its `/hydro-met` legacy redirect alias, or cross-plane E2E has `source`, `cycle_time`, `run_id`, and `model_id`
 - **THEN** the backend latest-product API accepts those four filters in one request
 - **AND** the response identity can be compared by downstream issues without needing source-only fallback.
 
@@ -56,4 +56,3 @@ Cross-plane E2E SHALL prove that 27 consumed the same run identity produced by 2
 - **WHEN** source-only latest-product succeeds but strict run identity latest-product fails
 - **THEN** the backend exposes the strict failure as a typed latest-product validation or unavailable error
 - **AND** later E2E issues can mark the run `BLOCKED`, `PARTIAL`, or `FAIL` instead of reporting pass based on historical data.
-

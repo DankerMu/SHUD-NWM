@@ -27,7 +27,7 @@ The MVP release checklist SHALL distinguish required internal MVP proof from lat
 
 #### Scenario: Required MVP proof
 - **WHEN** the MVP is marked ready for internal launch
-- **THEN** evidence shows a QHH station list near the expected forcing-station count, one station returning the six forcing variables with units and quality flags, one river segment returning nonempty `q_down`, latest-product bootstrap without manual IDs, GFS and IFS source handling, IFS shorter-horizon labeling where applicable, `/hydro-met` interactive chart updates, `/ops` stage/job/log visibility, and controlled failure retry evidence.
+- **THEN** evidence shows a QHH station list near the expected forcing-station count, one station returning the six forcing variables with units and quality flags, one river segment returning nonempty `q_down`, latest-product bootstrap without manual IDs, GFS and IFS source handling, IFS shorter-horizon labeling where applicable, current `/` display interactive chart updates, `/hydro-met -> /` only as a legacy redirect compatibility smoke when checked, `/ops` stage/job/log visibility, and controlled failure retry evidence.
 
 #### Scenario: Scoped exclusions
 - **WHEN** release notes or progress documents describe MVP readiness
@@ -53,4 +53,3 @@ The implementation SHALL keep MVP documentation, runbooks, and progress status a
 - **WHEN** MVP scope or acceptance criteria change during implementation
 - **THEN** `docs/plans/2026-05-25-mvp-launch-plan.md` is updated in the same PR or a linked documentation PR
 - **AND** changes preserve the distinction between `q_down` MVP flow curves and out-of-scope `stage` water levels.
-

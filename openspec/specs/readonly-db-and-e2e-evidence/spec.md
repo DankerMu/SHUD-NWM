@@ -72,7 +72,7 @@ The two-node Docker E2E SHALL only pass when display readonly boundaries and str
 
 #### Scenario: Cross-plane run identity gate
 - **WHEN** cross-plane E2E is evaluated
-- **THEN** 27 latest-product, `/hydro-met`, `/ops`, and job logs must point to the same `run_id/source/cycle_time/model_id` produced by 22
+- **THEN** 27 latest-product, the current `/` display entrypoint, `/hydro-met -> /` only as a legacy redirect compatibility check when included, `/ops`, and job logs must point to the same `run_id/source/cycle_time/model_id` produced by 22
 - **AND** historical latest or mocked API data cannot satisfy the pass condition.
 
 #### Scenario: GFS and IFS pass scope
@@ -84,4 +84,3 @@ The two-node Docker E2E SHALL only pass when display readonly boundaries and str
 - **WHEN** retry/cancel behavior is validated
 - **THEN** 27 proves fail-closed read-only behavior and 22 proves any actual retry/cancel receipt
 - **AND** 27 only displays the resulting state and logs after 22 acts.
-
