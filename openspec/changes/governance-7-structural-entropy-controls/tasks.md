@@ -253,10 +253,12 @@
   verification commands. It links `openspec/glossary.md`, the scoped-context
   spec, `docs/runbooks/two-node-deployment-overview.md`, and the scheduler/chain
   compatibility inventories. Scoped audit passes for the orchestrator scope.
-- [ ] 6.4 Add `services/production_closure/AGENTS.md`.
+- [x] 6.4 Add `services/production_closure/AGENTS.md`.
   Evidence: file defines lane ownership, evidence schema/redaction/path-safety
   rules, readonly boundary invariants, and focused verification commands;
-  scoped audit passes.
+  links `openspec/glossary.md`, the scoped-context spec,
+  `docs/runbooks/node-27-bringup-checklist.md`, and the production-closure lane
+  inventories. Scoped audit passes for the production_closure scope.
 - [ ] 6.5 Add `apps/api/AGENTS.md`.
   Evidence: file defines app bootstrap/routing boundaries, role guard
   expectations, and focused API verification commands; scoped audit passes.
