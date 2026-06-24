@@ -197,6 +197,21 @@ STRUCTURAL_PYTHON_CONTEXT_MAX_LINES = 200
 STRUCTURAL_PUBLIC_SURFACE_DETAIL_TOKEN_LIMIT = 10
 STRUCTURAL_TOKEN_COMPONENT_MAX_CHARS = 96
 STRUCTURAL_TOKEN_HASH_HEX_CHARS = 16
+COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON = (
+    "complete archive status marker declares preserved non-current evidence"
+)
+ARCHIVE_STATUS_REQUIRED_FIELDS = frozenset(
+    {
+        "status",
+        "current_authority",
+        "superseded_by",
+        "status_since",
+        "archive_scope",
+        "retained_for",
+    }
+)
+ARCHIVE_STATUS_NON_CURRENT_VALUES = frozenset({"historical baseline", "superseded", "archived"})
+ARCHIVE_STATUS_FRONT_MATTER_MAX_LINES = 200
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
 LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
     r"(?P<token>"
@@ -567,6 +582,12 @@ class _StaleRouteMentionContext:
 class _StaleRouteStructuralContext:
     governing_text: str
     redirect_governing_text: str
+
+
+@dataclass(frozen=True)
+class _ArchiveStatusMarkerRange:
+    start_line: int
+    end_line: int
 
 
 @dataclass(frozen=True)
@@ -2591,17 +2612,23 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, roots):
         rel = _rel(root, path)
-        if rel.startswith(("docs/archived/",)):
-            continue
         text = _read_repo_text(root, path)
         lines = text.splitlines()
+        archive_status_markers = _complete_archive_status_marker_ranges(lines)
         for match in _stale_route_line_matches(
             rel,
             lines,
             include_legacy_tokens=_path_is_legacy_route_token_scope(rel),
             include_expanded_aliases=_path_is_route_authority_expanded_scope(rel),
         ):
-            allowed_reason = _stale_route_allowlist_reason(rel, lines, match.line_no, match.token, match.context)
+            allowed_reason = _stale_route_allowlist_reason(
+                rel,
+                lines,
+                match.line_no,
+                match.token,
+                match.context,
+                archive_status_markers=archive_status_markers,
+            )
             findings.append(
                 FindingSpec(
                     check_id="stale-display-route-token",
@@ -2726,9 +2753,17 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
     for path in _iter_text_files(root, [root / "docs", root / "openspec", root / "services", root / "infra"]):
         rel = _rel(root, path)
         text = _read_repo_text(root, path)
+        lines = text.splitlines()
+        archive_status_markers = _complete_archive_status_marker_ranges(lines)
         for line_no, line in _matching_lines(text, placeholder_patterns):
             token = next(token for token in placeholder_patterns if token in line)
-            allowlist = _placeholder_path_allowlist_reason(rel, line, token)
+            allowlist = _placeholder_path_allowlist_reason(
+                rel,
+                line,
+                token,
+                line_no=line_no,
+                archive_status_markers=archive_status_markers,
+            )
             findings.append(
                 FindingSpec(
                     check_id="placeholder-path-token",
@@ -3325,6 +3360,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
     if check_id == "broad-e2e-api-mock" and tokens & {"deterministic", "mock", "mocked", "preview", "visual"}:
         return "deterministic-mocked-preview-visual"
     if check_id == "stale-display-route-token":
+        if {"complete", "archive", "status", "marker"} <= tokens:
+            return "complete-archive-status-marker"
         if "milestone" in tokens or "progress" in tokens:
             return "historical-milestone-summary"
         if "provenance" in tokens or "extraction" in tokens:
@@ -3337,6 +3374,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
             return "m26-route-consolidation-or-redirect"
     if check_id == "placeholder-path-token" and {"governance", "inventory"} <= tokens:
         return "governance-retired-placeholder-inventory"
+    if check_id == "placeholder-path-token" and {"complete", "archive", "status", "marker"} <= tokens:
+        return "complete-archive-status-marker"
     if check_id == "placeholder-path-token" and {"governed", "archived", "evidence"} <= tokens:
         return "governed-archived-retired-placeholder-evidence"
     if check_id == "placeholder-path-token" and {"governed", "completed", "openspec", "evidence"} <= tokens:
@@ -6099,7 +6138,11 @@ def _stale_route_allowlist_reason(
     line_no: int,
     token: str,
     mention_context: _StaleRouteMentionContext,
+    *,
+    archive_status_markers: tuple[_ArchiveStatusMarkerRange, ...] = (),
 ) -> str | None:
+    if _line_has_complete_archive_status_marker(line_no, archive_status_markers):
+        return COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON
     if relative_path.startswith("openspec/changes/m26-"):
         return "M26 route-consolidation evidence or redirect contract"
     if token == "HydroMetPage":
@@ -7556,11 +7599,186 @@ def _line_has_evidence_boundary_context(tokens: set[str]) -> bool:
     return "evidence" in tokens and "boundary" in tokens
 
 
-def _placeholder_path_allowlist_reason(relative_path: str, line: str = "", token: str = "") -> str | None:
+def _complete_archive_status_marker_ranges(lines: list[str]) -> tuple[_ArchiveStatusMarkerRange, ...]:
+    marker_ranges: list[_ArchiveStatusMarkerRange] = []
+    whole_document_marker = _whole_document_archive_status_marker_range(lines)
+    if whole_document_marker is not None:
+        marker_ranges.append(whole_document_marker)
+    marker_ranges.extend(_section_archive_status_marker_ranges(lines))
+    return tuple(marker_ranges)
+
+
+def _whole_document_archive_status_marker_range(lines: list[str]) -> _ArchiveStatusMarkerRange | None:
+    if not lines or lines[0].strip() != "---":
+        return None
+    max_index = min(len(lines), ARCHIVE_STATUS_FRONT_MATTER_MAX_LINES + 1)
+    for index in range(1, max_index):
+        if lines[index].strip() != "---":
+            continue
+        fields = _archive_status_front_matter_fields(lines[1:index])
+        if _archive_status_fields_are_complete(fields, expected_scope="whole-document"):
+            return _ArchiveStatusMarkerRange(start_line=1, end_line=len(lines))
+        return None
+    return None
+
+
+def _section_archive_status_marker_ranges(lines: list[str]) -> tuple[_ArchiveStatusMarkerRange, ...]:
+    marker_ranges: list[_ArchiveStatusMarkerRange] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().lower() != "archive status:":
+            index += 1
+            continue
+        cursor = index + 1
+        block_lines: list[str] = []
+        while cursor < len(lines):
+            stripped = lines[cursor].strip()
+            if not stripped:
+                break
+            if stripped.startswith("-") or lines[cursor].startswith((" ", "\t")):
+                block_lines.append(lines[cursor])
+                cursor += 1
+                continue
+            break
+        fields = _archive_status_section_block_fields(block_lines)
+        content_start = cursor
+        while content_start < len(lines) and not lines[content_start].strip():
+            content_start += 1
+        if _archive_status_fields_are_complete(fields, expected_scope="section"):
+            start_line = content_start + 1
+            end_line = _archive_status_section_end_line(lines, content_start)
+            if start_line <= end_line:
+                marker_ranges.append(_ArchiveStatusMarkerRange(start_line=start_line, end_line=end_line))
+        index = max(cursor, index + 1)
+    return tuple(marker_ranges)
+
+
+def _archive_status_front_matter_fields(lines: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line[:1] not in {" ", "\t"} and not stripped.startswith("-"):
+            parsed = _archive_status_key_value(stripped)
+            if parsed is None or parsed[0] not in ARCHIVE_STATUS_REQUIRED_FIELDS:
+                current_key = None
+                continue
+            current_key, value = parsed
+            fields[current_key] = _archive_status_join_value(fields.get(current_key, ""), value)
+            continue
+        if current_key is not None:
+            fields[current_key] = _archive_status_join_value(fields.get(current_key, ""), stripped)
+    return fields
+
+
+def _archive_status_section_block_fields(lines: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entry = stripped[1:].strip() if stripped.startswith("-") else stripped
+        parsed = _archive_status_key_value(entry)
+        if parsed is not None and parsed[0] in ARCHIVE_STATUS_REQUIRED_FIELDS:
+            current_key, value = parsed
+            fields[current_key] = _archive_status_join_value(fields.get(current_key, ""), value)
+            continue
+        if current_key is not None:
+            fields[current_key] = _archive_status_join_value(fields.get(current_key, ""), stripped)
+    return fields
+
+
+def _archive_status_key_value(text: str) -> tuple[str, str] | None:
+    key, separator, value = text.partition(":")
+    if not separator:
+        return None
+    normalized_key = key.strip().lower().replace("-", "_")
+    return normalized_key, value.strip()
+
+
+def _archive_status_join_value(existing: str, value: str) -> str:
+    value = value.strip()
+    if not value:
+        return existing
+    return f"{existing} {value}".strip() if existing else value
+
+
+def _archive_status_fields_are_complete(
+    fields: dict[str, str],
+    *,
+    expected_scope: Literal["whole-document", "section"],
+) -> bool:
+    if not ARCHIVE_STATUS_REQUIRED_FIELDS <= fields.keys():
+        return False
+    status = _archive_status_scalar(fields["status"])
+    if status not in ARCHIVE_STATUS_NON_CURRENT_VALUES:
+        return False
+    scope = _archive_status_scope(fields["archive_scope"])
+    if scope != expected_scope:
+        return False
+    return all(
+        _archive_status_field_has_required_value(field, fields[field])
+        for field in ARCHIVE_STATUS_REQUIRED_FIELDS
+    )
+
+
+def _archive_status_field_has_required_value(field: str, value: str) -> bool:
+    scalar = _archive_status_scalar(value)
+    if scalar in {"", "[]", "{}", "null", "~"}:
+        return False
+    if field != "superseded_by" and scalar == "none":
+        return False
+    return True
+
+
+def _archive_status_scalar(value: str) -> str:
+    return value.strip().strip("'\"").lower()
+
+
+def _archive_status_scope(value: str) -> str:
+    return _archive_status_scalar(value).replace("_", "-").replace(" ", "-")
+
+
+def _archive_status_section_end_line(lines: list[str], content_start: int) -> int:
+    if content_start >= len(lines):
+        return len(lines)
+    first_heading_level = _markdown_heading_level(lines[content_start])
+    for index in range(content_start + 1, len(lines)):
+        heading_level = _markdown_heading_level(lines[index])
+        if heading_level is None:
+            continue
+        if first_heading_level is None or heading_level <= first_heading_level:
+            return index
+    return len(lines)
+
+
+def _markdown_heading_level(line: str) -> int | None:
+    match = re.match(r"^\s{0,3}(#{1,6})\s+", line)
+    return len(match.group(1)) if match else None
+
+
+def _line_has_complete_archive_status_marker(
+    line_no: int,
+    archive_status_markers: tuple[_ArchiveStatusMarkerRange, ...],
+) -> bool:
+    return any(marker.start_line <= line_no <= marker.end_line for marker in archive_status_markers)
+
+
+def _placeholder_path_allowlist_reason(
+    relative_path: str,
+    line: str = "",
+    token: str = "",
+    *,
+    line_no: int | None = None,
+    archive_status_markers: tuple[_ArchiveStatusMarkerRange, ...] = (),
+) -> str | None:
     if relative_path == "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md":
         return "governance inventory documents retired placeholder paths"
-    if relative_path.startswith("docs/archived/"):
-        return "governed archived evidence documents retired placeholder paths"
+    if line_no is not None and _line_has_complete_archive_status_marker(line_no, archive_status_markers):
+        return COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON
     if relative_path.startswith("openspec/changes/governance-2-legacy-dead-code-retirement/"):
         return "governed completed OpenSpec evidence documents retired placeholder paths"
     if relative_path.startswith("openspec/changes/governance-5-e1-entropy-baseline-burndown/"):
