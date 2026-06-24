@@ -4273,7 +4273,77 @@ def _compatibility_inventory_covers_signal(
     signal: _CompatibilityFacadeSignal,
 ) -> bool:
     guard_text = _compatibility_inventory_guard_hook_text(inventory_text)
-    return any(_compatibility_inventory_contains_token(guard_text, token) for token in signal.inventory_tokens)
+    return any(
+        _compatibility_inventory_line_covers_signal(line, signal)
+        for line in guard_text.splitlines()
+    )
+
+
+def _compatibility_inventory_line_covers_signal(
+    line: str,
+    signal: _CompatibilityFacadeSignal,
+) -> bool:
+    if not any(_compatibility_inventory_contains_token(line, token) for token in signal.inventory_tokens):
+        return False
+    return _compatibility_inventory_line_has_metadata(line, signal.signal_type)
+
+
+def _compatibility_inventory_line_has_metadata(line: str, signal_type: str) -> bool:
+    normalized = line.casefold()
+    if signal_type in {"new-facade-reexport", "new-monkeypatch-alias"}:
+        return (
+            _compatibility_inventory_has_owner_semantics(normalized)
+            and _compatibility_inventory_has_retention_semantics(normalized)
+            and _compatibility_inventory_has_removal_condition_semantics(normalized)
+        )
+    if signal_type == "new-non-forwarding-implementation":
+        return (
+            _compatibility_inventory_has_local_or_follow_up_semantics(normalized)
+            and _compatibility_inventory_has_removal_condition_semantics(normalized)
+        )
+    if signal_type == "new-import-family":
+        return (
+            _compatibility_inventory_has_justification_semantics(normalized)
+            and _compatibility_inventory_has_no_ownership_inversion_semantics(normalized)
+        )
+    return False
+
+
+def _compatibility_inventory_has_owner_semantics(text: str) -> bool:
+    return re.search(r"(?<![a-z0-9_])owner(?![a-z0-9_])", text) is not None
+
+
+def _compatibility_inventory_has_retention_semantics(text: str) -> bool:
+    return "retention" in text or "retain" in text
+
+
+def _compatibility_inventory_has_removal_condition_semantics(text: str) -> bool:
+    return "removal-condition" in text or "removal condition" in text
+
+
+def _compatibility_inventory_has_local_or_follow_up_semantics(text: str) -> bool:
+    return (
+        re.search(r"(?<![a-z0-9_])local(?![a-z0-9_])", text) is not None
+        or "follow-up" in text
+        or "follow up" in text
+    )
+
+
+def _compatibility_inventory_has_justification_semantics(text: str) -> bool:
+    return "justified" in text or "justification" in text or "justify" in text
+
+
+def _compatibility_inventory_has_no_ownership_inversion_semantics(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "does not invert ownership",
+            "do not invert ownership",
+            "doesn't invert ownership",
+            "no ownership inversion",
+            "without ownership inversion",
+        )
+    )
 
 
 def _compatibility_inventory_guard_hook_text(inventory_text: str) -> str:
