@@ -216,12 +216,65 @@
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory group `candidate-construction-compat-aliases`, or state that no
     candidate-construction facade surface changed and prove it with compatibility tests.
-- [ ] 1.6 Scheduler execution/cohort owner-family completion.
+- [x] 1.6 Scheduler execution/cohort owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_execution` execution, restart-compatible cohorts, forced production, run-id/cohort grouping, concurrent submissions.
   - Dependencies: 1.1 and 1.5.
   - Out of Scope: evidence serialization/write safety, cancellation/status proof, lease implementation.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `execution-restart-cohort-wrappers`.
+  - Fixture Level: expanded; Repair Intensity: high, because this slice guards production execution handoff,
+    restart-compatible cohort grouping, concurrent submit ordering, Slurm preflight blockers, and old scheduler private
+    execution helper paths without changing evidence-write/proof or cancellation ownership.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler._produce_forcing_for_candidates`,
+    `_execute_candidates`, `_execute_candidate_cohort`, `_scheduler_execution_context`, and legacy
+    `services.orchestrator.scheduler` execution helper imports stay stable); Legacy compatibility / examples (old private
+    execution/cohort helper imports and monkeypatches keep working); Schema / columns / units / field names (execution
+    evidence status, submitted flags, mutation outcomes, pipeline write proof fields passed through by context, cohort
+    run IDs, and basin manifest fields stay equivalent); Config / project setup (`concurrent_submit_bound`,
+    `slurm_execution_enabled`, and `slurm_env` flow into execution context and preflight exactly once);
+    Concurrency / shared state / ordering (source/cycle/model ordering, restart-vs-full cohort ordering, overlap receipt,
+    concurrent submit bound, sibling cohort failure isolation, and active mutation ordering stay stable); Resource limits
+    / large input / discovery (candidate cohorts are grouped deterministically and submit fan-out remains bounded by
+    config); Slurm production lifecycle / mock-vs-real parity (Slurm env/resource/secret preflight blockers, QHH chain
+    handoff, submit overlap receipts, forced/in-process forcing handoff, and unknown-after-attempt semantics remain
+    equivalent); Error handling / rollback / partial outputs (orchestrator exceptions keep per-candidate submission
+    failure evidence without dropping sibling cohort evidence); Run manifest / QC provenance (candidate identity,
+    output URI, basin manifest, orchestration_run_id, restart_stage, canonical identity, and forcing result identity stay
+    bound to the submitted candidate); Documentation / migration notes (inventory group remains the owner/removal
+    authority). Auth / permissions / secrets is selected narrowly for execution preflight redaction/secret-manifest
+    blockers, not for API auth or scheduler lease permissions.
+    Not Selected: Evidence serialization/write safety and file overwrite behavior, cancellation/status proof assembly,
+    lease acquisition/heartbeat, discovery/source-window selection, candidate construction/canonical readiness
+    selection, public API route auth, Release / packaging / dependency compatibility, Geospatial / CRS / basin geometry,
+    Hydro-met numerical forcing contents, SHUD numerical runtime / conservation / NaN beyond execution handoff shape,
+    PostGIS / TimescaleDB domain behavior, External hydro-met providers / snapshot reproducibility, Published NHMS
+    artifacts / display identity beyond candidate output URI identity.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_execution` owns forcing production handoff,
+    candidate execution, execution cohorting, restart-compatible grouping, concurrent submissions, Slurm execution
+    preflight, and execution/cohort run-id helpers, while `services.orchestrator.scheduler` exposes only inventoried
+    execution forwarding methods and wrappers. Source-of-truth identity/contract: scheduler-execution owner module plus
+    inventory group `execution-restart-cohort-wrappers`. Surfaces: Producers:
+    `services/orchestrator/scheduler_execution.py`; Compatibility facade: `services/orchestrator/scheduler.py`;
+    Validators/preflight: production scheduler tests and compatibility-facade guard; Storage/cache/query:
+    submit-overlap receipt and read-only candidate state already attached to candidates; Public routes/entrypoints:
+    `ProductionScheduler._produce_forcing_for_candidates`, `_execute_candidates`, `_execute_candidate_cohort`,
+    `_scheduler_execution_context`, `_restart_compatible_candidate_cohorts`, `_candidate_restart_stage`,
+    `_candidate_restart_cohort_key`, `_candidate_execution_cohort_run_id`, `_candidate_execution_cohorts`, and
+    `_candidate_execution_cohort_run_id_for_candidate`; Failure paths/rollback/stale state: output-uri unavailable,
+    Slurm env/resource/secret preflight block, orchestrator exception, unknown-after-attempt mutation evidence, sibling
+    cohort failure isolation, and stale restart_stage ignored for fresh full-chain candidates; Evidence/audit/readiness:
+    scheduler compatibility inventory and focused production scheduler evidence.
+  - Regression Rows: scheduler facade execution wrapper names match owner attributes and inventory group; forwarding
+    methods delegate to `SchedulerExecutionContext`, `produce_forcing_for_candidates`, `execute_candidates`, and
+    `execute_candidate_cohort` while preserving scheduler-level monkeypatch inputs for cohort/run-id helpers; fresh
+    full-chain candidates ignore residual restart_stage and submit one full-chain cohort; mixed restart/fresh candidates
+    split into candidate-scoped restart cohorts and a full-chain cohort with stable orchestration_run_id values; concurrent
+    submissions stay within `concurrent_submit_bound` and preserve deterministic evidence ordering; one cohort exception
+    yields submission-failed evidence without dropping sibling successful cohort evidence; Slurm env/secret/resource
+    blockers prevent submission without moving evidence-write/proof ownership; no evidence-write, cancellation/status,
+    lease, discovery, or candidate-construction inventory groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `execution-restart-cohort-wrappers`, or state that no
+    execution/cohort facade surface changed and prove it with compatibility tests.
 - [ ] 1.7 Scheduler evidence-write and proof owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_evidence` evidence schema/constants, pre-execution reservation, bounded payloads, runtime-root evidence, write safety, proof assembly wrappers.
   - Dependencies: 1.1 and 1.6.

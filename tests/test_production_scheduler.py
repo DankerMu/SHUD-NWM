@@ -16,6 +16,7 @@ from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator.chain import (
@@ -570,6 +571,317 @@ def test_scheduler_candidate_compat_forwarders_delegate_to_owner_module(
     assert context.active_repository is scheduler.active_repository
     assert context.max_candidates == 7
     assert context.candidate_state_decider is patched_decision
+
+
+def test_scheduler_execution_compat_wrappers_match_owner_module_and_inventory() -> None:
+    wrapper_owner_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES
+    wrapper_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES
+    forwarder_owner_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES
+    forwarder_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES
+
+    assert len(wrapper_names) == len(set(wrapper_names))
+    assert len(forwarder_names) == len(set(forwarder_names))
+    assert tuple(wrapper_owner_names) == wrapper_names
+    assert tuple(forwarder_owner_names) == forwarder_names
+    assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING == ()
+    assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING == ()
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS)
+
+    for facade_name, owner_name in wrapper_owner_names.items():
+        assert hasattr(scheduler_execution_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
+            scheduler_execution_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+    for method_name, owner_name in forwarder_owner_names.items():
+        assert hasattr(scheduler_execution_module, owner_name)
+        assert hasattr(scheduler_module.ProductionScheduler, method_name)
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES",
+        "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES",
+        "_SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES",
+        "_SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES",
+        "_SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING",
+        "_SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING",
+        "_SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS",
+        "_SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS",
+    ):
+        assert token in inventory_text
+    for token in (*wrapper_names, *forwarder_names):
+        assert token in inventory_text
+
+
+def test_scheduler_execution_compat_forwarders_delegate_to_owner_module(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidates = [object()]
+    contexts: list[scheduler_execution_module.SchedulerExecutionContext] = []
+
+    def fake_produce_forcing_for_candidates(
+        context: scheduler_execution_module.SchedulerExecutionContext,
+        candidates_arg: Sequence[Any],
+    ) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+        contexts.append(context)
+        assert candidates_arg is candidates
+        return (["ready-from-owner"], ["blocked-from-owner"], [{"forcing": True}])
+
+    def fake_execute_candidates(
+        context: scheduler_execution_module.SchedulerExecutionContext,
+        candidates_arg: Sequence[Any],
+    ) -> list[dict[str, Any]]:
+        contexts.append(context)
+        assert candidates_arg is candidates
+        return [{"executed": True}]
+
+    def fake_execute_candidate_cohort(
+        context: scheduler_execution_module.SchedulerExecutionContext,
+        source_id: str,
+        cycle_time_arg: datetime,
+        cycle_id: str,
+        cycle_candidates: Sequence[Any],
+        *,
+        orchestration_run_id: str | None,
+    ) -> list[dict[str, Any]]:
+        contexts.append(context)
+        assert source_id == "gfs"
+        assert cycle_time_arg is cycle_time
+        assert cycle_id == "gfs_2026052106"
+        assert cycle_candidates is candidates
+        assert orchestration_run_id == "cycle-gfs-restart"
+        return [{"cohort": True}]
+
+    monkeypatch.setattr(
+        scheduler_execution_module,
+        "produce_forcing_for_candidates",
+        fake_produce_forcing_for_candidates,
+    )
+    assert scheduler._produce_forcing_for_candidates(candidates) == (
+        ["ready-from-owner"],
+        ["blocked-from-owner"],
+        [{"forcing": True}],
+    )
+
+    monkeypatch.setattr(scheduler_execution_module, "execute_candidates", fake_execute_candidates)
+    assert scheduler._execute_candidates(candidates) == [{"executed": True}]
+
+    monkeypatch.setattr(scheduler_execution_module, "execute_candidate_cohort", fake_execute_candidate_cohort)
+    assert scheduler._execute_candidate_cohort(
+        "gfs",
+        cycle_time,
+        "gfs_2026052106",
+        candidates,
+        orchestration_run_id="cycle-gfs-restart",
+    ) == [{"cohort": True}]
+
+    assert contexts
+    assert all(isinstance(context, scheduler_execution_module.SchedulerExecutionContext) for context in contexts)
+    assert all(context.config is scheduler.config for context in contexts)
+    assert all(
+        context.restart_compatible_candidate_cohorts is scheduler_module._restart_compatible_candidate_cohorts
+        for context in contexts
+    )
+    assert all(
+        context.candidate_execution_cohorts is scheduler_module._candidate_execution_cohorts for context in contexts
+    )
+
+
+def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatch: Any) -> None:
+    candidate = object()
+    candidates = [candidate]
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+
+    with monkeypatch.context() as patch_context:
+        def patched_stage(candidate_arg: Any) -> str:
+            del candidate_arg
+            return "forecast"
+
+        def patched_key(restart_stage: str | None) -> tuple[int, str]:
+            return (1, restart_stage or "full")
+
+        def fake_restart_compatible_candidate_cohorts(
+            candidates_arg: Sequence[Any],
+            *,
+            candidate_restart_stage: Any,
+            candidate_restart_cohort_key: Any,
+        ) -> list[tuple[tuple[int, str], list[Any]]]:
+            assert candidates_arg is candidates
+            assert candidate_restart_stage is patched_stage
+            assert candidate_restart_cohort_key is patched_key
+            return [((1, "forecast"), candidates)]
+
+        patch_context.setattr(scheduler_module, "_candidate_restart_stage", patched_stage)
+        patch_context.setattr(scheduler_module, "_candidate_restart_cohort_key", patched_key)
+        patch_context.setattr(
+            scheduler_execution_module,
+            "restart_compatible_candidate_cohorts",
+            fake_restart_compatible_candidate_cohorts,
+        )
+        assert scheduler_module._restart_compatible_candidate_cohorts(candidates) == [((1, "forecast"), candidates)]
+
+    with monkeypatch.context() as patch_context:
+        def patched_fresh(candidate_arg: Any) -> bool:
+            del candidate_arg
+            return False
+
+        def patched_downstream(stage: str) -> str:
+            del stage
+            return "forecast"
+
+        def fake_candidate_restart_stage(
+            candidate_arg: Any,
+            *,
+            candidate_is_fresh_full_chain: Any,
+            native_shud_stage_aliases: Any,
+            canonical_downstream_stage: Any,
+        ) -> str:
+            assert candidate_arg is candidate
+            assert candidate_is_fresh_full_chain is patched_fresh
+            assert native_shud_stage_aliases is scheduler_module.NATIVE_SHUD_STAGE_ALIASES
+            assert canonical_downstream_stage is patched_downstream
+            return "forecast"
+
+        patch_context.setattr(scheduler_module, "_candidate_is_fresh_full_chain", patched_fresh)
+        patch_context.setattr(scheduler_module, "_canonical_downstream_stage", patched_downstream)
+        patch_context.setattr(scheduler_execution_module, "candidate_restart_stage", fake_candidate_restart_stage)
+        assert scheduler_module._candidate_restart_stage(candidate) == "forecast"
+
+    def fake_candidate_restart_cohort_key(
+        restart_stage: str | None,
+        *,
+        downstream_restart_stages: Sequence[str] = (),
+    ) -> tuple[int, str]:
+        assert restart_stage == "forecast"
+        assert downstream_restart_stages == scheduler_module.DOWNSTREAM_RESTART_STAGES
+        return (1, "forecast")
+
+    monkeypatch.setattr(
+        scheduler_execution_module,
+        "candidate_restart_cohort_key",
+        fake_candidate_restart_cohort_key,
+    )
+    assert scheduler_module._candidate_restart_cohort_key("forecast") == (1, "forecast")
+
+    with monkeypatch.context() as patch_context:
+        def patched_format_cycle_time(cycle_time_arg: datetime) -> str:
+            del cycle_time_arg
+            return "2026052106"
+
+        def fake_candidate_execution_cohort_run_id(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+            *,
+            format_cycle_time: Any,
+        ) -> str:
+            assert source_id == "gfs"
+            assert cycle_time_arg is cycle_time
+            assert cohort_key == (1, "forecast")
+            assert format_cycle_time is patched_format_cycle_time
+            return "cycle-gfs-forecast"
+
+        patch_context.setattr(scheduler_module, "format_cycle_time", patched_format_cycle_time)
+        patch_context.setattr(
+            scheduler_execution_module,
+            "candidate_execution_cohort_run_id",
+            fake_candidate_execution_cohort_run_id,
+        )
+        assert (
+            scheduler_module._candidate_execution_cohort_run_id("gfs", cycle_time, (1, "forecast"))
+            == "cycle-gfs-forecast"
+        )
+
+    with monkeypatch.context() as patch_context:
+        def patched_run_id_for_candidate(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+            candidate_arg: Any,
+        ) -> str:
+            del source_id, cycle_time_arg, cohort_key, candidate_arg
+            return "run-for-candidate"
+
+        def fake_candidate_execution_cohorts(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+            candidates_arg: Sequence[Any],
+            *,
+            run_id_for_candidate: Any,
+        ) -> list[tuple[list[Any], str | None]]:
+            assert source_id == "gfs"
+            assert cycle_time_arg is cycle_time
+            assert cohort_key == (1, "forecast")
+            assert candidates_arg is candidates
+            assert run_id_for_candidate is patched_run_id_for_candidate
+            return [(candidates, "run-for-candidate")]
+
+        patch_context.setattr(
+            scheduler_module,
+            "_candidate_execution_cohort_run_id_for_candidate",
+            patched_run_id_for_candidate,
+        )
+        patch_context.setattr(
+            scheduler_execution_module,
+            "candidate_execution_cohorts",
+            fake_candidate_execution_cohorts,
+        )
+        assert scheduler_module._candidate_execution_cohorts(
+            "gfs",
+            cycle_time,
+            (1, "forecast"),
+            candidates,
+        ) == [(candidates, "run-for-candidate")]
+
+    with monkeypatch.context() as patch_context:
+        def patched_format_cycle_time(cycle_time_arg: datetime) -> str:
+            del cycle_time_arg
+            return "2026052106"
+
+        def fake_candidate_execution_cohort_run_id_for_candidate(
+            source_id: str,
+            cycle_time_arg: datetime,
+            cohort_key: tuple[int, str],
+            candidate_arg: Any,
+            *,
+            format_cycle_time: Any,
+        ) -> str:
+            assert source_id == "gfs"
+            assert cycle_time_arg is cycle_time
+            assert cohort_key == (1, "forecast")
+            assert candidate_arg is candidate
+            assert format_cycle_time is patched_format_cycle_time
+            return "cycle-gfs-forecast-model-a"
+
+        patch_context.setattr(scheduler_module, "format_cycle_time", patched_format_cycle_time)
+        patch_context.setattr(
+            scheduler_execution_module,
+            "candidate_execution_cohort_run_id_for_candidate",
+            fake_candidate_execution_cohort_run_id_for_candidate,
+        )
+        assert (
+            scheduler_module._candidate_execution_cohort_run_id_for_candidate(
+                "gfs",
+                cycle_time,
+                (1, "forecast"),
+                candidate,
+            )
+            == "cycle-gfs-forecast-model-a"
+        )
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
