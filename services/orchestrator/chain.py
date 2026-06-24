@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.parse import unquote, urlparse
 
@@ -35,7 +36,18 @@ from packages.common.state_lineage import (
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
-from services.orchestrator import chain_array_accounting, chain_manifests, chain_stage_execution, production_contract
+from services.orchestrator import (
+    chain_array_accounting,
+    chain_manifests,
+    chain_stage_execution,
+    production_contract,
+)
+from services.orchestrator import (
+    chain_stages as _chain_stages_module,
+)
+from services.orchestrator import (
+    chain_types as _chain_types_module,
+)
 from services.orchestrator.chain_stages import (
     ANALYSIS_STAGES,
     LEGACY_FORECAST_STAGES,
@@ -114,6 +126,82 @@ build_reindexed_manifest = chain_manifests.build_reindexed_manifest
 production_stage_for = chain_manifests.production_stage_for
 production_status_for = production_contract.production_status_for
 serialize_manifest_index = chain_manifests.serialize_manifest_index
+
+_CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
+    "ANALYSIS_STAGES",
+    "LEGACY_FORECAST_STAGES",
+    "M3_STAGES",
+    "STAGES",
+)
+_CHAIN_TYPE_COMPAT_REEXPORT_NAMES = (
+    "AnalysisRunContext",
+    "ArrayAggregation",
+    "ArrayTaskResult",
+    "CycleOrchestrationContext",
+    "DisplayLogPublication",
+    "DisplayLogPublicationAttempt",
+    "ForcingContext",
+    "ForecastRunContext",
+    "InitialStateSelection",
+    "ModelContext",
+    "ModelRunAssembly",
+    "OrchestratorError",
+    "PipelineResult",
+    "StageDefinition",
+    "StageRunResult",
+    "TerminalJobObservation",
+)
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES = (
+    *_CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES,
+    *_CHAIN_TYPE_COMPAT_REEXPORT_NAMES,
+)
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_MISSING = tuple(
+    name for name in _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES if not hasattr(_chain_stages_module, name)
+)
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_MISSING += tuple(
+    name for name in _CHAIN_TYPE_COMPAT_REEXPORT_NAMES if not hasattr(_chain_types_module, name)
+)
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_MISSING = tuple(
+    name for name in _CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES if name not in globals()
+)
+if _CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_MISSING:
+    raise RuntimeError(
+        "chain stage catalog/type compatibility names missing from owner modules: "
+        f"{', '.join(_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_MISSING)}"
+    )
+if _CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "chain stage catalog/type compatibility names missing from facade: "
+        f"{', '.join(_CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_MISSING)}"
+    )
+if set(getattr(_chain_stages_module, "__all__", ())) != set(_CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES):
+    raise RuntimeError("chain stage catalog compatibility names drifted from owner __all__")
+if set(getattr(_chain_types_module, "__all__", ())) != set(_CHAIN_TYPE_COMPAT_REEXPORT_NAMES):
+    raise RuntimeError("chain type compatibility names drifted from owner __all__")
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS = MappingProxyType(
+    {
+        **{name: getattr(_chain_stages_module, name) for name in _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES},
+        **{name: getattr(_chain_types_module, name) for name in _CHAIN_TYPE_COMPAT_REEXPORT_NAMES},
+    }
+)
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES}
+)
+for _chain_stage_type_direct_name, _chain_stage_type_owner_value in (
+    _CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS.items()
+):
+    if _CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS[_chain_stage_type_direct_name] is not (
+        _chain_stage_type_owner_value
+    ):
+        raise RuntimeError(
+            "chain stage catalog/type direct re-export drifted from owner module: "
+            f"{_chain_stage_type_direct_name}"
+        )
+del _chain_stage_type_direct_name, _chain_stage_type_owner_value
+_CHAIN_STAGE_CATALOG_TYPE_COMPAT_EXPORTS = tuple(
+    _CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS[name]
+    for name in _CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES
+)
 
 
 def build_model_run_assembly(

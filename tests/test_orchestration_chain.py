@@ -809,6 +809,12 @@ def _stage_catalog_snapshot(stages: Sequence[Any]) -> list[tuple[str, str, str, 
     ]
 
 
+def _chain_inventory_text() -> str:
+    return (Path(__file__).resolve().parents[1] / "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def _run_fresh_python(code: str) -> None:
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -1195,6 +1201,46 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
     entry["residual_blockers"][0]["code"] = "mutated"
     assert assembly.identity == {"model_id": "model-a"}
     assert assembly.residual_blockers == ({"code": "none"},)
+
+
+def test_chain_stage_catalog_type_compat_reexports_match_owner_modules_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_stages, chain_types
+
+    stage_names = legacy_chain._CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES
+    type_names = legacy_chain._CHAIN_TYPE_COMPAT_REEXPORT_NAMES
+    reexport_names = legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES
+
+    assert len(stage_names) == len(set(stage_names))
+    assert len(type_names) == len(set(type_names))
+    assert len(reexport_names) == len(set(reexport_names))
+    assert reexport_names == (*stage_names, *type_names)
+    assert set(stage_names) == set(chain_stages.__all__)
+    assert set(type_names) == set(chain_types.__all__)
+    assert set(reexport_names) == set(legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS)
+    assert set(reexport_names) == set(legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS)
+    assert legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_EXPORTS == tuple(
+        legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS[name] for name in reexport_names
+    )
+
+    for name in stage_names:
+        assert legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS[name] is getattr(chain_stages, name)
+        assert legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS[name] is getattr(legacy_chain, name)
+        assert getattr(legacy_chain, name) is getattr(chain_stages, name)
+    for name in type_names:
+        assert legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS[name] is getattr(chain_types, name)
+        assert legacy_chain._CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS[name] is getattr(legacy_chain, name)
+        assert getattr(legacy_chain, name) is getattr(chain_types, name)
+
+    inventory_text = _chain_inventory_text()
+    for token in (
+        "_CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES",
+        "_CHAIN_TYPE_COMPAT_REEXPORT_NAMES",
+        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES",
+        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS",
+        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS",
+    ):
+        assert token in inventory_text
 
 
 def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_matches(tmp_path: Path) -> None:
