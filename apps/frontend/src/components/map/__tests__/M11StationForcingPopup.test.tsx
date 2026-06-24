@@ -407,7 +407,7 @@ describe('M11StationForcingPopup', () => {
     }
   })
 
-  it('resets station window placement when the station identity changes and reflects active z-index', async () => {
+  it('keeps the dragged station window placement when the station identity changes and reflects active z-index', async () => {
     mockSeriesBySource()
     const { rerender } = render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} active={false} />)
 
@@ -418,7 +418,8 @@ describe('M11StationForcingPopup', () => {
     fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
     fireEvent.pointerMove(window, { clientX: initial.x + 220, clientY: initial.y + 140 })
     fireEvent.pointerUp(window)
-    expect(panelPosition(panel)).not.toEqual(initial)
+    const dragged = panelPosition(panel)
+    expect(dragged).not.toEqual(initial)
 
     rerender(
       <M11StationForcingPopup
@@ -429,7 +430,8 @@ describe('M11StationForcingPopup', () => {
       />,
     )
 
-    await waitFor(() => expect(panelPosition(panel)).toEqual(initial))
+    expect(screen.getByText('North Ridge station')).toBeInTheDocument()
+    await waitFor(() => expect(panelPosition(panel)).toEqual(dragged))
     expect(panel.style.zIndex).toBe('142')
   })
 

@@ -251,7 +251,6 @@ export function M11RiverForecastPanel({
   return (
     <M11DraggableCurveWindow
       kind="river"
-      identityKey={`${identity.basin_version_id}:${identity.river_network_version_id}:${identity.river_segment_id}`}
       active={active}
       onActivate={onActivate}
       testId="m11-river-forecast-panel"

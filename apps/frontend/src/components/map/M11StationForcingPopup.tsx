@@ -190,7 +190,6 @@ export function M11StationForcingPopup({
   return (
     <M11DraggableCurveWindow
       kind="station"
-      identityKey={station.station_id}
       active={active}
       onActivate={onActivate}
       testId="m11-station-popup"

@@ -35,7 +35,6 @@ interface ActiveDrag {
 
 export function M11DraggableCurveWindow({
   kind,
-  identityKey,
   active = true,
   onActivate,
   testId,
@@ -44,7 +43,6 @@ export function M11DraggableCurveWindow({
   className,
 }: {
   kind: CurveWindowKind
-  identityKey: string
   active?: boolean
   onActivate?: () => void
   testId: string
@@ -74,7 +72,7 @@ export function M11DraggableCurveWindow({
     const frame = frameRef.current
     if (!frame) return
     setPosition(clampPosition(frame, defaultPosition(frame, kind)))
-  }, [identityKey, kind, setPosition])
+  }, [kind, setPosition])
 
   useLayoutEffect(() => {
     const ownerWindow = frameRef.current?.ownerDocument.defaultView ?? window

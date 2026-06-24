@@ -287,7 +287,7 @@ describe('M11RiverForecastPanel', () => {
     }
   })
 
-  it('resets only the river window placement when the river identity changes', async () => {
+  it('keeps the dragged river window placement when the river identity changes', async () => {
     mockForecastBySource()
     const { rerender } = render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
 
@@ -297,11 +297,18 @@ describe('M11RiverForecastPanel', () => {
     fireEvent.pointerDown(handle, { button: 0, clientX: initial.x + 24, clientY: initial.y + 24 })
     fireEvent.pointerMove(window, { clientX: initial.x + 180, clientY: initial.y + 120 })
     fireEvent.pointerUp(window)
-    expect(panelPosition(panel)).not.toEqual(initial)
+    const dragged = panelPosition(panel)
+    expect(dragged).not.toEqual(initial)
 
-    rerender(<M11RiverForecastPanel basinId="basins_qhh" segment={{ ...segment, river_segment_id: 'seg-010', segment_id: 'seg-010' }} />)
+    rerender(
+      <M11RiverForecastPanel
+        basinId="basins_qhh"
+        segment={{ ...segment, river_segment_id: 'seg-010', segment_id: 'seg-010', name: 'Main Stem 010' }}
+      />,
+    )
 
-    await waitFor(() => expect(panelPosition(panel)).toEqual(initial))
+    expect(screen.getByText('Main Stem 010')).toBeInTheDocument()
+    await waitFor(() => expect(panelPosition(panel)).toEqual(dragged))
   })
 
   it('renders a readable river segment title while preserving the raw segment ID', async () => {
