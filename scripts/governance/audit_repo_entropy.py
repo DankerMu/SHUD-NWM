@@ -4484,13 +4484,18 @@ def _compatibility_inventory_has_removal_condition_semantics(text: str) -> bool:
 
 
 def _compatibility_inventory_has_verification_semantics(text: str) -> bool:
+    if "verification command" not in text:
+        return False
     return any(
         marker in text
         for marker in (
-            "verification",
-            "verify",
-            "uv run pytest",
-            "openspec validate",
+            "`uv run pytest",
+            "`uv run ruff",
+            "`openspec validate",
+            "`git diff --check",
+            "`corepack pnpm",
+            "`pnpm ",
+            "`cd apps/frontend && pnpm",
         )
     )
 

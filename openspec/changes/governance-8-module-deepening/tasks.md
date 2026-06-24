@@ -4,10 +4,35 @@
   - Module/Scope: `services/orchestrator/scheduler.py` facade guard plus scheduler compatibility inventory assertions.
   - Dependencies: None.
   - Out of Scope: moving implementation behavior.
-  - Fixture Level: expanded; Repair Intensity: high, because this guards a shared scheduler compatibility facade, legacy import/monkeypatch paths, and governance evidence that later scheduler extraction tasks rely on.
-  - Selected Risk Packs: Public API / CLI / script entry (stable `ProductionScheduler` facade); Legacy compatibility / examples (old `services.orchestrator.scheduler` imports and monkeypatches); Schema / columns / units / field names (entropy guard JSON/markdown signal shape); Concurrency / shared state / ordering (state-helper monkeypatch wrappers use shared compatibility bindings and must keep old call ordering); Documentation / migration notes (inventory rows remain the authority); Error handling / rollback / partial outputs (audit remains report-only and never writes `.entropy-baseline/latest.json`). Not Selected: Auth / permissions / secrets, File IO / path safety / overwrite, Config / project setup, Resource limits / large input / discovery, Release / packaging / dependency compatibility, Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows, SHUD numerical runtime / conservation / NaN, PostGIS / TimescaleDB domain behavior, Slurm production lifecycle / mock-vs-real parity, External hydro-met providers / snapshot reproducibility, Run manifest / QC provenance, Published NHMS artifacts / display identity - no runtime, provider, DB, Slurm, artifact, or frontend behavior changes are in scope.
-  - Invariant Matrix: Governing invariant: every scheduler facade compatibility surface that grows or changes is either covered by `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` guard-hook metadata or reported by the entropy audit before merge. Source-of-truth identity/contract: `services/orchestrator/scheduler.py` facade symbols plus the scheduler inventory `Guard Hook Seed` rows. Surfaces: Producers: `services/orchestrator/scheduler.py`; Validators/preflight: `scripts/governance/audit_repo_entropy.py` and `tests/test_entropy_audit_script.py`; Storage/cache/query: none - report-only audit; Public routes/entrypoints: `ProductionScheduler`, `ProductionSchedulerConfig`, and legacy `services.orchestrator.scheduler` import/monkeypatch paths; Frontend/downstream consumers: scheduler tests and downstream private imports; Failure paths/rollback/stale state: report-only findings without baseline writes; Evidence/audit/readiness: scheduler compatibility inventory and entropy report metadata.
-  - Regression Rows: new un-inventoried scheduler alias/wrapper/import -> compatibility-facade-growth finding; inventoried scheduler alias/wrapper/import with owner, retention/removal, and verification metadata -> no finding; audit JSON/markdown report -> preserves compatibility guard schema and does not create/update `.entropy-baseline/latest.json`; existing scheduler monkeypatch path -> focused scheduler tests continue to pass.
+  - Fixture Level: expanded; Repair Intensity: high, because this guards a shared scheduler compatibility facade,
+    legacy import/monkeypatch paths, and governance evidence that later scheduler extraction tasks rely on.
+  - Selected Risk Packs: Public API / CLI / script entry (stable `ProductionScheduler` facade);
+    Legacy compatibility / examples (old `services.orchestrator.scheduler` imports and monkeypatches);
+    Schema / columns / units / field names (entropy guard JSON/markdown signal shape);
+    Concurrency / shared state / ordering (state-helper monkeypatch wrappers use shared compatibility bindings and must keep old call ordering);
+    Documentation / migration notes (inventory rows remain the authority);
+    Error handling / rollback / partial outputs (audit remains report-only and never writes `.entropy-baseline/latest.json`).
+    Not Selected: Auth / permissions / secrets, File IO / path safety / overwrite, Config / project setup,
+    Resource limits / large input / discovery, Release / packaging / dependency compatibility,
+    Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+    SHUD numerical runtime / conservation / NaN, PostGIS / TimescaleDB domain behavior,
+    Slurm production lifecycle / mock-vs-real parity, External hydro-met providers / snapshot reproducibility,
+    Run manifest / QC provenance, Published NHMS artifacts / display identity - no runtime, provider, DB, Slurm,
+    artifact, or frontend behavior changes are in scope.
+  - Invariant Matrix: Governing invariant: every scheduler facade compatibility surface that grows or changes is either
+    covered by `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` guard-hook metadata or reported by the entropy audit
+    before merge. Source-of-truth identity/contract: `services/orchestrator/scheduler.py` facade symbols plus the scheduler
+    inventory `Guard Hook Seed` rows. Surfaces: Producers: `services/orchestrator/scheduler.py`;
+    Validators/preflight: `scripts/governance/audit_repo_entropy.py` and `tests/test_entropy_audit_script.py`;
+    Storage/cache/query: none - report-only audit; Public routes/entrypoints: `ProductionScheduler`,
+    `ProductionSchedulerConfig`, and legacy `services.orchestrator.scheduler` import/monkeypatch paths;
+    Frontend/downstream consumers: scheduler tests and downstream private imports;
+    Failure paths/rollback/stale state: report-only findings without baseline writes;
+    Evidence/audit/readiness: scheduler compatibility inventory and entropy report metadata.
+  - Regression Rows: new un-inventoried scheduler alias/wrapper/import -> compatibility-facade-growth finding;
+    inventoried scheduler alias/wrapper/import with owner, retention/removal, and verification metadata -> no finding;
+    audit JSON/markdown report -> preserves compatibility guard schema and does not create/update `.entropy-baseline/latest.json`;
+    existing scheduler monkeypatch path -> focused scheduler tests continue to pass.
   - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
 - [ ] 1.2 Scheduler state owner-family completion.
@@ -125,7 +150,9 @@
   - Module/Scope: integration gate for chain group.
   - Dependencies: 2.1-2.10.
   - Out of Scope: new orchestration behavior, Slurm behavior changes, DB schema changes.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py tests/test_real_database_integration.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
+  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py tests/test_real_database_integration.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`;
+    `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final chain issue/PR mapping in implementation evidence.
 
 ## 3. Two-Node E2E Lane Deepening
@@ -233,7 +260,11 @@
   - Module/Scope: Slurm, object-store, source, E2E, and MVT deterministic dependency summaries, aliases, issue/schema/status checks, artifact refs, sha256 details, review-only final semantics.
   - Dependencies: 4.1 and 4.2.
   - Out of Scope: dependency live proof receipts, final live readiness, two-node E2E lane extraction.
-  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or existing_m19"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or object_store or existing_m19"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or source or existing_m19"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or e2e or existing_m19"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or mvt or existing_m19"`.
+  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or existing_m19"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or object_store or existing_m19"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or source or existing_m19"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or e2e or existing_m19"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or mvt or existing_m19"`.
   - Inventory/Evidence Update: update readiness inventory dependency-summary rows.
 - [ ] 4.5 Scheduler evidence reader extraction.
   - Module/Scope: scheduler evidence root/file mutual exclusion, file limits, schema/pass-id checks, review modes, count/cardinality logic, no-mutation proof, redaction.
@@ -245,13 +276,20 @@
   - Module/Scope: auth, alert, rollback, and target-environment proof validators under the shared live-proof loader.
   - Dependencies: 4.1 and 4.3.
   - Out of Scope: dependency proof binding, scheduler proof binding, executing live side effects.
-  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "auth or live_receipt"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "alert or live_receipt"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "rollback or live_receipt"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "target_env or final_readiness"`.
+  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "auth or live_receipt"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "alert or live_receipt"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "rollback or live_receipt"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "target_env or final_readiness"`.
   - Inventory/Evidence Update: update readiness inventory rows `Live backend auth proof`, `Live alert sink proof`, `Live rollback proof`, and `Target-environment config proof`.
 - [ ] 4.7 Dependency live-proof binder extraction.
   - Module/Scope: Slurm, object-store, source, E2E, and MVT dependency proof binders, alias precedence, summary-binding comparisons before redaction, live producer provenance.
   - Dependencies: 4.3 and 4.4.
   - Out of Scope: deterministic summary acceptance, scheduler live proof binding, final aggregation.
-  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or slurm_proof"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or object_store"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or source"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or e2e"`; `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or mvt"`.
+  - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or slurm_proof"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or object_store"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or source"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or e2e"`;
+    `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or mvt"`.
   - Inventory/Evidence Update: update readiness dependency live-proof rows.
 - [ ] 4.8 Scheduler live-proof binder extraction.
   - Module/Scope: optional live scheduler proof, exact producer binding, ambiguity detection, live-eligible producer mode/status, final count behavior.
@@ -308,7 +346,9 @@
   - Module/Scope: integration gate for API bootstrap group.
   - Dependencies: 5.1-5.4.
   - Out of Scope: public route removal, DB migration, display-readonly capability expansion.
-  - Focused Verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py tests/test_openapi_drift.py`; when schema output changes, `cd apps/frontend && pnpm check:api-types`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
+  - Focused Verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py tests/test_openapi_drift.py`;
+    when schema output changes, `cd apps/frontend && pnpm check:api-types`;
+    `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final API issue/PR mapping in implementation evidence.
 
 ## 6. Frontend Map Surface Deepening
@@ -341,7 +381,9 @@
   - Module/Scope: popup slot, curve-window placement, selected station data attributes, selected segment data attributes, popup identity updates after drag, station-MVT separation.
   - Dependencies: 6.3.
   - Out of Scope: backend station-MVT endpoint completion, hydrology/station series API behavior changes.
-  - Focused Verification: `cd apps/frontend && pnpm test -- src/components/map/__tests__/M11RiverForecastPanel.test.tsx`; `cd apps/frontend && pnpm test -- src/components/map/__tests__/M11StationForcingPopup.test.tsx`; `cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "selected|popup|station overlay|selected station"`.
+  - Focused Verification: `cd apps/frontend && pnpm test -- src/components/map/__tests__/M11RiverForecastPanel.test.tsx`;
+    `cd apps/frontend && pnpm test -- src/components/map/__tests__/M11StationForcingPopup.test.tsx`;
+    `cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "selected|popup|station overlay|selected station"`.
   - Inventory/Evidence Update: update structural inventory frontend row or scoped map ownership notes with popup/selection retained surface and command.
 - [ ] 6.6 Frontend group verification and evidence closeout.
   - Module/Scope: integration gate for frontend map group.

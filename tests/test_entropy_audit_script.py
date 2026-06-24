@@ -830,6 +830,18 @@ def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
         "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
+        "retention removal-condition; verification TBD.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
         "retention removal-condition.",
     )
 
