@@ -88,6 +88,22 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "facades",
         "signals",
     } <= set(compatibility_guard)
+    scoped_context = metadata["scoped_agent_context"]
+    assert isinstance(scoped_context, dict)
+    assert (
+        scoped_context["schema_version"]
+        == audit_repo_entropy.SCOPED_AGENT_CONTEXT_SCHEMA_VERSION
+    )
+    assert scoped_context["mode"] == "report-only"
+    assert {
+        "governed_scope_count",
+        "missing_instruction_count",
+        "stale_context_count",
+        "missing_glossary_link_count",
+        "signal_count",
+        "scopes",
+        "signals",
+    } <= set(scoped_context)
     assert metadata["max_scanned_text_file_bytes"] == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
     assert metadata["max_artifact_fingerprint_bytes"] == audit_repo_entropy.MAX_ARTIFACT_FINGERPRINT_BYTES
     assert ".venv" in metadata["skipped_path_families"]
@@ -107,6 +123,7 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "agent-artifact-ownership-policy",
         "apps-api-layer-inversion",
         "compatibility-facade-growth",
+        "scoped-agent-context",
     } <= set(metadata["executed_check_families"])
 
     heatmap = report["module_heatmap"]
@@ -234,6 +251,7 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
     assert "- Baseline written: `false`" in result.stdout
     assert "## Structural File Budget" in result.stdout
     assert "## Compatibility Facade Guard" in result.stdout
+    assert "## Scoped Agent Context" in result.stdout
     assert "## Entropy Heatmap" in result.stdout
     assert "## High-Spread Patterns" in result.stdout
     assert "## Prioritized Cleanup Targets" in result.stdout
@@ -250,6 +268,236 @@ def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> No
     assert guard["signal_count"] == 0
     assert guard["signals"] == []
     assert _findings_by_check(REPO_ROOT, audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID) == []
+
+
+def test_scoped_agent_context_current_repo_matches_scoped_instruction_state() -> None:
+    context = _scoped_agent_context(REPO_ROOT)
+    signals = context["signals"]
+    assert isinstance(signals, list)
+    scopes = context["scopes"]
+    assert isinstance(scopes, list)
+    expected_scoped_instruction_paths = {
+        "services/orchestrator/AGENTS.md",
+        "services/production_closure/AGENTS.md",
+        "apps/api/AGENTS.md",
+        "apps/frontend/AGENTS.md",
+    }
+    configured_paths = {
+        config.instruction_path for config in audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS
+    }
+    assert configured_paths == expected_scoped_instruction_paths
+    assert context["governed_scope_count"] == 4
+
+    expected_missing = {
+        path
+        for path in expected_scoped_instruction_paths
+        if not (REPO_ROOT / path).is_file()
+    }
+    actual_missing = {
+        str(signal["instruction_path"])
+        for signal in signals
+        if isinstance(signal, dict) and signal["signal_type"] == "missing-scoped-instruction"
+    }
+
+    assert actual_missing == expected_missing
+    assert context["missing_instruction_count"] == len(expected_missing)
+    if expected_missing == expected_scoped_instruction_paths:
+        assert context["missing_instruction_count"] == 4
+        assert context["stale_context_count"] == 0
+        assert context["missing_glossary_link_count"] == 0
+    for scope in scopes:
+        assert isinstance(scope, dict)
+        instruction_path = str(scope["instruction_path"])
+        if instruction_path in expected_missing:
+            assert scope["status"] == "missing"
+            continue
+        assert scope["status"] == "pass"
+
+
+def test_scoped_agent_context_reports_missing_high_entropy_directory_instructions(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+
+    context = _scoped_agent_context(tmp_path)
+    findings = _findings_by_check(tmp_path, audit_repo_entropy.SCOPED_AGENT_CONTEXT_CHECK_ID)
+
+    assert context["missing_instruction_count"] == len(audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS)
+    assert context["stale_context_count"] == 0
+    assert context["missing_glossary_link_count"] == 0
+    assert len(findings) == len(audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS)
+    assert {finding["evidence_path"] for finding in findings} == {
+        config.instruction_path for config in audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS
+    }
+    for finding in findings:
+        _assert_unallowlisted_budget_counted_report_only_finding(finding)
+
+
+def test_scoped_agent_context_reports_stale_scoped_context(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "services" / "orchestrator" / "AGENTS.md",
+        """
+        # Orchestrator Instructions
+
+        See `openspec/glossary.md`.
+        See `openspec/changes/governance-7-structural-entropy-controls/specs/scoped-agent-context-governance/spec.md`.
+        See `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`.
+        See `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`.
+
+        Use the glossary terms active entrypoint, compatibility facade, current authority,
+        and budget-counted finding when describing local ownership.
+
+        Verification:
+        - `uv run pytest -q tests/test_entropy_audit_script.py`
+        - `openspec validate --all --strict --no-interactive`
+        """,
+    )
+
+    signals = _scoped_agent_context_signals(tmp_path, "stale-scoped-context")
+    orchestrator = [
+        signal
+        for signal in signals
+        if signal["instruction_path"] == "services/orchestrator/AGENTS.md"
+    ]
+
+    assert len(orchestrator) == 1
+    missing_items = set(orchestrator[0]["missing_items"])
+    assert missing_items == {"docs/runbooks/two-node-deployment-overview.md"}
+    assert not [
+        signal
+        for signal in _scoped_agent_context_signals(tmp_path, "missing-glossary-linkage")
+        if signal["instruction_path"] == "services/orchestrator/AGENTS.md"
+    ]
+
+
+def test_scoped_agent_context_reports_missing_glossary_linkage(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "apps" / "api" / "AGENTS.md",
+        f"""
+        # API Instructions
+
+        Current references:
+        - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
+        - `docs/governance/ROLE_BOUNDARY.md`
+        - `docs/runbooks/qhh-backend-smoke.md`
+
+        Verification:
+        - `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`
+        - `openspec validate --all --strict --no-interactive`
+        """,
+    )
+
+    glossary_signals = _scoped_agent_context_signals(tmp_path, "missing-glossary-linkage")
+    api = [
+        signal
+        for signal in glossary_signals
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
+
+    assert len(api) == 1
+    missing_items = set(api[0]["missing_items"])
+    assert audit_repo_entropy.SCOPED_AGENT_CONTEXT_GLOSSARY_PATH in missing_items
+    assert {"active entrypoint", "budget-counted finding", "gate-eligible finding"} <= missing_items
+    assert not [
+        signal
+        for signal in _scoped_agent_context_signals(tmp_path, "stale-scoped-context")
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
+
+
+def test_scoped_agent_context_accepts_glossary_link_without_repeated_terms(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "apps" / "api" / "AGENTS.md",
+        f"""
+        # API Instructions
+
+        Use the canonical vocabulary in `openspec/glossary.md`.
+
+        Current references:
+        - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
+        - `docs/governance/ROLE_BOUNDARY.md`
+        - `docs/runbooks/qhh-backend-smoke.md`
+
+        Verification:
+        - `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`
+        - `openspec validate --all --strict --no-interactive`
+        """,
+    )
+
+    assert not [
+        signal
+        for signal in _scoped_agent_context_signals(tmp_path, "missing-glossary-linkage")
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
+    api_scope = _scoped_agent_context_scope(tmp_path, "apps/api/AGENTS.md")
+    assert api_scope["has_glossary_link"] is True
+    assert api_scope["missing_glossary_terms"] == []
+
+
+def test_scoped_agent_context_accepts_required_terms_without_glossary_link(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "apps" / "api" / "AGENTS.md",
+        f"""
+        # API Instructions
+
+        Use the terms active entrypoint, current authority, budget-counted finding,
+        and gate-eligible finding for local governance concepts.
+
+        Current references:
+        - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
+        - `docs/governance/ROLE_BOUNDARY.md`
+        - `docs/runbooks/qhh-backend-smoke.md`
+
+        Verification:
+        - `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`
+        - `openspec validate --all --strict --no-interactive`
+        """,
+    )
+
+    assert not [
+        signal
+        for signal in _scoped_agent_context_signals(tmp_path, "missing-glossary-linkage")
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
+    api_scope = _scoped_agent_context_scope(tmp_path, "apps/api/AGENTS.md")
+    assert api_scope["has_glossary_link"] is False
+    assert api_scope["missing_glossary_terms"] == []
+
+
+def test_scoped_agent_context_matches_wrapped_verification_command(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    _write(
+        tmp_path / "apps" / "api" / "AGENTS.md",
+        f"""
+        # API Instructions
+
+        See `openspec/glossary.md`.
+
+        Current references:
+        - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
+        - `docs/governance/ROLE_BOUNDARY.md`
+        - `docs/runbooks/qhh-backend-smoke.md`
+
+        Verification:
+        - `uv run pytest -q tests/test_entropy_audit_script.py
+          tests/test_runtime_mode.py tests/test_api.py`
+        - `openspec validate --all --strict --no-interactive`
+        """,
+    )
+
+    assert not [
+        signal
+        for signal in _scoped_agent_context_signals(tmp_path, "stale-scoped-context")
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
 
 
 def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseable_stdout() -> None:
@@ -2658,14 +2906,15 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
     assert tracked_v1_summary["total_test_files"] == 247
     assert tracked_v1_summary["total_instruction_files"] == 3
-    assert inventory.total_test_files == 171
-    assert inventory.total_instruction_files == 2
-    assert inventory.v1_summary_test_files == 171
-    assert inventory.v1_summary_instruction_files == 2
+    assert inventory.total_test_files == _expected_baseline_test_count()
+    assert inventory.total_instruction_files == _expected_baseline_instruction_count()
+    assert inventory.v1_summary_test_files == _expected_baseline_test_count(v1_summary=True)
+    assert inventory.v1_summary_instruction_files == _expected_baseline_instruction_count(
+        v1_summary=True
+    )
     assert baseline["summary"]["total_test_files"] == inventory.v1_summary_test_files
     assert baseline["summary"]["total_instruction_files"] == inventory.v1_summary_instruction_files
     assert baseline["summary"]["total_test_files"] != tracked_v1_summary["total_test_files"]
-    assert baseline["summary"]["total_instruction_files"] != tracked_v1_summary["total_instruction_files"]
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("docs/runbooks/live.md")
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted(
         "openspec/changes/example/spec.md"
@@ -2675,8 +2924,12 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
     assert modules["apps/frontend"]["file_count"] == _expected_apps_frontend_file_count()
     assert _apps_frontend_baseline_counted_path_exists("apps/frontend/src/App.tsx")
-    assert modules["services/production_closure"]["file_count"] == 11
-    assert modules["services/slurm_gateway"]["file_count"] == 11
+    assert modules["services/production_closure"]["file_count"] == _expected_module_file_count(
+        "services/production_closure"
+    )
+    assert modules["services/slurm_gateway"]["file_count"] == _expected_module_file_count(
+        "services/slurm_gateway"
+    )
     for zero_count_module in (
         "docs/governance",
         "docs/runbooks",
@@ -2689,8 +2942,11 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
 
     orchestrator = modules["services/orchestrator"]
     assert isinstance(orchestrator, dict)
-    assert orchestrator["file_count"] == _expected_services_orchestrator_file_count()
-    assert orchestrator["finding_count"] == 0
+    assert orchestrator["file_count"] == _expected_module_file_count("services/orchestrator")
+    expected_orchestrator_scoped_findings = (
+        0 if (REPO_ROOT / "services" / "orchestrator" / "AGENTS.md").is_file() else 1
+    )
+    assert orchestrator["finding_count"] == expected_orchestrator_scoped_findings
     assert orchestrator["priority"] == "P1"
     assert orchestrator["structure"] == {
         "score": "high",
@@ -2994,13 +3250,13 @@ def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_famili
     assert modules["README.md"]["file_count"] == 0
 
 
-def test_services_orchestrator_file_count_includes_tracked_scheduler_execution_module() -> None:
+def test_services_orchestrator_file_count_matches_tracked_module_surface() -> None:
     report = audit_repo_entropy.build_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
 
     orchestrator = baseline["modules"]["services/orchestrator"]
     assert isinstance(orchestrator, dict)
-    assert orchestrator["file_count"] == _expected_services_orchestrator_file_count()
+    assert orchestrator["file_count"] == _expected_module_file_count("services/orchestrator")
 
 
 @pytest.mark.parametrize(
@@ -7689,6 +7945,37 @@ def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[st
     return guard
 
 
+def _scoped_agent_context(root: Path) -> dict[str, object]:
+    report = audit_repo_entropy.build_report(root)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    context = metadata["scoped_agent_context"]
+    assert isinstance(context, dict)
+    return context
+
+
+def _scoped_agent_context_signals(root: Path, signal_type: str) -> list[dict[str, object]]:
+    context = _scoped_agent_context(root)
+    signals = context["signals"]
+    assert isinstance(signals, list)
+    return [
+        signal
+        for signal in signals
+        if isinstance(signal, dict) and signal["signal_type"] == signal_type
+    ]
+
+
+def _scoped_agent_context_scope(root: Path, instruction_path: str) -> dict[str, object]:
+    context = _scoped_agent_context(root)
+    scopes = context["scopes"]
+    assert isinstance(scopes, list)
+    for scope in scopes:
+        assert isinstance(scope, dict)
+        if scope["instruction_path"] == instruction_path:
+            return scope
+    raise AssertionError(f"missing scoped context record for {instruction_path}")
+
+
 def _compatibility_facade_signals(
     root: Path,
     structural_base_ref: str,
@@ -7893,24 +8180,54 @@ def _emitted_module_file_count_sum(modules: dict[str, object]) -> int:
     return total
 
 
-def _expected_services_orchestrator_file_count() -> int:
-    tracked_paths = audit_repo_entropy._git_tracked_paths(REPO_ROOT, ("services/orchestrator",))
-    expected = 16
-    if "services/orchestrator/scheduler_execution.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/scheduler_evidence.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/chain_types.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/chain_stages.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/chain_stage_execution.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/chain_manifests.py" in tracked_paths:
-        expected += 1
-    if "services/orchestrator/chain_array_accounting.py" in tracked_paths:
-        expected += 1
-    return expected
+def _expected_module_file_count(module: str) -> int:
+    return len(_baseline_counted_paths_for_module(module))
+
+
+def _baseline_counted_paths_for_module(module: str) -> set[str]:
+    tracked_paths = audit_repo_entropy._git_tracked_paths(REPO_ROOT, (module,))
+    return {
+        relative_path
+        for relative_path in tracked_paths
+        if not write_entropy_baseline._baseline_path_is_file_count_skipped(relative_path)
+        and write_entropy_baseline._baseline_path_is_v1_source_counted(relative_path)
+        and audit_repo_entropy._module_for_relative(relative_path) == module
+    }
+
+
+def _expected_baseline_test_count(*, v1_summary: bool = False) -> int:
+    return _expected_baseline_sibling_count(
+        write_entropy_baseline._baseline_path_is_test,
+        write_entropy_baseline._baseline_path_is_v1_summary_test_counted,
+        v1_summary=v1_summary,
+    )
+
+
+def _expected_baseline_instruction_count(*, v1_summary: bool = False) -> int:
+    return _expected_baseline_sibling_count(
+        write_entropy_baseline._baseline_path_is_instruction,
+        write_entropy_baseline._baseline_path_is_v1_summary_instruction_counted,
+        v1_summary=v1_summary,
+    )
+
+
+def _expected_baseline_sibling_count(
+    classifier: Callable[[str], bool],
+    v1_summary_classifier: Callable[[str], bool],
+    *,
+    v1_summary: bool,
+) -> int:
+    count = 0
+    for relative_path in audit_repo_entropy._git_tracked_paths(REPO_ROOT):
+        if write_entropy_baseline._baseline_path_is_file_count_skipped(relative_path):
+            continue
+        if audit_repo_entropy._repo_text_rejection_reason(REPO_ROOT, REPO_ROOT / relative_path) is not None:
+            continue
+        if v1_summary:
+            count += int(v1_summary_classifier(relative_path))
+        else:
+            count += int(classifier(relative_path))
+    return count
 
 
 def _expected_apps_frontend_file_count() -> int:
@@ -7922,14 +8239,7 @@ def _apps_frontend_baseline_counted_path_exists(relative_path: str) -> bool:
 
 
 def _apps_frontend_baseline_counted_paths() -> set[str]:
-    tracked_paths = audit_repo_entropy._git_tracked_paths(REPO_ROOT, ("apps/frontend",))
-    return {
-        relative_path
-        for relative_path in tracked_paths
-        if not write_entropy_baseline._baseline_path_is_file_count_skipped(relative_path)
-        and write_entropy_baseline._baseline_path_is_v1_source_counted(relative_path)
-        and audit_repo_entropy._module_for_relative(relative_path) == "apps/frontend"
-    }
+    return _baseline_counted_paths_for_module("apps/frontend")
 
 
 def _baseline_archive_files(baseline_dir: Path) -> list[Path]:

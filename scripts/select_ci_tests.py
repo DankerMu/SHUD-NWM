@@ -318,6 +318,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_run_qhh_continuous.py",),
     ),
     PathTestRule(
+        "scripts/governance/audit_repo_entropy.py",
+        ("tests/test_entropy_audit_script.py",),
+    ),
+    PathTestRule(
+        "scripts/governance/write_entropy_baseline.py",
+        ("tests/test_entropy_audit_script.py",),
+    ),
+    PathTestRule(
         "scripts/select_ci_tests.py",
         ("tests/test_select_ci_tests.py",),
     ),
