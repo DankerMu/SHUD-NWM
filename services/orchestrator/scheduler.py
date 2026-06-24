@@ -5760,6 +5760,135 @@ def _empty_counts() -> dict[str, int]:
     return _scheduler_evidence.empty_counts()
 
 
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES = MappingProxyType(
+    {
+        "_scheduler_pass_status_from_cancellation": "scheduler_pass_status_from_cancellation",
+        "_scheduler_execution_boundary_from_cancellation": "scheduler_execution_boundary_from_cancellation",
+        "_slurm_status_sync_proof": "slurm_status_sync_proof",
+        "_slurm_status_sync_proof_from_candidates": "slurm_status_sync_proof_from_candidates",
+        "_slurm_cancellation_proof": "slurm_cancellation_proof",
+        "_slurm_cancellation_proof_from_evidence": "slurm_cancellation_proof_from_evidence",
+        "_slurm_status_sync_count": "slurm_status_sync_count",
+        "_slurm_status_sync_unknown_count": "slurm_status_sync_unknown_count",
+        "_slurm_status_sync_mutated": "slurm_status_sync_mutated",
+        "_slurm_status_sync_failed": "slurm_status_sync_failed",
+        "_slurm_cancelled_count": "slurm_cancelled_count",
+        "_slurm_cancellation_blocked_count": "slurm_cancellation_blocked_count",
+        "_slurm_cancellation_unknown_count": "slurm_cancellation_unknown_count",
+        "_scheduler_mutation_proof": "scheduler_mutation_proof",
+        "_proof_mutation_value": "proof_mutation_value",
+        "_named_proof_value": "named_proof_value",
+        "_slurm_submit_proof_value": "slurm_submit_proof_value",
+        "_pipeline_status_write_proof_value": "pipeline_status_write_proof_value",
+        "_pipeline_event_write_proof_value": "pipeline_event_write_proof_value",
+        "_merge_proof_values": "merge_proof_values",
+        "_positive_count": "positive_count",
+        "_empty_counts": "empty_counts",
+    }
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES = tuple(
+    _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES = MappingProxyType(
+    {"_slurm_status_sync_failed_evidence": "_slurm_status_sync_failed_evidence"}
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES = tuple(
+    _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES = (
+    "_cancel_requested_active_slurm",
+    "_cancel_orchestrator_for",
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES = (
+    "_scheduler_cancellation_status",
+    "_cancelled_job_pipeline_status_write",
+    "_cancelled_job_pipeline_event_write",
+    "_execution_mutation_value",
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING = (
+    *tuple(
+        owner_name
+        for owner_name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values()
+        if not hasattr(_scheduler_evidence, owner_name)
+    ),
+    *tuple(
+        owner_name
+        for owner_name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES.values()
+        if not hasattr(_scheduler_candidates, owner_name)
+    ),
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING = (
+    *tuple(name for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES if name not in globals()),
+    *tuple(name for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES if name not in globals()),
+    *tuple(
+        name
+        for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES
+        if not hasattr(ProductionScheduler, name)
+    ),
+    *tuple(
+        name
+        for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES
+        if name not in globals()
+    ),
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP = tuple(
+    sorted(
+        {
+            *_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES,
+            *_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES,
+        }
+        & {
+            *_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES,
+            *_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES,
+        }
+    )
+)
+if _SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "scheduler cancellation/status compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING)}"
+    )
+if _SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler cancellation/status compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING)}"
+    )
+if _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP:
+    raise RuntimeError(
+        "scheduler cancellation/status retained local glue entered pure compatibility owner maps: "
+        f"{', '.join(_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP)}"
+    )
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_evidence, owner_name)
+        for facade_name, owner_name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES}
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_candidates, owner_name)
+        for facade_name, owner_name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES}
+)
+for _scheduler_cancellation_status_alias_name, _scheduler_cancellation_status_owner_value in (
+    _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES.items()
+):
+    if _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[
+        _scheduler_cancellation_status_alias_name
+    ] is not _scheduler_cancellation_status_owner_value:
+        raise RuntimeError(
+            "scheduler cancellation/status candidate alias drifted from owner module: "
+            f"{_scheduler_cancellation_status_alias_name}"
+        )
+del _scheduler_cancellation_status_alias_name, _scheduler_cancellation_status_owner_value
+
+
 def _no_mutation_proof() -> dict[str, bool]:
     return _scheduler_evidence.no_mutation_proof()
 
