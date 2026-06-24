@@ -1,16 +1,17 @@
 # Scheduler Compatibility Inventory
 
-Snapshot date: 2026-06-23
+Snapshot date: 2026-06-24
 
-Scope: Governance-7 issue #669 inventory for
+Scope: Governance-7 issue #669 inventory and Governance-8 issue #712 guard
+fixture for
 `services/orchestrator/scheduler.py`. This page records scheduler compatibility
 export groups, monkeypatch bindings, real owner modules, known callers/tests,
-retention reasons, removal conditions, verification commands, and future guard
-hooks for #671.
+retention reasons, removal conditions, verification commands, and guard hooks
+for scheduler facade growth.
 
-This inventory is evidence-only. It does not move code, remove symbols, change
-scheduler behavior, add guard tests, inventory `services/orchestrator/chain.py`,
-or write `.entropy-baseline/latest.json`.
+This inventory is evidence-only. It does not move scheduler implementation
+behavior, remove symbols, change Slurm/runtime behavior, inventory
+`services/orchestrator/chain.py`, or write `.entropy-baseline/latest.json`.
 
 ## Authority
 
@@ -63,14 +64,21 @@ Markdown lint target for this slice:
 rtk corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md openspec/changes/governance-7-structural-entropy-controls/tasks.md
 ```
 
+Governance-8 issue #712 guard verification commands:
+
+```bash
+uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
 ## Non-Targets
 
 - No scheduler behavior changes, Slurm behavior changes, DB changes, API
   contract changes, or production topology changes.
 - No compatibility symbol removal and no caller migration in #669.
 - No `chain.py` compatibility inventory; that is #670.
-- No guard-test implementation; #671 owns the tests that enforce this
-  inventory.
 - No file splitting or owner-module extraction in this slice.
 
 ## Governed Groups
@@ -88,7 +96,14 @@ rtk corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governa
 
 ## Guard Hook Seed
 
-Issue #671 can use this inventory as the expected owner map:
+The entropy audit only treats this section as guard coverage. Mentions in the
+authority text, evidence commands, or governed-group prose are not coverage.
+For #712 and later scheduler facade growth, a row that claims coverage for a
+new scheduler alias, wrapper, imported symbol, or monkeypatch path must include
+the covered token, real owner, retention reason, removal condition, and an
+exact verification command.
+
+Issue #712 uses this inventory as the expected owner map:
 
 | Group ID | Owner selector in `scheduler.py` | Guard expectation |
 |---|---|---|
@@ -100,3 +115,14 @@ Issue #671 can use this inventory as the expected owner map:
 | `execution-restart-cohort-wrappers` | `_scheduler_execution.*` wrappers and execution forwarding methods | New execution/cohort wrappers require an inventory update. |
 | `scheduler-evidence-write-compat` | `_scheduler_evidence.*` constants, write/reservation/runtime wrappers, and file-safety wrappers | New evidence write/runtime wrappers require an inventory update. |
 | `cancellation-status-proof-wrappers` | `_scheduler_evidence.*` proof/status wrappers and `_scheduler_candidates._slurm_status_sync_failed_evidence` | New cancellation/status/proof wrappers require an inventory update; local cancellation glue is tracked as local glue, not a pure alias. |
+
+Guard-hook metadata rows required by #712:
+
+- `scheduler-state-monkeypatch-bindings`: owner `services.orchestrator.scheduler_state`; retention reason: keep old `services.orchestrator.scheduler` monkeypatch bindings visible inside moved state helpers; removal condition: migrate known monkeypatch callers to `services.orchestrator.scheduler_state` and prove old scheduler paths unused; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
+- `candidate-state-reexports`: owner `services.orchestrator.scheduler_state`; retention reason: keep downstream state constants, decisions, and private helper imports stable through the scheduler facade; removal condition: callers import the owner module or public scheduler API and legacy candidate-state evidence tests prove equivalence; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
+- `scheduler-lease-reexports`: owner `services.orchestrator.scheduler_lease`; retention reason: keep lock, heartbeat, guard-file, and monkeypatch compatibility paths stable through the scheduler facade; removal condition: callers patch/import `scheduler_lease` directly and lease-loss/guard behavior remains equivalent; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py`.
+- `discovery-compat-aliases`: owner `services.orchestrator.scheduler_discovery`; retention reason: keep discovery/backfill helper paths stable through the scheduler facade; removal condition: callers use the owner module or public scheduler API and discovery/backfill ordering, redaction, and deferred evidence stay equivalent; verification command: `uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py`.
+- `candidate-construction-compat-aliases`: owner `services.orchestrator.scheduler_candidates`; retention reason: keep candidate construction, canonical readiness, active Slurm sync, and candidate-state merge helper paths stable through the scheduler facade; removal condition: caller migration plus focused candidate-construction tests prove canonical readiness, duplicate exclusion, status sync, and state merge equivalence; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
+- `execution-restart-cohort-wrappers`: owner `services.orchestrator.scheduler_execution`; retention reason: keep execution/cohort private helper paths stable through the scheduler facade; removal condition: callers use `scheduler_execution` or public scheduler pass APIs and execution/cohort tests prove forcing, restart grouping, run IDs, concurrent submissions, and mutation ordering equivalent; verification command: `uv run pytest -q tests/test_production_scheduler.py`.
+- `scheduler-evidence-write-compat`: owner `services.orchestrator.scheduler_evidence`; retention reason: keep evidence constants, write/reservation/runtime helpers, and file-safety monkeypatch paths stable through the scheduler facade; removal condition: callers import `scheduler_evidence` directly or use public scheduler APIs and evidence tests prove schema, bounded serialization, reservation order, root evidence, and write-error payload equivalence; verification command: `uv run pytest -q tests/test_production_scheduler.py`.
+- `cancellation-status-proof-wrappers`: owner `services.orchestrator.scheduler_evidence` for proof/status wrappers, `services.orchestrator.scheduler_candidates` for `_slurm_status_sync_failed_evidence`, and retained local `scheduler.py` glue for cancellation orchestration; retention reason: keep proof helper paths and local cancellation glue stable while proof assembly lives in owner modules; removal condition: proof wrappers migrate to `scheduler_evidence`, and local cancellation glue moves only under a future extraction issue with equivalent cancellation, status-sync, mutation-proof, and lease-lost evidence tests; verification command: `uv run pytest -q tests/test_production_scheduler.py`.
