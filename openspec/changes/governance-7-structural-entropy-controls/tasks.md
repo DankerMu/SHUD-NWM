@@ -247,10 +247,12 @@
   signal types plus the current repo state before #684-#687 land individual
   scoped `AGENTS.md` files. The check is not in `HARD_GATE_CHECK_IDS`, so
   hard-gate and CI failure semantics stay unchanged.
-- [ ] 6.3 Add `services/orchestrator/AGENTS.md`.
+- [x] 6.3 Add `services/orchestrator/AGENTS.md`.
   Evidence: file defines local dependency direction, scheduler/chain facade
   compatibility rules, state ownership, mutation fences, and focused
-  verification commands; scoped audit passes.
+  verification commands. It links `openspec/glossary.md`, the scoped-context
+  spec, `docs/runbooks/two-node-deployment-overview.md`, and the scheduler/chain
+  compatibility inventories. Scoped audit passes for the orchestrator scope.
 - [ ] 6.4 Add `services/production_closure/AGENTS.md`.
   Evidence: file defines lane ownership, evidence schema/redaction/path-safety
   rules, readonly boundary invariants, and focused verification commands;
