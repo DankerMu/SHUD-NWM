@@ -278,14 +278,23 @@
 
 ## 7. Final Verification
 
-- [ ] 7.1 Run local verification for the governance controls.
+- [x] 7.1 Run local verification for the governance controls.
   Evidence: `uv run pytest -q tests/test_entropy_audit_script.py` plus new
-  focused tests pass; `uv run ruff check .` passes.
-- [ ] 7.2 Validate OpenSpec artifacts.
+  focused tests pass with 338 tests; `uv run ruff check .` passes with all
+  checks clean.
+- [x] 7.2 Validate OpenSpec artifacts.
   Evidence: `openspec validate governance-7-structural-entropy-controls
   --strict --no-interactive` and `openspec validate --all --strict
-  --no-interactive` pass.
-- [ ] 7.3 Keep baseline write policy unchanged.
+  --no-interactive` pass. The targeted change is valid, and the all-spec run
+  reports 183 passed and 0 failed.
+- [x] 7.3 Keep baseline write policy unchanged.
   Evidence: report-only and hard-gate entropy commands do not modify
   `.entropy-baseline/latest.json`; any baseline update remains a separate
-  maintainer-confirmed action.
+  maintainer-confirmed action. Final report-only audit metadata from
+  `/tmp/entropy.json` is `mode=report-only`, `finding_count=822`,
+  `budget_counted_count=338`, `gate_eligible_count=0`,
+  `baseline_written=false`, and `scoped_agent_context.signal_count=0`. Final
+  hard-gate metadata from `/tmp/entropy-hard-gate.json` is
+  `mode=hard-gate`, `hard_gate_status=pass`, `hard_gate_failing_count=0`,
+  `gate_eligible_count=0`, and `baseline_written=false`. The baseline diff
+  command `git diff -- .entropy-baseline/latest.json --exit-code` passes.
