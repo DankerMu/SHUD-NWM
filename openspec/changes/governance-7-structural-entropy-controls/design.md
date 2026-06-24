@@ -146,6 +146,110 @@ Required #667 evidence:
 - existing entropy finding schema, summary counts, and exit-code semantics stay
   compatible.
 
+## Issue #672 Fixture
+
+Fixture level: expanded. The issue defines production-closure lane contracts
+for a large validation aggregator and future extraction work, so the mandatory
+expanded triggers are `production_closure`, evidence schema/field contract,
+legacy compatibility, path/redaction/current-run safety, and future public
+entrypoint preservation. This issue is documentation/inventory only; it does
+not extract code or change runtime validation behavior.
+
+Change surface:
+
+- `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md` lane inventory.
+- `openspec/changes/governance-7-structural-entropy-controls/tasks.md`
+  evidence for task 3.1.
+
+Must preserve:
+
+- `services/production_closure/two_node_e2e_evidence.py` remains the stable
+  aggregator and CLI-facing validation entrypoint for #672.
+- Existing lane status vocabulary, blocker/finding code namespaces, redaction,
+  current-run binding, source identity, path-safety, readonly DB boundary, and
+  final aggregation semantics are documented rather than weakened.
+- #673 readiness validation inventory and #674 docker-preflight extraction stay
+  separate follow-up scopes.
+
+Must add/change:
+
+- Record the lane owner-module plan, input/output contract, blocker/finding
+  namespace, and focused verification command for metadata, Docker
+  preflight/security, readonly DB, API/browser proof, logs, Slurm, compute
+  summary, display summary, manual ops receipts, source-scope/cross-plane,
+  producer identity/source artifacts, and final aggregation surfaces in
+  `two_node_e2e_evidence`.
+- Make a future extraction issue able to choose a lane without making new
+  product decisions.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - the inventory must preserve the
+  existing final evidence validator entrypoint and future lane result shape.
+- Config / project setup: not selected - no environment, dependency, workflow,
+  or deployment configuration changes.
+- File IO / path safety / overwrite: selected - lane contracts must retain
+  approved evidence-root, symlink/traversal, source artifact, and log URI
+  safety semantics.
+- Schema / columns / units / field names: selected - lane input/output schemas,
+  status values, blocker/finding namespaces, and redacted evidence summaries
+  are the primary contract.
+- Auth / permissions / secrets: selected - readonly DB and manual ops lanes
+  must keep no-write boundaries and credential-safe redaction requirements.
+- Concurrency / shared state / ordering: not selected - no runtime scheduler or
+  concurrent execution behavior changes.
+- Resource limits / large input / discovery: selected - inventory must keep
+  bounded evidence payload and scoped source-artifact discovery expectations.
+- Legacy compatibility / examples: selected - the current aggregator entrypoint
+  and legacy alias/source identity compatibility remain intact until extraction
+  issues prove equivalence.
+- Error handling / rollback / partial outputs: selected - blocker/finding
+  status and partial/BLOCKED semantics are required lane outputs.
+- Release / packaging / dependency compatibility: not selected - no package or
+  dependency change.
+- Documentation / migration notes: selected - this issue is the authoritative
+  extraction plan and evidence mapping for #674.
+
+Domain packs:
+
+- Slurm production lifecycle / mock-vs-real parity: selected - final evidence
+  can include live Slurm/manual ops/log proof and must not confuse mocked or
+  diagnostic evidence with live proof.
+- Run manifest / QC provenance: selected - strict identity, producer-backed
+  evidence, source artifacts, and current evidence bundle binding are core lane
+  contracts.
+- Published NHMS artifacts / display identity: selected - readonly DB, API,
+  browser, logs, and cross-plane evidence must remain bound to the same source,
+  cycle, run, model, and job identity.
+- Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+  SHUD numerical runtime, PostGIS / TimescaleDB domain behavior, and external
+  provider snapshot reproducibility: not selected - #672 documents validation
+  lane boundaries only and does not change scientific or database data paths.
+
+Required #672 evidence:
+
+- Inventory lists every #672 in-scope lane with owner module plan, input
+  contract, output/result shape, blocker/finding namespace, focused
+  verification command, retention condition, and extraction readiness note.
+- Inventory verification input/output: given
+  `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`, the documented
+  runtime lane-summary set matches `FINAL_REQUIRED_LANES` for #672
+  (`metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`,
+  `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`,
+  and `display_summary`). The inventory also covers the shared
+  producer-identity/source-artifact surface and final aggregation surface, and
+  every row includes owner module plan, input contract, output/result shape,
+  blocker/finding namespace, focused verification command, retention condition,
+  and extraction readiness note. The inventory must not include #673
+  readiness-validation rows or #674 implementation-extraction rows.
+- Cross-lane contracts document strict identity, current-run binding,
+  producer/source-artifact proof, redaction, path/log URI safety, and final
+  aggregation status semantics.
+- `uv run pytest -q tests/test_two_node_e2e_evidence.py` remains the focused
+  regression command for the documented contracts.
+- `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive` passes.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis
