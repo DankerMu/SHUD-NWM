@@ -509,11 +509,49 @@
     condition; no owner-family behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_entropy_audit_script.py`; `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
-- [ ] 2.2 Chain stage catalog/type owner-family completion.
+- [x] 2.2 Chain stage catalog/type owner-family completion.
   - Module/Scope: `services.orchestrator.chain_stages`, `services.orchestrator.chain_types`, static catalog/type re-exports, and result/context type compatibility.
   - Dependencies: 2.1.
   - Out of Scope: stage execution, array accounting, manifest assembly, reservation, retry, tile publication, worker adapters, repository behavior.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py`.
+  - Fixture Level: expanded owner-family fixture. This slice completes the
+    stage catalog/type re-export compatibility contract by making owner/facade
+    name maps explicit and testable; it does not move runtime orchestration
+    behavior.
+  - Risk Pack Selection: Selected: Public API / stable facade (stage catalogs,
+    shared dataclasses, result/context types, and legacy
+    `services.orchestrator.chain` imports stay identity-compatible); Legacy
+    compatibility (package and chain-level imports retain object identity);
+    Schema / field names (dataclass fields, defaults, type hints, and frozen
+    contracts remain unchanged); Dependency / ownership direction
+    (`chain_stages` and `chain_types` stay lightweight owner modules that import
+    without loading `chain.py` runtime dependencies); Test / evidence coverage
+    (owner/facade maps, `__all__` drift, inventory tokens, and static snapshots
+    are guarded). Not Selected: stage execution behavior, array accounting,
+    manifest assembly, reservation, retry, tile publication, worker/source
+    identity, repository behavior, Slurm behavior, DB schema, API/frontend
+    surfaces, or production topology changes.
+  - Invariant Matrix: Governing invariant: every static stage catalog and
+    chain type re-export exposed through `chain.py` is present in the matching
+    owner module `__all__`, mapped in `_CHAIN_STAGE_CATALOG_TYPE_COMPAT_*`, and
+    identity-equal through the legacy facade. Source-of-truth
+    identity/contract: `services.orchestrator.chain_stages`,
+    `services.orchestrator.chain_types`, `services.orchestrator.chain`, and
+    `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` agree on the
+    `chain-stage-catalog-type-reexports` group. Surfaces: Producers:
+    `chain_stages.py` and `chain_types.py`; Compatibility facade:
+    `chain.py` static imports and package-level lazy exports; Validators:
+    orchestration chain tests, entropy inventory guard, OpenSpec validation,
+    markdownlint, ruff, and diff-check; Storage/cache/query: no DB or artifact
+    changes.
+  - Regression Rows: `chain_stages.__all__` and `chain_types.__all__` match the
+    explicit compatibility name tuples; owner/facade maps cover every stage and
+    type export exactly once; `ModelRunAssembly` remains type-owned even when
+    manifest builders import it; static stage snapshots and dataclass field
+    defaults/type hints remain unchanged; `chain_stages` and `chain_types`
+    still import without loading `services.orchestrator.chain`, `httpx`, or
+    tile-publisher modules; no 2.3+ owner-family behavior changes in this
+    slice.
+  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update chain inventory group `chain-stage-catalog-type-reexports`.
 - [ ] 2.3 Chain stage execution owner-family completion.
   - Module/Scope: `services.orchestrator.chain_stage_execution`, `StageExecutionDependencies`, reservation-before-submit, bind-after-submit, polling, timeout, retry bridge, and published-log semantics.
@@ -528,7 +566,7 @@
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py`.
   - Inventory/Evidence Update: update chain inventory group `chain-array-accounting-forwarders`.
 - [ ] 2.5 Chain manifest owner-family completion.
-  - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly, runtime manifest safe writes, manifest index, quality states, residual blockers.
+  - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly builders and payload serialization, runtime manifest safe writes, manifest index, quality states, residual blockers.
   - Dependencies: 2.1 and 2.2.
   - Out of Scope: array accounting, stage execution, repository persistence, tile publishing.
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py tests/test_production_scheduler.py`.
