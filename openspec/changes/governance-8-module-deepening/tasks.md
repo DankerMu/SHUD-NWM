@@ -458,7 +458,56 @@
   - Module/Scope: `services/orchestrator/chain.py` facade guard plus chain compatibility inventory assertions.
   - Dependencies: None.
   - Out of Scope: moving owner-family behavior.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py`.
+  - Fixture Level: expanded guard fixture. This slice makes the chain
+    compatibility inventory executable as a current Governance-8 guard without
+    moving any chain owner-family behavior.
+  - Risk Pack Selection: Selected: Public API / stable facade
+    (`ForecastOrchestrator`, `AnalysisOrchestrator`, `OrchestratorConfig`,
+    result/context types, gateway clients, and legacy
+    `services.orchestrator.chain` imports remain stable); Legacy compatibility
+    (chain import, re-export, wrapper, and monkeypatch paths must be inventoried
+    before growth); Dependency / ownership direction (new import families
+    through `chain.py` require explicit no-ownership-inversion justification);
+    Test / evidence coverage (entropy guard plus chain, retry/cancel, and
+    gateway reconcile suites); Documentation / migration notes (inventory
+    records owner, retention reason, removal condition, caller migration path,
+    and verification command); Release/package compatibility (legacy import
+    surfaces remain available and no package entrypoint changes). Not Selected:
+    Config / project setup (no config files, CLI defaults, or environment
+    defaults change); File IO / path safety (no artifact, manifest, runtime-root,
+    or safe-write logic changes); Auth / secrets / redaction (no route,
+    credential, or payload-redaction behavior changes); Resource limits (no
+    Slurm resources, array sizing, timeout, or concurrency behavior changes);
+    Error handling / rollback / partial outputs (no runtime failure semantics
+    change); moving stage execution, array accounting, manifests, reservations,
+    retry, tile publication, worker/source identity, persistence/repository
+    behavior; changing Slurm behavior, changing DB schema, changing scheduler
+    behavior, changing API/frontend/display surfaces, or removing legacy chain
+    symbols.
+  - Invariant Matrix: Governing invariant: any new chain facade re-export,
+    wrapper, monkeypatch alias, import family, or local implementation growth is
+    either blocked by the compatibility-facade guard or covered by the Chain
+    Compatibility Inventory Guard Hook Seed with required metadata.
+    Source-of-truth identity/contract: `services/orchestrator/chain.py`,
+    extracted owner modules, `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`,
+    and the chain-facade-deepening spec agree on the nine governed chain groups.
+    Surfaces: Producers: `chain.py` and owner modules; Compatibility facade:
+    legacy `services.orchestrator.chain` imports and monkeypatch paths,
+    including `OrchestratorConfig`;
+    Validators/preflight: entropy audit compatibility guard, chain inventory
+    metadata regression, orchestration chain tests, retry/cancel consistency
+    tests, gateway reconcile tests, OpenSpec validation, and diff-check;
+    Storage/cache/query: no DB or repository schema changes; Public
+    routes/entrypoints: no API route changes.
+  - Regression Rows: current repository compatibility-facade guard reports zero
+    signals; every chain governed group has exactly one Guard Hook Seed metadata
+    row with owner, retention, removal condition, and exact verification command;
+    synthetic chain facade growth still produces report-only findings until the
+    inventory metadata is updated; chain import-family growth still requires a
+    no-ownership-inversion justification; non-forwarding local chain growth still
+    requires owner-hosting rationale, concrete follow-up issue, and removal
+    condition; no owner-family behavior moves in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_entropy_audit_script.py`; `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
 - [ ] 2.2 Chain stage catalog/type owner-family completion.
   - Module/Scope: `services.orchestrator.chain_stages`, `services.orchestrator.chain_types`, static catalog/type re-exports, and result/context type compatibility.

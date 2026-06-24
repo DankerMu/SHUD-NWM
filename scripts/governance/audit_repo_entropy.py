@@ -4452,7 +4452,7 @@ def _compatibility_inventory_line_has_metadata(line: str, signal: _Compatibility
             and _compatibility_inventory_has_retention_semantics(normalized)
             and _compatibility_inventory_has_removal_condition_semantics(normalized)
         )
-        if signal.facade_name == "scheduler":
+        if signal.facade_name in {"scheduler", "chain"}:
             required_metadata = required_metadata and _compatibility_inventory_has_verification_semantics(
                 normalized
             )

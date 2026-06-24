@@ -2,15 +2,15 @@
 
 Snapshot date: 2026-06-23
 
-Scope: Governance-7 issue #670 inventory for
-`services/orchestrator/chain.py`. This page records chain compatibility export
-groups, monkeypatch bindings, real owner modules, known callers/tests,
-retention reasons, removal conditions, caller migration paths, verification
-commands, and future guard hooks for #671.
+Scope: Governance-7 issue #670 inventory and Governance-8 issue #721 guard
+fixture for `services/orchestrator/chain.py`. This page records chain
+compatibility export groups, monkeypatch bindings, real owner modules, known
+callers/tests, retention reasons, removal conditions, caller migration paths,
+verification commands, and Guard Hook Seed expectations for chain facade growth.
 
 This inventory is evidence-only. It does not move code, remove symbols, change
-orchestrator behavior, add guard tests, inventory `services/orchestrator/scheduler.py`,
-or write `.entropy-baseline/latest.json`.
+orchestrator behavior, inventory `services/orchestrator/scheduler.py`, or write
+`.entropy-baseline/latest.json`.
 
 ## Authority
 
@@ -72,14 +72,23 @@ rtk corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governa
 rtk git diff --check
 ```
 
+Governance-8 issue #721 chain guard verification commands:
+
+```bash
+uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
 ## Non-Targets
 
 - No chain behavior changes, Slurm behavior changes, DB changes, API contract
   changes, scheduler behavior changes, or production topology changes.
 - No compatibility symbol removal and no caller migration in #670.
 - No `scheduler.py` compatibility inventory; that is #669.
-- No guard-test implementation; #671 owns the tests that enforce this
-  inventory.
+- No owner-family behavior movement in #721; it only adds the Governance-8
+  chain facade guard fixture and inventory metadata assertions.
 - No file splitting or owner-module extraction in this slice.
 - `ForecastOrchestrator`, `AnalysisOrchestrator`, `OrchestratorConfig`,
   `OrchestratorRepository`, `PsycopgOrchestratorRepository`,
@@ -102,7 +111,7 @@ rtk git diff --check
 
 ## Guard Hook Seed
 
-Issue #671 can use this inventory as the expected owner map:
+Issue #721 uses this inventory as the expected owner map:
 
 | Group ID | Owner selector in `chain.py` | Guard expectation |
 |---|---|---|
@@ -115,3 +124,17 @@ Issue #671 can use this inventory as the expected owner map:
 | `chain-tile-publisher-facade` | `from services.tile_publisher import (...)`, `from services.tile_publisher.publisher import failure_payload`, and `StageExecutionDependencies` tile-publisher fields | New tile-publisher compatibility paths require an inventory update; tests should migrate toward owner-module injection before removal. |
 | `chain-worker-adapter-facade` | Worker imports from `workers.canonical_converter.converter`, `workers.data_adapters.base`, dynamic GFS/IFS adapter imports in `_auto_trigger_source_identity_adapter`, and `_check_three_way_time_consistency` alias | New worker/adapter imports through `chain.py` require an inventory update and an explicit local-glue versus owner-re-export classification. |
 | `chain-persistence-repository-facade` | `from services.orchestrator.persistence import (...)`, `OrchestratorRepository`, and `PsycopgOrchestratorRepository` | Persistence primitive re-exports and repository local implementation are tracked separately; new persistence symbols or repository moves require this inventory to change. |
+
+Guard-hook metadata rows required by #721:
+
+| Group ID | Guard metadata |
+|---|---|
+| `chain-stage-catalog-type-reexports` | owner `services.orchestrator.chain_stages` / `services.orchestrator.chain_types`; retention reason: legacy chain stage/type imports; removal condition: migrate callers to owner modules or stable public APIs; caller migration path: import stage catalogs from `services.orchestrator.chain_stages` and types from `services.orchestrator.chain_types`; verification command: `uv run pytest -q tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_orchestrator.py tests/test_real_slurm_gateway.py`. |
+| `chain-stage-execution-forwarders` | owner `services.orchestrator.chain_stage_execution`; retention reason: legacy stage execution private method and monkeypatch paths; removal condition: callers use owner functions or public orchestration APIs after parity is proved; caller migration path: use `services.orchestrator.chain_stage_execution` with `StageExecutionDependencies`; verification command: `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py tests/test_e2e_m3.py`. |
+| `chain-array-accounting-forwarders` | owner `services.orchestrator.chain_array_accounting`; retention reason: legacy array accounting helper imports and monkeypatch paths; removal condition: callers use owner module paths and partial-success parity remains covered; caller migration path: import array accounting helpers from `services.orchestrator.chain_array_accounting`; verification command: `uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py`. |
+| `chain-manifest-forwarders` | owner `services.orchestrator.chain_manifests` / `services.orchestrator.production_contract`; retention reason: legacy manifest and production-contract imports plus monkeypatch seams; removal condition: callers migrate to owner modules and manifest quality-state parity remains covered; caller migration path: import manifest helpers from `services.orchestrator.chain_manifests` and status/stage helpers from `services.orchestrator.production_contract`; verification command: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py tests/test_production_scheduler.py`. |
+| `chain-reservation-facade` | owner `services.orchestrator.reservation`; retention reason: legacy reservation helper imports and stage reservation wrapper paths; removal condition: callers use reservation owner paths or public chain execution APIs with no double-submit regressions; caller migration path: import reservation helpers from `services.orchestrator.reservation`; verification command: `uv run pytest -q tests/test_gateway_reconcile.py tests/test_orchestration_chain.py`. |
+| `chain-retry-facade` | owner `services.orchestrator.retry`; retention reason: legacy retry imports and chain retry orchestration glue; removal condition: callers use retry owner paths and retry identity/partial-array parity remains covered; caller migration path: import retry helpers from `services.orchestrator.retry` and inject `RetryService` into `ForecastOrchestrator`; verification command: `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_e2e_m3.py tests/test_orchestration_chain.py`. |
+| `chain-tile-publisher-facade` | owner `services.tile_publisher` / `services.tile_publisher.publisher`; retention reason: legacy tile publisher import and monkeypatch paths; removal condition: callers inject or patch owner publisher dependencies directly and local publish parity remains covered; caller migration path: import publisher classes from `services.tile_publisher` and failure payloads from `services.tile_publisher.publisher`; verification command: `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py`. |
+| `chain-worker-adapter-facade` | owner `workers.canonical_converter.converter` / `workers.data_adapters.base` / `services.orchestrator.time_consistency`; retention reason: legacy worker, adapter, source-identity, and time-consistency helper imports; removal condition: callers migrate to worker/adapter utilities or stable public orchestration APIs after source identity parity is covered; caller migration path: import converter helpers from `workers.canonical_converter.converter`, cycle helpers from `workers.data_adapters.base`, and time consistency from `services.orchestrator.time_consistency`; verification command: `uv run pytest -q tests/test_ifs_forecast_integration.py tests/test_source_identity.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py`. |
+| `chain-persistence-repository-facade` | owner `services.orchestrator.persistence` for persistence primitives and local `services.orchestrator.chain` for repository implementation; retention reason: legacy scheduler/test imports and local repository glue; removal condition: persistence callers migrate to owner primitives and repository movement happens only under a future extraction issue with equivalent integration coverage; caller migration path: import `PipelineJob`, `PipelineEvent`, and `PipelineStore` from `services.orchestrator.persistence` while keeping `PsycopgOrchestratorRepository` on `chain.py` until an owner module exists; verification command: `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py`. |

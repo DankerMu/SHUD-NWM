@@ -323,7 +323,9 @@ def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata
         matches = [
             line
             for line in guard_text.splitlines()
-            if f"`{group_id}`" in line and "verification command" in line
+            if (line.startswith("- ") or line.startswith("| "))
+            and f"`{group_id}`" in line
+            and "verification command" in line
         ]
         assert len(matches) == 1, f"expected one #712 metadata row for {group_id}"
         line = matches[0]
@@ -333,6 +335,89 @@ def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata
         if group_id == "cancellation-status-proof-wrappers":
             assert "_slurm_status_sync_failed_evidence" in line
             assert "services.orchestrator.scheduler_candidates" in line
+        assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_verification_semantics(normalized)
+
+
+def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
+    metadata_text = guard_text.split("Guard-hook metadata rows required by #721:", maxsplit=1)[1]
+    expected_metadata = {
+        "chain-stage-catalog-type-reexports": (
+            "services.orchestrator.chain_stages",
+            "uv run pytest -q tests/test_orchestration_chain.py "
+            "tests/test_production_scheduler.py tests/test_orchestrator.py "
+            "tests/test_real_slurm_gateway.py",
+        ),
+        "chain-stage-execution-forwarders": (
+            "services.orchestrator.chain_stage_execution",
+            "uv run pytest -q tests/test_orchestration_chain.py "
+            "tests/test_pipeline_logs_artifacts.py tests/test_e2e_m3.py",
+        ),
+        "chain-array-accounting-forwarders": (
+            "services.orchestrator.chain_array_accounting",
+            "uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py",
+        ),
+        "chain-manifest-forwarders": (
+            "services.orchestrator.chain_manifests",
+            "uv run pytest -q tests/test_orchestration_chain.py "
+            "tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py "
+            "tests/test_production_scheduler.py",
+        ),
+        "chain-reservation-facade": (
+            "services.orchestrator.reservation",
+            "uv run pytest -q tests/test_gateway_reconcile.py tests/test_orchestration_chain.py",
+        ),
+        "chain-retry-facade": (
+            "services.orchestrator.retry",
+            "uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py "
+            "tests/test_e2e_m3.py tests/test_orchestration_chain.py",
+        ),
+        "chain-tile-publisher-facade": (
+            "services.tile_publisher",
+            "uv run pytest -q tests/test_orchestration_chain.py "
+            "tests/test_pipeline_logs_artifacts.py",
+        ),
+        "chain-worker-adapter-facade": (
+            "workers.canonical_converter.converter",
+            "uv run pytest -q tests/test_ifs_forecast_integration.py "
+            "tests/test_source_identity.py tests/test_warm_start_chaining.py "
+            "tests/test_orchestration_chain.py",
+        ),
+        "chain-persistence-repository-facade": (
+            "services.orchestrator.persistence",
+            "uv run pytest -q tests/test_gateway_reconcile.py "
+            "tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py",
+        ),
+    }
+
+    for command in (
+        "uv run pytest -q tests/test_entropy_audit_script.py",
+        "uv run pytest -q tests/test_orchestration_chain.py "
+        "tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py",
+        "openspec validate governance-8-module-deepening --strict --no-interactive",
+        "git diff --check",
+    ):
+        assert command in inventory_text
+
+    for group_id, (owner, command) in expected_metadata.items():
+        matches = [
+            line
+            for line in metadata_text.splitlines()
+            if (line.startswith("- ") or line.startswith("| "))
+            and f"`{group_id}`" in line
+            and "verification command" in line
+        ]
+        assert len(matches) == 1, f"expected one #721 metadata row for {group_id}"
+        line = matches[0]
+        normalized = line.casefold()
+        assert owner in line
+        assert command in line
         assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
@@ -1427,7 +1512,8 @@ def test_compatibility_facade_guard_reports_existing_sync_local_changed_to_forwa
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
         "unlisted_existing_local_chain_policy owner services.orchestrator.chain_manifests "
-        "retention forwarding facade until removal condition.",
+        "retention forwarding facade until removal condition; verification command: "
+        "`uv run pytest -q tests/test_orchestration_chain.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -1479,7 +1565,8 @@ def test_compatibility_facade_guard_reports_existing_async_local_changed_to_forw
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
         "unlisted_existing_async_local_chain_policy owner services.orchestrator.chain_manifests "
-        "retention async forwarding facade until removal condition.",
+        "retention async forwarding facade until removal condition; verification command: "
+        "`uv run pytest -q tests/test_orchestration_chain.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
