@@ -2675,7 +2675,7 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
     assert modules["apps/frontend"]["file_count"] == _expected_apps_frontend_file_count()
     assert _apps_frontend_baseline_counted_path_exists("apps/frontend/src/App.tsx")
-    assert modules["services/production_closure"]["file_count"] == 10
+    assert modules["services/production_closure"]["file_count"] == 11
     assert modules["services/slurm_gateway"]["file_count"] == 11
     for zero_count_module in (
         "docs/governance",
@@ -5150,6 +5150,38 @@ def test_active_doc_retired_path_tokens_remain_budget_counted(
     assert findings[0]["allowlist_state"] == "unallowlisted"
     assert findings[0]["budget_counted"] is True
     assert findings[0]["gate_eligible"] is False
+
+
+def test_slurm_gateway_retired_template_source_comment_is_allowlisted(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "services" / "slurm_gateway" / "config.py",
+        "`workers/sbatch_templates/` was retired from the active tree in #363.\n",
+    )
+    _write(
+        tmp_path / "docs" / "active.md",
+        "Current docs still mention workers/sbatch_templates.\n",
+    )
+
+    findings = {
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+    }
+
+    source_comment = findings["services/slurm_gateway/config.py"]
+    assert source_comment["allowlist_reason"] == "source comment documents retired Slurm template path"
+    assert source_comment["allowlist_key"] == (
+        "placeholder-path-token:source-comment-documents-retired-slurm-template-path"
+    )
+    assert source_comment["allowlist_state"] == "allowlisted"
+    assert source_comment["budget_counted"] is False
+    assert source_comment["gate_eligible"] is False
+
+    active_doc = findings["docs/active.md"]
+    assert active_doc["allowlist_reason"] is None
+    assert active_doc["allowlist_state"] == "unallowlisted"
+    assert active_doc["budget_counted"] is True
 
 
 def test_tracked_apps_web_file_emits_retired_path_return_finding(

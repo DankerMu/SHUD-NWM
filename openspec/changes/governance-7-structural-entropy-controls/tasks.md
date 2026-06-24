@@ -147,10 +147,16 @@
   has 40 active findings, 0 budget-counted, and 0 unallowlisted. Global
   `budget_counted_count` dropped from 229 to 224, and `baseline_written=false`
   in both audits.
-- [ ] 4.3 Clean `services/slurm_gateway/config.py` retired-path source/comment
+- [x] 4.3 Clean `services/slurm_gateway/config.py` retired-path source/comment
   drift without changing runtime template behavior.
   Evidence: source comment is audit-classified as retired/historical context;
-  focused entropy tests and relevant Slurm gateway config tests pass.
+  focused entropy tests and relevant Slurm gateway config tests pass. Before
+  cleanup `/tmp/entropy-677-before.json` had one
+  `services/slurm_gateway/config.py` placeholder-path finding, budget-counted
+  and unallowlisted; after cleanup `/tmp/entropy-677-after.json` has one
+  finding for the same source comment, allowlisted and not budget-counted.
+  Global `budget_counted_count` drops from 224 to 223, and
+  `baseline_written=false` in both audits.
 - [ ] 4.4 Re-run report-only entropy audit and record the active
   budget-counted delta.
   Evidence: non-archive budget-counted route/path findings decrease from 36, or

@@ -2728,7 +2728,7 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
         text = _read_repo_text(root, path)
         for line_no, line in _matching_lines(text, placeholder_patterns):
             token = next(token for token in placeholder_patterns if token in line)
-            allowlist = _placeholder_path_allowlist_reason(rel)
+            allowlist = _placeholder_path_allowlist_reason(rel, line, token)
             findings.append(
                 FindingSpec(
                     check_id="placeholder-path-token",
@@ -7556,7 +7556,7 @@ def _line_has_evidence_boundary_context(tokens: set[str]) -> bool:
     return "evidence" in tokens and "boundary" in tokens
 
 
-def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
+def _placeholder_path_allowlist_reason(relative_path: str, line: str = "", token: str = "") -> str | None:
     if relative_path == "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md":
         return "governance inventory documents retired placeholder paths"
     if relative_path.startswith("docs/archived/"):
@@ -7565,6 +7565,12 @@ def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
         return "governed completed OpenSpec evidence documents retired placeholder paths"
     if relative_path.startswith("openspec/changes/governance-5-e1-entropy-baseline-burndown/"):
         return "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
+    if (
+        relative_path == "services/slurm_gateway/config.py"
+        and token == "workers/sbatch_templates"
+        and "retired" in line.lower()
+    ):
+        return "source comment documents retired Slurm template path"
     return None
 
 
