@@ -275,12 +275,77 @@
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory group `execution-restart-cohort-wrappers`, or state that no
     execution/cohort facade surface changed and prove it with compatibility tests.
-- [ ] 1.7 Scheduler evidence-write and proof owner-family completion.
+- [x] 1.7 Scheduler evidence-write and proof owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_evidence` evidence schema/constants, pre-execution reservation, bounded payloads, runtime-root evidence, write safety, proof assembly wrappers.
   - Dependencies: 1.1 and 1.6.
   - Out of Scope: local cancellation orchestration glue and Slurm cancellation side effects.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `scheduler-evidence-write-compat`.
+  - Fixture Level: expanded; Repair Intensity: high, because this slice guards the pre-mutation evidence write fence,
+    bounded evidence serialization, approved runtime-root evidence, write-error blocker payloads, and legacy scheduler
+    proof helper paths without changing cancellation orchestration or Slurm side effects.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler._write_prelock_blocked_evidence`,
+    `_reserve_pre_execution_evidence`, `_scheduler_evidence_write_context`, `_base_evidence`, `_write_evidence`, and
+    legacy `services.orchestrator.scheduler` evidence helper imports stay stable); Legacy compatibility / examples
+    (old private scheduler evidence helper imports and monkeypatches keep working); Schema / columns / units / field
+    names (scheduler evidence schema/version constants, review contract, model-run evidence schema, `artifact_path`,
+    `evidence_pre_execution`, `resolved_runtime_roots`, `runtime_config`, execution write proof fields, and
+    `no_mutation_proof` stay equivalent); Config / project setup (`evidence_dir`, `workspace_root`,
+    `object_store_root`, `published_artifact_root`, `runtime_root`, `temp_root`, `require_runtime_roots`, service role,
+    and `MAX_EVIDENCE_BYTES` flow through the write context and root evidence exactly once); Auth / permissions /
+    secrets selected narrowly for approved-root and file-mode safety, not API auth; Filesystem / path safety (artifact
+    names reject traversal/absolute paths, final evidence no-clobber guard remains, evidence directory opens through
+    safe final-component and under-workspace checks); Concurrency / shared state / ordering selected narrowly for
+    prelock/pre-execution evidence ordering, no-clobber-before-mutation behavior, reservation status gating execution
+    proof, and unknown-after-attempt proof preservation, not for lease heartbeat, scheduler cohort concurrency, Slurm
+    cancellation ordering, or #719 cancellation/status retained-glue behavior; Resource limits / large input / discovery
+    (oversized evidence payloads are bounded without dropping required proof fields); Error handling / rollback / partial outputs
+    (`SchedulerEvidenceWriteError`, prelock write failure, pre-execution reservation blocks, and write-error payloads
+    remain stable before production mutation); Run manifest / QC provenance (runtime-root evidence, pre-execution proof,
+    execution write proof, and no-mutation proof stay bound to the current pass); Documentation / migration notes
+    (inventory group remains the owner/removal authority).
+    Not Selected: local cancellation orchestration glue, Slurm cancellation side effects, lease acquisition/heartbeat,
+    discovery/source-window selection, candidate construction/canonical readiness selection, execution/cohort grouping,
+    Slurm numerical runtime or submit behavior beyond proof field interpretation, public API route auth,
+    Release / packaging / dependency compatibility, Geospatial / CRS / basin geometry, Hydro-met numerical forcing
+    contents, PostGIS / TimescaleDB domain behavior, External hydro-met providers / snapshot reproducibility, frontend
+    display identity, and deletion of legacy scheduler evidence helper paths.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_evidence` owns evidence constants,
+    `SchedulerEvidenceWriteContext`, base evidence, prelock/pre-execution evidence writes, bounded payload fitting,
+    root/runtime evidence, evidence write blocker payloads, evidence directory/file guards, evidence status helpers, and
+    execution/no-mutation proof assembly helpers, while `services.orchestrator.scheduler` exposes only inventoried
+    evidence forwarding methods, wrappers, and constants. Source-of-truth identity/contract: scheduler-evidence owner
+    module plus inventory group `scheduler-evidence-write-compat`. Surfaces: Producers:
+    `services/orchestrator/scheduler_evidence.py`; Compatibility facade: `services/orchestrator/scheduler.py`;
+    Validators/preflight: production scheduler tests and compatibility-facade guard; Storage/cache/query: evidence
+    artifact path, pre-execution reservation artifact, final evidence no-clobber check, and runtime-root evidence;
+    Public routes/entrypoints: `ProductionScheduler._write_prelock_blocked_evidence`,
+    `_reserve_pre_execution_evidence`, `_scheduler_evidence_write_context`, `_base_evidence`, `_write_evidence`,
+    `_candidate_evidence_write_blocked_evidence`, `_cancel_candidate_evidence_write_blocked_evidence`,
+    `_sync_candidate_evidence_write_blocked_evidence`, `_evidence_reservation_blocked_payload`,
+    `_evidence_write_error_payload`, `_scheduler_resolved_runtime_roots`, `_root_evidence_item`,
+    `_scheduler_runtime_config_evidence`, `_open_evidence_directory`, `_write_new_regular_file`,
+    `_require_evidence_artifact_available`, `_bounded_evidence_payload`, `_evidence_status`, direct scheduler evidence
+    constants/classes, and execution/no-mutation proof wrappers that do not own local cancellation orchestration;
+    Failure paths/rollback/stale state: unsafe artifact names, unsafe/root path failure, final artifact already exists,
+    oversized payload, evidence write failure, reservation blocked, and prelock write skipped when evidence root is not
+    writable; Evidence/audit/readiness: scheduler compatibility inventory and focused production scheduler evidence.
+  - Regression Rows: scheduler facade evidence constants/classes match owner attributes and inventory group; forwarding
+    methods delegate to `SchedulerEvidenceWriteContext`, `base_evidence`, `write_prelock_blocked_evidence`,
+    `reserve_pre_execution_evidence`, and `write_evidence` while preserving scheduler-level monkeypatch inputs for
+    bounded payload, open/write/availability helpers, runtime-root evidence, and write-error payloads; oversized
+    evidence retains required proof fields and records the bounded reason; unsafe artifact names and final-artifact
+    collisions block writes before mutation; pre-execution reservation status controls execution/slurm proof protection;
+    execution write proof and no-mutation proof wrappers preserve unknown-after-attempt and absent-write semantics; apart
+    from the explicit reclassification of `_execution_write_proof`, `_execution_write_proof_from_evidence`, and
+    `_no_mutation_proof`, no cancellation local glue, lease, discovery, candidate-construction, execution/cohort, or
+    cancellation/status inventory groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `scheduler-evidence-write-compat`, or state that no
+    evidence-write facade surface changed and prove it with compatibility tests. This slice may reclassify exactly
+    `_execution_write_proof`, `_execution_write_proof_from_evidence`, and `_no_mutation_proof` from
+    `cancellation-status-proof-wrappers` into `scheduler-evidence-write-compat`; preserve all other
+    cancellation/status proof wrappers and local cancellation retained-glue classification for #719. Do not change local
+    cancellation orchestration glue, Slurm cancellation side effects, or #719 retained-glue ownership.
 - [ ] 1.8 Scheduler cancellation/status proof local-glue closure.
   - Module/Scope: cancellation/status/proof wrappers, local cancellation orchestration retained in `scheduler.py`, and explicit retained-glue classification.
   - Dependencies: 1.1 and 1.7.

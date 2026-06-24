@@ -571,7 +571,7 @@ DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
 # pass proceeds to the DB-host preflight.
 RECONCILE_DB_STATEMENT_TIMEOUT_MS = 10_000
 SCHEDULER_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.SCHEDULER_EVIDENCE_SCHEMA_VERSION
-MODEL_RUN_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.model_run_evidence.v1"
+MODEL_RUN_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.MODEL_RUN_EVIDENCE_SCHEMA_VERSION
 SCHEDULER_EVIDENCE_CONTRACT_ID = _scheduler_evidence.SCHEDULER_EVIDENCE_CONTRACT_ID
 SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = _scheduler_evidence.SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE
 SCHEDULER_EVIDENCE_GITHUB_ISSUE = _scheduler_evidence.SCHEDULER_EVIDENCE_GITHUB_ISSUE
@@ -6571,6 +6571,105 @@ def _bounded_evidence_payload(
 
 def _evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:
     return _scheduler_evidence.evidence_status(evidence, fallback)
+
+
+_SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES = MappingProxyType(
+    {
+        "MAX_EVIDENCE_BYTES": "MAX_EVIDENCE_BYTES",
+        "SCHEDULER_EVIDENCE_SCHEMA_VERSION": "SCHEDULER_EVIDENCE_SCHEMA_VERSION",
+        "SCHEDULER_EVIDENCE_CONTRACT_ID": "SCHEDULER_EVIDENCE_CONTRACT_ID",
+        "SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE": "SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE",
+        "SCHEDULER_EVIDENCE_GITHUB_ISSUE": "SCHEDULER_EVIDENCE_GITHUB_ISSUE",
+        "MODEL_RUN_EVIDENCE_SCHEMA_VERSION": "MODEL_RUN_EVIDENCE_SCHEMA_VERSION",
+        "UNKNOWN_AFTER_ATTEMPT": "UNKNOWN_AFTER_ATTEMPT",
+        "SchedulerEvidenceWriteError": "SchedulerEvidenceWriteError",
+    }
+)
+_SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES = tuple(_SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES)
+_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES = MappingProxyType(
+    {
+        "_write_prelock_blocked_evidence": "write_prelock_blocked_evidence",
+        "_reserve_pre_execution_evidence": "reserve_pre_execution_evidence",
+        "_scheduler_evidence_write_context": "SchedulerEvidenceWriteContext",
+        "_base_evidence": "base_evidence",
+        "_write_evidence": "write_evidence",
+    }
+)
+_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES = tuple(_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES)
+_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES = MappingProxyType(
+    {
+        "_candidate_evidence_write_blocked_evidence": "candidate_evidence_write_blocked_evidence",
+        "_cancel_candidate_evidence_write_blocked_evidence": "cancel_candidate_evidence_write_blocked_evidence",
+        "_sync_candidate_evidence_write_blocked_evidence": "sync_candidate_evidence_write_blocked_evidence",
+        "_evidence_reservation_blocked_payload": "evidence_reservation_blocked_payload",
+        "_evidence_write_error_payload": "evidence_write_error_payload",
+        "_scheduler_resolved_runtime_roots": "scheduler_resolved_runtime_roots",
+        "_root_evidence_item": "root_evidence_item",
+        "_scheduler_runtime_config_evidence": "scheduler_runtime_config_evidence",
+        "_open_evidence_directory": "open_evidence_directory",
+        "_write_new_regular_file": "write_new_regular_file",
+        "_require_evidence_artifact_available": "require_evidence_artifact_available",
+        "_bounded_evidence_payload": "bounded_evidence_payload",
+        "_evidence_status": "evidence_status",
+        "_execution_write_proof": "execution_write_proof",
+        "_execution_write_proof_from_evidence": "execution_write_proof_from_evidence",
+        "_no_mutation_proof": "no_mutation_proof",
+    }
+)
+_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES = tuple(_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES)
+_SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING = tuple(
+    owner_name
+    for owner_name in (
+        *_SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES.values(),
+        *_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES.values(),
+        *_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES.values(),
+    )
+    if not hasattr(_scheduler_evidence, owner_name)
+)
+_SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING = (
+    *tuple(name for name in _SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES if name not in globals()),
+    *tuple(name for name in _SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES if not hasattr(ProductionScheduler, name)),
+    *tuple(name for name in _SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES if name not in globals()),
+)
+if _SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "scheduler evidence compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING)}"
+    )
+if _SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler evidence compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING)}"
+    )
+_SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_evidence, owner_name)
+        for facade_name, owner_name in _SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES}
+)
+for _scheduler_evidence_direct_name, _scheduler_evidence_owner_value in (
+    _SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS.items()
+):
+    if _SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS[_scheduler_evidence_direct_name] is not (
+        _scheduler_evidence_owner_value
+    ):
+        raise RuntimeError(
+            "scheduler evidence direct alias drifted from owner module: "
+            f"{_scheduler_evidence_direct_name}"
+        )
+del _scheduler_evidence_direct_name, _scheduler_evidence_owner_value
+_SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_evidence, owner_name)
+        for facade_name, owner_name in _SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES}
+)
 
 
 def _now(config: ProductionSchedulerConfig) -> datetime:

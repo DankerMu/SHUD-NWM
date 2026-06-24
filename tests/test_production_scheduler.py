@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+from services.orchestrator import scheduler_evidence as scheduler_evidence_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
@@ -882,6 +884,426 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
             )
             == "cycle-gfs-forecast-model-a"
         )
+
+
+def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> None:
+    direct_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES
+    direct_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES
+    forwarder_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES
+    forwarder_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES
+    wrapper_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES
+    wrapper_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES
+
+    assert len(direct_names) == len(set(direct_names))
+    assert len(forwarder_names) == len(set(forwarder_names))
+    assert len(wrapper_names) == len(set(wrapper_names))
+    assert tuple(direct_owner_names) == direct_names
+    assert tuple(forwarder_owner_names) == forwarder_names
+    assert tuple(wrapper_owner_names) == wrapper_names
+    assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING == ()
+    assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING == ()
+    assert set(direct_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS)
+    assert set(direct_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS)
+
+    scheduler_source = Path(scheduler_module.__file__ or "").read_text(encoding="utf-8")
+    scheduler_tree = ast.parse(scheduler_source)
+    direct_assignments: dict[str, ast.expr] = {}
+    for node in scheduler_tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    direct_assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            direct_assignments[node.target.id] = node.value
+
+    for facade_name, owner_name in direct_owner_names.items():
+        assert hasattr(scheduler_evidence_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assignment = direct_assignments[facade_name]
+        assert isinstance(assignment, ast.Attribute)
+        assert isinstance(assignment.value, ast.Name)
+        assert assignment.value.id == "_scheduler_evidence"
+        assert assignment.attr == owner_name
+        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS[facade_name] is getattr(
+            scheduler_evidence_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_evidence_module, owner_name)
+    for method_name, owner_name in forwarder_owner_names.items():
+        assert hasattr(scheduler_evidence_module, owner_name)
+        assert hasattr(scheduler_module.ProductionScheduler, method_name)
+    for facade_name, owner_name in wrapper_owner_names.items():
+        assert hasattr(scheduler_evidence_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
+            scheduler_evidence_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES",
+        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING",
+        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING",
+        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS",
+        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS",
+        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS",
+        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS",
+    ):
+        assert token in inventory_text
+    for token in (*direct_names, *forwarder_names, *wrapper_names):
+        assert token in inventory_text
+
+
+def test_scheduler_evidence_compat_forwarders_delegate_to_owner_module(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    started_at = _dt("2026-05-21T12:00:00Z")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=started_at, dry_run=False),
+        registry=FakeRegistry([]),
+        adapters={},
+    )
+    pass_id = "scheduler_20260521120000_evidence_compat"
+    evidence = {"pass_id": pass_id, "status": "planned"}
+    root_preflight = {"checks": {"evidence_root": {"writable": True}}}
+    contexts: list[scheduler_evidence_module.SchedulerEvidenceWriteContext] = []
+
+    def fake_write_prelock_blocked_evidence(
+        context: scheduler_evidence_module.SchedulerEvidenceWriteContext,
+        pass_id_arg: str,
+        evidence_arg: dict[str, Any],
+        root_preflight_arg: Mapping[str, Any],
+        *,
+        write_evidence_callback: Any = None,
+    ) -> Path:
+        contexts.append(context)
+        assert pass_id_arg == pass_id
+        assert evidence_arg is evidence
+        assert root_preflight_arg is root_preflight
+        assert write_evidence_callback.__self__ is scheduler
+        assert write_evidence_callback.__func__ is scheduler._write_evidence.__func__
+        return tmp_path / "prelock.json"
+
+    def fake_reserve_pre_execution_evidence(
+        context: scheduler_evidence_module.SchedulerEvidenceWriteContext,
+        pass_id_arg: str,
+        started_at_arg: datetime,
+        candidate_count: int,
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        contexts.append(context)
+        assert pass_id_arg == pass_id
+        assert started_at_arg is started_at
+        assert candidate_count == 3
+        assert now is started_at
+        return {"status": "reserved"}
+
+    def fake_base_evidence(
+        config: Any,
+        pass_id_arg: str,
+        started_at_arg: datetime,
+        *,
+        resolved_runtime_roots: Any,
+        runtime_config_evidence: Any,
+    ) -> dict[str, Any]:
+        assert config is scheduler.config
+        assert pass_id_arg == pass_id
+        assert started_at_arg is started_at
+        assert resolved_runtime_roots is scheduler_module._scheduler_resolved_runtime_roots
+        assert runtime_config_evidence is scheduler_module._scheduler_runtime_config_evidence
+        return {"base": True}
+
+    def fake_write_evidence(
+        context: scheduler_evidence_module.SchedulerEvidenceWriteContext,
+        pass_id_arg: str,
+        evidence_arg: Mapping[str, Any],
+    ) -> Path:
+        contexts.append(context)
+        assert pass_id_arg == pass_id
+        assert evidence_arg is evidence
+        return tmp_path / "final.json"
+
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "write_prelock_blocked_evidence",
+        fake_write_prelock_blocked_evidence,
+    )
+    assert scheduler._write_prelock_blocked_evidence(pass_id, evidence, root_preflight) == tmp_path / "prelock.json"
+
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "reserve_pre_execution_evidence",
+        fake_reserve_pre_execution_evidence,
+    )
+    assert scheduler._reserve_pre_execution_evidence(pass_id, started_at, 3) == {"status": "reserved"}
+
+    monkeypatch.setattr(scheduler_evidence_module, "base_evidence", fake_base_evidence)
+    assert scheduler._base_evidence(pass_id, started_at) == {"base": True}
+
+    monkeypatch.setattr(scheduler_evidence_module, "write_evidence", fake_write_evidence)
+    assert scheduler._write_evidence(pass_id, evidence) == tmp_path / "final.json"
+
+    context = scheduler._scheduler_evidence_write_context()
+    assert isinstance(context, scheduler_evidence_module.SchedulerEvidenceWriteContext)
+    assert context.config is scheduler.config
+    assert context.max_evidence_bytes == scheduler_module.MAX_EVIDENCE_BYTES
+    assert context.bounded_evidence_payload is scheduler_module._bounded_evidence_payload
+    assert context.open_evidence_directory is scheduler_module._open_evidence_directory
+    assert context.evidence_write_error_payload is scheduler_module._evidence_write_error_payload
+    assert contexts
+    assert all(item.config is scheduler.config for item in contexts)
+
+
+def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    candidate = scheduler_module.SchedulerCandidate(
+        candidate_id="candidate-1",
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        cycle_time_utc=_dt("2026-05-21T06:00:00Z"),
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=2,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        resource_profile={},
+        display_capabilities={},
+        frequency_capabilities={},
+        horizon={},
+        scenario_id="forecast_gfs_deterministic",
+        run_id="fcst_gfs_2026052106_model_a",
+        forcing_version_id="forc_gfs_2026052106_model_a",
+        status="ready",
+    )
+    reservation = {"status": "reserved"}
+    written: list[tuple[str, str, int, Path]] = []
+    available: list[tuple[str, int, Path]] = []
+
+    def fake_candidate_evidence_write_blocked_evidence(
+        candidate_arg: Any,
+        reservation_arg: Mapping[str, Any],
+        *,
+        candidate_model_run_review_evidence: Any,
+        candidate_identity_evidence: Any,
+        standard_chain_shape: Sequence[str],
+        evidence_safe: Any,
+    ) -> dict[str, Any]:
+        assert candidate_arg is candidate
+        assert reservation_arg is reservation
+        assert candidate_model_run_review_evidence is scheduler_module._candidate_model_run_review_evidence
+        assert candidate_identity_evidence is scheduler_module._candidate_identity_evidence
+        assert standard_chain_shape == [stage.stage for stage in scheduler_module.ForecastOrchestrator.stages]
+        assert evidence_safe is scheduler_module._evidence_safe
+        return {"candidate_blocked": True}
+
+    def fake_cancel_candidate_evidence_write_blocked_evidence(
+        candidate_arg: Mapping[str, Any],
+        reservation_arg: Mapping[str, Any],
+        *,
+        ensure_utc: Any,
+        evidence_safe: Any,
+    ) -> dict[str, Any]:
+        assert candidate_arg == {"source_id": "gfs", "cycle_time_utc": "2026-05-21T06:00:00Z"}
+        assert reservation_arg is reservation
+        assert ensure_utc is scheduler_module._ensure_utc
+        assert evidence_safe is scheduler_module._evidence_safe
+        return {"cancel_blocked": True}
+
+    def fake_sync_candidate_evidence_write_blocked_evidence(
+        candidate_arg: Mapping[str, Any],
+        reservation_arg: Mapping[str, Any],
+        *,
+        standard_chain_shape: Sequence[str],
+        evidence_safe: Any,
+    ) -> dict[str, Any]:
+        assert candidate_arg == {"candidate_id": "candidate-1"}
+        assert reservation_arg is reservation
+        assert standard_chain_shape == [stage.stage for stage in scheduler_module.ForecastOrchestrator.stages]
+        assert evidence_safe is scheduler_module._evidence_safe
+        return {"sync_blocked": True}
+
+    def fake_evidence_reservation_blocked_payload(
+        *,
+        pass_id: str,
+        artifact_path: Path,
+        reason: str,
+        details: Mapping[str, Any] | None,
+        evidence_safe: Any,
+    ) -> dict[str, Any]:
+        assert pass_id == "pass-1"
+        assert artifact_path == tmp_path / "blocked.json"
+        assert reason == "blocked"
+        assert details == {"detail": True}
+        assert evidence_safe is scheduler_module._evidence_safe
+        return {"reservation_blocked": True}
+
+    def fake_write_new_regular_file(
+        artifact_name: str,
+        serialized: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        written.append((artifact_name, serialized, dir_fd, artifact_path))
+
+    def fake_require_evidence_artifact_available(
+        artifact_name: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        available.append((artifact_name, dir_fd, artifact_path))
+
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "candidate_evidence_write_blocked_evidence",
+        fake_candidate_evidence_write_blocked_evidence,
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "cancel_candidate_evidence_write_blocked_evidence",
+        fake_cancel_candidate_evidence_write_blocked_evidence,
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "sync_candidate_evidence_write_blocked_evidence",
+        fake_sync_candidate_evidence_write_blocked_evidence,
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "evidence_reservation_blocked_payload",
+        fake_evidence_reservation_blocked_payload,
+    )
+    monkeypatch.setattr(scheduler_evidence_module, "evidence_write_error_payload", lambda error: {"error": str(error)})
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "scheduler_resolved_runtime_roots",
+        lambda config: {"config": config},
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "root_evidence_item",
+        lambda value, *, env, required, fallback=None: {
+            "value": value,
+            "env": env,
+            "required": required,
+            "fallback": fallback,
+        },
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "scheduler_runtime_config_evidence",
+        lambda config: {"runtime_config": config},
+    )
+    monkeypatch.setattr(scheduler_evidence_module, "open_evidence_directory", lambda evidence_dir, workspace_root: 101)
+    monkeypatch.setattr(scheduler_evidence_module, "write_new_regular_file", fake_write_new_regular_file)
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "require_evidence_artifact_available",
+        fake_require_evidence_artifact_available,
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "bounded_evidence_payload",
+        lambda payload, *, reason, max_evidence_bytes: {
+            "payload": payload,
+            "reason": reason,
+            "max_evidence_bytes": max_evidence_bytes,
+        },
+    )
+    monkeypatch.setattr(scheduler_evidence_module, "evidence_status", lambda evidence, fallback: "owner-status")
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "execution_write_proof",
+        lambda *, reservation=None, execution_required=False, blocked=False: {
+            "reservation": reservation,
+            "execution_required": execution_required,
+            "blocked": blocked,
+        },
+    )
+    monkeypatch.setattr(
+        scheduler_evidence_module,
+        "execution_write_proof_from_evidence",
+        lambda execution_evidence, *, reservation: {
+            "execution_evidence": execution_evidence,
+            "reservation": reservation,
+        },
+    )
+    monkeypatch.setattr(scheduler_evidence_module, "no_mutation_proof", lambda: {"no_mutation": True})
+
+    assert scheduler_module._candidate_evidence_write_blocked_evidence(candidate, reservation) == {
+        "candidate_blocked": True
+    }
+    assert scheduler_module._cancel_candidate_evidence_write_blocked_evidence(
+        {"source_id": "gfs", "cycle_time_utc": "2026-05-21T06:00:00Z"},
+        reservation,
+    ) == {"cancel_blocked": True}
+    assert scheduler_module._sync_candidate_evidence_write_blocked_evidence(
+        {"candidate_id": "candidate-1"},
+        reservation,
+    ) == {"sync_blocked": True}
+    assert scheduler_module._evidence_reservation_blocked_payload(
+        pass_id="pass-1",
+        artifact_path=tmp_path / "blocked.json",
+        reason="blocked",
+        details={"detail": True},
+    ) == {"reservation_blocked": True}
+    assert scheduler_module._evidence_write_error_payload(OSError("boom")) == {"error": "boom"}
+    assert scheduler_module._scheduler_resolved_runtime_roots("config") == {"config": "config"}
+    assert scheduler_module._root_evidence_item("value", env="ENV", required=True, fallback="fallback") == {
+        "value": "value",
+        "env": "ENV",
+        "required": True,
+        "fallback": "fallback",
+    }
+    assert scheduler_module._scheduler_runtime_config_evidence("config") == {"runtime_config": "config"}
+    assert scheduler_module._open_evidence_directory(tmp_path / "evidence", tmp_path) == 101
+    scheduler_module._write_new_regular_file("artifact.json", "{}", dir_fd=7, artifact_path=tmp_path / "artifact.json")
+    assert written == [("artifact.json", "{}", 7, tmp_path / "artifact.json")]
+    scheduler_module._require_evidence_artifact_available(
+        "artifact.json",
+        dir_fd=7,
+        artifact_path=tmp_path / "artifact.json",
+    )
+    assert available == [("artifact.json", 7, tmp_path / "artifact.json")]
+    assert scheduler_module._bounded_evidence_payload({"a": 1}, reason="too_large", max_evidence_bytes=99) == {
+        "payload": {"a": 1},
+        "reason": "too_large",
+        "max_evidence_bytes": 99,
+    }
+    assert scheduler_module._evidence_status({}, "fallback") == "owner-status"
+    assert scheduler_module._execution_write_proof(reservation=reservation, execution_required=True) == {
+        "reservation": reservation,
+        "execution_required": True,
+        "blocked": False,
+    }
+    assert scheduler_module._execution_write_proof_from_evidence([{"submitted": True}], reservation=reservation) == {
+        "execution_evidence": [{"submitted": True}],
+        "reservation": reservation,
+    }
+    assert scheduler_module._no_mutation_proof() == {"no_mutation": True}
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
