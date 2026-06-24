@@ -6369,6 +6369,69 @@ def _require_evidence_artifact_available(
 
 _source_horizon_metadata = _scheduler_discovery.source_horizon_metadata
 
+_SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES = MappingProxyType(
+    {
+        "MAX_DISCOVERED_CYCLES": "MAX_DISCOVERED_CYCLES",
+        "SchedulerResourceLimitError": "SchedulerResourceLimitError",
+        "SchedulerSourceCycle": "SchedulerSourceCycle",
+        "_source_cycle_evidence": "_source_cycle_evidence",
+        "_source_cycle_status_candidate": "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason": "_source_cycle_not_selected_reason",
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE": "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE": "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        "_source_discovery_evidence_safe": "_source_discovery_evidence_safe",
+        "_source_secret_text_safe": "_source_secret_text_safe",
+        "_duplicate_cycle_evidence": "_duplicate_cycle_evidence",
+        "_backfill_deferred_evidence": "_backfill_deferred_evidence",
+        "_source_horizon_metadata": "source_horizon_metadata",
+    }
+)
+_SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES = tuple(_SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES)
+_SCHEDULER_DISCOVERY_COMPAT_FORWARDER_NAMES = (
+    "_discovery_context",
+    "_cycle_completion_status",
+    "_discover_cycles",
+    "_discover_source_window",
+)
+_SCHEDULER_DISCOVERY_COMPAT_OWNER_MISSING = tuple(
+    owner_name
+    for owner_name in _SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.values()
+    if not hasattr(_scheduler_discovery, owner_name)
+)
+_SCHEDULER_DISCOVERY_COMPAT_FACADE_MISSING = tuple(
+    name for name in _SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES if name not in globals()
+)
+if _SCHEDULER_DISCOVERY_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "scheduler discovery compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_DISCOVERY_COMPAT_OWNER_MISSING)}"
+    )
+if _SCHEDULER_DISCOVERY_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler discovery compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_DISCOVERY_COMPAT_FACADE_MISSING)}"
+    )
+_SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_discovery, owner_name)
+        for facade_name, owner_name in _SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES}
+)
+for _scheduler_discovery_facade_name, _scheduler_discovery_owner_value in (
+    _SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES.items()
+):
+    if _SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES[_scheduler_discovery_facade_name] is not (
+        _scheduler_discovery_owner_value
+    ):
+        raise RuntimeError(
+            "scheduler discovery direct alias drifted from owner module: "
+            f"{_scheduler_discovery_facade_name}"
+        )
+del _scheduler_discovery_facade_name, _scheduler_discovery_owner_value
+
 
 _source_forecast_hours = _scheduler_candidates._source_forecast_hours
 _source_policy_identity = _scheduler_candidates._source_policy_identity
