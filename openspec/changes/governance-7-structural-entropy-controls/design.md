@@ -920,9 +920,10 @@ Selected report input:
 Current authority mapping for selected families:
 
 - Slurm template archive: current authority is
-  `services/slurm_gateway/config.py`, `infra/sbatch/**`, and
-  `docs/archived/legacy-slurm-templates.md` own active replacement table,
-  with role/topology context from `docs/runbooks/two-node-deployment-overview.md`.
+  `services/slurm_gateway/config.py` and `infra/sbatch/**`, with
+  role/topology context from `docs/runbooks/two-node-deployment-overview.md`.
+  The archive's replacement table remains retained migration evidence, not
+  current authority.
 - Governance-2 retired path/dead-code archive: current authority is
   `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`,
   `openspec/specs/legacy-dead-code-retirement/spec.md`, and
@@ -930,6 +931,9 @@ Current authority mapping for selected families:
 - M26 display-route archive: current authority is
   `openspec/specs/single-map-shell-routing/spec.md`,
   `openspec/specs/legacy-display-page-retirement/spec.md`,
+  `openspec/specs/inplace-overview-basin-detail/spec.md`,
+  `openspec/specs/map-feature-popups/spec.md`,
+  `openspec/specs/met-station-cluster-layer/spec.md`,
   `docs/runbooks/display-readonly-live-mvt.md`, and
   `docs/runbooks/two-node-deployment-overview.md`.
 
