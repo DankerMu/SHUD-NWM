@@ -330,6 +330,9 @@ def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata
         normalized = line.casefold()
         assert owner in line
         assert command in line
+        if group_id == "cancellation-status-proof-wrappers":
+            assert "_slurm_status_sync_failed_evidence" in line
+            assert "services.orchestrator.scheduler_candidates" in line
         assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)

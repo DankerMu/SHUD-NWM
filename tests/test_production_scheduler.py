@@ -1306,6 +1306,198 @@ def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
     assert scheduler_module._no_mutation_proof() == {"no_mutation": True}
 
 
+def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inventory() -> None:
+    wrapper_owner_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES
+    wrapper_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES
+    candidate_alias_owner_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES
+    candidate_alias_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES
+    retained_method_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES
+    retained_function_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES
+
+    assert len(wrapper_names) == len(set(wrapper_names))
+    assert len(candidate_alias_names) == len(set(candidate_alias_names))
+    assert len(retained_method_names) == len(set(retained_method_names))
+    assert len(retained_function_names) == len(set(retained_function_names))
+    assert tuple(wrapper_owner_names) == wrapper_names
+    assert tuple(candidate_alias_owner_names) == candidate_alias_names
+    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING == ()
+    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING == ()
+    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP == ()
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS)
+    assert set(candidate_alias_names) == set(
+        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES
+    )
+    assert set(candidate_alias_names) == set(
+        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES
+    )
+
+    for facade_name, owner_name in wrapper_owner_names.items():
+        assert hasattr(scheduler_evidence_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
+            scheduler_evidence_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+    for facade_name, owner_name in candidate_alias_owner_names.items():
+        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES[facade_name] == owner_name
+        assert hasattr(scheduler_candidates_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES[
+            facade_name
+        ] is getattr(scheduler_candidates_module, owner_name)
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[
+            facade_name
+        ] is getattr(scheduler_module, facade_name)
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_candidates_module, owner_name)
+    for method_name in retained_method_names:
+        assert hasattr(scheduler_module.ProductionScheduler, method_name)
+        assert method_name not in wrapper_names
+        assert method_name not in candidate_alias_names
+    for function_name in retained_function_names:
+        assert hasattr(scheduler_module, function_name)
+        assert function_name not in wrapper_names
+        assert function_name not in candidate_alias_names
+    for evidence_write_name in (
+        "_execution_write_proof",
+        "_execution_write_proof_from_evidence",
+        "_no_mutation_proof",
+    ):
+        assert evidence_write_name not in wrapper_names
+        assert evidence_write_name not in candidate_alias_names
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES",
+        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES",
+    ):
+        assert token in inventory_text
+    for token in (*wrapper_names, *candidate_alias_names, *retained_method_names, *retained_function_names):
+        assert token in inventory_text
+
+
+def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_owner(owner_name: str) -> Any:
+        def fake(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            calls.append({"owner": owner_name, "args": args, "kwargs": kwargs})
+            return {"owner": owner_name, "args": args, "kwargs": kwargs}
+
+        return fake
+
+    for owner_name in scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values():
+        monkeypatch.setattr(scheduler_evidence_module, owner_name, fake_owner(owner_name))
+
+    cancellation_evidence = [{"status": "cancelled", "cancelled_jobs": []}]
+    sync_evidence = [{"status": "synced", "updates": []}]
+    reservation = {"status": "reserved"}
+    proof = {"mutation_occurred": True}
+    execution_write_proof = {"slurm_submit_called": False}
+    slurm_status_sync_proof = {"mutation_occurred": False}
+    slurm_cancellation_proof = {"mutation_occurred": True}
+
+    assert scheduler_module._scheduler_pass_status_from_cancellation(cancellation_evidence)["owner"] == (
+        "scheduler_pass_status_from_cancellation"
+    )
+    assert calls[-1]["args"] == (cancellation_evidence,)
+    assert scheduler_module._scheduler_execution_boundary_from_cancellation(cancellation_evidence)["owner"] == (
+        "scheduler_execution_boundary_from_cancellation"
+    )
+    assert calls[-1]["args"] == (cancellation_evidence,)
+    assert scheduler_module._slurm_status_sync_proof(sync_required=True, reservation=reservation)["owner"] == (
+        "slurm_status_sync_proof"
+    )
+    assert calls[-1]["kwargs"] == {"sync_required": True, "reservation": reservation, "blocked": False}
+    assert scheduler_module._slurm_status_sync_proof_from_candidates(
+        sync_evidence,
+        reservation=reservation,
+    )["owner"] == "slurm_status_sync_proof_from_candidates"
+    assert calls[-1]["args"] == (sync_evidence,)
+    assert calls[-1]["kwargs"] == {"reservation": reservation}
+    assert scheduler_module._slurm_cancellation_proof(
+        cancellation_required=True,
+        reservation=reservation,
+    )["owner"] == "slurm_cancellation_proof"
+    assert calls[-1]["kwargs"] == {"cancellation_required": True, "reservation": reservation, "blocked": False}
+    assert scheduler_module._slurm_cancellation_proof_from_evidence(
+        cancellation_evidence,
+        reservation=reservation,
+    )["owner"] == "slurm_cancellation_proof_from_evidence"
+    assert calls[-1]["args"] == (cancellation_evidence,)
+    assert calls[-1]["kwargs"] == {"reservation": reservation}
+    assert scheduler_module._slurm_status_sync_count(proof)["owner"] == "slurm_status_sync_count"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._slurm_status_sync_unknown_count(proof)["owner"] == "slurm_status_sync_unknown_count"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._slurm_status_sync_mutated(proof)["owner"] == "slurm_status_sync_mutated"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._slurm_status_sync_failed(proof)["owner"] == "slurm_status_sync_failed"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._slurm_cancelled_count(cancellation_evidence)["owner"] == "slurm_cancelled_count"
+    assert calls[-1]["args"] == (cancellation_evidence,)
+    assert scheduler_module._slurm_cancellation_blocked_count(cancellation_evidence)["owner"] == (
+        "slurm_cancellation_blocked_count"
+    )
+    assert calls[-1]["args"] == (cancellation_evidence,)
+    assert scheduler_module._slurm_cancellation_unknown_count(proof)["owner"] == "slurm_cancellation_unknown_count"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._scheduler_mutation_proof(
+        execution_write_proof=execution_write_proof,
+        slurm_status_sync_proof=slurm_status_sync_proof,
+        slurm_cancellation_proof=slurm_cancellation_proof,
+    )["owner"] == "scheduler_mutation_proof"
+    assert calls[-1]["kwargs"] == {
+        "execution_write_proof": execution_write_proof,
+        "slurm_status_sync_proof": slurm_status_sync_proof,
+        "slurm_cancellation_proof": slurm_cancellation_proof,
+    }
+    assert scheduler_module._proof_mutation_value(proof)["owner"] == "proof_mutation_value"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._named_proof_value(proof, "pipeline_status_writes", "absent")["owner"] == (
+        "named_proof_value"
+    )
+    assert calls[-1]["args"] == (proof, "pipeline_status_writes", "absent")
+    assert scheduler_module._slurm_submit_proof_value(proof)["owner"] == "slurm_submit_proof_value"
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._pipeline_status_write_proof_value(proof)["owner"] == (
+        "pipeline_status_write_proof_value"
+    )
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._pipeline_event_write_proof_value(proof)["owner"] == (
+        "pipeline_event_write_proof_value"
+    )
+    assert calls[-1]["args"] == (proof,)
+    assert scheduler_module._merge_proof_values(False, True, scheduler_module.UNKNOWN_AFTER_ATTEMPT)["owner"] == (
+        "merge_proof_values"
+    )
+    assert calls[-1]["args"] == (False, True, scheduler_module.UNKNOWN_AFTER_ATTEMPT)
+    assert scheduler_module._positive_count(2)["owner"] == "positive_count"
+    assert calls[-1]["args"] == (2,)
+    assert scheduler_module._empty_counts()["owner"] == "empty_counts"
+    assert calls[-1]["args"] == ()
+    assert set(call["owner"] for call in calls) == set(
+        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values()
+    )
+
+
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
     model = scheduler_module.RegisteredSchedulerModel(
         model_id="basins_heihe_shud",

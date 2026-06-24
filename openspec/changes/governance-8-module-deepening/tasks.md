@@ -346,12 +346,69 @@
     `cancellation-status-proof-wrappers` into `scheduler-evidence-write-compat`; preserve all other
     cancellation/status proof wrappers and local cancellation retained-glue classification for #719. Do not change local
     cancellation orchestration glue, Slurm cancellation side effects, or #719 retained-glue ownership.
-- [ ] 1.8 Scheduler cancellation/status proof local-glue closure.
+- [x] 1.8 Scheduler cancellation/status proof local-glue closure.
   - Module/Scope: cancellation/status/proof wrappers, local cancellation orchestration retained in `scheduler.py`, and explicit retained-glue classification.
   - Dependencies: 1.1 and 1.7.
   - Out of Scope: extracting cancellation orchestration unless the issue proves equivalent cancellation, status-sync, mutation-proof, and lease-lost evidence behavior.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `cancellation-status-proof-wrappers`.
+  - Fixture Level: expanded; Repair Intensity: high, because this slice closes the remaining scheduler cancellation /
+    status proof compatibility surface while deliberately documenting local cancellation orchestration as retained glue.
+    It must prove owner-module delegation for proof/status helpers without converting live Slurm cancellation control
+    flow into a shallow forwarding layer.
+  - Selected Risk Packs: Public API / CLI / script entry (legacy `services.orchestrator.scheduler` private proof helper
+    imports and `ProductionScheduler.run_once` evidence fields stay stable); Legacy compatibility / examples (old
+    monkeypatch/import paths for cancellation/status/proof helpers remain inventoried); Schema / columns / units / field
+    names (`status`, `execution_boundary`, `counts`, `slurm_status_sync_proof`, `slurm_cancellation_proof`,
+    `no_mutation_proof`, `pipeline_status_writes`, `pipeline_event_writes`, `unknown_after_attempt`, and cancellation
+    evidence item fields remain equivalent); Concurrency / shared state / ordering selected narrowly for preserving
+    pre-execution evidence protection before status sync or cancellation mutation and for preserving unknown-after-attempt
+    conservative proof aggregation, not for lease heartbeat or execution cohort concurrency; Error handling / rollback /
+    partial outputs (`SLURM_CANCEL_UNSUPPORTED`, `SLURM_CANCEL_FAILED`, `SLURM_CANCELLATION_GAP`,
+    `JOB_ALREADY_TERMINAL`, status-sync failures, and lease-lost evidence keep current status/proof semantics);
+    Run manifest / QC provenance (mutation proof aggregation and no-mutation proof remain tied to current pass evidence);
+    Documentation / migration notes (inventory records owner wrappers and retained local glue separately).
+    Not Selected: extracting `ProductionScheduler._cancel_requested_active_slurm`, `_cancel_orchestrator_for`,
+    `_scheduler_cancellation_status`, `_cancelled_job_pipeline_status_write`, `_cancelled_job_pipeline_event_write`, or
+    `_execution_mutation_value`; changing Slurm cancellation side effects, replacing active Slurm job queries, changing
+    retry/orchestrator construction, changing candidate discovery/construction/execution/cohorting, changing evidence
+    file write safety, changing lease acquisition/heartbeat, changing DB schema or API routes, changing SHUD numerical
+    runtime behavior, changing frontend/display surfaces, or deleting legacy scheduler helper paths.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_evidence` owns cancellation/status proof
+    assembly and proof-value helpers, `services.orchestrator.scheduler_candidates` owns `_slurm_status_sync_failed_evidence`,
+    and `services.orchestrator.scheduler` retains local cancellation orchestration glue until a separate extraction proves
+    full equivalence. Source-of-truth identity/contract: scheduler-evidence owner module, scheduler-candidates status-sync
+    failure helper, local retained-glue list, and inventory group `cancellation-status-proof-wrappers`. Surfaces:
+    Producers: `services/orchestrator/scheduler_evidence.py` and `services/orchestrator/scheduler_candidates.py`;
+    Compatibility facade: `services/orchestrator/scheduler.py`; Validators/preflight: production scheduler tests,
+    compatibility-facade guard, and entropy inventory guard; Storage/cache/query: final scheduler evidence and
+    pre-execution proof; Public routes/entrypoints: `_scheduler_pass_status_from_cancellation`,
+    `_scheduler_execution_boundary_from_cancellation`, `_slurm_status_sync_proof`,
+    `_slurm_status_sync_proof_from_candidates`, `_slurm_cancellation_proof`, `_slurm_cancellation_proof_from_evidence`,
+    `_slurm_status_sync_count`, `_slurm_status_sync_unknown_count`, `_slurm_status_sync_mutated`,
+    `_slurm_status_sync_failed`, `_slurm_cancelled_count`, `_slurm_cancellation_blocked_count`,
+    `_slurm_cancellation_unknown_count`, `_scheduler_mutation_proof`, `_proof_mutation_value`, `_named_proof_value`,
+    `_slurm_submit_proof_value`, `_pipeline_status_write_proof_value`, `_pipeline_event_write_proof_value`,
+    `_merge_proof_values`, `_positive_count`, `_empty_counts`, and `_slurm_status_sync_failed_evidence`; retained local
+    glue: `ProductionScheduler._cancel_requested_active_slurm`, `_cancel_orchestrator_for`,
+    `_scheduler_cancellation_status`, `_cancelled_job_pipeline_status_write`,
+    `_cancelled_job_pipeline_event_write`, and `_execution_mutation_value`. Failure paths/rollback/stale state:
+    unsupported cancellation, cancellation exception after attempt, partial cancellation, already-terminal job gap,
+    status-sync failure after attempt, preflight-blocked reservation, and lease-lost no-mutation evidence.
+    Evidence/audit/readiness: scheduler compatibility inventory and focused production scheduler evidence.
+  - Regression Rows: scheduler facade cancellation/status proof wrapper names match owner attributes and inventory group;
+    `_slurm_status_sync_failed_evidence` remains mapped to `scheduler_candidates`; wrappers delegate to
+    `scheduler_evidence` or `scheduler_candidates` after owner monkeypatches; local retained glue remains present in
+    `scheduler.py`, is not in the pure wrapper owner map, and is explicitly inventoried with retention reason/removal
+    condition; cancellation proof preserves cancelled/partial/blocked/unknown counts, pipeline status/event write
+    aggregation, `JOB_ALREADY_TERMINAL` event-write semantics, and `unknown_after_attempt`; status-sync proof preserves
+    terminal update counts, failed-sync conservative mutation outcome, and pre-execution protection; no-mutation proof
+    preserves submit/status-sync/cancellation/pipeline write fields; no scheduler state, lease, discovery, candidate,
+    execution/cohort, evidence-write/file-safety, chain, API, frontend, or topology groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `cancellation-status-proof-wrappers` with explicit
+    wrapper-owner names and retained local-glue classification. Do not move local cancellation orchestration glue unless
+    equivalent cancellation, status-sync, mutation-proof, and lease-lost behavior is proved in this issue; if not moved,
+    inventory must say why it remains local and when it can be removed or extracted.
 - [ ] 1.9 Scheduler group verification and evidence closeout.
   - Module/Scope: integration gate for scheduler group.
   - Dependencies: 1.1-1.8.
