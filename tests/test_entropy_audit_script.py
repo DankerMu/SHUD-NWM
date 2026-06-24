@@ -74,6 +74,20 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     assert isinstance(thresholds, dict)
     assert thresholds["yellow_zone_min_physical_lines"] == 500
     assert thresholds["mandatory_governance_over_physical_lines"] == 1000
+    compatibility_guard = metadata["compatibility_facade_guard"]
+    assert isinstance(compatibility_guard, dict)
+    assert (
+        compatibility_guard["schema_version"]
+        == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_SCHEMA_VERSION
+    )
+    assert compatibility_guard["mode"] == "report-only"
+    assert {
+        "comparison_base_ref",
+        "governed_facade_count",
+        "signal_count",
+        "facades",
+        "signals",
+    } <= set(compatibility_guard)
     assert metadata["max_scanned_text_file_bytes"] == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
     assert metadata["max_artifact_fingerprint_bytes"] == audit_repo_entropy.MAX_ARTIFACT_FINGERPRINT_BYTES
     assert ".venv" in metadata["skipped_path_families"]
@@ -92,6 +106,7 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "slurm-gateway-route-leakage",
         "agent-artifact-ownership-policy",
         "apps-api-layer-inversion",
+        "compatibility-facade-growth",
     } <= set(metadata["executed_check_families"])
 
     heatmap = report["module_heatmap"]
@@ -218,10 +233,23 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
     assert "- Baseline path: `.entropy-baseline/latest.json`" in result.stdout
     assert "- Baseline written: `false`" in result.stdout
     assert "## Structural File Budget" in result.stdout
+    assert "## Compatibility Facade Guard" in result.stdout
     assert "## Entropy Heatmap" in result.stdout
     assert "## High-Spread Patterns" in result.stdout
     assert "## Prioritized Cleanup Targets" in result.stdout
     assert _entropy_baseline_snapshot() == before
+
+
+def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    guard = metadata["compatibility_facade_guard"]
+    assert isinstance(guard, dict)
+
+    assert guard["signal_count"] == 0
+    assert guard["signals"] == []
+    assert _findings_by_check(REPO_ROOT, audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID) == []
 
 
 def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseable_stdout() -> None:
@@ -413,10 +441,852 @@ def test_structural_file_budget_markdown_keeps_existing_report_sections(tmp_path
     markdown = audit_repo_entropy.render_markdown(report)
 
     assert "## Structural File Budget" in markdown
+    assert "## Compatibility Facade Guard" in markdown
     assert "## Entropy Heatmap" in markdown
     assert "## High-Spread Patterns" in markdown
     assert "## Prioritized Cleanup Targets" in markdown
     assert markdown.index("## Structural File Budget") < markdown.index("## Entropy Heatmap")
+    assert markdown.index("## Compatibility Facade Guard") < markdown.index("## Entropy Heatmap")
+
+
+def test_compatibility_facade_guard_reports_scheduler_owner_alias_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "NewSchedulerAlias = _scheduler_state.NewSchedulerAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/scheduler.py"
+    assert signals[0]["inventory_tokens"] == ["NewSchedulerAlias"]
+    assert "NewSchedulerAlias" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "NewSchedulerAlias owner services.orchestrator.scheduler_state retention removal-condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "MetadataRequiredSchedulerAlias = _scheduler_state.MetadataRequiredSchedulerAlias\n",
+    )
+
+    message_key = "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "- MetadataRequiredSchedulerAlias",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
+        "retention removal-condition.",
+    )
+
+    assert _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport") == []
+
+
+def test_compatibility_facade_guard_reports_scheduler_annotated_owner_alias_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "AnnotatedAlias: object = _scheduler_state.AnnotatedAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/scheduler.py"
+    assert signals[0]["inventory_tokens"] == ["AnnotatedAlias"]
+    assert (
+        signals[0]["detail"]
+        == "new owner-module alias `AnnotatedAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.AnnotatedAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "AnnotatedAlias owner services.orchestrator.scheduler_state retention removal-condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_scheduler_full_module_dotted_aliases_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "\n"
+        + "import services.orchestrator.scheduler_state\n"
+        + "DottedAlias = services.orchestrator.scheduler_state.DottedAlias\n"
+        + "DottedAnnotatedAlias: object = "
+        + "services.orchestrator.scheduler_state.DottedAnnotatedAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    ]
+    assert [signal["inventory_tokens"] for signal in signals] == [
+        ["DottedAlias"],
+        ["DottedAnnotatedAlias"],
+    ]
+    assert (
+        signals[0]["detail"]
+        == "new owner-module alias `DottedAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.DottedAlias`"
+    )
+    assert (
+        signals[1]["detail"]
+        == "new owner-module alias `DottedAnnotatedAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.DottedAnnotatedAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "DottedAlias and DottedAnnotatedAlias owner module aliases retain with removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_classifies_full_module_dotted_call_as_forwarding(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "\n"
+        + "import services.orchestrator.scheduler_state\n"
+        + "def dotted_scheduler_forwarder(value: object) -> object:\n"
+        + "    return services.orchestrator.scheduler_state.dotted_scheduler_forwarder(value)\n",
+    )
+
+    forwarding_signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    non_forwarding_signals = _compatibility_facade_signals(
+        tmp_path,
+        base_ref,
+        "new-non-forwarding-implementation",
+    )
+
+    assert [signal["inventory_tokens"] for signal in forwarding_signals] == [
+        ["dotted_scheduler_forwarder", "dotted_scheduler_forwarder"]
+    ]
+    assert "new forwarding facade path" in str(forwarding_signals[0]["detail"])
+    assert non_forwarding_signals == []
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "dotted_scheduler_forwarder owner module services.orchestrator.scheduler_state "
+        "retains forwarding facade path until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_same_rhs_multi_target_aliases_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "SameRhsAlias = SameRhsAliasCompat = _scheduler_state.SameRhsAlias\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    signals_by_token = {tuple(signal["inventory_tokens"]): signal for signal in signals}
+    assert set(signals_by_token) == {
+        ("SameRhsAlias",),
+        ("SameRhsAliasCompat",),
+    }
+    assert (
+        signals_by_token[("SameRhsAlias",)]["detail"]
+        == "new owner-module alias `SameRhsAlias` forwarding to "
+        "`services.orchestrator.scheduler_state.SameRhsAlias`"
+    )
+    assert (
+        signals_by_token[("SameRhsAliasCompat",)]["detail"]
+        == "new owner-module alias `SameRhsAliasCompat` forwarding to "
+        "`services.orchestrator.scheduler_state.SameRhsAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "SameRhsAlias and SameRhsAliasCompat share owner module aliases with "
+        "retention and removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("opening", "closing", "name_prefix"),
+    [
+        ("(", ")", "Tuple"),
+        ("[", "]", "List"),
+    ],
+)
+def test_compatibility_facade_guard_reports_sequence_owner_aliases_until_inventory_updates(
+    tmp_path: Path,
+    opening: str,
+    closing: str,
+    name_prefix: str,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + (
+            f"{opening}{name_prefix}Alias, {name_prefix}OtherAlias{closing} = "
+            f"{opening}_scheduler_state.{name_prefix}Alias, "
+            f"_scheduler_state.{name_prefix}OtherAlias{closing}\n"
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["inventory_tokens"] for signal in signals] == [
+        [f"{name_prefix}Alias"],
+        [f"{name_prefix}OtherAlias"],
+    ]
+    assert (
+        signals[0]["detail"]
+        == f"new owner-module alias `{name_prefix}Alias` forwarding to "
+        f"`services.orchestrator.scheduler_state.{name_prefix}Alias`"
+    )
+    assert (
+        signals[1]["detail"]
+        == f"new owner-module alias `{name_prefix}OtherAlias` forwarding to "
+        f"`services.orchestrator.scheduler_state.{name_prefix}OtherAlias`"
+    )
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        f"{name_prefix}Alias and {name_prefix}OtherAlias sequence owner module aliases "
+        "retain with removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_scheduler_imported_symbol(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "from services.orchestrator.scheduler_state import NewImportedSchedulerSymbol\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == ["NewImportedSchedulerSymbol"]
+    assert "new imported facade symbol" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+
+def test_compatibility_facade_guard_ignores_inventory_token_outside_guard_hook(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "from services.orchestrator.persistence import PipelineEvent\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == ["PipelineEvent"]
+    assert "PipelineEvent" in str(signals[0]["detail"])
+
+
+def test_compatibility_facade_guard_reports_scheduler_monkeypatch_alias(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
+    _write(
+        scheduler_path,
+        scheduler_path.read_text(encoding="utf-8")
+        + "_new_scheduler_patch = _scheduler_state._new_scheduler_patch\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-monkeypatch-alias.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == ["_new_scheduler_patch"]
+    assert "new owner-module alias" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-monkeypatch-alias.inventory-required",
+    )
+
+
+def test_compatibility_facade_guard_reports_chain_non_forwarding_implementation_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "\n"
+        + "def new_chain_policy(value: object) -> dict[str, str]:\n"
+        + "    normalized = str(value).strip()\n"
+        + "    return {\"value\": normalized}\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == ["new_chain_policy", "new_chain_policy"]
+    assert "new_chain_policy" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "new_chain_policy owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_follow_up_issue_semantics_requires_concrete_issue_ref() -> None:
+    assert not audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue #999; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue /issues/999; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; issues/999 follow-up removal condition."
+    )
+
+
+def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "\n"
+        + "def metadata_required_chain_policy(value: object) -> dict[str, str]:\n"
+        + "    normalized = str(value).strip()\n"
+        + "    return {\"value\": normalized}\n",
+    )
+
+    message_key = "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy local removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy follow-up issue #999 removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host local glue; "
+        "follow-up issue; removal condition after owner extraction.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
+    )
+
+    assert _compatibility_facade_signals(
+        tmp_path,
+        base_ref,
+        "new-non-forwarding-implementation",
+    ) == []
+
+
+def test_compatibility_facade_guard_reports_async_non_forwarding_implementation(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "\n"
+        + "async def new_async_chain_policy(value: object) -> dict[str, str]:\n"
+        + "    normalized = str(value).strip()\n"
+        + "    return {\"value\": normalized}\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == ["new_async_chain_policy", "new_async_chain_policy"]
+    assert "new_async_chain_policy" in str(signals[0]["detail"])
+
+
+def test_compatibility_facade_guard_reports_existing_sync_local_changed_to_forwarder_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    local_function = (
+        "\n"
+        "def unlisted_existing_local_chain_policy(value: object) -> dict[str, str]:\n"
+        "    normalized = str(value).strip()\n"
+        "    return {\"value\": normalized}\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
+    _commit_all(tmp_path, "add unlisted existing local chain policy")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            local_function,
+            "\n"
+            "def unlisted_existing_local_chain_policy(value: object) -> object:\n"
+            "    return chain_manifests.unlisted_existing_local_chain_policy(value)\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_local_chain_policy",
+        "unlisted_existing_local_chain_policy",
+    ]
+    assert signals[0]["line"] is not None
+    assert "changed to forwarding facade path" in str(signals[0]["detail"])
+    assert "unlisted_existing_local_chain_policy" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_local_chain_policy owner services.orchestrator.chain_manifests "
+        "retention forwarding facade until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_existing_async_local_changed_to_forwarder_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    local_function = (
+        "\n"
+        "async def unlisted_existing_async_local_chain_policy(value: object) -> dict[str, str]:\n"
+        "    normalized = str(value).strip()\n"
+        "    return {\"value\": normalized}\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
+    _commit_all(tmp_path, "add unlisted existing async local chain policy")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            local_function,
+            "\n"
+            "async def unlisted_existing_async_local_chain_policy(value: object) -> object:\n"
+            "    return await chain_manifests.unlisted_existing_async_local_chain_policy(value)\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_async_local_chain_policy",
+        "unlisted_existing_async_local_chain_policy",
+    ]
+    assert signals[0]["line"] is not None
+    assert "changed to forwarding facade path" in str(signals[0]["detail"])
+    assert "unlisted_existing_async_local_chain_policy" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_async_local_chain_policy owner services.orchestrator.chain_manifests "
+        "retention async forwarding facade until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_existing_sync_forwarder_changed_to_non_forwarding_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    forwarding_function = (
+        "\n"
+        "def unlisted_existing_chain_forwarder(value: object) -> object:\n"
+        "    return chain_manifests.unlisted_existing_chain_forwarder(value)\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + forwarding_function)
+    _commit_all(tmp_path, "add unlisted existing chain forwarding facade")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            forwarding_function,
+            "\n"
+            "def unlisted_existing_chain_forwarder(value: object) -> dict[str, str]:\n"
+            "    normalized = str(value).strip()\n"
+            "    return {\"value\": normalized}\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_chain_forwarder",
+        "unlisted_existing_chain_forwarder",
+    ]
+    assert "changed to non-forwarding facade implementation" in str(signals[0]["detail"])
+    assert "unlisted_existing_chain_forwarder" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_chain_forwarder owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_existing_async_forwarder_changed_to_non_forwarding_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    forwarding_function = (
+        "\n"
+        "async def unlisted_existing_async_chain_forwarder(value: object) -> object:\n"
+        "    return await chain_manifests.unlisted_existing_async_chain_forwarder(value)\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + forwarding_function)
+    _commit_all(tmp_path, "add unlisted existing async chain forwarding facade")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            forwarding_function,
+            "\n"
+            "async def unlisted_existing_async_chain_forwarder(value: object) -> dict[str, str]:\n"
+            "    normalized = str(value).strip()\n"
+            "    return {\"value\": normalized}\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_async_chain_forwarder",
+        "unlisted_existing_async_chain_forwarder",
+    ]
+    assert "changed to non-forwarding facade implementation" in str(signals[0]["detail"])
+    assert "unlisted_existing_async_chain_forwarder" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_async_chain_forwarder owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_requires_import_family_inventory_metadata(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8") + "import apps.api.main as api_main\n",
+    )
+
+    message_key = "compatibility-facade-growth.new-import-family.inventory-required"
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- apps/api",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- apps/api import family justified; it does not invert ownership.",
+    )
+
+    assert _compatibility_facade_signals(tmp_path, base_ref, "new-import-family") == []
+
+
+def test_compatibility_facade_guard_reports_chain_import_family_growth_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8") + "import apps.api.main as api_main\n",
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-import-family.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == ["apps/api"]
+    assert "apps/api" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-import-family.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "apps/api import family justified; it does not invert ownership.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
 
 
 def test_structural_ownership_growth_ignores_oversized_bugfix_only_edit(
@@ -6545,16 +7415,67 @@ def test_route_authority_skips_generated_artifact_roots(tmp_path: Path) -> None:
     assert _route_authority_findings(tmp_path) == []
 
 
-def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:
+def _findings_by_check(
+    root: Path,
+    check_id: str,
+    *,
+    structural_base_ref: str | None = None,
+) -> list[dict[str, object]]:
     return [
         finding
-        for finding in audit_repo_entropy.build_report(root)["findings"]
+        for finding in audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)[
+            "findings"
+        ]
         if finding["check_id"] == check_id
     ]
 
 
 def _route_authority_findings(root: Path) -> list[dict[str, object]]:
     return _findings_by_check(root, "stale-display-route-token")
+
+
+def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[str, object]:
+    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    guard = metadata["compatibility_facade_guard"]
+    assert isinstance(guard, dict)
+    return guard
+
+
+def _compatibility_facade_signals(
+    root: Path,
+    structural_base_ref: str,
+    signal_type: str,
+) -> list[dict[str, object]]:
+    guard = _compatibility_facade_guard(root, structural_base_ref)
+    signals = guard["signals"]
+    assert isinstance(signals, list)
+    return [
+        signal
+        for signal in signals
+        if isinstance(signal, dict) and signal["signal_type"] == signal_type
+    ]
+
+
+def _assert_compatibility_facade_report_only_finding(
+    root: Path,
+    structural_base_ref: str,
+    message_key: str,
+) -> None:
+    findings = [
+        finding
+        for finding in _findings_by_check(
+            root,
+            audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID,
+            structural_base_ref=structural_base_ref,
+        )
+        if message_key in str(finding["description"])
+    ]
+    assert findings, f"expected report-only finding with {message_key}"
+    assert findings[0]["check_id"] == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID
+    assert findings[0]["gate_eligible"] is False
+    assert findings[0]["budget_counted"] is True
 
 
 def _route_authority_findings_by_token(
@@ -6865,6 +7786,70 @@ def _file_bytes_by_relative_path(root: Path) -> dict[str, bytes]:
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+
+
+def _append_inventory_line(root: Path, relative_path: str, line: str) -> None:
+    path = root / relative_path
+    path.write_text(path.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
+
+
+def _setup_compatibility_facade_guard_fixture(root: Path) -> str:
+    _init_git(root)
+    _write(root / "services" / "orchestrator" / "scheduler_state.py", "\n")
+    _write(root / "services" / "orchestrator" / "chain_manifests.py", "\n")
+    _write(
+        root / "services" / "orchestrator" / "scheduler.py",
+        """
+        from __future__ import annotations
+
+        from services.orchestrator import scheduler_state as _scheduler_state
+
+        ExistingSchedulerAlias = _scheduler_state.ExistingSchedulerAlias
+
+        def existing_scheduler_forwarder(value: object) -> object:
+            return _scheduler_state.existing_scheduler_forwarder(value)
+        """,
+    )
+    _write(
+        root / "services" / "orchestrator" / "chain.py",
+        """
+        from __future__ import annotations
+
+        from services.orchestrator import chain_manifests
+
+        ExistingChainAlias = chain_manifests.ExistingChainAlias
+
+        def existing_chain_forwarder(value: object) -> object:
+            return chain_manifests.existing_chain_forwarder(value)
+        """,
+    )
+    _write(
+        root / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        """
+        # Scheduler Compatibility Inventory
+
+        ## Guard Hook Seed
+
+        - ExistingSchedulerAlias
+        - existing_scheduler_forwarder
+        """,
+    )
+    _write(
+        root / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md",
+        """
+        # Chain Compatibility Inventory
+
+        PipelineEvent appears here as owner-context prose only; it is not a
+        Guard Hook Seed selector until listed below.
+
+        ## Guard Hook Seed
+
+        - ExistingChainAlias
+        - existing_chain_forwarder
+        """,
+    )
+    _commit_all(root, "base facade inventories")
+    return _git_rev_parse(root, "HEAD")
 
 
 def _setup_agent_artifact_drift(root: Path) -> None:
