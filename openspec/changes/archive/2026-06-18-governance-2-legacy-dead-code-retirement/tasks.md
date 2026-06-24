@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md; openspec/specs/legacy-dead-code-retirement/spec.md; docs/governance/DOC_STATUS.md"
+superseded_by: "openspec/specs/legacy-dead-code-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for Governance-2 retired path and dead-code verification"
+---
+
 ## 0. Dependency gate
 
 - [x] 0.1 Confirm `governance-0-ci-contract-baseline` is merged and green, or

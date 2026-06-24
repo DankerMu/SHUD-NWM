@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md; docs/runbooks/display-readonly-live-mvt.md; docs/runbooks/two-node-deployment-overview.md"
+superseded_by: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for M26 display-route convergence"
+---
+
 ## Why
 
 展示前端碎成约 10 条路由（`/`、`/overview`、`/basins/:basinId`、`/hydro-met`、`/meteorology`、`/forecast`、`/flood-alerts`、`/segments/:segmentId` …）加一条顶部重导航。其中 `/hydro-met`（2496 行）是 M21 遗留的**不可扩展玩具页**：DOM `<Marker>` 逐点渲染 + 一次性拉全量列表（河段 limit 250、站点 limit 500）+ 搜索/分页/过滤等"很多模块"，与 M11 的瓦片地图（`OverviewPage` 全国总览 / `BasinDetailPage` 流域详情，已跑在 `M11MapLibreSurface` + river-network/hydro MVT 上）严重重复造轮子。

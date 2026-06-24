@@ -196,12 +196,39 @@
   `gate_eligible_count=0`, `baseline_written=false`; current complete-marker
   allowlist count is 0 because #681 owns first marker materialization, and the
   remaining archive route/path findings stay visible for triage.
-- [ ] 5.3 Apply archive/superseded markers to the first governed materialization
+- [x] 5.3 Apply archive/superseded markers to the first governed materialization
   set.
   Evidence: target set covers archive or current-superseded documents that
-  mention legacy route/path/topology text in the latest report; any remaining
-  archive findings are documented with owner follow-up issues; report-only
-  audit remains explainable without broad path suppression.
+  mention legacy route/path/topology text in the latest report:
+  `docs/archived/legacy-slurm-templates.md`,
+  `openspec/changes/archive/2026-06-18-governance-2-legacy-dead-code-retirement/**`,
+  and
+  `openspec/changes/archive/2026-06-18-m26-unified-map-display/**`. These
+  files keep historical evidence but point stale-looking text to current
+  authority through complete archive/superseded markers. Any remaining archive
+  findings are documented in
+  `docs/governance/ARCHIVE_STATUS_MATERIALIZATION_LEDGER.md` with path,
+  line/check ID/family, selected-vs-remaining status, marker scope/status,
+  current authority, supersession target, before/after budget status, owner
+  area, follow-up issue or `#688`, and disposition reason. Evidence input is
+  the report-only archive route/path filter
+  `check_id in {stale-display-route-token, placeholder-path-token}` and
+  `budget_counted=true`: before archive total is `453`, and the selected target
+  set is `115` (`44` placeholder-path, `71` stale-display-route). After
+  materialization, selected findings are complete-marker allowlisted or
+  explicitly unresolved in the ledger, the archive budget-counted route/path
+  total is lower than `453`, `baseline_written=false`, and no broad archive
+  path suppression is used. Verification after materialization:
+  `/tmp/entropy-681-after.json` records `finding_count=821`,
+  `budget_counted_count=338`, `gate_eligible_count=0`,
+  `baseline_written=false`; the archive route/path budget total is `338`
+  (`38` placeholder-path, `300` stale-display-route), the selected target
+  budget total is `0`, selected complete-marker allowlists total `152`, and
+  selected unresolved findings total `0`. `openspec validate
+  governance-7-structural-entropy-controls --strict --no-interactive`,
+  `openspec validate --all --strict --no-interactive`, markdownlint for the
+  ledger/changed active docs, `.entropy-baseline/latest.json` diff, and
+  `git diff --check` all pass.
 
 ## 6. Scoped Agent Context And Glossary
 

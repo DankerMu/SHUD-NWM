@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md; docs/runbooks/display-readonly-live-mvt.md; docs/runbooks/two-node-deployment-overview.md"
+superseded_by: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for M26 met-station cluster layer implementation"
+---
+
 # issue-339 worklog — 气象代站 clustered-GeoJSON 图层 (met-station-cluster-layer)
 
 ## 角色/oracle/门

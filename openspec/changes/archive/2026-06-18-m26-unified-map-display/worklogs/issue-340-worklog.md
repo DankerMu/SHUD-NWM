@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md; docs/runbooks/display-readonly-live-mvt.md; docs/runbooks/two-node-deployment-overview.md"
+superseded_by: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for M26 map feature popup implementation"
+---
+
 # issue-340 worklog — 河段/代站两类地图 popup (map-feature-popups)
 
 ## 角色/oracle/门：同前。实现=fix subagent；验证=本地四件套；合并门=审核 clean（不等 CI）。

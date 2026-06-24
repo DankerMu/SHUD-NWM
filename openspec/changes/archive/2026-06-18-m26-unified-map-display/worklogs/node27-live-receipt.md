@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md; docs/runbooks/display-readonly-live-mvt.md; docs/runbooks/two-node-deployment-overview.md"
+superseded_by: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for M26 node-27 live display receipt"
+---
+
 # M26 node-27 display_readonly live receipt（EPIC #336 收尾）
 
 - **节点/角色**：node-27 `nwm@210.77.77.27:32099`，`/home/nwm/NWM`，`display_readonly`。

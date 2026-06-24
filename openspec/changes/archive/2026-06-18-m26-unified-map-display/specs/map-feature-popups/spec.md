@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "openspec/specs/single-map-shell-routing/spec.md; openspec/specs/legacy-display-page-retirement/spec.md; docs/runbooks/display-readonly-live-mvt.md; docs/runbooks/two-node-deployment-overview.md"
+superseded_by: "openspec/specs/single-map-shell-routing/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for the archived M26 map feature popup delta"
+---
+
 ## ADDED Requirements
 
 ### Requirement: 点击河段要素弹出 q_down 预报曲线 + 重现期三态
