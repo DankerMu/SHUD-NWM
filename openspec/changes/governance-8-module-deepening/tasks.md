@@ -604,6 +604,7 @@
     - `uv run pytest -q tests/test_entropy_audit_script.py`
     - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
     - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-stage-execution-forwarders`.
 - [ ] 2.4 Chain array-accounting owner-family completion.
