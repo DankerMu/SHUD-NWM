@@ -2665,7 +2665,7 @@ def _path_is_legacy_route_token_scope(relative_path: str) -> bool:
 
 def _path_is_route_authority_expanded_scope(relative_path: str) -> bool:
     return (
-        relative_path.startswith(("docs/archived/", "docs/runbooks/"))
+        relative_path.startswith(("docs/archived/", "docs/runbooks/", "openspec/changes/archive/"))
         or relative_path in {"README.md", "progress.md", "CLAUDE.md", "docs/governance/DOC_STATUS.md"}
     )
 

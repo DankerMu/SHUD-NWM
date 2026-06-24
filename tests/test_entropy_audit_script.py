@@ -6558,6 +6558,41 @@ def test_complete_archive_marker_allowlists_expanded_archive_route_token(
     assert findings[0]["gate_eligible"] is False
 
 
+def test_archived_openspec_expanded_route_token_without_marker_remains_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
+        "Current route link ?next=/forecast.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/forecast"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_complete_archive_marker_allowlists_archived_openspec_expanded_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
+        _complete_archive_status_front_matter("Current route link ?next=/meteorology.\n"),
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/meteorology"
+    assert findings[0]["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
+    assert findings[0]["allowlist_state"] == "allowlisted"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
+
+
 def test_current_active_doc_route_tokens_without_archive_marker_remain_budget_counted(
     tmp_path: Path,
 ) -> None:

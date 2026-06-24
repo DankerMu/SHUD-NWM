@@ -187,12 +187,12 @@
   visibility, incomplete marker visibility, and no global ignore of archived
   material. The classifier must remain report-only and must not write
   `.entropy-baseline/latest.json`. `uv run pytest -q
-  tests/test_entropy_audit_script.py` passed with 329 tests; `uv run ruff
+  tests/test_entropy_audit_script.py` passed with 331 tests; `uv run ruff
   check scripts/governance/audit_repo_entropy.py
   tests/test_entropy_audit_script.py` passed; `openspec validate
   governance-7-structural-entropy-controls --strict --no-interactive` passed.
   `/tmp/entropy-680-current.json` report-only metadata:
-  `finding_count=448`, `budget_counted_count=225`,
+  `finding_count=822`, `budget_counted_count=453`,
   `gate_eligible_count=0`, `baseline_written=false`; current complete-marker
   allowlist count is 0 because #681 owns first marker materialization, and the
   remaining archive route/path findings stay visible for triage.
