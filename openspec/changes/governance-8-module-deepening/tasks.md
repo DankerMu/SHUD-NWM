@@ -553,11 +553,58 @@
     slice.
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update chain inventory group `chain-stage-catalog-type-reexports`.
-- [ ] 2.3 Chain stage execution owner-family completion.
+- [x] 2.3 Chain stage execution owner-family completion.
   - Module/Scope: `services.orchestrator.chain_stage_execution`, `StageExecutionDependencies`, reservation-before-submit, bind-after-submit, polling, timeout, retry bridge, and published-log semantics.
   - Dependencies: 2.1 and 2.2.
   - Out of Scope: reservation protocol internals, retry service internals, tile publisher implementation, array accounting.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py tests/test_e2e_m3.py`.
+  - Fixture Expansion: make the stage-execution compatibility contract explicit
+    in `chain.py` with `_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES`,
+    `_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES`,
+    `_CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS`, and
+    `_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS`; import-time guards verify owner
+    functions, owner `__all__`, dependency fields, and legacy
+    `ForecastOrchestrator` facade methods stay synchronized.
+  - Risk Pack Selection: Selected: Legacy compatibility (old private
+    `ForecastOrchestrator` method and monkeypatch paths stay callable);
+    Dependency / ownership direction (`chain_stage_execution` remains the
+    owner and imports without loading `chain.py`); Schema / field names
+    (`StageExecutionDependencies` field order/names are guarded); Runtime
+    behavior invariants (reservation-before-submit, bind-after-submit, polling,
+    timeout, retry bridge, and published-log semantics continue through the
+    focused tests); Test / evidence coverage (compat maps, inventory tokens,
+    entropy guard, OpenSpec validation, ruff, markdownlint, and diff-check).
+    Not Selected: reservation protocol internals, retry service internals, tile
+    publisher implementation, array accounting, manifest assembly,
+    worker/source identity, repository behavior, DB schema, API/frontend
+    surfaces, or production topology changes.
+  - Invariant Matrix: Governing invariant: every legacy stage-execution
+    wrapper exposed by `ForecastOrchestrator` maps to a named function in
+    `services.orchestrator.chain_stage_execution`, and every dependency needed
+    by those owner functions is present in `StageExecutionDependencies`.
+    Source-of-truth identity/contract:
+    `services.orchestrator.chain_stage_execution`,
+    `services.orchestrator.chain`, and
+    `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` agree on the
+    `chain-stage-execution-forwarders` group. Surfaces: Producers:
+    `chain_stage_execution.py` owner functions and dependency dataclass;
+    Compatibility facade: `ForecastOrchestrator` private wrappers and
+    `_chain_stage_execution_dependencies`; Validators: orchestration chain
+    tests, pipeline-log artifact tests, M3 retry e2e tests, entropy inventory
+    guard, OpenSpec validation, ruff, markdownlint, and diff-check;
+    Storage/cache/query: no DB or artifact schema changes.
+  - Regression Rows: `chain_stage_execution` still imports without loading
+    `services.orchestrator.chain`; owner function names are present in owner
+    `__all__`; facade wrapper names remain callable on `ForecastOrchestrator`;
+    `_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS` maps each legacy wrapper to the
+    expected owner function; `StageExecutionDependencies` field names/order
+    remain unchanged; submit/resume/poll/timeout/array/local-publish behaviors
+    retain existing reservation, retry, and published-log evidence.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py tests/test_e2e_m3.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-stage-execution-forwarders`.
 - [ ] 2.4 Chain array-accounting owner-family completion.
   - Module/Scope: `services.orchestrator.chain_array_accounting`, sacct parsing, task evidence, resource metrics, partial status, candidate outcome sanitization.

@@ -203,6 +203,83 @@ _CHAIN_STAGE_CATALOG_TYPE_COMPAT_EXPORTS = tuple(
     for name in _CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES
 )
 
+_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES = (
+    "_submit_and_wait_cycle_stage",
+    "_run_local_publish_stage",
+    "_resume_cycle_stage",
+    "_poll_cycle_stage_until_terminal",
+    "_record_cycle_stage_poll_timeout",
+    "_submit_array_stage",
+    "_slurm_submission_manifest",
+)
+_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES = (
+    "submit_and_wait_cycle_stage",
+    "run_local_publish_stage",
+    "resume_cycle_stage",
+    "poll_cycle_stage_until_terminal",
+    "record_cycle_stage_poll_timeout",
+    "submit_array_stage",
+    "slurm_submission_manifest",
+)
+_CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS = (
+    "terminal_job_statuses",
+    "pipeline_job_id",
+    "published_artifact_root_configured",
+    "cycle_stage_idempotency_key",
+    "slurm_comment_for",
+    "cycle_payload_model_id",
+    "cycle_pipeline_job_model_id",
+    "coerce_mapping",
+    "coerce_array_task_id",
+    "status_from_gateway_job",
+    "parse_gateway_time",
+    "utcnow",
+    "format_time",
+    "safe_pipeline_event_details",
+    "submission_runtime_root_contract",
+    "aggregation_error_code",
+    "aggregation_error_message",
+    "slurm_accounting_from_payload",
+    "resource_metrics_from_payload",
+    "stage_task_result_evidence",
+    "stage_status_message",
+    "make_slurm_client_error",
+    "tile_publisher_cls",
+    "publish_error_cls",
+    "failure_payload",
+    "redact_payload",
+)
+_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_MISSING = tuple(
+    name
+    for name in _CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES
+    if not hasattr(chain_stage_execution, name)
+)
+if _CHAIN_STAGE_EXECUTION_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "chain stage execution compatibility names missing from owner module: "
+        f"{', '.join(_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_MISSING)}"
+    )
+if set(getattr(chain_stage_execution, "__all__", ())) != {
+    "StageExecutionDependencies",
+    *_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES,
+}:
+    raise RuntimeError("chain stage execution compatibility names drifted from owner __all__")
+if (
+    tuple(chain_stage_execution.StageExecutionDependencies.__dataclass_fields__)
+    != _CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS
+):
+    raise RuntimeError("chain stage execution dependency fields drifted from compatibility fixture")
+_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_stage_execution, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES,
+            _CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+
 
 def build_model_run_assembly(
     basin: Mapping[str, Any],
@@ -3760,6 +3837,18 @@ class ForecastOrchestrator:
         workspace_root = Path(self.config.workspace_root).expanduser().resolve()
         _workspace_relative_parts(path, workspace_root)
         return read_bytes_no_follow(path, containment_root=workspace_root)
+
+
+_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES
+    if not callable(getattr(ForecastOrchestrator, name, None))
+)
+if _CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "chain stage execution compatibility forwarders missing from facade: "
+        f"{', '.join(_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING)}"
+    )
 
 
 class AnalysisOrchestrator(ForecastOrchestrator):
