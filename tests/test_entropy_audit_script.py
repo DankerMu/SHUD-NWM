@@ -7249,42 +7249,62 @@ def test_route_authority_m26_references_preserve_expected_allowlist_keys(
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
 
 
-def test_route_authority_current_repo_m26_route_evidence_preserves_m26_allowlist_key() -> None:
-    expected_rows = {
-        ("openspec/changes/archive/2026-06-18-m26-unified-map-display/proposal.md", 11, "/hydro-met"),
-        (
-            "openspec/changes/archive/2026-06-18-m26-unified-map-display/specs/single-map-shell-routing/spec.md",
-            17,
-            "/hydro-met",
-        ),
-        (
-            "openspec/changes/archive/2026-06-18-m26-unified-map-display/specs/single-map-shell-routing/spec.md",
-            20,
-            "/hydro-met",
-        ),
-        ("openspec/changes/archive/2026-06-18-m26-unified-map-display/tasks.md", 49, "/hydro-met"),
+def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_allowlist() -> None:
+    archive_root = "openspec/changes/archive/2026-06-18-m26-unified-map-display"
+    expected_token_counts_by_path = {
+        f"{archive_root}/proposal.md": {
+            "/basins/:basinId": 3,
+            "/flood-alerts": 2,
+            "/forecast": 2,
+            "/hydro-met": 3,
+            "/meteorology": 2,
+            "/overview": 2,
+            "/segments/:segmentId": 2,
+            "HydroMetPage": 3,
+        },
+        f"{archive_root}/specs/single-map-shell-routing/spec.md": {
+            "/basins/:basinId": 1,
+            "/basins/basins_qhh": 1,
+            "/flood-alerts": 2,
+            "/forecast": 2,
+            "/hydro-met": 2,
+            "/meteorology": 3,
+            "/overview": 2,
+            "/segments/:segmentId": 2,
+            "/segments/seg_001": 1,
+        },
+        f"{archive_root}/tasks.md": {
+            "/basins/:basinId": 1,
+            "/basins/:id": 1,
+            "/flood-alerts": 2,
+            "/forecast": 2,
+            "/hydro-met": 2,
+            "/meteorology": 2,
+            "/overview": 2,
+            "/segments/:id": 1,
+            "/segments/:segmentId": 2,
+            "HydroMetPage": 1,
+        },
     }
-    findings = [
-        finding
-        for finding in _route_authority_findings(REPO_ROOT)
-        if (
-            finding["evidence_path"],
-            finding["line"],
-            _route_authority_token_from_finding(finding),
+    actual_token_counts_by_path = {
+        evidence_path: {token: 0 for token in expected_tokens}
+        for evidence_path, expected_tokens in expected_token_counts_by_path.items()
+    }
+    findings: list[dict[str, object]] = []
+    for finding in _route_authority_findings(REPO_ROOT):
+        evidence_path = str(finding["evidence_path"])
+        if evidence_path not in expected_token_counts_by_path:
+            continue
+        token = _route_authority_token_from_finding(finding)
+        assert token is not None
+        findings.append(finding)
+        actual_token_counts_by_path[evidence_path][token] = (
+            actual_token_counts_by_path[evidence_path].get(token, 0) + 1
         )
-        in expected_rows
-    ]
 
-    assert {
-        (
-            finding["evidence_path"],
-            finding["line"],
-            _route_authority_token_from_finding(finding),
-        )
-        for finding in findings
-    } == expected_rows
+    assert actual_token_counts_by_path == expected_token_counts_by_path
     assert {finding["allowlist_key"] for finding in findings} == {
-        "stale-display-route-token:m26-route-consolidation-or-redirect"
+        "stale-display-route-token:complete-archive-status-marker"
     }
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
     assert all(finding["budget_counted"] is False for finding in findings)
