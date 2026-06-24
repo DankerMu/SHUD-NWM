@@ -250,6 +250,116 @@ Required #672 evidence:
 - `openspec validate governance-7-structural-entropy-controls --strict
   --no-interactive` passes.
 
+## Issue #673 Fixture
+
+Fixture level: expanded. The issue defines readiness-validation lane contracts
+for a production-closure aggregator that reads bounded evidence, scheduler
+artifacts, live proof receipts, scoped exclusions, and final readiness summaries.
+The mandatory expanded triggers are `production_closure`, evidence schema/field
+contract, live proof/current-run binding, path/redaction safety, and final
+readiness status preservation. This issue is documentation/inventory only; it
+does not extract code or change runtime validation behavior.
+
+Change surface:
+
+- A new readiness-validation lane inventory document under `docs/governance/`.
+- `openspec/changes/governance-7-structural-entropy-controls/tasks.md`
+  evidence for task 3.2.
+
+Must preserve:
+
+- `services/production_closure/readiness_validation.py` remains the stable
+  validator entrypoint and CLI-facing `validate-readiness` behavior for #673.
+- Deterministic dependency summaries and scheduler evidence remain review
+  lineage only; they do not satisfy final production readiness without accepted
+  live proof receipts.
+- Final readiness remains `ready` only when every required live proof item is
+  `passed` and `live_proof_accepted=true`; otherwise the summary remains
+  `release_blocked`.
+- Existing status/execution-mode vocabulary, proof contract aliases,
+  blocker/error namespaces, redaction, bounded JSON/path safety, symlink
+  rejection, and scoped exclusion semantics are documented rather than weakened.
+- #672 two-node E2E evidence inventory and #674 docker-preflight extraction stay
+  separate scopes.
+
+Must add/change:
+
+- Record owner-module plan, input/output contract, blocker/error namespace, and
+  focused verification command for dependency summaries, scheduler evidence,
+  live proof receipts, scoped exclusions, validation/final aggregation, and
+  shared preflight/environment/receipt artifact surfaces in
+  `readiness_validation`.
+- Make a future readiness lane extraction issue able to choose a lane without
+  making new product decisions.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - the inventory must preserve the
+  existing `validate_readiness`/`validate-readiness` entrypoint and output files.
+- Config / project setup: selected - readiness inputs are driven by environment
+  variables and CLI options, but #673 only documents them and does not change
+  configuration.
+- File IO / path safety / overwrite: selected - dependency summaries, scheduler
+  evidence, live proof files, evidence roots, existing output behavior, bounded
+  reads, regular-file checks, and symlink rejection are core contracts.
+- Schema / columns / units / field names: selected - readiness item shape,
+  summary/release blocker schemas, live proof schemas, and accepted status aliases
+  are primary contracts.
+- Auth / permissions / secrets: selected - auth proof, target-environment proof,
+  environment capture, and path/secret redaction must remain safe.
+- Concurrency / shared state / ordering: not selected - no scheduler execution or
+  concurrent processing behavior changes.
+- Resource limits / large input / discovery: selected - proof payloads, scheduler
+  evidence files, dependency summaries, JSON depth/node limits, and scheduler
+  evidence file limits remain bounded.
+- Legacy compatibility / examples: selected - existing proof aliases, dependency
+  binding aliases, scheduler binding aliases, and deterministic fast-CI behavior
+  remain intact until extraction issues prove equivalence.
+- Error handling / rollback / partial outputs: selected - malformed, missing,
+  oversized, stale, unsafe, or unaccepted proof remains release-blocking and
+  redacted.
+- Release / packaging / dependency compatibility: not selected - no dependency or
+  packaging changes.
+- Documentation / migration notes: selected - this issue is the authoritative
+  extraction plan and evidence mapping for future readiness lane work.
+
+Domain packs:
+
+- Slurm production lifecycle / mock-vs-real parity: selected - scheduler evidence
+  can be deterministic review evidence, while final live scheduler proof requires
+  accepted live binding to production scheduler evidence.
+- Run manifest / QC provenance: selected - dependency and scheduler live proof
+  receipts bind to producer run IDs, artifact refs, checksums/receipt IDs, schemas,
+  target environment, and current readiness run ID.
+- Published NHMS artifacts / display identity: selected - E2E and MVT dependency
+  proof surfaces must stay separate from #672 lane contracts and final readiness
+  must not claim live display proof from deterministic summaries alone.
+- Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+  SHUD numerical runtime, PostGIS / TimescaleDB domain behavior, and external
+  provider snapshot reproducibility: not selected - #673 documents readiness
+  validation lane boundaries only and does not change scientific/data behavior.
+
+Required #673 evidence:
+
+- Inventory lists every #673 in-scope readiness lane with owner module plan, input
+  contract, output/result shape, blocker/error namespace, focused verification
+  command, retention condition, and extraction readiness note.
+- Inventory verification input/output: given the readiness inventory document, the
+  documented lane/surface set covers dependency summaries (`slurm`,
+  `object_store`, `source`, `e2e`, `mvt`), scheduler evidence, live proof receipts
+  (`auth`, `alert`, `rollback`, optional `scheduler`, dependency proof receipts,
+  `target_env`), scoped exclusions, validation/final aggregation, and shared
+  preflight/environment/receipt artifacts. The inventory must not include #672
+  two-node E2E lane rows or #674 docker-preflight implementation extraction.
+- Cross-lane contracts document deterministic-vs-live proof semantics,
+  status/execution-mode truth table, current-run/target-environment binding,
+  dependency and scheduler producer binding, redaction, path safety, bounded JSON,
+  and final readiness status semantics.
+- `uv run pytest -q tests/test_production_readiness_validation.py` remains the
+  focused regression command for the documented contracts.
+- `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive` passes.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis

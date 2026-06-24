@@ -92,10 +92,16 @@
   is `uv run pytest -q tests/test_two_node_e2e_evidence.py` plus
   `openspec validate governance-7-structural-entropy-controls --strict
   --no-interactive`.
-- [ ] 3.2 Define the `readiness_validation` lane inventory and contracts.
-  Evidence: dependency summary, scheduler evidence, live proof, exclusions, and
-  final aggregation lanes each have owner module plans, result shape, blocker
-  namespaces, and focused verification commands.
+- [x] 3.2 Define the `readiness_validation` lane inventory and contracts.
+  Evidence: dependency summary, scheduler evidence, live proof receipt,
+  exclusion, validation/final aggregation, and shared preflight/environment/
+  receipt-artifact surfaces each have owner module plans, input contracts,
+  output/result shapes, blocker/error namespaces, focused verification commands,
+  retention conditions, and extraction readiness notes. See
+  `docs/governance/READINESS_VALIDATION_LANE_INVENTORY.md`; issue #673
+  verification is `uv run pytest -q tests/test_production_readiness_validation.py`
+  plus `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive`.
 - [ ] 3.3 Extract the `docker_preflight` lane from
   `two_node_e2e_evidence.py` behind the existing aggregator entrypoint.
   Evidence: new owner module under `services/production_closure/` returns a
