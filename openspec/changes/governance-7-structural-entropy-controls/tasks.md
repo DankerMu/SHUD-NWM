@@ -102,14 +102,27 @@
   verification is `uv run pytest -q tests/test_production_readiness_validation.py`
   plus `openspec validate governance-7-structural-entropy-controls --strict
   --no-interactive`.
-- [ ] 3.3 Extract the `docker_preflight` lane from
+- [x] 3.3 Extract the `docker_preflight` lane from
   `two_node_e2e_evidence.py` behind the existing aggregator entrypoint.
-  Evidence: new owner module under `services/production_closure/` returns a
-  structured lane result with status, blockers, findings, and redacted evidence
-  summary; sibling Docker security, readonly DB, API/browser, logs, producer
-  identity, and manual ops lanes remain out of scope; focused tests prove
-  current-run blockers, blocker codes, redaction, path safety, and final status
-  remain unchanged for equivalent fixtures.
+  Evidence: `services/production_closure/two_node_e2e_docker_preflight.py`
+  owns Docker preflight schema/command/disk contract evaluation behind the
+  unchanged `validate_two_node_e2e_evidence(config)` aggregator entrypoint;
+  the aggregator passes shared helper callbacks for blocker construction,
+  missing-lane/lane-summary adapters, status normalization, current-run,
+  stale-lane, recorded-path, and integer parsing semantics, so sibling Docker
+  security, readonly DB, API/browser, logs, producer identity, manual ops,
+  source-scope/cross-plane, simple live lanes, and final aggregation remain out
+  of scope. Focused parity coverage now asserts PASS summary path/checksum,
+  redacted evidence shape, missing lane, unknown schema, failed command, missing
+  DockerRootDir, current-run blockers, unsafe paths, missing resource evidence,
+  missing/invalid/low disk evidence, missing/failed command evidence, producer
+  blockers, blocker codes, and final status. Verification:
+  `uv run pytest -q tests/test_two_node_e2e_evidence.py -k
+  "docker_preflight"` (19 passed), `uv run pytest -q
+  tests/test_two_node_e2e_evidence.py` (696 passed), `uv run ruff check
+  services/production_closure tests/test_two_node_e2e_evidence.py` (passed),
+  and `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive`.
 
 ## 4. Active Document Entropy Burn-Down
 

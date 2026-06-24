@@ -21,6 +21,10 @@ from packages.common.safe_fs import (
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
+from services.production_closure.two_node_e2e_docker_preflight import (
+    DockerPreflightEvaluationHelpers,
+    evaluate_docker_preflight,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVIDENCE_ROOT = REPO_ROOT / "artifacts" / "two-node-e2e"
@@ -270,15 +274,6 @@ PRODUCER_CHECK_ALIASES: Mapping[str, tuple[str, ...]] = {
 PRODUCER_BASE_REQUIRED_IDENTITY_FIELDS = ("source", "check", "run_id", "cycle_time", "model_id")
 PRODUCER_TEXT_AUTHORITY_IDENTITY_FIELDS = (*STRICT_LOG_IDENTITY_FIELDS, "check")
 PRODUCER_JOB_ID_REQUIRED_CHECKS = frozenset({"job_logs", "ops_jobs", "ops_job_logs"})
-DOCKER_PREFLIGHT_SCHEMA = "nhms.two_node_docker.preflight.v1"
-DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
-    "docker_version",
-    "docker_compose_version",
-    "docker_info_docker_root",
-    "docker_system_df",
-    "df_h",
-)
-DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS = ("evidence_root", "tmpdir", "docker_root")
 DOCKER_REQUIRED_FALSE_PROOFS: Mapping[str, tuple[str, ...]] = {
     "slurm_routes_enabled": ("slurm_routes_enabled",),
     "slurm_route_available": ("slurm_route_available",),
@@ -684,8 +679,10 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
     lane_docs = _load_lane_documents(config.run_dir)
     lanes = {
         "metadata": metadata_lane,
-        "docker_preflight": _evaluate_docker_preflight(
-            lane_docs["docker_preflight"], evidence_run_id=config.run_id, run_dir=config.run_dir
+        "docker_preflight": evaluate_docker_preflight(
+            lane_docs["docker_preflight"],
+            evidence_run_id=config.run_id,
+            helpers=_docker_preflight_helpers(),
         ),
         "docker_security": _evaluate_docker_security(
             lane_docs["docker_security"], evidence_run_id=config.run_id
@@ -850,62 +847,16 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
     }
 
 
-def _evaluate_docker_preflight(
-    doc: EvidenceDocument | None,
-    *,
-    evidence_run_id: str,
-    run_dir: Path,
-) -> LaneEvaluation:
-    if doc is None:
-        return _missing_lane("docker_preflight", "TWO_NODE_E2E_DOCKER_PREFLIGHT_MISSING")
-    payload = doc.payload
-    status = _normalized_status(payload.get("status"))
-    blockers = list(_stale_lane_blockers(payload))
-    summary_status = str(payload.get("status", "unknown"))
-    if status == STATUS_PASS:
-        preflight_contract_blockers = _docker_preflight_contract_blockers(payload)
-        blockers.extend(preflight_contract_blockers)
-        blockers.extend(
-            _docker_preflight_current_run_blockers(
-                doc,
-                payload,
-                evidence_run_id=evidence_run_id,
-                run_dir=run_dir,
-                contract_complete=not preflight_contract_blockers,
-            )
-        )
-        commands = payload.get("commands")
-        if not isinstance(commands, Mapping):
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMANDS_MISSING",
-                    "Docker preflight PASS must include live docker command evidence.",
-                )
-            )
-        else:
-            for command_name in DOCKER_PREFLIGHT_REQUIRED_COMMANDS:
-                command = commands.get(command_name)
-                if not isinstance(command, Mapping) or command.get("returncode") != 0:
-                    blockers.append(
-                        _blocker(
-                            "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_FAILED",
-                            f"Docker preflight command {command_name} is missing or did not succeed.",
-                            command=command_name,
-                        )
-                    )
-        if not payload.get("docker_root_dir"):
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_DOCKER_ROOT_MISSING",
-                    "Docker preflight PASS must record DockerRootDir.",
-                )
-            )
-    return _lane_from_status(
-        "docker_preflight",
-        doc,
-        status=STATUS_BLOCKED if blockers and status == STATUS_PASS else status,
-        summary_status=summary_status,
-        blockers=blockers,
+def _docker_preflight_helpers() -> DockerPreflightEvaluationHelpers[LaneEvaluation]:
+    return DockerPreflightEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        blocker=_blocker,
+        stale_lane_blockers=_stale_lane_blockers,
+        current_run_blockers=_current_run_blockers,
+        recorded_path_approval_blockers=_recorded_path_approval_blockers,
+        int_value=_int_value,
     )
 
 
@@ -2587,112 +2538,6 @@ def _permission_operations(payload: Mapping[str, Any]) -> list[Mapping[str, Any]
                 if isinstance(raw_operations, list):
                     operations.extend(item for item in raw_operations if isinstance(item, Mapping))
     return operations
-
-
-def _docker_preflight_contract_blockers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    blockers: list[dict[str, Any]] = []
-    if payload.get("schema_version") != DOCKER_PREFLIGHT_SCHEMA and payload.get("schema") != DOCKER_PREFLIGHT_SCHEMA:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DOCKER_PREFLIGHT_SCHEMA_UNRECOGNIZED",
-                "Docker preflight PASS must use the known preflight producer schema.",
-                schema=payload.get("schema") or payload.get("schema_version"),
-                expected_schema=DOCKER_PREFLIGHT_SCHEMA,
-            )
-        )
-    for key in ("evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes"):
-        value = payload.get(key)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_DOCKER_PREFLIGHT_RESOURCE_EVIDENCE_MISSING",
-                    "Docker preflight PASS must record DockerRootDir, TMPDIR, evidence root, and min-free evidence.",
-                    evidence_key=key,
-                )
-            )
-    blockers.extend(
-        _recorded_path_approval_blockers(payload, ("evidence_root", "tmpdir"), lane_name="docker_preflight")
-    )
-    producer_blockers = payload.get("blockers")
-    if isinstance(producer_blockers, list) and producer_blockers:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DOCKER_PREFLIGHT_PRODUCER_BLOCKERS_PRESENT",
-                "Docker preflight PASS cannot contain producer blockers.",
-                producer_blocker_count=len(producer_blockers),
-            )
-        )
-    disk = payload.get("disk")
-    if not isinstance(disk, Mapping):
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
-                "Docker preflight PASS must include disk evidence.",
-                )
-            )
-    else:
-        min_free_bytes = _int_value(payload.get("min_free_bytes"))
-        for label in DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS:
-            snapshot = disk.get(label)
-            if not isinstance(snapshot, Mapping) or snapshot.get("free_bytes") is None:
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
-                        "Docker preflight PASS must include free-space evidence for required disk labels.",
-                        label=label,
-                    )
-                )
-                continue
-            free_bytes = _int_value(snapshot.get("free_bytes"))
-            if free_bytes is None:
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_INVALID",
-                        "Docker preflight disk free_bytes must be numeric.",
-                        label=label,
-                    )
-                )
-            elif min_free_bytes is not None and free_bytes < min_free_bytes:
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_LOW_DISK_SPACE",
-                        "Docker preflight PASS contradicts required free-space minimum.",
-                        label=label,
-                        free_bytes=free_bytes,
-                        min_free_bytes=min_free_bytes,
-                    )
-                )
-    commands = payload.get("commands")
-    if not isinstance(commands, Mapping):
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMANDS_MISSING",
-                "Docker preflight PASS must include command evidence.",
-            )
-        )
-    else:
-        for command_name in DOCKER_PREFLIGHT_REQUIRED_COMMANDS:
-            if command_name not in commands:
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_EVIDENCE_MISSING",
-                        "Docker preflight PASS is missing required command evidence.",
-                        command=command_name,
-                    )
-                )
-    return blockers
-
-
-def _docker_preflight_current_run_blockers(
-    doc: EvidenceDocument,
-    payload: Mapping[str, Any],
-    *,
-    evidence_run_id: str,
-    run_dir: Path,
-    contract_complete: bool,
-) -> list[dict[str, Any]]:
-    _ = (doc, run_dir, contract_complete)
-    return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
 
 
 def _recorded_path_approval_blockers(
