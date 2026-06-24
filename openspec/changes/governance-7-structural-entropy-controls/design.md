@@ -622,6 +622,85 @@ Required #676 evidence:
 - `uv run python scripts/governance/audit_repo_entropy.py --format json`
   passes and does not write `.entropy-baseline/latest.json`.
 
+## Issue #677 Fixture
+
+Fixture level: standard. The issue classifies one source-comment drift surface,
+so the mandatory triggers are retired path token handling, focused audit tests,
+Slurm gateway runtime-behavior preservation, and lint/test verification. It does
+not change runtime template defaults or perform docs cleanup.
+
+Change surface:
+
+- `services/slurm_gateway/config.py` source comment classification only.
+- `scripts/governance/audit_repo_entropy.py` and
+  `tests/test_entropy_audit_script.py` only if classifier support is needed.
+
+Workflow evidence exception:
+
+- This reviewed fixture and task checkbox evidence record #677 workflow status.
+  They do not broaden #677 implementation scope into active docs cleanup.
+
+Must preserve:
+
+- `SlurmGatewaySettings.template_dir` remains `infra/sbatch`.
+- `DEFAULT_JOB_TYPE_TEMPLATES` and job-template mapping behavior remain
+  unchanged.
+- The retired template explanation remains useful and machine-classifiable as
+  source-comment historical/retired context.
+- Active docs and arbitrary source files must not become broadly allowlisted for
+  retired path tokens.
+
+Must add/change:
+
+- Make the `services/slurm_gateway/config.py` retired-template source comment
+  audit-classified as allowlisted historical/retired context.
+- Add focused entropy-audit coverage showing that the Slurm gateway source
+  comment is allowlisted while an active doc mention remains budget-counted.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no public API or CLI behavior
+  change.
+- Config / project setup: not selected - runtime config defaults are preserved.
+- File IO / path safety / overwrite: not selected - no runtime file IO change.
+- Schema / columns / units / field names: not selected - no runtime schema
+  change.
+- Auth / permissions / secrets: not selected - no auth or secret handling
+  change.
+- Concurrency / shared state / ordering: not selected - no runtime state change.
+- Resource limits / large input / discovery: selected - the entropy audit scans
+  tracked text and must remain report-only without baseline writes.
+- Legacy compatibility / examples: selected - the source comment preserves a
+  retired Slurm template migration note without consuming the active drift
+  budget.
+- Error handling / rollback / partial outputs: not selected - no runtime errors.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected only for source-comment wording and
+  workflow evidence; no docs cleanup.
+
+Domain packs:
+
+- Slurm production lifecycle / mock-vs-real parity: selected - the change is
+  limited to retired Slurm template classification and must not change Slurm
+  gateway runtime behavior.
+- Published NHMS artifacts / display identity, geospatial / CRS / basin
+  geometry, Hydro-met time series / forcing windows, SHUD numerical runtime,
+  PostGIS / TimescaleDB domain behavior, external provider snapshot
+  reproducibility, and run manifest/QC provenance: not selected.
+
+Required #677 evidence:
+
+- Before cleanup, the report-only entropy audit lists the
+  `services/slurm_gateway/config.py` retired-template comment as budget-counted.
+- After cleanup, the same source comment is allowlisted and not budget-counted,
+  while active docs remain budget-counted unless separately cleaned.
+- `uv run pytest -q tests/test_entropy_audit_script.py
+  tests/test_slurm_route_contract.py` passes.
+- `uv run ruff check services/slurm_gateway tests/test_entropy_audit_script.py`
+  passes.
+- `uv run python scripts/governance/audit_repo_entropy.py --format json` passes
+  and does not write `.entropy-baseline/latest.json`.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis
