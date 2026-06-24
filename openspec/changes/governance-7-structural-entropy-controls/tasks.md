@@ -81,10 +81,16 @@
 
 ## 3. Production Closure Lane Decomposition
 
-- [ ] 3.1 Define the `two_node_e2e_evidence` lane inventory and contracts.
-  Evidence: Docker security, readonly DB, API/browser, logs, producer identity,
-  source artifact, and manual ops receipt lanes each have owner module plans,
-  result shape, blocker namespaces, and focused verification commands.
+- [x] 3.1 Define the `two_node_e2e_evidence` lane inventory and contracts.
+  Evidence: Docker preflight/security, readonly DB, API/browser, logs,
+  producer identity, source artifact, manual ops receipt, and final/source-scope
+  aggregation surfaces each have owner module plans, input contracts,
+  output/result shapes, blocker/finding code namespaces, focused verification
+  commands, retention conditions, and extraction readiness notes. See
+  `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`; focused evidence
+  is `uv run pytest -q tests/test_two_node_e2e_evidence.py` plus
+  `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive`.
 - [ ] 3.2 Define the `readiness_validation` lane inventory and contracts.
   Evidence: dependency summary, scheduler evidence, live proof, exclusions, and
   final aggregation lanes each have owner module plans, result shape, blocker
