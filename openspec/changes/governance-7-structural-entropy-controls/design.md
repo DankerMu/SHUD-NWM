@@ -701,6 +701,66 @@ Required #677 evidence:
 - `uv run python scripts/governance/audit_repo_entropy.py --format json` passes
   and does not write `.entropy-baseline/latest.json`.
 
+## Issue #678 Fixture
+
+Fixture level: standard. The issue records evidence after #675, #676, and #677;
+it does not change detector logic or clean additional source/docs drift.
+
+Change surface:
+
+- Governance entropy evidence/worklog documentation under `docs/governance/**`.
+
+Workflow evidence exception:
+
+- This reviewed fixture and task checkbox evidence record #678 workflow status.
+  They do not broaden #678 implementation scope beyond evidence recording.
+
+Must preserve:
+
+- The report-only audit remains non-mutating and does not write
+  `.entropy-baseline/latest.json`.
+- The evidence distinguishes non-archive active budget from archive material.
+- Remaining archive budget findings are not silently claimed as fixed by #678.
+
+Must add/change:
+
+- Record the current report-only audit command, metadata, and non-archive
+  budget-counted route/path delta after #675-#677.
+- Record owner disposition for any remaining active route/path findings; if the
+  active remainder is zero, record that no active owner mapping is required.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no API, CLI, or detector
+  behavior change.
+- Config / project setup: not selected - no config change.
+- File IO / path safety / overwrite: selected only to verify the audit does not
+  write `.entropy-baseline/latest.json`.
+- Schema / columns / units / field names: not selected - no schema change.
+- Auth / permissions / secrets: not selected - no auth or secret handling
+  change.
+- Concurrency / shared state / ordering: not selected - evidence-only change.
+- Resource limits / large input / discovery: selected - the entropy audit scans
+  tracked text and must remain report-only.
+- Legacy compatibility / examples: selected - evidence must not erase or
+  misclassify archive material.
+- Error handling / rollback / partial outputs: not selected - no runtime errors.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected - this is a governance worklog
+  update.
+
+Domain packs:
+
+- No runtime/scientific domain packs selected. This is evidence recording only.
+
+Required #678 evidence:
+
+- `uv run python scripts/governance/audit_repo_entropy.py --format json
+  >/tmp/entropy-678-current.json` passes.
+- Non-archive budget-counted route/path findings decrease from 36 to 0, or any
+  remaining active findings have explicit owner issue/reason mapping.
+- `.entropy-baseline/latest.json` is unchanged.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis
