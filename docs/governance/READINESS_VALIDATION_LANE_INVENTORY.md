@@ -1,0 +1,229 @@
+# Readiness Validation Lane Inventory
+
+Snapshot date: 2026-06-24
+
+Scope: Governance-7 issue #673 inventory for
+`services/production_closure/readiness_validation.py`. This page records the
+readiness validation lanes and shared artifact surfaces that future extraction
+work can use without making new product decisions.
+
+This inventory is documentation-only. It does not move code, add runtime
+behavior, add tests, change proof acceptance semantics, inventory #672
+two-node E2E lane rows, extract #674 Docker preflight logic, or write
+`.entropy-baseline/latest.json`.
+
+## Authority
+
+This page is a companion inventory for
+`openspec/changes/governance-7-structural-entropy-controls/`. When it
+disagrees with executable behavior,
+`services/production_closure/readiness_validation.py` wins. When it disagrees
+with governance policy, `docs/governance/entropy-budget.md` and the active
+OpenSpec change win.
+
+The stable public entrypoints for this slice remain
+`validate_readiness(config)`, `validate_readiness_item(item)`, and the
+CLI-facing `validate-readiness` command routed through
+`services.production_closure.slurm_validation`. Future lane modules must sit
+behind those entrypoints until equivalence is proven.
+
+## Evidence Commands
+
+Issue #673 lists these verification commands:
+
+```bash
+uv run pytest -q tests/test_production_readiness_validation.py
+openspec validate governance-7-structural-entropy-controls --strict --no-interactive
+```
+
+Additional PR hygiene evidence for this inventory slice:
+
+```bash
+npx markdownlint-cli2 "docs/**/*.md"
+git diff --check
+```
+
+Read-only inventory context was collected from:
+
+```bash
+rg -n "DEPENDENCY_SUMMARY_CONTRACTS|PROOF_CONTRACTS|ALLOWED_STATUS_EXECUTION_MODES|_dependency_summary_items|_scheduler_evidence_items|_live_proof_items|_exclusion_items|_validate_items|_release_blockers|_final_ready|_preflight_payload|_environment_payload|_receipt_artifact" services/production_closure/readiness_validation.py
+rg -n "dependency|scheduler|live_receipt|proof|exclusion|final|redact|path|bounded|execution_mode|status" tests/test_production_readiness_validation.py
+```
+
+## Non-Targets
+
+- No #672 two-node E2E lane rows. This page does not map
+  `two_node_e2e_evidence.py` lanes such as Docker preflight, readonly DB,
+  API/browser, logs, cross-plane, manual ops, or final E2E aggregation.
+- No #674 Docker preflight extraction or implementation extraction of any
+  readiness lane.
+- No runtime, test, schema, CLI, environment-variable, or proof-acceptance
+  behavior change.
+- No claim that deterministic dependency summaries or scheduler evidence alone
+  make production readiness final.
+
+## Lane Set
+
+The #673 readiness inventory covers these runtime item lanes and shared output
+surfaces:
+
+- dependency summaries: `slurm`, `object_store`, `source`, `e2e`, and `mvt`
+- scheduler evidence: optional deterministic review evidence, with optional
+  live scheduler proof only when scheduler evidence or scheduler proof is
+  configured
+- live proof receipts: `auth`, `alert`, `rollback`, dependency proofs for
+  `slurm`/`object_store`/`source`/`e2e`/`mvt`, `target_env`, and optional
+  `scheduler`
+- scoped exclusions: CLDAS restricted source and incomplete real national data
+- validation/final aggregation: readiness item validation, release blockers,
+  final readiness status, and summary output
+- shared artifact surfaces: `preflight.json`, `live_proof_receipts.json`, and
+  `environment.json`
+
+## Lane Contracts
+
+| Lane / surface | Owner module plan | Input contract | Output/result shape | Blocker/error namespace | Focused verification command | Retention condition | Extraction readiness note |
+|---|---|---|---|---|---|---|---|
+| Slurm dependency summary | Future owner `services.production_closure.readiness_dependency_summaries`; aggregator keeps entrypoint and composition. | Optional root from `NHMS_PRODUCTION_READINESS_SLURM_EVIDENCE_ROOT` or `--slurm-evidence-root`. Reads `summary.json` or `slurm/summary.json`, bounded to 64 KiB, regular file, no symlink components. Accepted producer summary is issue `147`, schema `nhms.production_closure.slurm.v1`, status `ready` or `submitted`. | `readiness_items` item `deterministic-slurm-summary`, surface `slurm_production_like_evidence`; `not_executed` when no root is supplied, `passed`/`deterministic` when the summary matches, otherwise `blocked`/`not_executed`. Details include producer issue/schema, `summary_run_id`, summary status, artifact ref, and sha256 checksum. | Blocked item residual risk for missing/malformed/out-of-contract summary; public path/symlink errors use `PRODUCTION_READINESS_EVIDENCE_*` when they escape safe path checks. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or existing_m19"` | Retain in aggregator until extracted code preserves summary discovery aliases, schema/issue/status checks, checksum/artifact-ref details, redaction, and review-only final semantics. | Ready as part of a shared dependency-summary reader; keep one contract table for all five dependency producers to avoid divergent alias rules. |
+| Object-store dependency summary | Future owner `services.production_closure.readiness_dependency_summaries`. | Optional root from `NHMS_PRODUCTION_READINESS_OBJECT_STORE_EVIDENCE_ROOT` or `--object-store-evidence-root`. Reads `summary.json`, `object_store/summary.json`, or `object-store/summary.json`, bounded to 64 KiB, regular file, no symlink components. Accepted producer summary is issue `148`, schema `nhms.production_closure.object_store.v1`, status `ready`. | `deterministic-object_store-summary`, surface `object_store_production_like_evidence`; same item shape and review-only semantics as Slurm. | Same dependency-summary blocked item namespace and safe-filesystem public error handling. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or object_store or existing_m19"` | Retain until the extracted reader preserves underscore/hyphen path aliases and producer detail fields. | Ready with the shared dependency-summary reader; do not merge object-store proof semantics into #672 display evidence. |
+| Source dependency summary | Future owner `services.production_closure.readiness_dependency_summaries`. | Optional root from `NHMS_PRODUCTION_READINESS_SOURCE_EVIDENCE_ROOT` or `--source-evidence-root`. Reads `summary.json` or `source/summary.json`, bounded to 64 KiB, regular file, no symlink components. Accepted producer summary is issue `149`, schema `nhms.production_closure.met.v1`, status `ready`. | `deterministic-source-summary`, surface `source_production_like_evidence`; same item shape and review-only semantics as Slurm. | Same dependency-summary blocked item namespace and safe-filesystem public error handling. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or source or existing_m19"` | Retain until extracted code preserves weather/source producer lineage and does not treat deterministic source evidence as live credential or ingest proof. | Ready with the shared dependency-summary reader. |
+| E2E dependency summary | Future owner `services.production_closure.readiness_dependency_summaries`. | Optional root from `NHMS_PRODUCTION_READINESS_E2E_EVIDENCE_ROOT` or `--e2e-evidence-root`. Reads `summary.json` or `e2e/summary.json`, bounded to 64 KiB, regular file, no symlink components. Accepted producer summary is issue `150`, schema `nhms.production_closure.e2e.v1`, status `ready`. | `deterministic-e2e-summary`, surface `e2e_production_like_evidence`; same item shape and review-only semantics as Slurm. | Same dependency-summary blocked item namespace and safe-filesystem public error handling. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or e2e or existing_m19"` | Retain until extracted code preserves E2E producer lineage without importing #672 two-node lane rows. | Ready with the shared dependency-summary reader; keep #672 final E2E aggregation outside this inventory. |
+| MVT dependency summary | Future owner `services.production_closure.readiness_dependency_summaries`. | Optional root from `NHMS_PRODUCTION_READINESS_MVT_EVIDENCE_ROOT` or `--mvt-evidence-root`. Reads `summary.json` or `mvt/summary.json`, bounded to 64 KiB, regular file, no symlink components. Accepted producer summary is issue `151`, schema `nhms.production_closure.scale.v1`, status `ready`. | `deterministic-mvt-summary`, surface `mvt_production_like_evidence`; same item shape and review-only semantics as Slurm. | Same dependency-summary blocked item namespace and safe-filesystem public error handling. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_summary or mvt or existing_m19"` | Retain until extracted code preserves MVT/scale producer lineage without claiming live display performance proof. | Ready with the shared dependency-summary reader. |
+| Scheduler evidence | Future owner `services.production_closure.readiness_scheduler_evidence`; aggregator keeps optional insertion and final composition. | Optional root/file from `NHMS_PRODUCTION_READINESS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_PRODUCTION_READINESS_SCHEDULER_EVIDENCE_FILE`, `--scheduler-evidence-root`, or `--scheduler-evidence-file`. Root and file are mutually exclusive. Root scans only top-level `*.json`, max 16 files. Each file is regular, no symlink components, bounded to 256 KiB, JSON object, schema `nhms.production_scheduler.pass_evidence.v1`, non-empty `pass_id`, review execution mode in the scheduler review set, accepted or stable blocked status, required count fields, no stale/final-readiness claim, dry-run no-mutation proof when `execution_mode=dry_run`, and scheduler identity/count consistency. | One item per evidence artifact, surface `scheduler_production_like_evidence`; `passed`/`deterministic` for valid review evidence, `blocked`/`not_executed` for malformed/stale/unsafe/out-of-contract evidence. Details include producer schema, pass id, status, execution mode, artifact ref `scheduler:<name-or-relative-path>`, sha256 checksum, count summary, no-mutation proof, execution boundary, acceptance errors, and bounded redacted payload. | `PRODUCTION_READINESS_SCHEDULER_EVIDENCE_*` for discovery/read/size/file-limit/ambiguity; acceptance error strings include schema/status/mode/count/stale/final-claim/identity/cardinality/live-status mismatches. | `uv run pytest -q tests/test_production_readiness_validation.py -k "scheduler and evidence"` | Retain until extraction proves root/file mutual exclusion, root file limit, per-file safe read, review-mode acceptance, stable blocked evidence, model-run identity/count logic, redaction, and deterministic review-only final semantics. | Ready as a standalone scheduler evidence reader. Keep live scheduler proof binding separate so review evidence cannot satisfy final readiness by itself. |
+| Live backend auth proof | Future owner `services.production_closure.readiness_live_proofs` with proof-specific auth validator. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_AUTH_PROOF`, `NHMS_PRODUCTION_READINESS_AUTH_PROOF_FILE`, `--auth-proof`, or `--auth-proof-file`; inline and file are mutually exclusive. Payload must be a bounded JSON object under 64 KiB with schema `nhms.production_readiness.live_proof.v1`, `proof_type=auth`, surface `live_backend_auth`, current readiness `run_id`, target environment `production`, live proof mode, meaningful artifact/evidence refs, `accepted=true`, status `passed`, provider metadata, role mapping, and allowed plus denied coverage for every `REQUIRED_AUTH_ACTIONS` member. | Required final item `live-backend-auth`, surface `live_backend_auth`; `passed`/`live_proof`/`live_proof_accepted=true` when accepted, otherwise `release_blocked` with `not_executed` for missing or `live_proof` for invalid/too-large/parsed-but-rejected receipt. Details are redacted receipt details plus acceptance errors. | Load errors `PRODUCTION_READINESS_PROOF_*`; common acceptance errors plus `missing_provider_metadata`, `missing_role_mapping`, `missing_allowed_actions`, and `missing_denied_actions`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "auth or live_receipt"` | Retain until extracted auth proof preserves protected-action coverage, provider/role metadata checks, redaction, and release-blocker shape. | Ready as proof-specific function under a shared live-proof loader. |
+| Live alert sink proof | Future owner `services.production_closure.readiness_live_proofs` with proof-specific alert validator. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_ALERT_PROOF`, `NHMS_PRODUCTION_READINESS_ALERT_PROOF_FILE`, `--alert-proof`, or `--alert-proof-file`. Common live proof contract plus `proof_type=alert`, surface `live_alert_sink_delivery`, status `passed` or `delivered`, meaningful sink metadata, meaningful delivery metadata, and either `delivered=true` or status `delivered`. | Required final item `live-alert-sink`, surface `live_alert_sink_delivery`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | `PRODUCTION_READINESS_PROOF_*`; common acceptance errors plus `missing_sink_metadata`, `missing_delivery_metadata`, and `delivery_not_confirmed`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "alert or live_receipt"` | Retain until extraction preserves dry-run-vs-live distinction and delivery metadata requirements. | Ready as proof-specific function under the shared live-proof loader. |
+| Live rollback proof | Future owner `services.production_closure.readiness_live_proofs` with proof-specific rollback validator. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_ROLLBACK_PROOF`, `NHMS_PRODUCTION_READINESS_ROLLBACK_PROOF_FILE`, `--rollback-proof`, or `--rollback-proof-file`. Common live proof contract plus `proof_type=rollback`, surface `live_rollback_execution`, status `passed` or `executed`, meaningful preconditions, command/drill metadata, and an executed/success result. | Required final item `live-rollback-drill`, surface `live_rollback_execution`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | `PRODUCTION_READINESS_PROOF_*`; common acceptance errors plus `missing_preconditions`, `missing_command_or_drill_metadata`, and `rollback_not_executed`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "rollback or live_receipt"` | Retain until extraction preserves live rollback proof requirements without executing rollback during deterministic validation. | Ready as proof-specific function under the shared live-proof loader. |
+| Optional live scheduler proof | Future owner `services.production_closure.readiness_scheduler_live_proof`; consumes `readiness_scheduler_evidence` bindings. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_SCHEDULER_PROOF`, `NHMS_PRODUCTION_READINESS_SCHEDULER_PROOF_FILE`, `--scheduler-proof`, or `--scheduler-proof-file`. The item is created only when scheduler evidence root/file is configured or scheduler proof is supplied. Common live proof contract plus `proof_type=scheduler_evidence`, surface `live_scheduler_evidence_proof`, receipt status `passed`/`accepted`/`ready`/`submitted`/`completed`, producer schema `nhms.production_scheduler.pass_evidence.v1`, producer pass id, artifact ref, checksum or receipt id, and meaningful provenance. The receipt must bind to exactly one consumed scheduler evidence item; that producer evidence must have `scheduler_execution_mode=production_orchestration` and live-eligible scheduler status `submitted`, `completed`, `succeeded`, or `passed`. | Optional required final item `live-scheduler-evidence` when configured; accepted binding becomes `passed`/`live_proof`, otherwise `release_blocked`. Missing scheduler proof is `not_executed`; invalid/too-large/parsed rejected proof is `live_proof`. | `PRODUCTION_READINESS_PROOF_*`; scheduler binding errors such as `missing_scheduler_evidence_binding`, `scheduler_evidence_binding_not_found`, `ambiguous_scheduler_evidence_binding`, producer schema/run/artifact/checksum mismatches, `scheduler_execution_mode_not_live_eligible`, and `scheduler_status_not_live_eligible`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "scheduler and live"` | Retain until extraction preserves optional item creation, exact producer binding, ambiguity detection, live-eligible producer mode/status, and final count behavior. | Ready after scheduler evidence reader is isolated; do not combine review evidence and live proof acceptance in one lane result. |
+| Live Slurm dependency proof | Future owner `services.production_closure.readiness_dependency_live_proofs`; consumes optional dependency-summary bindings. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_SLURM_PROOF`, `NHMS_PRODUCTION_READINESS_SLURM_PROOF_FILE`, `--slurm-proof`, or `--slurm-proof-file`. Common live proof contract plus `proof_type=dependency`, surface `live_slurm_dependency_proof`, dependency `slurm`, status `passed`/`accepted`/`ready`, producer issue `147`, producer schema `nhms.production_closure.slurm.v1`, producer run id, artifact ref, checksum/receipt id, and meaningful non-placeholder provenance. If a Slurm dependency summary was consumed, receipt aliases must match its run id, artifact ref, and checksum. | Required final item `live-slurm-dependency`, surface `live_slurm_dependency_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | `PRODUCTION_READINESS_PROOF_*`; dependency binding errors such as dependency/issue/schema/run/artifact/checksum mismatches, missing producer fields, missing/placeholder provenance, top-level/provenance alias mismatches, and summary-binding mismatches. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or slurm_proof"` | Retain until extraction preserves raw alias validation before public redaction and optional binding to consumed summary. | Ready as part of a shared dependency live-proof binder. |
+| Live object-store dependency proof | Future owner `services.production_closure.readiness_dependency_live_proofs`. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_OBJECT_STORE_PROOF`, `NHMS_PRODUCTION_READINESS_OBJECT_STORE_PROOF_FILE`, `--object-store-proof`, or `--object-store-proof-file`. Common dependency proof contract for dependency `object_store`, surface `live_object_store_dependency_proof`, issue `148`, schema `nhms.production_closure.object_store.v1`, status `passed`/`accepted`/`ready`, and optional binding to consumed object-store summary. | Required final item `live-object-store-dependency`, surface `live_object_store_dependency_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | Same `PRODUCTION_READINESS_PROOF_*` and dependency binding error namespace as Slurm, with object-store expected issue/schema/dependency. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or object_store"` | Retain until extraction preserves dependency-specific issue/schema/surface checks and object-store alias compatibility. | Ready with the shared dependency live-proof binder. |
+| Live source dependency proof | Future owner `services.production_closure.readiness_dependency_live_proofs`. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_SOURCE_PROOF`, `NHMS_PRODUCTION_READINESS_SOURCE_PROOF_FILE`, `--source-proof`, or `--source-proof-file`. Common dependency proof contract for dependency `source`, surface `live_source_weather_dependency_proof`, issue `149`, schema `nhms.production_closure.met.v1`, status `passed`/`accepted`/`ready`, and optional binding to consumed source summary. | Required final item `live-source-dependency`, surface `live_source_weather_dependency_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | Same `PRODUCTION_READINESS_PROOF_*` and dependency binding error namespace as Slurm, with source expected issue/schema/dependency. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or source"` | Retain until extraction preserves weather/source proof as live producer evidence, not deterministic summary proof. | Ready with the shared dependency live-proof binder. |
+| Live E2E dependency proof | Future owner `services.production_closure.readiness_dependency_live_proofs`. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_E2E_PROOF`, `NHMS_PRODUCTION_READINESS_E2E_PROOF_FILE`, `--e2e-proof`, or `--e2e-proof-file`. Common dependency proof contract for dependency `e2e`, surface `live_e2e_dependency_proof`, issue `150`, schema `nhms.production_closure.e2e.v1`, status `passed`/`accepted`/`ready`, and optional binding to consumed E2E summary. | Required final item `live-e2e-dependency`, surface `live_e2e_dependency_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | Same `PRODUCTION_READINESS_PROOF_*` and dependency binding error namespace as Slurm, with E2E expected issue/schema/dependency. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or e2e"` | Retain until extraction preserves #673 dependency proof semantics without importing #672 lane rows. | Ready with the shared dependency live-proof binder. |
+| Live MVT dependency proof | Future owner `services.production_closure.readiness_dependency_live_proofs`. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_MVT_PROOF`, `NHMS_PRODUCTION_READINESS_MVT_PROOF_FILE`, `--mvt-proof`, or `--mvt-proof-file`. Common dependency proof contract for dependency `mvt`, surface `live_mvt_performance_proof`, issue `151`, schema `nhms.production_closure.scale.v1`, status `passed`/`accepted`/`ready`, and optional binding to consumed MVT summary. | Required final item `live-mvt-performance`, surface `live_mvt_performance_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | Same `PRODUCTION_READINESS_PROOF_*` and dependency binding error namespace as Slurm, with MVT expected issue/schema/dependency. | `uv run pytest -q tests/test_production_readiness_validation.py -k "dependency_receipt or mvt"` | Retain until extraction preserves final live performance proof requirement and does not treat deterministic scale summaries as final display proof. | Ready with the shared dependency live-proof binder. |
+| Target-environment config proof | Future owner `services.production_closure.readiness_live_proofs` with proof-specific target-env validator. | Optional inline/file proof from `NHMS_PRODUCTION_READINESS_TARGET_ENV_PROOF`, `NHMS_PRODUCTION_READINESS_TARGET_ENV_PROOF_FILE`, `--target-env-proof`, or `--target-env-proof-file`. Common live proof contract plus `proof_type=target_env`, surface `target_environment_config_proof`, status `passed`/`accepted`/`ready`, meaningful `config_metadata` or `environment_metadata`, and an environment/config identifier. | Required final item `live-target-environment-config`, surface `target_environment_config_proof`; accepted receipt becomes `passed`/`live_proof`, otherwise `release_blocked`. | `PRODUCTION_READINESS_PROOF_*`; common acceptance errors plus `missing_target_environment_config_metadata`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "target_env or final_readiness"` | Retain until extraction preserves target environment identity and config metadata requirements. | Ready as proof-specific function under the shared live-proof loader. |
+| Scoped exclusions | Future owner `services.production_closure.readiness_scope_exclusions`; aggregator keeps final summary inclusion. | No external input. Current static exclusions are CLDAS restricted source and incomplete real national data. They are scoped product exclusions for M19 and not validation failures. | Two non-final items: `scope-exclusion-cldas` on `cldas_restricted_source` and `scope-exclusion-national-data` on `incomplete_real_national_data`, both `not_executed`/`not_executed`, `required_for_final=false`, `live_proof_accepted=false`, with exclusion records propagated to `summary.exclusions` and `release_blockers.exclusions`. | No `PRODUCTION_READINESS_*` error code; correctness is item shape and final aggregation semantics. | `uv run pytest -q tests/test_production_readiness_validation.py -k "exclusions"` | Retain until extraction proves exclusions remain not failed, do not satisfy live proof, and preserve removal criteria. | Ready as a tiny static lane; future scope changes must update this inventory and product decision source. |
+| Readiness item validation | Future owner `services.production_closure.readiness_item_contracts`; aggregator composes lane results and validates every item. | Consumes all produced item dictionaries. Required fields are `surface`, `required_for_final`, `live_proof_accepted`, `artifact_refs`, `residual_risk`, `removal_criteria`, and `exclusions`; status and execution mode must be in the governed vocabulary and allowed pair table. `release_blocked` final-required items require residual risk and removal criteria. | Invalid item contracts create `failed`/`deterministic` validation items on surface `readiness_schema_validation` with artifact ref `readiness_items.json`; valid items pass through unchanged. | `PRODUCTION_READINESS_STATUS_INVALID`, `PRODUCTION_READINESS_EXECUTION_MODE_INVALID`, `PRODUCTION_READINESS_STATUS_MODE_INVALID`, `PRODUCTION_READINESS_ITEM_FIELD_MISSING`, and `PRODUCTION_READINESS_BLOCKER_CONTEXT_MISSING`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "status_execution_mode_truth_table or readiness_schema_validation_item"` | Retain until every extracted lane returns a single structured item/result type that validates under the same table. | Ready as a shared item dataclass/validator before any lane extraction. |
+| Final aggregation and release blockers | Future owner `services.production_closure.readiness_final_aggregation`; public entrypoint remains `validate_readiness`. | Consumes deterministic review items, dependency summaries, scheduler evidence items, live proof items, exclusions, and validation failures. Writes all readiness artifacts under `<evidence_root>/<run_id>/readiness`; run IDs must match `^[A-Za-z0-9][A-Za-z0-9_-]*$`; existing output requires `force`. | Writes `readiness_items.json`, `release_blockers.json`, and `summary.json`. Summary schema is `nhms.production_readiness.summary.v1`; `status` is `ready` only when `_final_ready(items)` is true, otherwise `release_blocked`. Counts include deterministic item count, live proof item count, required live proof count, and accepted live proof count. Release blockers include every `failed`, `blocked`, or `release_blocked` item and every required final item not accepted. | `PRODUCTION_READINESS_RUN_ID_UNSAFE`, `PRODUCTION_READINESS_EVIDENCE_EXISTS`, `PRODUCTION_READINESS_EVIDENCE_PATH_UNSAFE`, `PRODUCTION_READINESS_EVIDENCE_SYMLINK`, `PRODUCTION_READINESS_EVIDENCE_WRITE_FAILED`, `PRODUCTION_READINESS_EVIDENCE_PAYLOAD_TOO_LARGE`, plus propagated lane namespaces. | `uv run pytest -q tests/test_production_readiness_validation.py -k "final or release_blocker or existing_lane"` | Retain as the stable aggregation boundary until all extracted lanes prove identical final status, blocker list, artifact refs, counts, redaction, and output safety for equivalent fixtures. | Ready last; extracting it before lane result interfaces stabilize would move aggregator coupling into a new file. |
+| Preflight artifact surface | Future owner `services.production_closure.readiness_shared_artifacts`; aggregator writes it before item collection. | Consumes config, dependency roots, scheduler evidence root/file, and loaded proof receipt statuses. Paths are rendered with `_path_for_evidence` and redacted. | `preflight.json` schema `nhms.production_readiness.preflight.v1`, issue `181`, run ID, evidence root/dir, dependency roots, scheduler root/file, `live_proof_configured`, and a fast-CI live-side-effect policy with all live side effects false. | Output write/path errors use `PRODUCTION_READINESS_EVIDENCE_*`; proof configured flags mirror receipt load statuses. | `uv run pytest -q tests/test_production_readiness_validation.py -k "preflight or side_effect"` | Retain until extraction preserves side-effect-free fast-CI policy and redacted path rendering. | Ready as a shared artifact writer once `EvidenceWriter` is shared. |
+| Live proof receipts artifact surface | Future owner `services.production_closure.readiness_shared_artifacts`; consumes shared live-proof loader output. | Consumes all receipt load results for `auth`, `alert`, `rollback`, optional `scheduler`, dependency proofs, and `target_env`. The public artifact never includes `raw_payload`; parsed payloads are bounded and redacted. | `live_proof_receipts.json` schema `nhms.production_readiness.live_proof_receipts.v1`, run ID, receipt details by surface, and redaction flags for secrets, local paths, payload depth, and payload size. | Load errors use `PRODUCTION_READINESS_PROOF_*`; JSON traversal limit returns `PRODUCTION_READINESS_PROOF_JSON_LIMIT_EXCEEDED`; output write/path errors use `PRODUCTION_READINESS_EVIDENCE_*`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "live_proof_receipts_artifact or live_proof_json_traversal"` | Retain until extraction preserves inline/file ambiguity handling, proof size limits, JSON parse/limit behavior, raw-payload omission, and redaction flags. | Ready as the shared live-proof loader/artifact layer before proof-specific validators move. |
+| Environment artifact surface | Future owner `services.production_closure.readiness_shared_artifacts`; aggregator writes it after release blockers. | Captures only the governed env key list: production closure run flag, dependency root vars, scheduler evidence vars, proof file vars, `AUTH_TOKEN`, `AWS_SECRET_ACCESS_KEY`, and `DATABASE_URL`, plus Python version, platform, and cwd. Values are path/secret redacted. | `environment.json` schema `nhms.production_readiness.environment.v1`, run ID, captured timestamp, Python/platform/cwd, and redacted env mapping. | Output write/path errors use `PRODUCTION_READINESS_EVIDENCE_*`; redaction is shared with `_redact_paths` and `redact_payload`. | `uv run pytest -q tests/test_production_readiness_validation.py -k "environment_artifact_uses_allowlist"` | Retain until extraction preserves the narrow env allowlist and never emits raw secrets or private paths. | Ready as a shared artifact writer with preflight and receipts. |
+
+## Cross-Lane Contracts
+
+### Deterministic vs live proof
+
+Deterministic items, dependency summaries, and scheduler evidence are review
+lineage only. They can be `passed` and useful to reviewers, but they are
+`required_for_final=false` and `live_proof_accepted=false`. Final production
+readiness depends on required live proof items, not deterministic summaries.
+
+Dependency proof receipts and the optional scheduler proof receipt are separate
+live proof items. Dependency live proofs may pass from semantic producer
+provenance alone; when a matching dependency summary is also supplied, the
+receipt must bind to that consumed summary. Scheduler live proof is stricter:
+it must bind to exactly one consumed scheduler evidence artifact.
+
+### Status and execution-mode truth table
+
+`validate_readiness_item` is the source of truth for status/mode pairs:
+
+| Status | Allowed execution modes |
+|---|---|
+| `passed` | `deterministic`, `policy_simulated`, `backend_route_executed`, `dry_run_sink`, `simulated_drill`, `live_proof` |
+| `failed` | Any executed mode: `deterministic`, `policy_simulated`, `backend_route_executed`, `dry_run_sink`, `simulated_drill`, `live_proof` |
+| `blocked` | `not_executed` |
+| `not_executed` | `not_executed` |
+| `release_blocked` | `not_executed`, `policy_simulated`, `dry_run_sink`, `simulated_drill`, `live_proof` |
+
+Unsupported statuses raise `PRODUCTION_READINESS_STATUS_INVALID`, unsupported
+modes raise `PRODUCTION_READINESS_EXECUTION_MODE_INVALID`, and unsupported
+pairs raise `PRODUCTION_READINESS_STATUS_MODE_INVALID`.
+
+### Current run and target environment binding
+
+The readiness run ID must pass `SAFE_RUN_ID_RE` and is written to all output
+artifacts. Every live proof receipt must include `run_id == config.run_id`.
+Producer run IDs in dependency summaries and scheduler evidence are separate
+producer identities; they do not replace the current readiness run binding.
+
+Every live proof receipt must also target the expected environment
+`production`. A string value is accepted directly; a mapping may provide
+`name`, `environment`, or `id`. Missing or non-production target environment
+blocks the receipt.
+
+### Dependency producer binding
+
+Dependency proof receipts use alias groups for dependency name, producer issue,
+producer schema, producer run ID, producer artifact ref, and checksum/receipt
+ID. Top-level receipt fields and nested `provenance` are both inspected.
+Contradictory aliases within a source produce `top_level_*_alias_mismatch` or
+`provenance_*_alias_mismatch`; contradictions between top-level and provenance
+produce `provenance_*_mismatch`.
+
+Meaningful provenance is required and placeholder-only provenance is rejected.
+If the matching deterministic dependency summary was supplied and passed, every
+available receipt alias must match the consumed summary's producer run ID,
+artifact ref, and sha256 checksum. Raw path-like aliases are validated before
+public redaction, so extraction must keep raw comparison separate from redacted
+output.
+
+### Scheduler producer binding
+
+Scheduler proof receipts bind to consumed scheduler evidence by producer
+schema, pass ID, artifact ref, and checksum/receipt ID. A missing scheduler
+evidence binding blocks the live scheduler proof; a non-unique exact match
+blocks as ambiguous. The matched scheduler evidence must also be live-eligible:
+producer mode `production_orchestration` and scheduler status `submitted`,
+`completed`, `succeeded`, or `passed`.
+
+Scheduler evidence itself validates schema, pass ID, review execution mode,
+status allowlists, required counts, stale/final-readiness claims, dry-run
+no-mutation proof, unsafe identity values, candidate/model-run identity
+derivation, and count/cardinality consistency. Live producer statuses require
+positive compatible model-run evidence with no failed, partial, blocked,
+missing-status, or explicitly unsubmitted rows.
+
+### Redaction, path safety, and bounded JSON
+
+Public artifacts never emit raw secrets or raw private paths. Path-like values
+and keys are redacted for Unix, Windows, UNC, and `file://` forms. Secret
+redaction is delegated to `packages.common.redaction.redact_payload` and
+`redact_text`.
+
+Live proof payloads are bounded before validation. Payloads over 64 KiB,
+malformed JSON, non-object JSON, excessive depth, or excessive node count become
+release blockers with bounded public details. Scheduler evidence files are
+bounded to 256 KiB; oversized or unreadable scheduler evidence becomes blocked
+review evidence. Scheduler details can include bounded redacted payload previews
+without turning benign detail truncation into a scheduler JSON error.
+
+Evidence roots and output paths reject unsafe run IDs, symlink components,
+unsafe parent directories, existing output without `force`, non-regular
+scheduler/dependency files, and writes outside the current readiness lane.
+
+### Final readiness status semantics
+
+`_final_ready(items)` returns true only when no item is `failed`, `blocked`, or
+`release_blocked`, and every `required_for_final` item is `passed` with
+`live_proof_accepted=true`. `summary.status` is therefore only `ready` or
+`release_blocked`.
+
+`release_blockers.json` records every failed, blocked, or release-blocked item,
+and also records any required final item that is not accepted. Scoped
+exclusions remain visible in summary artifacts but are not failures and do not
+satisfy live proof requirements.
+
+## Guard Hook Seed
+
+Future readiness extraction or guard issues can use this owner map:
+
+| Lane / surface | Owner selector in current aggregator | Guard expectation |
+|---|---|---|
+| Dependency summaries | `DEPENDENCY_SUMMARY_CONTRACTS`, `DEPENDENCY_ROOT_ENV`, `_dependency_summary_items`, `_read_dependency_summary_item`, `_dependency_bindings` | New dependency names, producer issues/schemas, accepted statuses, discovery aliases, detail fields, or summary-binding behavior require this inventory to change. |
+| Scheduler evidence | `SCHEDULER_*` constants, `_scheduler_evidence_items`, `_read_scheduler_evidence_item`, `_scheduler_evidence_errors`, scheduler identity/count helpers, `_scheduler_bindings` | New scheduler producer schemas, modes/statuses, count fields, identity fields, file limits, or acceptance errors require this inventory to change. |
+| Live proof loader and receipts | `PROOF_ENV`, `PROOF_FILE_ENV`, `PROOF_CONTRACTS`, `_load_proof`, `_receipt_artifact`, `_receipt_details` | New proof keys, proof source env vars, receipt size/depth limits, schema, status aliases, or public receipt fields require this inventory to change. |
+| Proof-specific validators | `_auth_live_item`, `_surface_live_item`, `_surface_live_receipt_errors`, `_common_live_receipt_errors` | New auth actions, provider/role requirements, alert delivery fields, rollback result fields, target-env fields, or common live-proof requirements require this inventory to change. |
+| Dependency proof binding | `DEPENDENCY_BINDING_ALIAS_GROUPS`, dependency binding helper functions | New aliases, provenance precedence, placeholder rules, or summary-binding comparisons require this inventory to change. |
+| Scheduler proof binding | `SCHEDULER_BINDING_ALIAS_GROUPS`, scheduler binding helper functions | New aliases, live-eligible producer mode/status, ambiguity handling, or checksum matching behavior require this inventory to change. |
+| Scoped exclusions | `_exclusion_items`, `_summary_exclusions` | New or removed scoped exclusions, status changes, or removal criteria changes require this inventory to change. |
+| Item validation and final aggregation | `validate_readiness_item`, `_validate_items`, `_release_blockers`, `_final_ready`, `validate_readiness` summary construction | New status/mode values, required item fields, blocker shape, final status semantics, summary fields, or artifact refs require this inventory to change. |
+| Shared artifacts and safe writes | `EvidenceWriter`, `_preflight_payload`, `_environment_payload`, `_bounded_payload`, `_bounded_redacted_payload`, `_path_for_evidence`, `_redact_paths`, safe filesystem helpers | New output files, env keys, redaction behavior, path safety behavior, payload limits, or overwrite rules require this inventory to change. |

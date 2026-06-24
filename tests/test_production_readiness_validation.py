@@ -9,7 +9,7 @@ import pytest
 
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
-from services.production_closure import slurm_validation
+from services.production_closure import readiness_validation, slurm_validation
 from services.production_closure.readiness_validation import (
     ALLOWED_STATUS_EXECUTION_MODES,
     EXECUTION_MODE_VALUES,
@@ -436,6 +436,28 @@ def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden
     missing.pop("removal_criteria")
     with pytest.raises(ProductionReadinessValidationError):
         validate_readiness_item(missing)
+
+
+def test_readiness_schema_validation_item_is_emitted_for_invalid_item_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    invalid_item = _base_item("passed", "deterministic")
+    invalid_item.pop("removal_criteria")
+    monkeypatch.setattr(readiness_validation, "_deterministic_items", lambda config: [invalid_item])
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
+
+    validation_item = next(item for item in _items(root) if item["surface"] == "readiness_schema_validation")
+    assert validation_item["item_id"] == "schema-validation-0"
+    assert validation_item["status"] == "failed"
+    assert validation_item["execution_mode"] == "deterministic"
+    assert validation_item["required_for_final"] is False
+    assert validation_item["artifact_refs"] == ["readiness_items.json"]
+    assert "removal_criteria" in validation_item["residual_risk"]
+    assert any(blocker["surface"] == "readiness_schema_validation" for blocker in _blockers(root))
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_default_readiness_lane_is_deterministic_release_blocked_and_side_effect_free(
@@ -1623,6 +1645,77 @@ def test_live_proof_json_traversal_limits_are_release_blockers_and_bounded(
     assert "raw_payload" not in receipts
     assert len(receipts.encode("utf-8")) < 64 * 1024
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_live_proof_receipts_artifact_omits_raw_payload_and_redacts(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    payload = json.loads(_bound_proof("alert", status="failed", accepted=False))
+    payload["sink_metadata"]["webhook_url"] = "https://user:pass@alerts.example.invalid/hook?token=secret"
+    payload["local_path"] = "/tmp/private-live-proof/receipt.json"
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            alert_proof=json.dumps(payload),
+        )
+    )
+
+    artifact = json.loads((root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8"))
+    rendered = json.dumps(artifact, sort_keys=True)
+    assert artifact["schema"] == "nhms.production_readiness.live_proof_receipts.v1"
+    assert set(artifact["redaction"]) == {
+        "secrets_redacted",
+        "local_paths_redacted",
+        "payload_depth_bounded",
+        "payload_size_bounded",
+    }
+    assert artifact["redaction"]["local_paths_redacted"] is True
+    assert artifact["redaction"]["payload_depth_bounded"] is True
+    assert artifact["redaction"]["payload_size_bounded"] is True
+    assert "raw_payload" not in rendered
+    assert "token=secret" not in rendered
+    assert "user:pass@" not in rendered
+    assert "/tmp/private-live-proof/receipt.json" not in rendered
+    assert "[redacted" in rendered
+
+
+def test_environment_artifact_uses_allowlist_and_redacts_env_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    private_proof_path = tmp_path / "private" / "auth-proof.json"
+    allowed_keys = {
+        "NHMS_RUN_PRODUCTION_CLOSURE",
+        *readiness_validation.DEPENDENCY_ROOT_ENV.values(),
+        readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV,
+        readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV,
+        *readiness_validation.PROOF_FILE_ENV.values(),
+        "AUTH_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "DATABASE_URL",
+    }
+    monkeypatch.setenv("AUTH_TOKEN", "token=secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@db.internal:55432/nhms")
+    monkeypatch.setenv("NHMS_PRODUCTION_READINESS_AUTH_PROOF_FILE", str(private_proof_path))
+    monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "do-not-capture")
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
+
+    artifact = json.loads((root / "m19" / "readiness" / "environment.json").read_text(encoding="utf-8"))
+    rendered = json.dumps(artifact, sort_keys=True)
+    assert artifact["schema"] == "nhms.production_readiness.environment.v1"
+    assert artifact["run_id"] == "m19"
+    assert set(artifact["env"]).issubset(allowed_keys)
+    assert "UNRELATED_SECRET_TOKEN" not in artifact["env"]
+    assert "do-not-capture" not in rendered
+    assert "token=secret" not in rendered
+    assert "super-secret" not in rendered
+    assert "password" not in rendered
+    assert str(private_proof_path) not in rendered
+    assert "[redacted" in rendered
 
 
 def test_scheduler_candidate_count_requires_identity_collection(tmp_path: Path) -> None:
