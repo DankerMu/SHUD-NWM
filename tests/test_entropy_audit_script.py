@@ -934,6 +934,111 @@ def test_compatibility_facade_guard_reports_async_non_forwarding_implementation(
     assert "new_async_chain_policy" in str(signals[0]["detail"])
 
 
+def test_compatibility_facade_guard_reports_existing_sync_local_changed_to_forwarder_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    local_function = (
+        "\n"
+        "def unlisted_existing_local_chain_policy(value: object) -> dict[str, str]:\n"
+        "    normalized = str(value).strip()\n"
+        "    return {\"value\": normalized}\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
+    _commit_all(tmp_path, "add unlisted existing local chain policy")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            local_function,
+            "\n"
+            "def unlisted_existing_local_chain_policy(value: object) -> object:\n"
+            "    return chain_manifests.unlisted_existing_local_chain_policy(value)\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["path"] == "services/orchestrator/chain.py"
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_local_chain_policy",
+        "unlisted_existing_local_chain_policy",
+    ]
+    assert signals[0]["line"] is not None
+    assert "changed to forwarding facade path" in str(signals[0]["detail"])
+    assert "unlisted_existing_local_chain_policy" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_local_chain_policy owner services.orchestrator.chain_manifests "
+        "retention forwarding facade until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_reports_existing_async_local_changed_to_forwarder_until_inventory_updates(
+    tmp_path: Path,
+) -> None:
+    _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    local_function = (
+        "\n"
+        "async def unlisted_existing_async_local_chain_policy(value: object) -> dict[str, str]:\n"
+        "    normalized = str(value).strip()\n"
+        "    return {\"value\": normalized}\n"
+    )
+    _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
+    _commit_all(tmp_path, "add unlisted existing async local chain policy")
+    base_ref = _git_rev_parse(tmp_path, "HEAD")
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8").replace(
+            local_function,
+            "\n"
+            "async def unlisted_existing_async_local_chain_policy(value: object) -> object:\n"
+            "    return await chain_manifests.unlisted_existing_async_local_chain_policy(value)\n",
+        ),
+    )
+
+    signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+
+    assert [signal["message_key"] for signal in signals] == [
+        "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    ]
+    assert signals[0]["inventory_tokens"] == [
+        "unlisted_existing_async_local_chain_policy",
+        "unlisted_existing_async_local_chain_policy",
+    ]
+    assert signals[0]["line"] is not None
+    assert "changed to forwarding facade path" in str(signals[0]["detail"])
+    assert "unlisted_existing_async_local_chain_policy" in str(signals[0]["detail"])
+    _assert_compatibility_facade_report_only_finding(
+        tmp_path,
+        base_ref,
+        "compatibility-facade-growth.new-facade-reexport.inventory-required",
+    )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "unlisted_existing_async_local_chain_policy owner services.orchestrator.chain_manifests "
+        "retention async forwarding facade until removal condition.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
 def test_compatibility_facade_guard_reports_existing_sync_forwarder_changed_to_non_forwarding_until_inventory_updates(
     tmp_path: Path,
 ) -> None:

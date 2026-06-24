@@ -75,9 +75,9 @@
   multi-target aliases, scheduler imported symbol,
   scheduler private monkeypatch alias, guard-hook-only inventory matching,
   chain non-forwarding local implementation, sync/async forwarding-to-local
-  implementation transitions, async local implementation, chain project
-  import-family growth, metadata-complete inventory updates, and bare-token
-  inventory rejection.
+  and local-to-forwarding definition transitions, async local implementation,
+  chain project import-family growth, metadata-complete inventory updates, and
+  bare-token inventory rejection.
 
 ## 3. Production Closure Lane Decomposition
 
