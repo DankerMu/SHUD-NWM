@@ -238,10 +238,15 @@
   finding, gate-eligible finding, current authority, and historical evidence.
   It also tells scoped instructions to reuse these terms or link to the
   glossary instead of introducing local synonyms.
-- [ ] 6.2 Add entropy/control-plane audit coverage for scoped instruction
+- [x] 6.2 Add entropy/control-plane audit coverage for scoped instruction
   presence, freshness, and glossary term/link checks.
-  Evidence: tests cover missing scoped instructions for high-entropy
-  directories, stale scoped context, and missing glossary linkage.
+  Evidence: `scripts/governance/audit_repo_entropy.py` now emits the
+  report-only `scoped_agent_context` metadata section and
+  `scoped-agent-context` findings for missing scoped instructions,
+  stale scoped context, and missing glossary linkage. Tests cover all three
+  signal types plus the current repo state before #684-#687 land individual
+  scoped `AGENTS.md` files. The check is not in `HARD_GATE_CHECK_IDS`, so
+  hard-gate and CI failure semantics stay unchanged.
 - [ ] 6.3 Add `services/orchestrator/AGENTS.md`.
   Evidence: file defines local dependency direction, scheduler/chain facade
   compatibility rules, state ownership, mutation fences, and focused
