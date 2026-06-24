@@ -163,3 +163,39 @@ finding-level gate eligibility.
   report example schema.
 - No API endpoint deprecation, removal, OpenAPI contraction, or generated type
   regeneration.
+
+## Governance-7 Active Budget Delta
+
+This 2026-06-24 UTC update records the report-only audit after Governance-7
+active drift cleanup issues #675, #676, and #677. It is evidence/worklog only;
+it does not change detector logic, runtime behavior, source code, or baseline
+state.
+
+| Field | Value |
+|---|---|
+| Command | `uv run python scripts/governance/audit_repo_entropy.py --format json >/tmp/entropy-678-current.json` |
+| Mode | `report-only` |
+| Report metadata timestamp | `2026-06-24T05:21:58+00:00` |
+| Total findings | 448 |
+| Global `budget_counted_count` | 223 |
+| Global `gate_eligible_count` | 0 |
+| Baseline written | `false` |
+| Non-archive budget-counted route/path findings | 0 |
+
+Governance-7 design used 36 non-archive budget-counted route/path findings as
+the active cleanup target. The current report has 0 remaining non-archive
+budget-counted findings for `stale-display-route-token`,
+`placeholder-path-token`, and `placeholder-path-exists`, after excluding archive
+material under `docs/archived/**` and `openspec/changes/archive/**`.
+
+No active owner mapping is required because the non-archive route/path remainder
+is zero. The remaining global budget-counted findings are archive route/path
+semantics under `openspec/changes/archive/**`; those are intentionally not
+claimed as fixed here. Governance-7 archive-status issues #679, #680, and #681
+remain the owners.
+
+Verification:
+
+- `uv run python scripts/governance/audit_repo_entropy.py --format json
+  >/tmp/entropy-678-current.json` passed.
+- `git diff -- .entropy-baseline/latest.json --exit-code` passed.

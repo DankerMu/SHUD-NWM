@@ -157,10 +157,17 @@
   finding for the same source comment, allowlisted and not budget-counted.
   Global `budget_counted_count` drops from 224 to 223, and
   `baseline_written=false` in both audits.
-- [ ] 4.4 Re-run report-only entropy audit and record the active
+- [x] 4.4 Re-run report-only entropy audit and record the active
   budget-counted delta.
   Evidence: non-archive budget-counted route/path findings decrease from 36, or
   every remaining active finding maps to an explicit owner issue with reason.
+  `/tmp/entropy-678-current.json` was generated with
+  `uv run python scripts/governance/audit_repo_entropy.py --format json`;
+  metadata: `finding_count=448`, `budget_counted_count=223`,
+  `gate_eligible_count=0`, `baseline_written=false`. Non-archive
+  budget-counted route/path findings are now 0, so no remaining active owner
+  mapping is required. Archive route/path budget semantics remain follow-up work
+  for #679-#681.
 
 ## 5. Archive Status Semantics
 
