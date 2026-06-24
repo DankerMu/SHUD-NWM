@@ -104,7 +104,7 @@ OpenSpec task to its GitHub issue and implementation PR.
 | 1.6 Scheduler execution/cohort owner-family completion | #717 | #776 | Execution wrapper and restart cohort parity coverage. |
 | 1.7 Scheduler evidence-write/proof owner-family completion | #718 | #777 | Evidence direct alias, forwarder, wrapper, and proof coverage. |
 | 1.8 Scheduler cancellation/status proof local-glue closure | #719 | #778 | Cancellation/status proof wrapper coverage and retained local glue classification. |
-| 1.9 Scheduler group verification and evidence closeout | #720 | closeout PR pending | Final group verification and this issue/PR mapping. |
+| 1.9 Scheduler group verification and evidence closeout | #720 | #779 | Final group verification and this issue/PR mapping. |
 
 ## Non-Targets
 

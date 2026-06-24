@@ -409,7 +409,7 @@
     wrapper-owner names and retained local-glue classification. Do not move local cancellation orchestration glue unless
     equivalent cancellation, status-sync, mutation-proof, and lease-lost behavior is proved in this issue; if not moved,
     inventory must say why it remains local and when it can be removed or extracted.
-- [ ] 1.9 Scheduler group verification and evidence closeout.
+- [x] 1.9 Scheduler group verification and evidence closeout.
   - Module/Scope: integration gate for scheduler group.
   - Dependencies: 1.1-1.8.
   - Out of Scope: new scheduler behavior, Slurm resource changes, DB schema changes.
