@@ -116,7 +116,7 @@ and the Governance Audit CI job remains report-only.
       "finding_count": 2
     },
     {
-      "module": "apps/web",
+      "module": "retired/frontend-placeholder",
       "structure": "medium",
       "semantics": "low",
       "behavior": "low",
@@ -212,12 +212,12 @@ and the Governance Audit CI job remains report-only.
       },
       "governance_face": "legacy/dead-code",
       "role": "shared_contract",
-      "evidence_path": "apps/web/README.md",
+      "evidence_path": "retired/frontend-placeholder/README.md",
       "line": null,
       "severity": "medium",
       "priority": "P2",
       "owner_area": "repo structure",
-      "module": "apps/web",
+      "module": "retired/frontend-placeholder",
       "allowlist_reason": null,
       "allowlist_key": null,
       "allowlist_state": "unallowlisted",

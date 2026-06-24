@@ -136,12 +136,17 @@
   historical/compatibility contexts. Global `budget_counted_count` dropped from
   259 to 229, and `baseline_written=false` in both audits. `openspec validate
   --all --strict --no-interactive` passes.
-- [ ] 4.2 Clean the active governance/module docs drift budget without deleting
+- [x] 4.2 Clean the active governance/module docs drift budget without deleting
   historical context.
   Evidence: `docs/governance/entropy-report.example.md`,
   `docs/governance/ROLE_BOUNDARY.md`, and `docs/modules/00_module_index.md`
   either use canonical paths or have audit-recognized retired/historical
-  markers.
+  markers. Before cleanup `/tmp/entropy-676-before.json` had 45 active
+  `docs/governance/**` + `docs/modules/**` route/path findings, 5
+  budget-counted and unallowlisted; after cleanup `/tmp/entropy-676-after.json`
+  has 40 active findings, 0 budget-counted, and 0 unallowlisted. Global
+  `budget_counted_count` dropped from 229 to 224, and `baseline_written=false`
+  in both audits.
 - [ ] 4.3 Clean `services/slurm_gateway/config.py` retired-path source/comment
   drift without changing runtime template behavior.
   Evidence: source comment is audit-classified as retired/historical context;
