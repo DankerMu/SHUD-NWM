@@ -4,10 +4,11 @@ Snapshot date: 2026-06-24
 
 Scope: Governance-7 issue #669 inventory, Governance-8 issue #712 guard
 fixture, Governance-8 issue #713 state owner-family fixture, Governance-8
-issue #714 lease owner-family fixture, and Governance-8 issue #715 discovery
+issue #714 lease owner-family fixture, Governance-8 issue #715 discovery
+owner-family fixture, and Governance-8 issue #716 candidate-construction
 owner-family fixture for `services/orchestrator/scheduler.py`. This page
-records scheduler compatibility export groups, monkeypatch bindings, real owner
-modules, known callers/tests, retention reasons, removal conditions,
+records scheduler compatibility export groups, monkeypatch bindings, real
+owner modules, known callers/tests, retention reasons, removal conditions,
 verification commands, and guard hooks for scheduler facade growth.
 
 This inventory is evidence-only. It does not move scheduler implementation
@@ -117,7 +118,7 @@ Issue #712 uses this inventory as the expected owner map:
 | `scheduler-evidence-write-compat` | `_scheduler_evidence.*` constants, write/reservation/runtime wrappers, and file-safety wrappers | New evidence write/runtime wrappers require an inventory update. |
 | `cancellation-status-proof-wrappers` | `_scheduler_evidence.*` proof/status wrappers and `_scheduler_candidates._slurm_status_sync_failed_evidence` | New cancellation/status/proof wrappers require an inventory update; local cancellation glue is tracked as local glue, not a pure alias. |
 
-Guard-hook metadata rows required by #712 through #715:
+Guard-hook metadata rows required by #712 through #716:
 
 - `scheduler-state-monkeypatch-bindings`: owner `services.orchestrator.scheduler_state`; retention reason: legacy scheduler monkeypatch bindings; removal condition: migrate monkeypatch callers; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
 - `candidate-state-reexports`: owner `services.orchestrator.scheduler_state`; retention reason: legacy candidate-state imports; removal condition: callers use owner module/public API; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
