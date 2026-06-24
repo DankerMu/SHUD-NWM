@@ -860,6 +860,21 @@ def test_compatibility_facade_guard_reports_chain_non_forwarding_implementation_
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
 
 
+def test_compatibility_facade_guard_follow_up_issue_semantics_requires_concrete_issue_ref() -> None:
+    assert not audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue #999; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; follow-up issue /issues/999; removal condition."
+    )
+    assert audit_repo_entropy._compatibility_inventory_has_follow_up_issue_semantics(
+        "owner module cannot host local glue; issues/999 follow-up removal condition."
+    )
+
+
 def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
     tmp_path: Path,
 ) -> None:
@@ -933,6 +948,22 @@ def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
         "- metadata_required_chain_policy owner module cannot host removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host local glue; "
+        "follow-up issue; removal condition after owner extraction.",
     )
 
     assert [

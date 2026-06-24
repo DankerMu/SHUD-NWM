@@ -4344,11 +4344,11 @@ def _compatibility_inventory_has_owner_hosting_rationale_semantics(text: str) ->
 
 
 def _compatibility_inventory_has_follow_up_issue_semantics(text: str) -> bool:
-    if "follow-up issue" in text or "follow up issue" in text:
-        return True
+    follow_up_pattern = r"(?:follow-up|follow up)"
+    issue_ref_pattern = r"(?:#[0-9]+|/?issues/[0-9]+)"
     return (
-        re.search(r"(?:follow-up|follow up).{0,40}#[0-9]+", text) is not None
-        or re.search(r"#[0-9]+.{0,40}(?:follow-up|follow up)", text) is not None
+        re.search(rf"{follow_up_pattern}.{{0,40}}{issue_ref_pattern}", text) is not None
+        or re.search(rf"{issue_ref_pattern}.{{0,40}}{follow_up_pattern}", text) is not None
     )
 
 
