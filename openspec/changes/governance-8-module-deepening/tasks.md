@@ -162,12 +162,60 @@
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory group `discovery-compat-aliases`, or state that no discovery
     facade surface changed and prove it with compatibility tests.
-- [ ] 1.5 Scheduler candidate-construction owner-family completion.
+- [x] 1.5 Scheduler candidate-construction owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_candidates` candidate building, canonical readiness, active Slurm sync, duplicate exclusion, and candidate-state merge.
   - Dependencies: 1.1 and 1.2.
   - Out of Scope: discovery source window logic, execution/cohort handling, evidence file writes, cancellation/status proof.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `candidate-construction-compat-aliases`.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because candidate construction selects mutable scheduler
+    work items from discovery and state inputs, gates canonical readiness before execution, can trigger active Slurm
+    status sync, and still exposes old scheduler private methods/constants that tests monkeypatch directly.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler._build_candidates`,
+    `_candidate_construction_context`, and legacy `services.orchestrator.scheduler` candidate imports stay stable);
+    Legacy compatibility / examples (old private candidate helper imports and `MAX_CANDIDATES` monkeypatches keep
+    working); Schema / columns / units / field names (candidate dictionaries, blocked/skipped reasons, canonical
+    readiness evidence, duplicate exclusions, active Slurm sync evidence, and state-evidence merge fields stay
+    equivalent); Concurrency / shared state / ordering (candidate-state decisions, active orchestration checks, active
+    Slurm jobs, status-sync retries, and duplicate exclusion ordering stay stable); Resource limits / large input /
+    discovery (`MAX_CANDIDATES`, bounded active Slurm jobs, candidate-state job/event limits, and duplicate collapse
+    stay bounded); Slurm production lifecycle / mock-vs-real parity (active Slurm sync/cancel/defer paths keep existing
+    proof inputs without moving execution); Run manifest / QC provenance (run_id, forcing_version_id, canonical product,
+    source policy identity, and source object identity remain bound to the candidate); Error handling / rollback /
+    partial outputs (canonical readiness unavailable/query-failed evidence, active Slurm status-sync failed/deferred
+    no-submit outcomes, and blocked/skipped candidate lists stay stable without writing evidence files in this slice);
+    Documentation / migration notes (inventory group remains the owner/removal authority).
+    Not Selected: Discovery source-window selection and backfill ordering, execution/cohort submission, evidence file
+    writes/reservation safety, cancellation/status proof assembly, lease acquisition/heartbeat, Auth / permissions /
+    secrets beyond existing evidence redaction, Config / project setup, File IO / path safety / overwrite, Release /
+    packaging / dependency compatibility, Geospatial / CRS / basin geometry, Hydro-met numerical forcing contents, SHUD
+    numerical runtime / conservation / NaN, PostGIS / TimescaleDB domain behavior beyond read-only candidate-state
+    queries, External hydro-met providers / snapshot reproducibility beyond input horizon identity, Published NHMS
+    artifacts / display identity.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_candidates` owns candidate construction,
+    canonical readiness gating, active Slurm sync/defer/cancel classification, duplicate exclusion, candidate-state
+    merge, source identity helpers, and status-sync failure evidence, while `services.orchestrator.scheduler` exposes
+    only inventoried candidate aliases and forwarding methods. Source-of-truth identity/contract: scheduler-candidates
+    owner module plus inventory group `candidate-construction-compat-aliases`. Surfaces: Producers:
+    `services/orchestrator/scheduler_candidates.py`; Compatibility facade: `services/orchestrator/scheduler.py`;
+    Validators/preflight: focused production scheduler/backfill tests and compatibility-facade guard;
+    Storage/cache/query: read-only active repository candidate-state, active orchestration, active Slurm jobs, and
+    completed pipeline queries; Public routes/entrypoints: `ProductionScheduler._build_candidates`,
+    `_candidate_construction_context`, canonical readiness/source identity helper imports, and `MAX_CANDIDATES`;
+    Failure paths/rollback/stale state: canonical readiness unavailable/query-failed evidence, identity mismatch blocks,
+    duplicate candidate exclusions, active duplicate pipeline skips, active Slurm sync failure/defer/cancel evidence, and
+    max-candidate limit errors; Evidence/audit/readiness: scheduler compatibility inventory and candidate construction
+    test evidence.
+  - Regression Rows: scheduler facade candidate alias names match owner attributes and inventory group; forwarding methods
+    delegate to `SchedulerCandidateConstructionContext` and `build_candidates` while preserving scheduler-level
+    monkeypatches for `MAX_CANDIDATES` and candidate-state decider inputs; duplicate candidate ids produce skipped
+    candidates plus `duplicate_exclusions` before amplification; canonical readiness unavailable/not-ready/fresh-zero-row
+    evidence keeps existing blocked or full-chain behavior; terminal candidate state and active Slurm state are recorded
+    before not-ready canonical gates; active Slurm status sync success/failure/defer paths keep sync evidence and
+    candidate-state merge semantics; no discovery source-window, execution/cohort, evidence-write, lease, or
+    cancellation/status inventory groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `candidate-construction-compat-aliases`, or state that no
+    candidate-construction facade surface changed and prove it with compatibility tests.
 - [ ] 1.6 Scheduler execution/cohort owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_execution` execution, restart-compatible cohorts, forced production, run-id/cohort grouping, concurrent submissions.
   - Dependencies: 1.1 and 1.5.
