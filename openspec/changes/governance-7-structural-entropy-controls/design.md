@@ -761,6 +761,59 @@ Required #678 evidence:
   remaining active findings have explicit owner issue/reason mapping.
 - `.entropy-baseline/latest.json` is unchanged.
 
+## Issue #679 Fixture
+
+Fixture level: compact. The issue defines governance marker semantics for
+archived/superseded material; it does not change audit classifier logic or apply
+markers to archive material.
+
+Change surface:
+
+- `docs/governance/DOC_STATUS.md` document authority and marker guidance.
+- Governance-7 OpenSpec task/fixture evidence for #679.
+
+Must preserve:
+
+- Historical and archived evidence remains visible, not deleted.
+- The entropy audit classifier remains unchanged until #680.
+- No mass archive materialization or marker application happens in #679.
+- Conflict resolution still requires current source code, validation matrices,
+  runbooks, and active OpenSpec tasks to win over historical text.
+
+Must add/change:
+
+- Define standardized whole-document and section-level markers for non-current
+  material.
+- Name required marker fields: `status`, `current_authority`,
+  `superseded_by`, `status_since`, `archive_scope`, and `retained_for`.
+- Direct agents/readers to resolve `current_authority` and `superseded_by`
+  before treating archived route/path/topology/operations text as actionable.
+- State that incomplete markers do not justify broad archive-path suppression.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no command or script behavior
+  change.
+- Config / project setup: not selected - no config change.
+- File IO / path safety / overwrite: not selected - docs-only marker guidance.
+- Schema / columns / units / field names: selected - marker field names become
+  the source contract for #680 classifier work.
+- Auth / permissions / secrets: not selected.
+- Concurrency / shared state / ordering: not selected.
+- Resource limits / large input / discovery: not selected.
+- Legacy compatibility / examples: selected - historical/archive text must
+  remain retained but non-current.
+- Error handling / rollback / partial outputs: not selected.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected - this issue is governance doc
+  guidance.
+
+Required #679 evidence:
+
+- `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive` passes.
+- Markdown lint for `docs/governance/DOC_STATUS.md` passes.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis

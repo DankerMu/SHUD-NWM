@@ -171,10 +171,16 @@
 
 ## 5. Archive Status Semantics
 
-- [ ] 5.1 Define archive/superseded front matter or standardized markers for
+- [x] 5.1 Define archive/superseded front matter or standardized markers for
   historical documents and archived OpenSpec artifacts.
   Evidence: documentation names required fields or markers, including status,
   current authority, and supersession target where applicable.
+  `docs/governance/DOC_STATUS.md` now defines YAML front matter and
+  section-level `Archive status:` blocks with required `status`,
+  `current_authority`, `superseded_by`, `status_since`, `archive_scope`, and
+  `retained_for` semantics; it directs agents to resolve current authority
+  before treating preserved archive/superseded text as actionable and states
+  incomplete markers remain visible for triage.
 - [ ] 5.2 Update the entropy audit classification to use complete archive
   status semantics instead of broad archive-path suppression.
   Evidence: tests cover complete archive marker allowlisting, missing marker

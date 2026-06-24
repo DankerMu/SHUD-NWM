@@ -17,6 +17,68 @@ only tells readers which source should win when two sources disagree.
 | `superseded` | A document or section whose guidance has been replaced by a named current source. | any path with an explicit superseded notice |
 | `archived` | Historical material moved out of the active tree or clearly marked as archive-only. | `docs/archived/**` |
 
+## Archive And Supersession Markers
+
+Archived and superseded material is retained as evidence, not as current
+instruction. A reader or agent must resolve the named current authority before
+treating any preserved route, path, topology, environment, or validation text as
+actionable.
+
+The preferred whole-document marker is YAML front matter at the top of the
+file:
+
+```yaml
+---
+status: archived
+current_authority:
+  - path: docs/governance/DOC_STATUS.md
+    section: Archive And Supersession Markers
+    reason: document authority and marker semantics
+superseded_by:
+  - path: docs/runbooks/two-node-deployment-overview.md
+    section: Current deployment topology
+    reason: current runtime topology
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: audit evidence
+---
+```
+
+For section-level archive material, or for files where front matter would break
+tooling, use this standardized block immediately before the preserved text:
+
+```text
+Archive status:
+- status: superseded
+- current_authority: docs/governance/DOC_STATUS.md#conflict-resolution-order
+- superseded_by: openspec/specs/single-map-shell-routing/spec.md
+- status_since: 2026-06-24
+- archive_scope: section
+- retained_for: compatibility evidence
+```
+
+Required marker semantics:
+
+- `status` is required and must be one of `historical baseline`, `superseded`,
+  or `archived` for non-current material.
+- `current_authority` is required whenever preserved text could look like a
+  current route, path, topology, environment, validation, or operational
+  instruction. It must name the current source path and, when helpful, the
+  section or requirement.
+- `superseded_by` is required for `superseded` material. It is also required
+  for `archived` material when a known replacement exists. If no single
+  replacement exists, use `superseded_by: none` and make `retained_for`
+  explicit.
+- `status_since` records the date the marker became valid.
+- `archive_scope` must state whether the marker applies to the whole document
+  or only the following section.
+- `retained_for` explains why the stale-looking text remains in the repository.
+
+Incomplete markers do not make text safe to ignore. Until the classifier learns
+the marker semantics, and whenever required fields are missing, archived-looking
+material remains visible for triage instead of being globally suppressed by
+path.
+
 ## Conflict-Resolution Order
 
 When sources disagree, use the highest applicable source in this order:
@@ -38,7 +100,8 @@ When sources disagree, use the highest applicable source in this order:
 6. **Module decomposition docs**: module docs are implementation guidance and
    lose to current specs, current runbooks, validation evidence, and code.
 7. **Historical baseline, superseded, and archived documents**: use these only
-   for audit context unless they point to a current source.
+   for audit context. If they contain archive or supersession markers, follow
+   `current_authority` and `superseded_by` before using the preserved text.
 
 If two current sources at the same level conflict, prefer the more specific
 source for the affected role, path, or issue. Record the conflict in the next
