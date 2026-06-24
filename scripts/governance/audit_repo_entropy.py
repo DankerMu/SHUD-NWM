@@ -4417,7 +4417,8 @@ def _compatibility_facade_signal(
         detail=detail,
         owner_action=(
             "Update the matching compatibility inventory with the new symbol/import family, "
-            "real owner, retention reason, removal condition, and follow-up rationale; "
+            "real owner, retention reason, removal condition, verification command, "
+            "and follow-up rationale; "
             "otherwise move the implementation to the owning module."
         ),
     )
@@ -4440,24 +4441,29 @@ def _compatibility_inventory_line_covers_signal(
 ) -> bool:
     if not any(_compatibility_inventory_contains_token(line, token) for token in signal.inventory_tokens):
         return False
-    return _compatibility_inventory_line_has_metadata(line, signal.signal_type)
+    return _compatibility_inventory_line_has_metadata(line, signal)
 
 
-def _compatibility_inventory_line_has_metadata(line: str, signal_type: str) -> bool:
+def _compatibility_inventory_line_has_metadata(line: str, signal: _CompatibilityFacadeSignal) -> bool:
     normalized = line.casefold()
-    if signal_type in {"new-facade-reexport", "new-monkeypatch-alias"}:
-        return (
+    if signal.signal_type in {"new-facade-reexport", "new-monkeypatch-alias"}:
+        required_metadata = (
             _compatibility_inventory_has_owner_semantics(normalized)
             and _compatibility_inventory_has_retention_semantics(normalized)
             and _compatibility_inventory_has_removal_condition_semantics(normalized)
         )
-    if signal_type == "new-non-forwarding-implementation":
+        if signal.facade_name == "scheduler":
+            required_metadata = required_metadata and _compatibility_inventory_has_verification_semantics(
+                normalized
+            )
+        return required_metadata
+    if signal.signal_type == "new-non-forwarding-implementation":
         return (
             _compatibility_inventory_has_owner_hosting_rationale_semantics(normalized)
             and _compatibility_inventory_has_follow_up_issue_semantics(normalized)
             and _compatibility_inventory_has_removal_condition_semantics(normalized)
         )
-    if signal_type == "new-import-family":
+    if signal.signal_type == "new-import-family":
         return (
             _compatibility_inventory_has_justification_semantics(normalized)
             and _compatibility_inventory_has_no_ownership_inversion_semantics(normalized)
@@ -4475,6 +4481,23 @@ def _compatibility_inventory_has_retention_semantics(text: str) -> bool:
 
 def _compatibility_inventory_has_removal_condition_semantics(text: str) -> bool:
     return "removal-condition" in text or "removal condition" in text
+
+
+def _compatibility_inventory_has_verification_semantics(text: str) -> bool:
+    if "verification command" not in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "`uv run pytest",
+            "`uv run ruff",
+            "`openspec validate",
+            "`git diff --check",
+            "`corepack pnpm",
+            "`pnpm ",
+            "`cd apps/frontend && pnpm",
+        )
+    )
 
 
 def _compatibility_inventory_has_owner_hosting_rationale_semantics(text: str) -> bool:

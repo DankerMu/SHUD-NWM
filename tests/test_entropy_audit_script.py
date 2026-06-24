@@ -270,6 +270,72 @@ def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> No
     assert _findings_by_check(REPO_ROOT, audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID) == []
 
 
+def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
+    expected_metadata = {
+        "scheduler-state-monkeypatch-bindings": (
+            "services.orchestrator.scheduler_state",
+            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
+        ),
+        "candidate-state-reexports": (
+            "services.orchestrator.scheduler_state",
+            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
+        ),
+        "scheduler-lease-reexports": (
+            "services.orchestrator.scheduler_lease",
+            "uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py",
+        ),
+        "discovery-compat-aliases": (
+            "services.orchestrator.scheduler_discovery",
+            "uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py",
+        ),
+        "candidate-construction-compat-aliases": (
+            "services.orchestrator.scheduler_candidates",
+            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
+        ),
+        "execution-restart-cohort-wrappers": (
+            "services.orchestrator.scheduler_execution",
+            "uv run pytest -q tests/test_production_scheduler.py",
+        ),
+        "scheduler-evidence-write-compat": (
+            "services.orchestrator.scheduler_evidence",
+            "uv run pytest -q tests/test_production_scheduler.py",
+        ),
+        "cancellation-status-proof-wrappers": (
+            "services.orchestrator.scheduler_evidence",
+            "uv run pytest -q tests/test_production_scheduler.py",
+        ),
+    }
+
+    for command in (
+        "uv run pytest -q tests/test_entropy_audit_script.py",
+        "uv run pytest -q tests/test_production_scheduler.py "
+        "tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py",
+        "openspec validate governance-8-module-deepening --strict --no-interactive",
+        "git diff --check",
+    ):
+        assert command in inventory_text
+
+    for group_id, (owner, command) in expected_metadata.items():
+        matches = [
+            line
+            for line in guard_text.splitlines()
+            if f"`{group_id}`" in line and "verification command" in line
+        ]
+        assert len(matches) == 1, f"expected one #712 metadata row for {group_id}"
+        line = matches[0]
+        normalized = line.casefold()
+        assert owner in line
+        assert command in line
+        assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
+        assert audit_repo_entropy._compatibility_inventory_has_verification_semantics(normalized)
+
+
 def test_scoped_agent_context_current_repo_matches_scoped_instruction_state() -> None:
     context = _scoped_agent_context(REPO_ROOT)
     signals = context["signals"]
@@ -725,7 +791,8 @@ def test_compatibility_facade_guard_reports_scheduler_owner_alias_until_inventor
     _append_inventory_line(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
-        "NewSchedulerAlias owner services.orchestrator.scheduler_state retention removal-condition.",
+        "NewSchedulerAlias owner services.orchestrator.scheduler_state retention removal-condition; "
+        "verification command: `uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -763,7 +830,32 @@ def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
         "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
+        "retention removal-condition; verification TBD.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
         "retention removal-condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
+        "retention removal-condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport") == []
@@ -801,7 +893,8 @@ def test_compatibility_facade_guard_reports_scheduler_annotated_owner_alias_unti
     _append_inventory_line(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
-        "AnnotatedAlias owner services.orchestrator.scheduler_state retention removal-condition.",
+        "AnnotatedAlias owner services.orchestrator.scheduler_state retention removal-condition; "
+        "verification command: `uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -851,7 +944,8 @@ def test_compatibility_facade_guard_reports_scheduler_full_module_dotted_aliases
     _append_inventory_line(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
-        "DottedAlias and DottedAnnotatedAlias owner module aliases retain with removal condition.",
+        "DottedAlias and DottedAnnotatedAlias owner module aliases retain with removal condition; "
+        "verification command: `uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -893,7 +987,8 @@ def test_compatibility_facade_guard_classifies_full_module_dotted_call_as_forwar
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
         "dotted_scheduler_forwarder owner module services.orchestrator.scheduler_state "
-        "retains forwarding facade path until removal condition.",
+        "retains forwarding facade path until removal condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -937,7 +1032,8 @@ def test_compatibility_facade_guard_reports_same_rhs_multi_target_aliases_until_
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
         "SameRhsAlias and SameRhsAliasCompat share owner module aliases with "
-        "retention and removal condition.",
+        "retention and removal condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -994,7 +1090,8 @@ def test_compatibility_facade_guard_reports_sequence_owner_aliases_until_invento
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
         f"{name_prefix}Alias and {name_prefix}OtherAlias sequence owner module aliases "
-        "retain with removal condition.",
+        "retain with removal condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -1023,6 +1120,16 @@ def test_compatibility_facade_guard_reports_scheduler_imported_symbol(
         base_ref,
         "compatibility-facade-growth.new-facade-reexport.inventory-required",
     )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "NewImportedSchedulerSymbol owner services.orchestrator.scheduler_state retention "
+        "removal condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
 
 
 def test_compatibility_facade_guard_ignores_inventory_token_outside_guard_hook(
@@ -1068,6 +1175,16 @@ def test_compatibility_facade_guard_reports_scheduler_monkeypatch_alias(
         base_ref,
         "compatibility-facade-growth.new-monkeypatch-alias.inventory-required",
     )
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "_new_scheduler_patch owner services.orchestrator.scheduler_state retention "
+        "removal condition; verification command: "
+        "`uv run pytest -q tests/test_entropy_audit_script.py`.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
 
 
 def test_compatibility_facade_guard_reports_chain_non_forwarding_implementation_until_inventory_updates(

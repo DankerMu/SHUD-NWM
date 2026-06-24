@@ -59,6 +59,21 @@ from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycl
 from workers.shud_runtime import runtime as shud_runtime_module
 
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
+_TEST_OBJECT_STORE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")).resolve() / "nhms-test-object-store"
+
+
+class _NoopReconcileStore:
+    def query_reserved_unbound_jobs(self) -> list[Any]:
+        return []
+
+    def query_inflight_jobs(self) -> list[Any]:
+        return []
+
+    def bind_reservation(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("noop reconcile store must not bind reservations")
+
+    def update_job_status(self, *_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("noop reconcile store must not update job status")
 
 
 def _write_valid_shud_executable(directory: Path) -> Path:
@@ -119,6 +134,14 @@ class _AlwaysReadyCanonicalReadinessProvider:
         }
 
 
+def _noop_reconcile_comment_query(_idempotency_key: str) -> None:
+    return None
+
+
+def _noop_reconcile_sacct_query(_slurm_job_id: str) -> None:
+    return None
+
+
 class ProductionScheduler(_RealProductionScheduler):
     def __init__(
         self,
@@ -131,12 +154,21 @@ class ProductionScheduler(_RealProductionScheduler):
         forcing_producer: Any | None = None,
         orchestrator_factory: Any | None = None,
         sleep: Any | None = None,
+        reconcile_store: Any | None = None,
+        reconcile_comment_query: Any | None = None,
+        reconcile_sacct_query: Any | None = None,
     ) -> None:
         self._test_canonical_readiness_omitted = (
             canonical_readiness_provider is _TEST_CANONICAL_READINESS_PROVIDER_UNSET
         )
         if canonical_readiness_provider is _TEST_CANONICAL_READINESS_PROVIDER_UNSET:
             canonical_readiness_provider = _AlwaysReadyCanonicalReadinessProvider()
+        if reconcile_store is None:
+            reconcile_store = _NoopReconcileStore()
+        if reconcile_comment_query is None:
+            reconcile_comment_query = _noop_reconcile_comment_query
+        if reconcile_sacct_query is None:
+            reconcile_sacct_query = _noop_reconcile_sacct_query
         super().__init__(
             config,
             registry=registry,
@@ -146,6 +178,9 @@ class ProductionScheduler(_RealProductionScheduler):
             forcing_producer=forcing_producer,
             orchestrator_factory=orchestrator_factory,
             sleep=sleep,
+            reconcile_store=reconcile_store,
+            reconcile_comment_query=reconcile_comment_query,
+            reconcile_sacct_query=reconcile_sacct_query,
         )
 
     def _canonical_readiness_for_candidate(self, candidate: Any, cycle: Any) -> dict[str, Any] | None:
@@ -13216,7 +13251,7 @@ class FakeProductionOrchestrator:
         self.calls: list[dict[str, Any]] = []
         self.cancel_calls: list[tuple[str, str]] = []
         if expose_object_store:
-            self.object_store = LocalObjectStore("/tmp/nhms-test-object-store", "s3://nhms")
+            self.object_store = LocalObjectStore(_TEST_OBJECT_STORE_ROOT, "s3://nhms")
         self.candidate_outcomes = candidate_outcomes
         self.result_status = result_status
         self.cancel_payload = cancel_payload
