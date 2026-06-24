@@ -232,9 +232,12 @@
 
 ## 6. Scoped Agent Context And Glossary
 
-- [ ] 6.1 Create `openspec/glossary.md` with canonical entropy-governance terms.
-  Evidence: glossary contains the required terms from
-  `scoped-agent-context-governance`.
+- [x] 6.1 Create `openspec/glossary.md` with canonical entropy-governance terms.
+  Evidence: `openspec/glossary.md` defines active entrypoint, legacy redirect
+  alias, retired active-tree path, compatibility facade, lane, budget-counted
+  finding, gate-eligible finding, current authority, and historical evidence.
+  It also tells scoped instructions to reuse these terms or link to the
+  glossary instead of introducing local synonyms.
 - [ ] 6.2 Add entropy/control-plane audit coverage for scoped instruction
   presence, freshness, and glossary term/link checks.
   Evidence: tests cover missing scoped instructions for high-entropy
