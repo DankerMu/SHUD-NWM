@@ -566,7 +566,7 @@
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py`.
   - Inventory/Evidence Update: update chain inventory group `chain-array-accounting-forwarders`.
 - [ ] 2.5 Chain manifest owner-family completion.
-  - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly, runtime manifest safe writes, manifest index, quality states, residual blockers.
+  - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly builders and payload serialization, runtime manifest safe writes, manifest index, quality states, residual blockers.
   - Dependencies: 2.1 and 2.2.
   - Out of Scope: array accounting, stage execution, repository persistence, tile publishing.
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py tests/test_production_scheduler.py`.

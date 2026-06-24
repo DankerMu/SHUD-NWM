@@ -67,6 +67,7 @@ from services.orchestrator.chain_types import (
     ForecastRunContext,
     InitialStateSelection,
     ModelContext,
+    ModelRunAssembly,
     OrchestratorError,
     PipelineResult,
     StageDefinition,
@@ -121,7 +122,6 @@ _project_name_for_basin = chain_manifests._project_name_for_basin
 _safe_project_name = chain_manifests._safe_project_name
 _station_metadata_for_basin = chain_manifests._station_metadata_for_basin
 _tri_state = chain_manifests._tri_state
-ModelRunAssembly = chain_manifests.ModelRunAssembly
 build_reindexed_manifest = chain_manifests.build_reindexed_manifest
 production_stage_for = chain_manifests.production_stage_for
 production_status_for = production_contract.production_status_for
