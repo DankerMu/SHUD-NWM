@@ -7370,6 +7370,42 @@ def test_chain_stage_execution_module_imports_without_loading_chain_runtime() ->
     )
 
 
+def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_stage_execution
+
+    forwarder_names = legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES
+    owner_names = legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES
+    dependency_fields = legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS
+
+    assert len(forwarder_names) == len(set(forwarder_names))
+    assert len(owner_names) == len(set(owner_names))
+    assert len(forwarder_names) == len(owner_names)
+    assert legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING == ()
+    assert set(chain_stage_execution.__all__) == {"StageExecutionDependencies", *owner_names}
+    assert tuple(chain_stage_execution.StageExecutionDependencies.__dataclass_fields__) == dependency_fields
+    assert set(legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS) == set(forwarder_names)
+
+    for facade_name, owner_name in zip(forwarder_names, owner_names, strict=True):
+        assert legacy_chain._CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS[facade_name] is getattr(
+            chain_stage_execution,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
+
+    inventory_text = _chain_inventory_text()
+    for token in (
+        "_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES",
+        "_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES",
+        "_CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS",
+        "_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS",
+        "_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING",
+        "StageExecutionDependencies",
+    ):
+        assert token in inventory_text
+
+
 def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
     command = (
         "import sys; "
