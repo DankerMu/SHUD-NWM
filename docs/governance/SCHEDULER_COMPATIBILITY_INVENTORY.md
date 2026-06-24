@@ -9,7 +9,8 @@ owner-family fixture, Governance-8 issue #716 candidate-construction
 owner-family fixture, Governance-8 issue #717 execution owner-family fixture,
 Governance-8 issue #718 evidence-write owner-family fixture, and Governance-8
 issue #719 cancellation/status local-glue fixture for
-`services/orchestrator/scheduler.py`. This page
+`services/orchestrator/scheduler.py`, plus Governance-8 issue #720 scheduler
+group closeout evidence. This page
 records scheduler compatibility export groups, monkeypatch bindings, real
 owner modules, known callers/tests, retention reasons, removal conditions,
 verification commands, and guard hooks for scheduler facade growth.
@@ -77,6 +78,33 @@ uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfil
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
+
+Governance-8 issue #720 scheduler closeout verification commands:
+
+```bash
+uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py
+uv run pytest -q tests/test_entropy_audit_script.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
+## Scheduler Group Closeout Evidence
+
+Governance-8 issue #720 closes scheduler tasks 1.1 through 1.9. The table below
+is the implementation evidence map for the scheduler group; it ties each
+OpenSpec task to its GitHub issue and implementation PR.
+
+| Task | Issue | PR | Closeout evidence |
+|---|---|---|---|
+| 1.1 Scheduler compatibility guard and parity fixture | #712 | #771 | Guard fixture, inventory metadata enforcement, and compatibility-facade growth checks. |
+| 1.2 Scheduler state owner-family completion | #713 | #772 | Scheduler state re-export and wrapper parity coverage. |
+| 1.3 Scheduler lease owner-family completion | #714 | #773 | Lease re-export and scheduler-compat lookup coverage. |
+| 1.4 Scheduler discovery owner-family completion | #715 | #774 | Discovery alias, forwarder, and backfill selection parity coverage. |
+| 1.5 Scheduler candidate-construction owner-family completion | #716 | #775 | Candidate alias, forwarder, and construction parity coverage. |
+| 1.6 Scheduler execution/cohort owner-family completion | #717 | #776 | Execution wrapper and restart cohort parity coverage. |
+| 1.7 Scheduler evidence-write/proof owner-family completion | #718 | #777 | Evidence direct alias, forwarder, wrapper, and proof coverage. |
+| 1.8 Scheduler cancellation/status proof local-glue closure | #719 | #778 | Cancellation/status proof wrapper coverage and retained local glue classification. |
+| 1.9 Scheduler group verification and evidence closeout | #720 | closeout PR pending | Final group verification and this issue/PR mapping. |
 
 ## Non-Targets
 
