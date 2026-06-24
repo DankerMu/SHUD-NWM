@@ -6438,6 +6438,70 @@ _source_policy_identity = _scheduler_candidates._source_policy_identity
 _source_object_identity = _scheduler_candidates._source_object_identity
 _accepted_horizon_from_hours = _scheduler_candidates._accepted_horizon_from_hours
 
+_SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES = MappingProxyType(
+    {
+        "MAX_CANDIDATES": "MAX_CANDIDATES",
+        "_source_blocked_evidence": "_source_blocked_evidence",
+        "_reason_code": "_reason_code",
+        "_canonical_readiness_unavailable_evidence": "_canonical_readiness_unavailable_evidence",
+        "_canonical_candidate_row_count": "_canonical_candidate_row_count",
+        "_canonical_evidence_is_fresh_zero_row": "_canonical_evidence_is_fresh_zero_row",
+        "_candidate_is_fresh_full_chain": "_candidate_is_fresh_full_chain",
+        "_blocked_candidate": "_blocked_candidate",
+        "_candidate_with_state_evidence": "_candidate_with_state_evidence",
+        "_merge_state_evidence": "_merge_state_evidence",
+        "_slurm_status_sync_failed_evidence": "_slurm_status_sync_failed_evidence",
+        "_source_forecast_hours": "_source_forecast_hours",
+        "_source_policy_identity": "_source_policy_identity",
+        "_source_object_identity": "_source_object_identity",
+        "_accepted_horizon_from_hours": "_accepted_horizon_from_hours",
+    }
+)
+_SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES = tuple(_SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES)
+_SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES = (
+    "_candidate_construction_context",
+    "_build_candidates",
+)
+_SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING = tuple(
+    owner_name
+    for owner_name in _SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES.values()
+    if not hasattr(_scheduler_candidates, owner_name)
+)
+_SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING = (
+    *tuple(name for name in _SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES if name not in globals()),
+    *tuple(name for name in _SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES if not hasattr(ProductionScheduler, name)),
+)
+if _SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "scheduler candidate compatibility names missing from owner module: "
+        f"{', '.join(_SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING)}"
+    )
+if _SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING:
+    raise RuntimeError(
+        "scheduler candidate compatibility names missing from facade: "
+        f"{', '.join(_SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING)}"
+    )
+_SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {
+        facade_name: getattr(_scheduler_candidates, owner_name)
+        for facade_name, owner_name in _SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES.items()
+    }
+)
+_SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES}
+)
+for _scheduler_candidate_facade_name, _scheduler_candidate_owner_value in (
+    _SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES.items()
+):
+    if _SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES[_scheduler_candidate_facade_name] is not (
+        _scheduler_candidate_owner_value
+    ):
+        raise RuntimeError(
+            "scheduler candidate direct alias drifted from owner module: "
+            f"{_scheduler_candidate_facade_name}"
+        )
+del _scheduler_candidate_facade_name, _scheduler_candidate_owner_value
+
 
 def _bounded_evidence_payload(
     payload: Mapping[str, Any],

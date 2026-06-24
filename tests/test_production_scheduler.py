@@ -14,6 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
@@ -453,6 +454,122 @@ def test_scheduler_discovery_compat_forwarders_delegate_to_owner_module(
     assert cycles == [scheduler_discovery_module.SchedulerSourceCycle(discovery=discovery, horizon={})]
     assert evidence == [{"delegated": True}]
     assert contexts
+
+
+def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -> None:
+    alias_owner_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES
+    alias_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES
+    forwarder_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES
+
+    assert len(alias_names) == len(set(alias_names))
+    assert len(forwarder_names) == len(set(forwarder_names))
+    assert tuple(alias_owner_names) == alias_names
+    assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING == ()
+    assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING == ()
+    assert set(alias_names) == set(scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES)
+    assert set(alias_names) == set(scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES)
+
+    for facade_name, owner_name in alias_owner_names.items():
+        assert hasattr(scheduler_candidates_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES[facade_name] is getattr(
+            scheduler_candidates_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_candidates_module, owner_name)
+    for method_name in forwarder_names:
+        assert hasattr(scheduler_module.ProductionScheduler, method_name)
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES",
+        "_SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES",
+        "_SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES",
+        "_SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING",
+        "_SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING",
+        "_SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES",
+        "_SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES",
+    ):
+        assert token in inventory_text
+    for token in (*alias_names, *forwarder_names):
+        assert token in inventory_text
+
+
+def test_scheduler_candidate_compat_forwarders_delegate_to_owner_module(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+    )
+    model = scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))
+    cycle = scheduler_module.SchedulerSourceCycle(
+        discovery=CycleDiscovery(
+            cycle_id="gfs_2026052106",
+            source_id="gfs",
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        horizon={"max_lead_hours": 24},
+    )
+    captured: dict[str, Any] = {}
+    sentinel = (
+        ["candidate-from-owner"],
+        ["blocked-from-owner"],
+        [{"skipped": True}],
+        [{"duplicate": True}],
+        [{"sync": True}],
+    )
+
+    def patched_decision(
+        candidate: Any,
+        state: Mapping[str, Any] | None,
+    ) -> scheduler_module.CandidateStateDecision | None:
+        del candidate, state
+        return None
+
+    def fake_build_candidates(
+        context: scheduler_candidates_module.SchedulerCandidateConstructionContext,
+        *,
+        models: Sequence[Any],
+        cycles: Sequence[Any],
+        allow_slurm_status_sync: bool = False,
+    ) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        captured["context"] = context
+        captured["models"] = models
+        captured["cycles"] = cycles
+        captured["allow_slurm_status_sync"] = allow_slurm_status_sync
+        return sentinel
+
+    monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 7)
+    monkeypatch.setattr(scheduler_module, "_candidate_state_decision", patched_decision)
+    monkeypatch.setattr(scheduler_candidates_module, "build_candidates", fake_build_candidates)
+
+    result = scheduler._build_candidates(
+        models=[model],
+        cycles=[cycle],
+        allow_slurm_status_sync=True,
+    )
+
+    assert result is sentinel
+    assert captured["models"] == [model]
+    assert captured["cycles"] == [cycle]
+    assert captured["allow_slurm_status_sync"] is True
+    context = captured["context"]
+    assert isinstance(context, scheduler_candidates_module.SchedulerCandidateConstructionContext)
+    assert context.config is scheduler.config
+    assert context.active_repository is scheduler.active_repository
+    assert context.max_candidates == 7
+    assert context.candidate_state_decider is patched_decision
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
