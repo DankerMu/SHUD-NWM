@@ -131,8 +131,41 @@ def test_docker_preflight_current_run_id_can_pass_lane() -> None:
 
     summary = validate_two_node_e2e_evidence(config)
 
+    preflight_path = config.run_dir / "docker-preflight" / "summary.json"
+    docker_preflight = summary["lane_summaries"]["docker_preflight"]
     assert summary["status"] == STATUS_PASS
-    assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_PASS
+    assert docker_preflight["status"] == STATUS_PASS
+    assert docker_preflight["evidence_path"] == str(preflight_path.resolve().relative_to(REPO_ROOT))
+    assert docker_preflight["evidence_sha256"] == _sha256_file(preflight_path)
+    assert docker_preflight["summary_status"] == STATUS_PASS
+    assert docker_preflight["blockers"] == []
+    assert docker_preflight["findings"] == []
+    redacted = docker_preflight["redacted_evidence"]
+    assert redacted["schema_version"] == "nhms.two_node_docker.preflight.v1"
+    assert set(redacted["commands"]) == {
+        "docker_version",
+        "docker_compose_version",
+        "docker_info_docker_root",
+        "docker_system_df",
+        "df_h",
+    }
+
+
+def test_docker_preflight_missing_lane_blocks_with_missing_lane_code() -> None:
+    run_id = _run_id("preflight-missing-lane")
+    config = _seed_pass_bundle(run_id)
+    (config.run_dir / "docker-preflight" / "summary.json").unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_preflight = summary["lane_summaries"]["docker_preflight"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_preflight["status"] == STATUS_BLOCKED
+    assert docker_preflight["evidence_path"] is None
+    assert docker_preflight["evidence_sha256"] is None
+    assert docker_preflight["summary_status"] is None
+    assert "redacted_evidence" not in docker_preflight
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_MISSING" in _codes(docker_preflight["blockers"])
 
 
 def test_stale_no_id_docker_preflight_copied_under_current_run_blocks() -> None:
@@ -251,8 +284,27 @@ def test_docker_preflight_pass_missing_resource_evidence_blocks(missing_key: str
 
     summary = validate_two_node_e2e_evidence(config)
 
+    blockers = summary["lane_summaries"]["docker_preflight"]["blockers"]
     assert summary["status"] == STATUS_BLOCKED
     assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_BLOCKED
+    if missing_key == "disk":
+        assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING" in _codes(blockers)
+    else:
+        assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_RESOURCE_EVIDENCE_MISSING" in _codes(blockers)
+
+
+def test_docker_preflight_unrecognized_schema_blocks_with_schema_code() -> None:
+    run_id = _run_id("preflight-schema")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["schema_version"] = "nhms.two_node_docker.preflight.v0"
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    blockers = summary["lane_summaries"]["docker_preflight"]["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_SCHEMA_UNRECOGNIZED" in _codes(blockers)
 
 
 def test_docker_preflight_pass_missing_command_evidence_blocks() -> None:
@@ -285,6 +337,35 @@ def test_docker_preflight_missing_df_h_evidence_blocks() -> None:
     )
 
 
+def test_docker_preflight_failed_command_blocks_with_command_failure_code() -> None:
+    run_id = _run_id("preflight-failed-command")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["commands"]["docker_system_df"]["returncode"] = 1
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    blockers = summary["lane_summaries"]["docker_preflight"]["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_FAILED" in _codes(blockers)
+    assert any(blocker.get("command") == "docker_system_df" for blocker in blockers)
+
+
+def test_docker_preflight_missing_docker_root_dir_blocks_with_root_code() -> None:
+    run_id = _run_id("preflight-missing-root-dir")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight.pop("docker_root_dir")
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    blockers = summary["lane_summaries"]["docker_preflight"]["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_ROOT_MISSING" in _codes(blockers)
+
+
 def test_docker_preflight_pass_with_producer_blockers_blocks() -> None:
     run_id = _run_id("preflight-producer-blockers")
     config = _seed_pass_bundle(run_id)
@@ -313,6 +394,20 @@ def test_docker_preflight_pass_with_low_free_bytes_blocks() -> None:
     assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_LOW_DISK_SPACE" in _codes(
         summary["lane_summaries"]["docker_preflight"]["blockers"]
     )
+
+
+def test_docker_preflight_non_numeric_free_bytes_blocks_with_invalid_disk_code() -> None:
+    run_id = _run_id("preflight-invalid-disk")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["disk"]["tmpdir"]["free_bytes"] = "unknown"
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    blockers = summary["lane_summaries"]["docker_preflight"]["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_INVALID" in _codes(blockers)
 
 
 @pytest.mark.parametrize("path_key", ["tmpdir", "evidence_root"])

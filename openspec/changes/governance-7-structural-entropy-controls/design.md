@@ -360,6 +360,115 @@ Required #673 evidence:
 - `openspec validate governance-7-structural-entropy-controls --strict
   --no-interactive` passes.
 
+## Issue #674 Fixture
+
+Fixture level: expanded. The issue performs the first production-closure lane
+extraction from `two_node_e2e_evidence.py`, so the mandatory expanded triggers
+are `production_closure`, public entrypoint preservation, evidence schema/field
+contract, path/redaction/current-run safety, and final aggregation status
+preservation.
+
+Change surface:
+
+- New owner module `services.production_closure.two_node_e2e_docker_preflight`
+  for the Docker preflight lane.
+- Minimal aggregator wiring in
+  `services/production_closure/two_node_e2e_evidence.py` behind the existing
+  `validate_two_node_e2e_evidence(config)` entrypoint.
+- Focused regression tests in `tests/test_two_node_e2e_evidence.py`.
+- Task 3.3 evidence in this OpenSpec change.
+
+Must preserve:
+
+- `validate_two_node_e2e_evidence(config)` and the module CLI remain stable.
+- `lane_summaries.docker_preflight` keeps the same `LaneEvaluation.to_summary`
+  shape: `status`, `evidence_path`, `evidence_sha256`, `summary_status`,
+  `blockers`, `findings`, and redacted evidence summary.
+- Equivalent fixtures preserve final status ordering and Docker preflight
+  blocker codes for missing lane, stale/current-run mismatch, unknown schema,
+  missing resource evidence, unsafe recorded paths, producer blockers, missing
+  disk evidence, invalid disk evidence, low disk space, missing command evidence,
+  failed commands, and missing DockerRootDir.
+- Shared current-run, recorded-path approval, blocker construction, status
+  normalization, bounded evidence, and redaction semantics may remain
+  aggregator-owned shared contracts; extraction must not copy or fork those
+  semantics in a way that creates a second truth source.
+- Sibling Docker security, readonly DB, API/browser, logs, producer identity,
+  source-scope/cross-plane, manual ops, simple live lanes, and final aggregation
+  are not extracted or behavior-changed by this issue.
+
+Must add/change:
+
+- Move Docker preflight evaluation responsibility into a named owner module
+  that returns a structured lane result with status, blockers, findings, and a
+  redacted evidence summary through the existing lane-summary adapter.
+- Keep aggregator wiring limited to passing the discovered Docker preflight
+  document, current evidence run ID, and shared helper callbacks or contracts
+  needed to preserve current behavior.
+- Add/retain focused tests proving Docker preflight PASS, current-run blockers,
+  unsafe path blockers, missing resource/command/disk evidence, producer
+  blockers, low disk, command failure, missing lane, and final status parity.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - extraction sits behind the stable
+  validator and must not change CLI/API output.
+- Config / project setup: not selected - no new environment variable,
+  dependency, workflow, or deployment configuration.
+- File IO / path safety / overwrite: selected - preflight evidence paths,
+  recorded paths, output summaries, and symlink/traversal safety must remain
+  governed by existing helpers.
+- Schema / columns / units / field names: selected - Docker preflight schema,
+  required commands, required disk labels, `free_bytes`/`min_free_bytes`, lane
+  summary fields, and blocker code namespaces are primary contracts.
+- Auth / permissions / secrets: selected - public summaries must remain
+  redacted and must not expose host path or secret material beyond existing
+  redaction semantics.
+- Concurrency / shared state / ordering: not selected - no concurrent execution
+  or scheduler state change.
+- Resource limits / large input / discovery: selected - evidence remains read
+  through the existing bounded JSON document loader and redacted summary path.
+- Legacy compatibility / examples: selected - discovery aliases and existing
+  Docker preflight fixtures must keep working.
+- Error handling / rollback / partial outputs: selected - BLOCKED vs FAIL/PASS
+  behavior and all current blocker codes must be preserved for equivalent
+  fixtures.
+- Release / packaging / dependency compatibility: not selected - no packaging
+  or dependency change.
+- Documentation / migration notes: selected - task evidence records the new lane
+  owner and verification commands.
+
+Domain packs:
+
+- Slurm production lifecycle / mock-vs-real parity: not selected - Docker
+  preflight validates host/container resource evidence only; Slurm lanes are
+  out of scope.
+- Run manifest / QC provenance: selected - Docker preflight PASS must bind to
+  the current evidence run and preserve stale/missing run blockers.
+- Published NHMS artifacts / display identity: selected - recorded evidence
+  paths and final public summaries must remain path-safe and redacted, but this
+  issue does not alter display identity lanes.
+- Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+  SHUD numerical runtime, PostGIS / TimescaleDB domain behavior, and external
+  provider snapshot reproducibility: not selected - #674 only extracts a
+  Docker preflight evidence lane.
+
+Required #674 evidence:
+
+- Equivalent Docker preflight fixtures produce the same lane status, final
+  status, evidence path/checksum fields, summary status, blocker code set, and
+  redacted evidence shape before and after extraction.
+- Focused tests cover at least PASS, missing current-run binding, stale copied
+  evidence, missing resource fields, missing/failed commands, missing/invalid/
+  low disk evidence, unsafe recorded paths, producer blockers, missing
+  DockerRootDir, and missing Docker preflight lane.
+- The new owner module does not import sibling lane implementation details and
+  `two_node_e2e_evidence.py` only delegates Docker preflight evaluation plus
+  composition.
+- `uv run pytest -q tests/test_two_node_e2e_evidence.py` passes.
+- `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`
+  passes.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis
