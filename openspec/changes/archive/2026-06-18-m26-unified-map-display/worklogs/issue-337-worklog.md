@@ -1,3 +1,24 @@
+---
+status: archived
+current_authority:
+  - openspec/specs/single-map-shell-routing/spec.md
+  - openspec/specs/legacy-display-page-retirement/spec.md
+  - openspec/specs/inplace-overview-basin-detail/spec.md
+  - openspec/specs/map-feature-popups/spec.md
+  - openspec/specs/met-station-cluster-layer/spec.md
+  - docs/runbooks/display-readonly-live-mvt.md
+  - docs/runbooks/two-node-deployment-overview.md
+superseded_by:
+  - openspec/specs/single-map-shell-routing/spec.md
+  - openspec/specs/legacy-display-page-retirement/spec.md
+  - openspec/specs/inplace-overview-basin-detail/spec.md
+  - openspec/specs/map-feature-popups/spec.md
+  - openspec/specs/met-station-cluster-layer/spec.md
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for M26 single-map shell routing implementation"
+---
+
 # issue-337 worklog — 去导航 + 路由收敛到单页 (single-map-shell-routing)
 
 ## 角色

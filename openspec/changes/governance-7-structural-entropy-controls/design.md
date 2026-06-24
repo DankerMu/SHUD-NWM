@@ -878,6 +878,160 @@ Required #680 evidence:
   --no-interactive` passes.
 - `.entropy-baseline/latest.json` remains unchanged.
 
+## Issue #681 Fixture
+
+Fixture level: expanded. This issue materializes the #679/#680 marker contract
+onto a first governed set of historical material. Mandatory expanded triggers
+are archive/superseded material, legacy display-route tokens, retired
+active-tree path tokens, topology/current-authority resolution, the complete
+marker schema, report-only no-baseline-write evidence, no broad archive
+suppression, and a residual-owner ledger. It does not change the audit
+classifier, rewrite the whole archive tree, delete historical evidence, or
+write a baseline.
+
+Change surface:
+
+- `docs/archived/legacy-slurm-templates.md` historical Slurm template notes.
+- `openspec/changes/archive/2026-06-18-governance-2-legacy-dead-code-retirement/**`
+  retired active-tree path evidence.
+- `openspec/changes/archive/2026-06-18-m26-unified-map-display/**` historical
+  display route consolidation evidence.
+- `docs/governance/ARCHIVE_STATUS_MATERIALIZATION_LEDGER.md`, mapping the
+  selected materialization set and remaining archive findings to owner
+  follow-up.
+- Governance-7 OpenSpec task/fixture evidence for #681.
+
+Selected report input:
+
+- Report command: `uv run python scripts/governance/audit_repo_entropy.py
+  --format json >/tmp/entropy-681-before.json`.
+- Before metadata: `finding_count=822`, `budget_counted_count=453`,
+  `gate_eligible_count=0`, `baseline_written=false`.
+- Archive route/path filter: `check_id in {stale-display-route-token,
+  placeholder-path-token}`, `budget_counted=true`, and `evidence_path` under
+  `docs/archived/**` or `openspec/changes/archive/**`; before total is `453`.
+- Selected target filter: same check IDs and budget predicate, with
+  `evidence_path` under `docs/archived/**`,
+  `openspec/changes/archive/2026-06-18-governance-2-legacy-dead-code-retirement/**`,
+  or `openspec/changes/archive/2026-06-18-m26-unified-map-display/**`;
+  selected before total is `115` (`44` `placeholder-path-token`, `71`
+  `stale-display-route-token`).
+
+Current authority mapping for selected families:
+
+- Slurm template archive: current authority is
+  `services/slurm_gateway/config.py` and `infra/sbatch/**`, with
+  role/topology context from `docs/runbooks/two-node-deployment-overview.md`.
+  The archive's replacement table remains retained migration evidence, not
+  current authority.
+- Governance-2 retired path/dead-code archive: current authority is
+  `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`,
+  `openspec/specs/legacy-dead-code-retirement/spec.md`, and
+  `docs/governance/DOC_STATUS.md`.
+- M26 display-route archive: current authority is
+  `openspec/specs/single-map-shell-routing/spec.md`,
+  `openspec/specs/legacy-display-page-retirement/spec.md`,
+  `openspec/specs/inplace-overview-basin-detail/spec.md`,
+  `openspec/specs/map-feature-popups/spec.md`,
+  `openspec/specs/met-station-cluster-layer/spec.md`,
+  `docs/runbooks/display-readonly-live-mvt.md`, and
+  `docs/runbooks/two-node-deployment-overview.md`.
+
+Must preserve:
+
+- Historical evidence remains readable and intact; stale route/path/topology
+  text is marked non-current rather than deleted.
+- Complete markers use the documented fields from #679 and the classifier
+  contract from #680.
+- Missing or incomplete markers outside the selected set remain visible and
+  budget-counted for triage; there is no broad path suppression.
+- Report-only audit commands do not create or modify
+  `.entropy-baseline/latest.json`.
+
+Must add/change:
+
+- Add complete whole-document or section-level markers to the selected files so
+  current-looking legacy route/path/topology text points to current authority.
+- Record the before/after archive budget effect, selected-set complete-marker
+  allowlist count, unresolved selected-set exceptions if any, and remaining
+  archive route/path families in a ledger.
+- Map remaining archive findings to a follow-up owner issue or explicitly to
+  #688 final structural entropy verification when #681 intentionally leaves
+  them visible.
+
+Ledger schema:
+
+- Path, line/check ID/family, selected vs remaining, marker scope,
+  marker status, `current_authority`, `superseded_by`, before budget status,
+  after budget status, owner area, follow-up issue or `#688`, and disposition
+  reason.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no command, API, route, or
+  script behavior change; the audit CLI is only run for evidence.
+- Config / project setup: not selected - no deployment, environment, workflow,
+  or dependency change.
+- File IO / path safety / overwrite: selected only to verify report-only audit
+  commands still do not write `.entropy-baseline/latest.json`.
+- Schema / columns / units / field names: selected - archive marker fields are
+  the machine-readable schema consumed by the audit.
+- Auth / permissions / secrets: not selected - marker materialization records
+  authority and role boundaries but does not change credentials, auth checks,
+  readonly DB roles, or secret handling.
+- Concurrency / shared state / ordering: not selected - docs/OpenSpec marker
+  changes have no scheduler, retry, cancel, or shared-state transitions.
+- Resource limits / large input / discovery: selected - the materialization
+  evidence is derived from the bounded report-only audit and should not expand
+  archive scanning.
+- Legacy compatibility / examples: selected - archive evidence remains usable
+  for history while current guidance is resolved through explicit authority.
+- Error handling / rollback / partial outputs: not selected - docs-only
+  materialization with no runtime output, publish, rollback, or cleanup path.
+- Release / packaging / dependency compatibility: not selected - no packaged
+  artifacts, dependency versions, build output, or release workflow changes.
+- Documentation / migration notes: selected - this PR documents the selected
+  materialization set and residual archive ownership.
+
+Domain packs:
+
+- Slurm production lifecycle / mock-vs-real parity: selected only for
+  `docs/archived/legacy-slurm-templates.md`, which must point to current
+  Slurm gateway and `infra/sbatch` authority.
+- Published NHMS artifacts / display identity: selected only for M26 archived
+  display-route material, which must point to the current single-map routing
+  and display/read-only authority.
+- Geospatial / CRS / basin geometry: not selected - marker materialization does
+  not change map geometry, CRS, vector tiles, or basin data.
+- Hydro-met time series / forcing windows: not selected - no forcing payload,
+  station-series data, forecast window, or time filter behavior changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD runtime,
+  solver output, conservation, or numeric handling changes.
+- PostGIS / TimescaleDB domain behavior: not selected - no database schema,
+  query, hypertable, or live DB behavior changes.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider ingest, snapshot identity, or external data discovery changes.
+- Run manifest / QC provenance: not selected - no run manifest, QC evidence, or
+  producer artifact binding changes.
+
+Required #681 evidence:
+
+- `uv run python scripts/governance/audit_repo_entropy.py --format json
+  >/tmp/entropy-681-before.json` and after-materialization
+  `/tmp/entropy-681-after.json` pass, with `baseline_written=false`.
+- The after report shows selected-set findings either allowlisted by
+  `complete-archive-status-marker` or explicitly listed as unresolved in the
+  ledger; archive budget-counted route/path total is lower than `453`.
+- The selected-set after total is measured with the exact selected target
+  filter above and compared to the before selected-set count of `115`.
+- Remaining archive route/path findings are listed in the governance ledger
+  with owner/follow-up disposition and remain explainable without broad path
+  suppression.
+- `openspec validate governance-7-structural-entropy-controls --strict
+  --no-interactive` and `openspec validate --all --strict --no-interactive`
+  pass.
+- `.entropy-baseline/latest.json` remains unchanged.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis

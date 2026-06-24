@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md; openspec/specs/legacy-dead-code-retirement/spec.md; docs/governance/DOC_STATUS.md"
+superseded_by: "openspec/specs/legacy-dead-code-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for Governance-2 retired path and dead-code disposition"
+---
+
 ## Why
 
 The repository contains active production paths, diagnostic paths, historical placeholders, paused CI lanes, and old mocked e2e tests. Without a governed retirement process, future contributors cannot tell whether a path is production, diagnostic, archived, or test-only.

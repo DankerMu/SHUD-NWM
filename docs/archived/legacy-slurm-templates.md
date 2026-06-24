@@ -1,3 +1,17 @@
+---
+status: archived
+current_authority:
+  - services/slurm_gateway/config.py
+  - infra/sbatch/**
+  - docs/runbooks/two-node-deployment-overview.md role/topology context
+superseded_by:
+  - services/slurm_gateway/config.py
+  - infra/sbatch/**
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence and legacy Slurm template migration history"
+---
+
 # Archived Legacy Slurm Templates
 
 Archived: 2026-06-09

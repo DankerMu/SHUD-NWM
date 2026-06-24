@@ -1,3 +1,12 @@
+---
+status: archived
+current_authority: "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md; openspec/specs/legacy-dead-code-retirement/spec.md; docs/governance/DOC_STATUS.md"
+superseded_by: "openspec/specs/legacy-dead-code-retirement/spec.md"
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for the archived Governance-2 OpenSpec delta"
+---
+
 ## ADDED Requirements
 
 Issue #362 implements only the persistent inventory scenarios below. Cleanup,

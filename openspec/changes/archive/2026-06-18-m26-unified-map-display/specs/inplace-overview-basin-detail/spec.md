@@ -1,3 +1,24 @@
+---
+status: archived
+current_authority:
+  - openspec/specs/single-map-shell-routing/spec.md
+  - openspec/specs/legacy-display-page-retirement/spec.md
+  - openspec/specs/inplace-overview-basin-detail/spec.md
+  - openspec/specs/map-feature-popups/spec.md
+  - openspec/specs/met-station-cluster-layer/spec.md
+  - docs/runbooks/display-readonly-live-mvt.md
+  - docs/runbooks/two-node-deployment-overview.md
+superseded_by:
+  - openspec/specs/single-map-shell-routing/spec.md
+  - openspec/specs/legacy-display-page-retirement/spec.md
+  - openspec/specs/inplace-overview-basin-detail/spec.md
+  - openspec/specs/map-feature-popups/spec.md
+  - openspec/specs/met-station-cluster-layer/spec.md
+status_since: 2026-06-24
+archive_scope: whole-document
+retained_for: "audit evidence for the archived M26 inplace overview/basin detail delta"
+---
+
 ## ADDED Requirements
 
 ### Requirement: 全国总览与流域详情在同一页按 basinId 切换
