@@ -115,12 +115,53 @@
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory group `scheduler-lease-reexports`, or state that no lease facade
     surface changed and prove it with compatibility tests.
-- [ ] 1.4 Scheduler discovery owner-family completion.
+- [x] 1.4 Scheduler discovery owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_discovery` and forwarding methods for cycle discovery/backfill/source windows.
   - Dependencies: 1.1.
   - Out of Scope: candidate construction, execution, evidence writes, cancellation/status proof.
-  - Focused Verification: `uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py`.
-  - Inventory/Evidence Update: update scheduler inventory group `discovery-compat-aliases`.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because discovery selects source cycles, preserves backfill
+    warm-start ordering, emits source-window evidence, and still exposes old scheduler private methods and aliases that
+    tests monkeypatch directly.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler` discovery pass behavior and legacy
+    `services.orchestrator.scheduler` discovery imports stay stable); Legacy compatibility / examples (old
+    `_discover_cycles`, `_discover_source_window`, `_cycle_completion_status`, source-cycle evidence helpers, and
+    discovery aliases keep working); Schema / columns / units / field names (source-cycle evidence, backfill audit,
+    deferred evidence, cycle-status candidates, and redaction fields stay equivalent); Resource limits / large input /
+    discovery (`MAX_DISCOVERED_CYCLES`, max-cycles-per-source, duplicate collapse, allowed-hour filter, and multi-day
+    backfill windows stay bounded); External hydro-met providers / snapshot reproducibility (legacy one-arg/two-arg
+    adapter discovery fallback and source-window filtering stay deterministic); Concurrency / shared state / ordering
+    (global oldest backfill selection and per-source ordering stay stable); Documentation / migration notes (inventory
+    group remains the owner/removal authority).
+    Not Selected: Lease acquisition/heartbeat, candidate construction/canonical readiness, execution/cohort handling,
+    evidence file writes, cancellation/status proof, Auth / permissions / secrets beyond discovery evidence redaction,
+    Config / project setup, File IO / path safety / overwrite, Release / packaging / dependency compatibility,
+    Geospatial / CRS / basin geometry, Hydro-met numerical forcing contents, SHUD numerical runtime / conservation /
+    NaN, PostGIS / TimescaleDB domain behavior, Slurm production lifecycle / mock-vs-real parity, Run manifest / QC
+    provenance, Published NHMS artifacts / display identity.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_discovery` owns cycle discovery, source-window
+    querying, completion/gap classification, backfill selection, source-cycle evidence, sensitive discovery evidence
+    redaction, duplicate/deferred evidence, and source horizon metadata, while `services.orchestrator.scheduler` exposes
+    only inventoried discovery aliases and forwarding methods. Source-of-truth identity/contract: scheduler-discovery
+    owner module plus inventory group `discovery-compat-aliases`. Surfaces: Producers:
+    `services/orchestrator/scheduler_discovery.py`; Compatibility facade: `services/orchestrator/scheduler.py`;
+    Validators/preflight: focused backfill/production scheduler tests and compatibility-facade guard;
+    Storage/cache/query: adapter cycle discovery and read-only active repository completion/candidate-state queries;
+    Public routes/entrypoints: `ProductionScheduler._discover_cycles`, `_discover_source_window`,
+    `_cycle_completion_status`, `SchedulerSourceCycle`, and legacy source-cycle helper imports; Failure paths/rollback/
+    stale state: adapter TypeError fallback, source unavailable/probe-failed/rate-limited evidence, duplicate exclusions,
+    cycle discovery cap, and global backfill deferral.
+  - Regression Rows: scheduler facade discovery alias names match owner attributes and inventory group; forwarding methods
+    delegate to owner module functions while preserving instance monkeypatches for `_discover_source_window` and
+    `_cycle_completion_status`; legacy adapter TypeError fallback and wrong-source/out-of-window filters remain
+    equivalent; allowed-cycle-hour filter happens before duplicate collapse; backfill picks the oldest available
+    incomplete cycle per source and globally defers later cycles; unavailable/probe-failed/rate-limited gaps do not
+    consume source budget and keep redacted retryable evidence; `MAX_DISCOVERED_CYCLES` blocks before candidate/evidence
+    amplification; no state/lease/candidate-construction/execution/evidence-write/cancellation inventory groups change in
+    this slice.
+  - Focused Verification: `uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory group `discovery-compat-aliases`, or state that no discovery
+    facade surface changed and prove it with compatibility tests.
 - [ ] 1.5 Scheduler candidate-construction owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_candidates` candidate building, canonical readiness, active Slurm sync, duplicate exclusion, and candidate-state merge.
   - Dependencies: 1.1 and 1.2.

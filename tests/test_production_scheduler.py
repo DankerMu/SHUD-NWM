@@ -14,6 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator.chain import (
@@ -333,6 +334,125 @@ def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
         with monkeypatch.context() as patch_context:
             patch_context.setattr(scheduler_module, name, patched)
             assert scheduler_lease_module._scheduler_compat_function(name, fallback) is patched
+
+
+def test_scheduler_discovery_compat_aliases_match_owner_module_and_inventory() -> None:
+    alias_owner_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES
+    alias_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES
+    forwarder_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FORWARDER_NAMES
+
+    assert len(alias_names) == len(set(alias_names))
+    assert len(forwarder_names) == len(set(forwarder_names))
+    assert tuple(alias_owner_names) == alias_names
+    assert set(alias_names) == set(scheduler_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES)
+    assert set(alias_names) == set(scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES)
+
+    for facade_name, owner_name in alias_owner_names.items():
+        assert hasattr(scheduler_discovery_module, owner_name)
+        assert hasattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES[facade_name] is getattr(
+            scheduler_discovery_module,
+            owner_name,
+        )
+        assert scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES[facade_name] is getattr(
+            scheduler_module,
+            facade_name,
+        )
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
+    for method_name in forwarder_names:
+        assert hasattr(scheduler_module.ProductionScheduler, method_name)
+
+    inventory_text = _scheduler_inventory_text()
+    for token in (
+        "_SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES",
+        "_SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES",
+        "_SCHEDULER_DISCOVERY_COMPAT_FORWARDER_NAMES",
+        "_SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES",
+        "_SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES",
+    ):
+        assert token in inventory_text
+
+
+def test_scheduler_discovery_compat_forwarders_delegate_to_owner_module(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026052106",
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+        cycle_hour=6,
+        available=True,
+        status="discovered",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    contexts: list[scheduler_discovery_module.SchedulerDiscoveryContext] = []
+
+    def fake_cycle_completion_status(
+        context: scheduler_discovery_module.SchedulerDiscoveryContext,
+        discovery_arg: CycleDiscovery,
+        models: Sequence[Any],
+        *,
+        horizon: Mapping[str, Any] | None = None,
+    ) -> str:
+        contexts.append(context)
+        assert discovery_arg is discovery
+        assert models == ()
+        assert horizon == {"max_lead_hours": 168}
+        return "complete"
+
+    def fake_discover_source_window(
+        adapter: Any,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[CycleDiscovery]:
+        del adapter
+        assert source_id == "gfs"
+        assert start_time <= discovery.cycle_time <= end_time
+        return [discovery]
+
+    def fake_discover_cycles(
+        context: scheduler_discovery_module.SchedulerDiscoveryContext,
+        started_at: datetime,
+        models: Sequence[Any] = (),
+    ) -> tuple[list[scheduler_discovery_module.SchedulerSourceCycle], list[dict[str, Any]]]:
+        contexts.append(context)
+        assert started_at is now
+        assert models == ()
+        assert context.discover_source_window_provider is not None
+        assert context.cycle_completion_status_provider is not None
+        return [scheduler_discovery_module.SchedulerSourceCycle(discovery=discovery, horizon={})], [
+            {"delegated": True}
+        ]
+
+    monkeypatch.setattr(scheduler_discovery_module, "cycle_completion_status", fake_cycle_completion_status)
+    assert scheduler._cycle_completion_status(
+        discovery,
+        (),
+        horizon={"max_lead_hours": 168},
+    ) == "complete"
+
+    monkeypatch.setattr(scheduler_discovery_module, "discover_source_window", fake_discover_source_window)
+    assert scheduler._discover_source_window(
+        scheduler.adapters["gfs"],
+        source_id="gfs",
+        start_time=_dt("2026-05-21T00:00:00Z"),
+        end_time=now,
+    ) == [discovery]
+
+    monkeypatch.setattr(scheduler_discovery_module, "discover_cycles", fake_discover_cycles)
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert cycles == [scheduler_discovery_module.SchedulerSourceCycle(discovery=discovery, horizon={})]
+    assert evidence == [{"delegated": True}]
+    assert contexts
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
