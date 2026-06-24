@@ -392,7 +392,8 @@ def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -
         "chain-persistence-repository-facade": (
             "services.orchestrator.persistence",
             "uv run pytest -q tests/test_gateway_reconcile.py "
-            "tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py",
+            "tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py "
+            "tests/test_real_database_integration.py",
         ),
     }
 
@@ -418,6 +419,12 @@ def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -
         normalized = line.casefold()
         assert owner in line
         assert command in line
+        if group_id == "chain-worker-adapter-facade":
+            assert "workers.data_adapters.gfs_adapter" in line
+            assert "workers.data_adapters.ifs_adapter" in line
+            assert "services.orchestrator.chain" in line
+            assert "scenario_for_source" in line
+            assert "auto-trigger helpers" in line
         assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
         assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
@@ -1215,6 +1222,86 @@ def test_compatibility_facade_guard_reports_scheduler_imported_symbol(
         "NewImportedSchedulerSymbol owner services.orchestrator.scheduler_state retention "
         "removal condition; verification command: "
         "`uv run pytest -q tests/test_entropy_audit_script.py`.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_requires_chain_alias_verification_metadata(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "NewChainAlias = chain_manifests.NewChainAlias\n",
+    )
+
+    message_key = "compatibility-facade-growth.new-facade-reexport.inventory-required"
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "NewChainAlias owner services.orchestrator.chain_manifests retention "
+        "legacy chain import until removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "NewChainAlias owner services.orchestrator.chain_manifests retention "
+        "legacy chain import until removal condition; verification command: "
+        "`uv run pytest -q tests/test_orchestration_chain.py`.",
+    )
+
+    assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
+
+
+def test_compatibility_facade_guard_requires_chain_monkeypatch_alias_verification_metadata(
+    tmp_path: Path,
+) -> None:
+    base_ref = _setup_compatibility_facade_guard_fixture(tmp_path)
+    chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
+    _write(
+        chain_path,
+        chain_path.read_text(encoding="utf-8")
+        + "_new_chain_patch = chain_manifests._new_chain_patch\n",
+    )
+
+    message_key = "compatibility-facade-growth.new-monkeypatch-alias.inventory-required"
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "_new_chain_patch owner services.orchestrator.chain_manifests retention "
+        "legacy chain monkeypatch alias until removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "_new_chain_patch owner services.orchestrator.chain_manifests retention "
+        "legacy chain monkeypatch alias until removal condition; verification command: "
+        "`uv run pytest -q tests/test_orchestration_chain.py`.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0

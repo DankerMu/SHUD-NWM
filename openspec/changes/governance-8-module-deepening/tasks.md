@@ -454,7 +454,7 @@
 
 ## 2. Chain Facade Deepening
 
-- [ ] 2.1 Chain compatibility guard and parity fixture.
+- [x] 2.1 Chain compatibility guard and parity fixture.
   - Module/Scope: `services/orchestrator/chain.py` facade guard plus chain compatibility inventory assertions.
   - Dependencies: None.
   - Out of Scope: moving owner-family behavior.
