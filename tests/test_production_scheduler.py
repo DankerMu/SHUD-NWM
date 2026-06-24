@@ -14,6 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator.chain import (
     M3_STAGES,
     OrchestratorConfig,
@@ -189,6 +190,17 @@ class ProductionScheduler(_RealProductionScheduler):
         return super()._canonical_readiness_for_candidate(candidate, cycle)
 
 
+def _scheduler_inventory_text() -> str:
+    return (
+        Path(__file__).resolve().parents[1] / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+
+
+def _scheduler_inventory_governed_group_ids(inventory_text: str) -> tuple[str, ...]:
+    section = inventory_text.split("## Governed Groups", 1)[1].split("## Guard Hook Seed", 1)[0]
+    return tuple(line.split("`", 2)[1] for line in section.splitlines() if line.startswith("| `"))
+
+
 def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identity() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stages, chain_types
@@ -216,6 +228,58 @@ def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identit
 
     assert result.stages[0].stage == "download"
     assert result.candidate_outcomes == ()
+
+
+def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory() -> None:
+    reexport_names = scheduler_module._SCHEDULER_STATE_COMPAT_REEXPORT_NAMES
+    wrapper_names = scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPER_NAMES
+    direct_names = tuple(name for name in reexport_names if name not in wrapper_names)
+
+    assert len(reexport_names) == len(set(reexport_names))
+    assert set(wrapper_names).issubset(reexport_names)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_EXPORT_NAMES)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_ORIGINALS)
+    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPERS)
+    assert set(reexport_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS)
+    assert set(reexport_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS)
+    assert scheduler_module._SCHEDULER_STATE_COMPAT_EXPORTS == tuple(
+        scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS[name] for name in reexport_names
+    )
+
+    for name in reexport_names:
+        assert hasattr(scheduler_state_module, name)
+        assert scheduler_module._SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS[name] is getattr(
+            scheduler_state_module,
+            name,
+        )
+        assert scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS[name] is getattr(
+            scheduler_module,
+            name,
+        )
+    for name in wrapper_names:
+        assert scheduler_module._SCHEDULER_STATE_COMPAT_ORIGINALS[name] is getattr(scheduler_state_module, name)
+        assert scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPERS[name] is getattr(scheduler_module, name)
+    for name in direct_names:
+        assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
+
+    inventory_text = _scheduler_inventory_text()
+    assert _scheduler_inventory_governed_group_ids(inventory_text) == (
+        "scheduler-state-monkeypatch-bindings",
+        "candidate-state-reexports",
+        "scheduler-lease-reexports",
+        "discovery-compat-aliases",
+        "candidate-construction-compat-aliases",
+        "execution-restart-cohort-wrappers",
+        "scheduler-evidence-write-compat",
+        "cancellation-status-proof-wrappers",
+    )
+    for token in (
+        "_SCHEDULER_STATE_COMPAT_REEXPORT_NAMES",
+        "_SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS",
+        "_SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS",
+        "_SCHEDULER_STATE_COMPAT_WRAPPER_NAMES",
+    ):
+        assert token in inventory_text
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
@@ -2423,6 +2487,40 @@ def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_comp
     assert decision.evidence["reason"] == "repair_missing_raw_manifest"
     assert decision.evidence["raw_manifest_repair"]["manifest_exists"] is False
     assert calls == [(candidate.candidate_id, manifest_uri)]
+
+
+def test_candidate_state_decision_owner_module_matches_scheduler_facade() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 1,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_fcst_gfs_2026052106_model_a_forecast",
+                "candidate_id": candidate.candidate_id,
+                "run_id": candidate.run_id,
+                "forcing_version_id": candidate.forcing_version_id,
+                "model_id": candidate.model_id,
+                "basin_id": candidate.basin_id,
+                "status": "failed",
+                "stage": "forecast",
+                "error_code": "NODE_FAILURE",
+                "retry_count": 1,
+            },
+        ],
+    }
+
+    assert scheduler_module._candidate_state_decision(
+        candidate,
+        state,
+    ) == scheduler_state_module._candidate_state_decision(candidate, state)
 
 
 def test_nested_task_proof_does_not_authorize_parent_event_active_status(
@@ -8443,6 +8541,82 @@ def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplificati
     assert state["state_bounds"]["overflow"] is True
     assert state["state_bounds"]["pipeline_jobs_total"] == 5
     assert state["state_bounds"]["pipeline_events_total"] == 4
+
+
+def test_candidate_state_bounded_evidence_owner_module_matches_scheduler_facade() -> None:
+    candidate = _scheduler_candidate_fixture()
+    task_limit = scheduler_state_module.CANDIDATE_STATE_TASK_RESULT_LIMIT
+    task_results = [
+        {
+            **_production_identity_fixture(),
+            "task_id": index,
+            "array_task_id": index,
+            "status": "succeeded",
+        }
+        for index in range(task_limit + 3)
+    ]
+    state = {
+        "job_limit": 2,
+        "event_limit": 1,
+        "pipeline_jobs": [
+            {
+                "job_id": f"job_{index}",
+                "run_id": candidate.run_id,
+                "candidate_id": candidate.candidate_id,
+                "forcing_version_id": candidate.forcing_version_id,
+                "model_id": candidate.model_id,
+                "basin_id": candidate.basin_id,
+                "status": "failed",
+                "stage": "forecast",
+                "error_code": "NODE_FAILURE",
+            }
+            for index in range(5)
+        ],
+        "pipeline_events": [
+            {
+                "event_id": index,
+                "event_type": "status_change",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": task_results,
+                    "task_results_total": len(task_results),
+                },
+            }
+            for index in range(4)
+        ],
+        "pipeline_jobs_total": 5,
+        "pipeline_events_total": 4,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+    }
+
+    facade_evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    owner_evidence = scheduler_state_module._candidate_state_evidence(candidate, state)
+
+    assert facade_evidence == owner_evidence
+    assert len(facade_evidence["pipeline_jobs"]) == 2
+    assert len(facade_evidence["pipeline_events"]) == 1
+    event_details = facade_evidence["pipeline_events"][0]["details"]
+    assert len(event_details["task_results"]) == task_limit
+    assert event_details["task_results_total"] == task_limit + 3
+    assert event_details["task_results_included"] == task_limit
+    assert event_details["task_results_limit"] == task_limit
+    assert event_details["task_results_overflow"] is True
+    assert event_details["task_results_omitted"] == 3
+    assert facade_evidence["state_bounds"] == {
+        "job_limit": 2,
+        "event_limit": 1,
+        "pipeline_jobs_total": 5,
+        "pipeline_jobs_returned": 2,
+        "pipeline_jobs_overflow": True,
+        "pipeline_events_total": 4,
+        "pipeline_events_returned": 1,
+        "pipeline_events_overflow": True,
+        "bounded": True,
+        "overflow": True,
+        "reason": "candidate_state_row_limit_applied",
+    }
 
 
 def test_candidate_state_nested_task_results_are_bounded_before_evidence_and_scanning(

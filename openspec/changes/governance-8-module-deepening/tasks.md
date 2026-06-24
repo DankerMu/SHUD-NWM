@@ -35,12 +35,43 @@
     existing scheduler monkeypatch path -> focused scheduler tests continue to pass.
   - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
-- [ ] 1.2 Scheduler state owner-family completion.
+- [x] 1.2 Scheduler state owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_state` state helpers, candidate-state re-exports, and legacy monkeypatch wrappers.
   - Dependencies: 1.1.
   - Out of Scope: lease, discovery, candidate construction, execution, evidence, cancellation/status proof.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
-  - Inventory/Evidence Update: update scheduler inventory groups `scheduler-state-monkeypatch-bindings` and `candidate-state-reexports`.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because this narrows the scheduler state compatibility surface while
+    preserving old scheduler imports and monkeypatch paths that existing tests still use.
+  - Selected Risk Packs: Public API / CLI / script entry (`ProductionScheduler` and legacy `services.orchestrator.scheduler`
+    state imports stay stable); Legacy compatibility / examples (old private state helper monkeypatches keep working);
+    Schema / columns / units / field names (candidate-state evidence and decision fields stay equivalent);
+    Concurrency / shared state / ordering (compat wrappers temporarily bind scheduler monkeypatches into `scheduler_state`);
+    Resource limits / large input / discovery (candidate-state bounded jobs/events/task-results and overflow evidence stay stable,
+    while discovery behavior remains out of scope);
+    Documentation / migration notes (inventory groups remain the owner/removal authority).
+    Not Selected: Auth / permissions / secrets, File IO / path safety / overwrite, Config / project setup,
+    Release / packaging / dependency compatibility,
+    Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+    SHUD numerical runtime / conservation / NaN, PostGIS / TimescaleDB domain behavior,
+    Slurm production lifecycle / mock-vs-real parity, External hydro-met providers / snapshot reproducibility,
+    Run manifest / QC provenance, Published NHMS artifacts / display identity - this task does not change runtime,
+    provider, DB, Slurm, artifact, evidence-write, discovery, lease, or frontend behavior.
+  - Invariant Matrix: Governing invariant: `services.orchestrator.scheduler_state` owns candidate-state decision/evidence
+    behavior, while `services.orchestrator.scheduler` exposes only inventoried compatibility names and wrappers.
+    Source-of-truth identity/contract: scheduler-state owner module plus inventory groups
+    `scheduler-state-monkeypatch-bindings` and `candidate-state-reexports`. Surfaces: Producers:
+    `services/orchestrator/scheduler_state.py`; Compatibility facade: `services/orchestrator/scheduler.py`;
+    Validators/preflight: focused scheduler tests and compatibility-facade guard; Storage/cache/query: candidate-state
+    repository/provider rows are read-only inputs; Public routes/entrypoints: `ProductionScheduler` and legacy scheduler
+    private imports; Failure paths/rollback/stale state: candidate decision/evidence stays behaviorally equivalent.
+  - Regression Rows: scheduler facade state export names match the owner module and inventory groups; monkeypatching an
+    inventoried scheduler state helper through `services.orchestrator.scheduler` affects nested `scheduler_state` calls;
+    direct owner-module candidate-state decisions match facade decisions; bounded candidate-state jobs/events/task-results
+    and overflow evidence stay equivalent through owner and facade paths; no lease/discovery/candidate-construction/execution/
+    evidence inventory groups change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`.
+  - Inventory/Evidence Update: update scheduler inventory groups `scheduler-state-monkeypatch-bindings` and
+    `candidate-state-reexports`, or state that no state facade surface changed and prove it with compatibility tests.
 - [ ] 1.3 Scheduler lease owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_lease` lease classes/constants, compat lookup names, heartbeat/guard-file helpers.
   - Dependencies: 1.1.
