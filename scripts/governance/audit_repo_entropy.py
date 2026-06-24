@@ -4307,7 +4307,8 @@ def _compatibility_inventory_line_has_metadata(line: str, signal_type: str) -> b
         )
     if signal_type == "new-non-forwarding-implementation":
         return (
-            _compatibility_inventory_has_local_or_follow_up_semantics(normalized)
+            _compatibility_inventory_has_owner_hosting_rationale_semantics(normalized)
+            and _compatibility_inventory_has_follow_up_issue_semantics(normalized)
             and _compatibility_inventory_has_removal_condition_semantics(normalized)
         )
     if signal_type == "new-import-family":
@@ -4330,11 +4331,24 @@ def _compatibility_inventory_has_removal_condition_semantics(text: str) -> bool:
     return "removal-condition" in text or "removal condition" in text
 
 
-def _compatibility_inventory_has_local_or_follow_up_semantics(text: str) -> bool:
+def _compatibility_inventory_has_owner_hosting_rationale_semantics(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "owner module cannot host",
+            "owner cannot host",
+            "cannot host",
+            "not hostable in owner",
+        )
+    )
+
+
+def _compatibility_inventory_has_follow_up_issue_semantics(text: str) -> bool:
+    if "follow-up issue" in text or "follow up issue" in text:
+        return True
     return (
-        re.search(r"(?<![a-z0-9_])local(?![a-z0-9_])", text) is not None
-        or "follow-up" in text
-        or "follow up" in text
+        re.search(r"(?:follow-up|follow up).{0,40}#[0-9]+", text) is not None
+        or re.search(r"#[0-9]+.{0,40}(?:follow-up|follow up)", text) is not None
     )
 
 

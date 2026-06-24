@@ -853,7 +853,8 @@ def test_compatibility_facade_guard_reports_chain_non_forwarding_implementation_
     _append_inventory_line(
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
-        "new_chain_policy remains local glue with follow-up issue and removal condition.",
+        "new_chain_policy owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -901,7 +902,53 @@ def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
     _append_inventory_line(
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
-        "- metadata_required_chain_policy local glue with follow-up issue and removal condition.",
+        "- metadata_required_chain_policy local removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy follow-up issue #999 removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host removal condition.",
+    )
+
+    assert [
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(
+            tmp_path,
+            base_ref,
+            "new-non-forwarding-implementation",
+        )
+    ] == [message_key]
+
+    _append_inventory_line(
+        tmp_path,
+        "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+        "- metadata_required_chain_policy owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
     )
 
     assert _compatibility_facade_signals(
@@ -1084,7 +1131,8 @@ def test_compatibility_facade_guard_reports_existing_sync_forwarder_changed_to_n
     _append_inventory_line(
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
-        "unlisted_existing_chain_forwarder local implementation retained with removal condition.",
+        "unlisted_existing_chain_forwarder owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
@@ -1134,7 +1182,8 @@ def test_compatibility_facade_guard_reports_existing_async_forwarder_changed_to_
     _append_inventory_line(
         tmp_path,
         "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
-        "unlisted_existing_async_chain_forwarder local implementation retained with removal condition.",
+        "unlisted_existing_async_chain_forwarder owner module cannot host local glue; "
+        "follow-up issue #999; removal condition after owner extraction.",
     )
 
     assert _compatibility_facade_guard(tmp_path, base_ref)["signal_count"] == 0
