@@ -544,6 +544,84 @@ Required #675 evidence:
 - `uv run python scripts/governance/audit_repo_entropy.py --format json`
   passes and does not write `.entropy-baseline/latest.json`.
 
+## Issue #676 Fixture
+
+Fixture level: standard. The issue cleans active governance/module documentation
+wording only, so the mandatory triggers are active document entropy, retired
+path token handling, document authority preservation, and OpenSpec validation.
+It does not change source code, active OpenSpec specs, archive material, or
+runtime behavior.
+
+Change surface:
+
+- Active governance/module docs under `docs/governance/**` and
+  `docs/modules/**`.
+
+Workflow evidence exception:
+
+- This reviewed fixture records the #676 workflow boundary. It does not broaden
+  #676 implementation scope beyond active governance/module docs.
+
+Must preserve:
+
+- Current role-boundary and module-index guidance remains useful for active
+  contributors.
+- Schema example documentation remains illustrative without becoming a committed
+  baseline or current finding-count source.
+- Useful historical/retired context remains present through governed inventory
+  references or descriptive retired-placeholder wording.
+- Source code, active OpenSpec cleanup/change artifacts, and archive material
+  remain out of #676 implementation scope, except this reviewed fixture and
+  task checkbox evidence.
+
+Must add/change:
+
+- Rewrite active governance/module doc route/path findings to canonical current
+  paths or audit-recognized retired/historical context.
+- Re-run the report-only entropy audit and record the active
+  `docs/governance/**` + `docs/modules/**` before/after finding delta.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no API or CLI behavior change.
+- Config / project setup: not selected - no config or environment change.
+- File IO / path safety / overwrite: not selected - no runtime file IO change.
+- Schema / columns / units / field names: not selected - schema example wording
+  remains documentation only and does not change report schema.
+- Auth / permissions / secrets: not selected - no auth or secret handling
+  change.
+- Concurrency / shared state / ordering: not selected - documentation only.
+- Resource limits / large input / discovery: selected - the entropy audit scans
+  tracked text and must remain report-only without baseline writes.
+- Legacy compatibility / examples: selected - the change preserves retired-path
+  context without re-presenting retired active-tree paths as current entries.
+- Error handling / rollback / partial outputs: not selected - no runtime errors.
+- Release / packaging / dependency compatibility: not selected.
+- Documentation / migration notes: selected - the issue is active-doc cleanup.
+
+Domain packs:
+
+- Published NHMS artifacts / display identity: not selected - no display route
+  contract change.
+- Slurm production lifecycle / mock-vs-real parity: selected only for retired
+  Slurm template wording in role/module docs; no Slurm runtime behavior changes.
+- Geospatial / CRS / basin geometry, Hydro-met time series / forcing windows,
+  SHUD numerical runtime, PostGIS / TimescaleDB domain behavior, external
+  provider snapshot reproducibility, and run manifest/QC provenance: not
+  selected - no scientific/runtime contract changes.
+
+Required #676 evidence:
+
+- The report-only entropy audit before cleanup lists active
+  `docs/governance/**` and `docs/modules/**` route/path findings.
+- After cleanup, active governance/module doc unallowlisted or budget-counted
+  route/path findings are zero or each remaining active finding maps to an
+  explicit follow-up owner issue; allowlisted inventory/authority findings do
+  not need follow-up owners.
+- `openspec validate --all --strict --no-interactive` passes.
+- `uv run python scripts/governance/audit_repo_entropy.py --format json`
+  passes and does not write `.entropy-baseline/latest.json`.
+
 ## Decisions
 
 ### 1. Treat line count as an entry criterion, not the whole diagnosis
