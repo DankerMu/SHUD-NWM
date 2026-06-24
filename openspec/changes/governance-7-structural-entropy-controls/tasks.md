@@ -266,9 +266,15 @@
   `docs/governance/ROLE_BOUNDARY.md`, and
   `docs/runbooks/qhh-backend-smoke.md`. Scoped audit passes for the apps/api
   scope.
-- [ ] 6.6 Add `apps/frontend/AGENTS.md`.
+- [x] 6.6 Add `apps/frontend/AGENTS.md`.
   Evidence: file defines map surface ownership, live-vs-mocked evidence rules,
-  frontend verification commands, and glossary links; scoped audit passes.
+  frontend verification commands, and glossary links. It links the scoped
+  context spec, `openspec/specs/evidence-boundary-hardening/spec.md`,
+  `docs/runbooks/display-readonly-live-mvt.md`, and `openspec/glossary.md`;
+  preserves `/` as active entrypoint, `/ops` as operational display proof path,
+  and old display paths as legacy redirect alias routes; separates mocked
+  regression from node-27 live display proof; and keeps display_readonly
+  mutation boundaries explicit. Scoped audit passes.
 
 ## 7. Final Verification
 
