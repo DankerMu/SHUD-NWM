@@ -2665,7 +2665,7 @@ def _path_is_legacy_route_token_scope(relative_path: str) -> bool:
 
 def _path_is_route_authority_expanded_scope(relative_path: str) -> bool:
     return (
-        relative_path.startswith("docs/runbooks/")
+        relative_path.startswith(("docs/archived/", "docs/runbooks/"))
         or relative_path in {"README.md", "progress.md", "CLAUDE.md", "docs/governance/DOC_STATUS.md"}
     )
 
@@ -7625,7 +7625,15 @@ def _whole_document_archive_status_marker_range(lines: list[str]) -> _ArchiveSta
 def _section_archive_status_marker_ranges(lines: list[str]) -> tuple[_ArchiveStatusMarkerRange, ...]:
     marker_ranges: list[_ArchiveStatusMarkerRange] = []
     index = 0
+    in_fenced_code = False
     while index < len(lines):
+        if _line_starts_markdown_fence(lines[index]):
+            in_fenced_code = not in_fenced_code
+            index += 1
+            continue
+        if in_fenced_code:
+            index += 1
+            continue
         if lines[index].strip().lower() != "archive status:":
             index += 1
             continue
@@ -7758,6 +7766,11 @@ def _archive_status_section_end_line(lines: list[str], content_start: int) -> in
 def _markdown_heading_level(line: str) -> int | None:
     match = re.match(r"^\s{0,3}(#{1,6})\s+", line)
     return len(match.group(1)) if match else None
+
+
+def _line_starts_markdown_fence(line: str) -> bool:
+    stripped = line.lstrip()
+    return stripped.startswith("```") or stripped.startswith("~~~")
 
 
 def _line_has_complete_archive_status_marker(

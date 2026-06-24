@@ -6498,6 +6498,66 @@ def test_complete_archive_marker_allowlists_section_route_token_without_global_a
     _assert_unallowlisted_budget_counted_report_only_finding(by_token["HydroMetPage"])
 
 
+def test_fenced_archive_status_example_does_not_allowlist_current_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        ```text
+        Archive status:
+        - status: superseded
+        - current_authority: docs/governance/DOC_STATUS.md#display-route-authority-m26-single-map
+        - superseded_by: openspec/specs/single-map-shell-routing/spec.md
+        - status_since: 2026-06-24
+        - archive_scope: section
+        - retained_for: compatibility evidence
+        ```
+
+        Current route link ?next=/hydro-met.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/runbooks/current.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/hydro-met"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_archive_expanded_route_token_without_marker_remains_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "archived" / "m26.md", "Current route link ?next=/forecast.\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m26.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/forecast"
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+
+
+def test_complete_archive_marker_allowlists_expanded_archive_route_token(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "archived" / "m26.md",
+        _complete_archive_status_front_matter("Current route link ?next=/meteorology.\n"),
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/archived/m26.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/meteorology"
+    assert findings[0]["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
+    assert findings[0]["allowlist_state"] == "allowlisted"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
+
+
 def test_current_active_doc_route_tokens_without_archive_marker_remain_budget_counted(
     tmp_path: Path,
 ) -> None:

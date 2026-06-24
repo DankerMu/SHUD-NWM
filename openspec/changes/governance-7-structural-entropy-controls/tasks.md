@@ -187,7 +187,7 @@
   visibility, incomplete marker visibility, and no global ignore of archived
   material. The classifier must remain report-only and must not write
   `.entropy-baseline/latest.json`. `uv run pytest -q
-  tests/test_entropy_audit_script.py` passed with 326 tests; `uv run ruff
+  tests/test_entropy_audit_script.py` passed with 329 tests; `uv run ruff
   check scripts/governance/audit_repo_entropy.py
   tests/test_entropy_audit_script.py` passed; `openspec validate
   governance-7-structural-entropy-controls --strict --no-interactive` passed.
