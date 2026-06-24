@@ -409,10 +409,46 @@
     wrapper-owner names and retained local-glue classification. Do not move local cancellation orchestration glue unless
     equivalent cancellation, status-sync, mutation-proof, and lease-lost behavior is proved in this issue; if not moved,
     inventory must say why it remains local and when it can be removed or extracted.
-- [ ] 1.9 Scheduler group verification and evidence closeout.
+- [x] 1.9 Scheduler group verification and evidence closeout.
   - Module/Scope: integration gate for scheduler group.
   - Dependencies: 1.1-1.8.
   - Out of Scope: new scheduler behavior, Slurm resource changes, DB schema changes.
+  - Fixture Level: expanded integration closeout. This slice is evidence-only
+    but high impact because it records the scheduler group's task-to-issue-to-PR
+    chain and verifies that the compatibility facade did not grow after the
+    owner-family slices.
+  - Risk Pack Selection: Selected: Public API / stable facade (the
+    `ProductionScheduler` facade and legacy `services.orchestrator.scheduler`
+    import/monkeypatch paths remain stable); Legacy compatibility (all eight
+    governed scheduler groups must stay inventoried); Test / evidence coverage
+    (focused scheduler, backfill, gateway reconcile, and entropy guard suites
+    form the group gate); Documentation / migration notes (implementation
+    evidence records the scheduler issue/PR mapping); CI / release governance
+    (closeout evidence must line up with merged PR state). Not Selected: moving
+    owner behavior, changing Slurm resources, changing DB schema, changing API
+    routes, changing frontend/display surfaces, changing runtime evidence
+    payload semantics, or deleting compatibility symbols.
+  - Invariant Matrix: Governing invariant: scheduler group 1.1-1.8 is complete
+    before this closeout is checked. Source-of-truth identity/contract:
+    `docs/review-loop-log.jsonl`, GitHub issue/PR state, and
+    `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` agree on the
+    scheduler task-to-issue-to-PR mapping. Surfaces: Producers: completed PRs
+    #771-#778 and this closeout PR; Compatibility facade:
+    `services/orchestrator/scheduler.py` plus owner modules; Validators:
+    production scheduler tests, scheduler backfill tests, gateway reconcile
+    tests, entropy inventory guard, OpenSpec validation, and diff-check;
+    Evidence/audit/readiness: scheduler compatibility inventory closeout map
+    and the post-merge review-loop log.
+  - Regression Rows: every governed scheduler group remains present in the
+    inventory (`scheduler-state-monkeypatch-bindings`,
+    `candidate-state-reexports`, `scheduler-lease-reexports`,
+    `discovery-compat-aliases`, `candidate-construction-compat-aliases`,
+    `execution-restart-cohort-wrappers`, `scheduler-evidence-write-compat`,
+    and `cancellation-status-proof-wrappers`); the final scheduler evidence map
+    records tasks 1.1-1.9 with issue/PR references; focused verification
+    commands pass after the evidence update; no scheduler runtime code,
+    Slurm behavior, DB schema, API route, chain, readiness, two-node, or
+    frontend groups change in this slice.
   - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final scheduler issue/PR mapping in implementation evidence.
 
