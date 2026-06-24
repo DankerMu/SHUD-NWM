@@ -259,9 +259,13 @@
   links `openspec/glossary.md`, the scoped-context spec,
   `docs/runbooks/node-27-bringup-checklist.md`, and the production-closure lane
   inventories. Scoped audit passes for the production_closure scope.
-- [ ] 6.5 Add `apps/api/AGENTS.md`.
+- [x] 6.5 Add `apps/api/AGENTS.md`.
   Evidence: file defines app bootstrap/routing boundaries, role guard
-  expectations, and focused API verification commands; scoped audit passes.
+  expectations, error model notes, and focused API verification commands; links
+  `openspec/glossary.md`, the scoped-context spec,
+  `docs/governance/ROLE_BOUNDARY.md`, and
+  `docs/runbooks/qhh-backend-smoke.md`. Scoped audit passes for the apps/api
+  scope.
 - [ ] 6.6 Add `apps/frontend/AGENTS.md`.
   Evidence: file defines map surface ownership, live-vs-mocked evidence rules,
   frontend verification commands, and glossary links; scoped audit passes.
