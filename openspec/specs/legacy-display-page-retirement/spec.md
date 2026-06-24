@@ -17,7 +17,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: 去除拉全量列表/分页/过滤模块
 
-单页 MUST NOT 保留原 `/hydro-met` 的"站点列表 + 河段列表 + 搜索 + 分页 + stream_order 过滤 + 变量/QC 筛选"模块；要素发现改由地图点选（图层 + 点击 popup）承载。删除这些模块对应的不再适用测试。
+单页 MUST NOT 保留原 `/hydro-met` legacy redirect-era page 的"站点列表 + 河段列表 + 搜索 + 分页 + stream_order 过滤 + 变量/QC 筛选"模块；要素发现改由地图点选（图层 + 点击 popup）承载。删除这些模块对应的不再适用测试。
 
 #### Scenario: 列表/分页模块不再存在
 - **WHEN** 渲染单页地图
@@ -34,4 +34,3 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 #### Scenario: react-map-gl mock 支撑 popup/cluster
 - **WHEN** 测试点击河段/代站要素
 - **THEN** mock 的 `Popup`/`Marker` 与 `getSource` stub 使 popup 与 cluster 交互可断言（不依赖真实 WebGL）
-

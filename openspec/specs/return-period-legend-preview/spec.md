@@ -5,7 +5,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 ## Requirements
 ### Requirement: 洪水重现期区块诚实三态
 
-`/hydro-met` 内的洪水重现期区块 SHALL 根据 latest-product 的 return-period 可用性渲染状态。当为 unavailable 时 MUST 显示"暂未发布正式产品"提示且不渲染任何产品数据；同时 SHALL 展示静态分级图例（2y/5y/10y/20y/50y/100y）作为分级说明。
+当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）内的洪水重现期区块 SHALL 根据 latest-product 的 return-period 可用性渲染状态。当为 unavailable 时 MUST 显示"暂未发布正式产品"提示且不渲染任何产品数据；同时 SHALL 展示静态分级图例（2y/5y/10y/20y/50y/100y）作为分级说明。
 
 #### Scenario: 不可用时显示占位与图例
 - **WHEN** latest-product 返回 `RETURN_PERIOD_RESULT_UNAVAILABLE`
@@ -26,4 +26,3 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 #### Scenario: 不引入造假数据通路
 - **WHEN** 渲染洪水重现期区块
 - **THEN** 前端不请求 `flood-return-period/preview` 或 `flood-return-period/status` 等本变更明确排除的接口，不加载 preview 假河段 fixture
-

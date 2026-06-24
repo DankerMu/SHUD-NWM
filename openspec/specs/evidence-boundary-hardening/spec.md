@@ -45,7 +45,7 @@ instructions.
 #### Scenario: historical checklist remains in docs/runbooks
 - **WHEN** a runbook such as
   `docs/runbooks/qhh-mvp-production-like-e2e-checklist.md` keeps M21/MVP
-  `/hydro-met` steps
+  historical `/hydro-met` redirect-era steps
 - **THEN** the file or affected section contains a visible historical or
   superseded notice that points to current M26 route authority
 
@@ -125,4 +125,3 @@ read published artifacts without gaining run-product copyback authority.
 - **THEN** the copyback root is required to be compute-only, mounted for compute
   publication, and rejected if it overlaps `OBJECT_STORE_ROOT` except for exact
   equality semantics governed by publisher copyback validation
-

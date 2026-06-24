@@ -52,22 +52,22 @@ The `/ops` display SHALL bind jobs, stages, and logs to the same run identity us
 - **THEN** the backend returns `PIPELINE_STRICT_IDENTITY_MISMATCH`
 - **AND** it does not read or return the wrong job's published log content.
 
-### Requirement: Hydro-met strict latest-product handoff
+### Requirement: Single-map display strict latest-product handoff
 
-The `/hydro-met` frontend SHALL support a strict cross-plane latest-product handoff without breaking source-only browsing.
+The current `/` single-map display frontend, including the `/hydro-met` legacy redirect alias, SHALL support a strict cross-plane latest-product handoff without breaking source-only browsing.
 
-#### Scenario: Strict hydro-met URL identity
-- **WHEN** `/hydro-met` is opened with strict `source`, `cycle_time`, `run_id`, and `model_id` query parameters
+#### Scenario: Strict display URL identity
+- **WHEN** the current `/` display entrypoint or the `/hydro-met` legacy redirect alias is opened with strict `source`, `cycle_time`, `run_id`, and `model_id` query parameters
 - **THEN** the latest-product request includes all four fields
 - **AND** downstream station and river bootstrap only proceeds when the returned product matches the strict identity.
 
-#### Scenario: Partial strict hydro-met identity
+#### Scenario: Partial strict display identity
 - **WHEN** any strict identity query parameter is present but one or more of `source`, `cycle_time`, `run_id`, or `model_id` is missing or malformed
-- **THEN** `/hydro-met` renders an invalid or blocked strict handoff state
+- **THEN** the display entrypoint renders an invalid or blocked strict handoff state
 - **AND** it does not issue a source-only latest-product fallback request for cross-plane evidence.
 
 #### Scenario: Non-strict browsing compatibility
-- **WHEN** `/hydro-met` is opened without strict identity query parameters
+- **WHEN** the current `/` display entrypoint or the `/hydro-met` legacy redirect alias is opened without strict identity query parameters
 - **THEN** the existing source-only latest-product browsing mode remains available.
 
 #### Scenario: E2E handoff file boundary
@@ -107,4 +107,3 @@ The display readonly `/ops` page SHALL view logs through the backend job logs en
 - **WHEN** a job log is missing, unsupported, or access denied
 - **THEN** the log modal displays the stable backend error reason
 - **AND** the diagnostic payload still includes safe job identity for manual investigation.
-

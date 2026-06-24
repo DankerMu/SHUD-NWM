@@ -126,10 +126,16 @@
 
 ## 4. Active Document Entropy Burn-Down
 
-- [ ] 4.1 Clean the active OpenSpec route/path drift budget.
+- [x] 4.1 Clean the active OpenSpec route/path drift budget.
   Evidence: active `openspec/specs/**` route/path findings are rewritten to
   current canonical terms or marked as machine-readable historical/compatibility
-  context; `openspec validate --all --strict --no-interactive` passes.
+  context; before cleanup `/tmp/entropy-675-before.json` had 41 active
+  `openspec/specs/**` route/path findings, 30 budget-counted; after cleanup
+  `/tmp/entropy-675-after.json` has 31 active findings, all allowlisted and 0
+  budget-counted, so no follow-up owner is required for the remaining
+  historical/compatibility contexts. Global `budget_counted_count` dropped from
+  259 to 229, and `baseline_written=false` in both audits. `openspec validate
+  --all --strict --no-interactive` passes.
 - [ ] 4.2 Clean the active governance/module docs drift budget without deleting
   historical context.
   Evidence: `docs/governance/entropy-report.example.md`,

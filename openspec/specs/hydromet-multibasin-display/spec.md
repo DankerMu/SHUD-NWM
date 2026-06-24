@@ -5,47 +5,52 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 ## Requirements
 ### Requirement: 流域选择器数据驱动
 
-`/hydro-met` SHALL 提供流域选择器，其候选流域来自流域发现接口（`GET /api/v1/basins?has_display_product=true`）。前端 MUST NOT 维护硬编码的流域白名单。
+当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）SHALL 提供流域选择器，其候选流域来自流域发现接口（`GET /api/v1/basins?has_display_product=true`）。前端 MUST NOT 维护硬编码的流域白名单。
 
 #### Scenario: 新流域自动出现在选择器
-- **WHEN** 后端发现接口返回新增流域，用户打开 `/hydro-met`
+- **WHEN** 后端发现接口返回新增流域，用户打开当前 `/` 单图展示入口或通过 `/hydro-met` legacy redirect alias 进入
 - **THEN** 流域选择器列出该新流域，前端代码无需修改
 
 #### Scenario: 切换流域刷新展示
 - **WHEN** 用户在选择器中从 qhh 切到 heihe
 - **THEN** 页面以 `basin_id=basins_heihe` 重新拉取 latest-product、河段与站点，展示 heihe 数据
 
-### Requirement: 河段列表生产可用
+### Requirement: 河段发现迁移到地图 popup
 
-`/hydro-met` 河段列表 SHALL 经后端 `search` + `limit/offset` 分页加载，MUST NOT 一次性全量加载全部河段；并 SHALL 支持选中河段高亮加载其 q_down 曲线。`stream_order` 过滤为可选增强，仅在底层河段数据含该字段时提供，否则该筛选项标注不可用（不伪造、不改 DB schema）。
+Pre-M26 `/hydro-met` legacy redirect-era segment list/search/pagination evidence SHALL be treated as historical only. Current `/` single-map display SHALL discover river segments through map layers and feature popups, and MUST NOT reintroduce the retired full-list/search/pagination/filter module. Historical `stream_order` filter evidence also remains retired context unless a later change explicitly designs a map-layer filter.
 
-#### Scenario: 搜索定位河段
-- **WHEN** 用户在河段搜索框输入某 segment 标识
-- **THEN** 列表经后端 search 过滤出匹配河段，选中后加载其 q_down 曲线
+#### Scenario: 地图点选定位河段
+- **WHEN** 用户从当前 `/` 单图展示入口点选河段要素
+- **THEN** popup 加载该河段的 q_down 曲线，并且不依赖 retired list search
 
-#### Scenario: 分页不全量加载
-- **WHEN** 流域河段数超过单页上限
-- **THEN** 列表按页加载（后端 limit/offset），显示总数与当前页，不一次拉全量
+#### Scenario: 历史列表证据不恢复为当前契约
+- **WHEN** pre-M26 historical evidence mentions segment list pagination
+- **THEN** current `/` display treats that evidence as superseded by map-layer
+  discovery and does not restore the retired list module
 
-#### Scenario: stream-order 过滤（字段可用时）
-- **WHEN** 底层河段数据含 stream_order 字段且用户按某 stream order 过滤
-- **THEN** 列表仅显示匹配该 stream order 的河段；若底层无该字段，则该过滤项以不可用呈现
+#### Scenario: stream-order 过滤保持 retired context
+- **WHEN** pre-M26 historical evidence mentions stream-order filtering
+- **THEN** current `/` display does not require a `stream_order` list filter
+  unless a later change explicitly designs a map-layer filter
 
-### Requirement: 站点列表筛选
+### Requirement: 站点发现迁移到地图 popup
 
-`/hydro-met` 站点列表 SHALL 支持后端 `search` 与变量覆盖筛选，并可查看当前 station-series route 返回的站点 forcing 变量（PRCP/TEMP/RH/wind/Rn）或明确 unavailable。`Press` 若作为 UI 选项出现，MUST 标注为当前 route unavailable/omitted，不得绘制可用曲线。QC 状态筛选为可选增强，仅在站点数据含 QC 字段时提供。
+Pre-M26 `/hydro-met` legacy redirect-era station list/search/variable-filter evidence SHALL be treated as historical only. Current `/` single-map display SHALL discover stations through the meteorology-station map layer and popups, while station series data remains honest: PRCP/TEMP/RH/wind/Rn may render when available, and `Press` is unavailable/omitted unless the current station-series route supports it.
 
-#### Scenario: 站点搜索
-- **WHEN** 用户在站点搜索框输入站点标识
-- **THEN** 列表经后端 search 过滤出匹配站点
+#### Scenario: 地图点选定位站点
+- **WHEN** 用户从当前 `/` 单图展示入口点选站点 marker
+- **THEN** popup 加载该站点可用 forcing 曲线或明确 unavailable，不依赖 retired list search
 
-#### Scenario: 按变量覆盖筛选
-- **WHEN** 用户筛选"含 PRCP 的站点"
-- **THEN** 列表仅显示具备 PRCP 覆盖的站点
+#### Scenario: 历史变量筛选不恢复为当前契约
+- **WHEN** pre-M26 historical evidence mentions filtering stations by variable
+  coverage
+- **THEN** current `/` display treats it as superseded by map-layer discovery
+  unless a later change explicitly designs a map-layer filter
 
-#### Scenario: QC 筛选（字段可用时）
-- **WHEN** 站点数据含 QC 状态字段且用户按 QC 状态筛选
-- **THEN** 列表按 QC 状态过滤；若无该字段则该筛选项以不可用呈现
+#### Scenario: QC 筛选保持 retired context
+- **WHEN** pre-M26 historical evidence mentions QC list filtering
+- **THEN** current `/` display does not require a QC list filter, while any shown
+  station series quality flags remain truthful
 
 #### Scenario: 变量缺失明确标注
 - **WHEN** 某站点缺少某 forcing 变量
@@ -53,7 +58,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 ### Requirement: 产品状态条诚实展示
 
-`/hydro-met` 顶部 SHALL 展示产品状态条，覆盖 q_down、forcing、return-period 三类产品各自的 ready / degraded / unavailable 状态，来源为 latest-product 响应（return-period 取自独立的 `availability.return_period_status`）。
+当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）顶部 SHALL 展示产品状态条，覆盖 q_down、forcing、return-period 三类产品各自的 ready / degraded / unavailable 状态，来源为 latest-product 响应（return-period 取自独立的 `availability.return_period_status`）。
 
 #### Scenario: 三类产品状态可见（含 return-period unavailable）
 - **WHEN** latest-product 返回 q_down ready、forcing ready、`availability.return_period_status = unavailable`
@@ -65,7 +70,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 ### Requirement: strict identity 贯穿多流域（前端一致性）
 
-`/hydro-met` 所有数据请求 MUST 与选中产品身份一致：latest-product 携带选中 `basin_id` 与 strict identity（`source`/`cycle_time`/`run_id`/`model_id`）；河段/站点/forecast-series 复用现有路由参数（如 `basin_version_id`/`segment_id`/`issue_time`，由同一 latest-product 产品身份派生）。前端 MUST NOT 手工输入 identity 或绘制假曲线。本要求 SHALL 以前端一致性校验实现，不要求为 forecast-series/station-series 新增后端 identity 参数。
+当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）的所有数据请求 MUST 与选中产品身份一致：latest-product 携带选中 `basin_id` 与 strict identity（`source`/`cycle_time`/`run_id`/`model_id`）；河段/站点/forecast-series 复用现有路由参数（如 `basin_version_id`/`segment_id`/`issue_time`，由同一 latest-product 产品身份派生）。前端 MUST NOT 手工输入 identity 或绘制假曲线。本要求 SHALL 以前端一致性校验实现，不要求为 forecast-series/station-series 新增后端 identity 参数。
 
 #### Scenario: 请求参数派生自同一产品身份
 - **WHEN** 用户选定流域与产品后查看河段 q_down

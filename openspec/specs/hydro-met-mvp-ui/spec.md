@@ -9,11 +9,11 @@ The frontend SHALL expose a two-purpose hydrology/meteorology MVP entry for QHH 
 
 #### Scenario: Navigation entry
 - **WHEN** the app shell renders for the MVP build
-- **THEN** the visible workflow includes a hydrology/meteorology entry at `/hydro-met` or an equivalent route alias
+- **THEN** the visible workflow includes a hydrology/meteorology entry on the current `/` single-map display entrypoint, with `/hydro-met` only as a legacy redirect alias when compatibility is checked
 - **AND** existing routes remain accessible for regression and deep-link compatibility.
 
 #### Scenario: Latest product bootstrap
-- **WHEN** `/hydro-met` loads without explicit IDs
+- **WHEN** the current `/` display entrypoint or the `/hydro-met` legacy redirect alias loads without explicit IDs
 - **THEN** it requests the latest QHH display product for the selected source
 - **AND** it uses returned identifiers to load station inventory, river segment candidates, and chart data.
 
@@ -61,4 +61,4 @@ The hydro-met MVP UI SHALL have automated coverage for route bootstrap, station 
 
 #### Scenario: Browser smoke
 - **WHEN** the MVP browser smoke runs with mocked or live QHH data
-- **THEN** it opens `/hydro-met`, verifies station markers and river features are visible, selects at least one station and one river segment from the map or lists, and verifies both chart areas update from API-backed data.
+- **THEN** it opens the current `/` single-map display entrypoint, optionally checking `/hydro-met -> /` as a legacy redirect smoke, verifies station markers and river features are visible, selects at least one station and one river segment from map layers or popups, and verifies both chart areas update from API-backed data.

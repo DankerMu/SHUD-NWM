@@ -15,8 +15,8 @@ Current docs SHALL describe `/` as the active display map entrypoint and describ
 - **WHEN** a contributor reads `progress.md` for current cross-session status
 - **THEN** display live proof language names `/` as the current display entrypoint and treats `/hydro-met` only as historical or redirect compatibility context
 
-#### Scenario: runbook mentions `/hydro-met`
-- **WHEN** a current runbook mentions `/hydro-met`
+#### Scenario: runbook mentions legacy display redirect alias
+- **WHEN** a current runbook mentions the `/hydro-met` legacy redirect alias
 - **THEN** the text states that it is a legacy redirect alias or historical evidence, not the current primary display page
 
 ### Requirement: Governance-2 mocked-vs-live split is not duplicated
@@ -86,4 +86,3 @@ Tracked M11/M15 visual evidence SHALL remain traceable when relabeled, indexed, 
 #### Scenario: tracked visual evidence is moved
 - **WHEN** a cleanup issue moves or renames tracked historical visual evidence
 - **THEN** it preserves old-path references, SHA/provenance notes, and the manual M15 workflow evidence contract
-

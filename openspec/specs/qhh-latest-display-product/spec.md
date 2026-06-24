@@ -30,12 +30,11 @@ The system SHALL provide a stable contract for discovering the latest usable QHH
 
 The latest product response SHALL contain enough identifiers for the hydro-met UI to request station inventory, station series, river segments, and river `q_down` forecasts without manual operator input.
 
-#### Scenario: Hydro-met bootstrap
-- **WHEN** `/hydro-met` loads for QHH and a selected source
+#### Scenario: Display bootstrap
+- **WHEN** the current `/` single-map display entrypoint or the `/hydro-met` legacy redirect alias loads for QHH and a selected source
 - **THEN** it can use latest-product metadata to call station list, station series, river segment list, and forecast-series APIs
 - **AND** no user-entered `run_id`, `forcing_version_id`, `basin_version_id`, or `river_network_version_id` is required.
 
 #### Scenario: Contract validation
 - **WHEN** backend tests seed a QHH-like product
 - **THEN** latest-product tests assert the identity fields, counts, source/cycle normalization, and incomplete-product rejection rules.
-

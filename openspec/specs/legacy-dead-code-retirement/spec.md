@@ -11,17 +11,17 @@ The classification SHALL be recorded in a persistent inventory with exact path, 
 
 #### Scenario: placeholder path is evaluated
 
-- **WHEN** a path such as `apps/web` or a hyphenated worker directory is considered for removal
+- **WHEN** a retired frontend placeholder path or a hyphenated worker directory is considered for removal
 - **THEN** the cleanup PR includes evidence that it is not part of active build, tests, imports, or deployment
 
 #### Scenario: legacy path inventory is reviewed
 
 - **WHEN** the legacy/dead-code governance issue is implemented
-- **THEN** the persistent inventory includes `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, `services/tile-publisher`, QHH diagnostic scripts, mocked e2e specs, and paused CI jobs
+- **THEN** the persistent inventory includes retired frontend placeholders, hyphenated worker placeholders, retired Slurm template placeholders, retired tile-publisher service placeholders, QHH diagnostic scripts, mocked e2e specs, and paused CI jobs
 
-#### Scenario: workers/sbatch_templates is evaluated
+#### Scenario: retired Slurm template placeholder is evaluated
 
-- **WHEN** `workers/sbatch_templates` is considered for archive or deletion
+- **WHEN** the retired Slurm template placeholder path is considered for archive or deletion
 - **THEN** the inventory records that it contains legacy single-run templates, documents the canonical `infra/sbatch` replacement, and verifies no active Slurm gateway or production scheduler path depends on it
 
 #### Scenario: legacy placeholder paths are retired
@@ -126,4 +126,3 @@ CI jobs SHALL NOT remain indefinitely disabled by conditions such as `&& false`.
 - **WHEN** governance scans automatic PR/push workflow files after #366
 - **THEN** no automatic CI job for M15 visual evidence is disabled behind `&& false`
 - **AND** any retained M15 visual evidence command is reachable only from an explicit manual workflow
-
