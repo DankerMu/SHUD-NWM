@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import shlex
@@ -6985,27 +6986,39 @@ def test_ready_cycle_query_uses_stripped_nonblank_checksum_predicate() -> None:
     assert "cmp.checksum <> ''" not in repository.statement
 
 
+@pytest.mark.parametrize(
+    "failing_identity_helper",
+    (
+        "services.orchestrator.chain._auto_trigger_source_policy_identity",
+        "services.orchestrator.chain._auto_trigger_source_object_identity",
+    ),
+    ids=("policy_identity", "object_identity"),
+)
 def test_trigger_ready_forecasts_provider_error_fails_closed_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failing_identity_helper: str,
 ) -> None:
     cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
     repository = ReadyForecastRepository(
         cycle_time=cycle_time,
         canonical_products=_canonical_rows(
             source_id="gfs",
             cycle_time=cycle_time,
             forecast_hours=(0, 3),
-            policy_identity={"source": "gfs", "forecast_hours": [0, 3]},
-            source_object_identity={"source": "gfs", "object": "current"},
+            policy_identity=current_policy,
+            source_object_identity=current_object,
         ),
     )
     client = ImmediateTerminalSlurmClient()
 
-    def fail_policy(**_kwargs: Any) -> dict[str, Any]:
+    def fail_identity(**_kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("identity provider failed")
 
-    monkeypatch.setattr("services.orchestrator.chain._auto_trigger_source_policy_identity", fail_policy)
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    monkeypatch.setattr(failing_identity_helper, fail_identity)
     orchestrator = _orchestrator(tmp_path, repository, client)
 
     results = orchestrator.trigger_ready_forecasts(source_id="gfs")
@@ -7640,6 +7653,154 @@ def test_chain_tile_publisher_compat_local_publish_failure_paths(
     assert generic_payload["layers"] == []
     assert "supersecret" not in generic_payload["error_message"]
     assert "[redacted]" in generic_payload["error_message"]
+
+
+def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(tmp_path: Path) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import time_consistency
+    from workers.canonical_converter import converter as canonical_converter
+    from workers.data_adapters import base as data_adapter_base
+
+    expected_canonical_names = ("evaluate_canonical_readiness", "expected_converter_version")
+    expected_cycle_names = ("parse_cycle_time", "format_cycle_time", "cycle_id_for")
+    expected_alias_names = (*expected_canonical_names, *expected_cycle_names)
+    expected_time_names = ("_check_three_way_time_consistency",)
+    expected_local_helper_names = (
+        "scenario_for_source",
+        "_auto_trigger_source_policy_identity",
+        "_auto_trigger_source_object_identity",
+        "_auto_trigger_source_identity_adapter",
+    )
+    expected_classifications = {
+        "scenario_for_source": "chain-local-source-scenario-glue",
+        "_auto_trigger_source_policy_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_object_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_identity_adapter": "chain-local-dynamic-adapter-glue",
+    }
+    expected_dynamic_adapters = {
+        "gfs": ("workers.data_adapters.gfs_adapter", "GFSAdapter", "GFSAdapterConfig"),
+        "IFS": ("workers.data_adapters.ifs_adapter", "IFSAdapter", "IFSAdapterConfig"),
+    }
+
+    canonical_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES
+    cycle_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES
+    alias_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES
+    time_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_NAMES
+    local_helper_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_NAMES
+    classifications = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS
+    dynamic_adapters = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_DYNAMIC_ADAPTERS
+
+    assert canonical_names == expected_canonical_names
+    assert cycle_names == expected_cycle_names
+    assert alias_names == expected_alias_names
+    assert time_names == expected_time_names
+    assert local_helper_names == expected_local_helper_names
+    assert dict(classifications) == expected_classifications
+    assert dict(dynamic_adapters) == expected_dynamic_adapters
+    assert len(alias_names) == len(set(alias_names))
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_MISSING == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_DRIFT == ()
+    assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_DRIFT == ()
+    assert set(legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES) == set(time_names)
+    assert set(legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_FACADE_ALIASES) == set(time_names)
+    assert set(legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CHAIN_LOCAL_HELPERS) == set(local_helper_names)
+
+    for alias_name in canonical_names:
+        assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            canonical_converter,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+        assert getattr(legacy_chain, alias_name) is getattr(canonical_converter, alias_name)
+    for alias_name in cycle_names:
+        assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            data_adapter_base,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+        assert getattr(legacy_chain, alias_name) is getattr(data_adapter_base, alias_name)
+    assert (
+        legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES["_check_three_way_time_consistency"]
+        is time_consistency.check_three_way_time_consistency
+    )
+    assert (
+        legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_FACADE_ALIASES["_check_three_way_time_consistency"]
+        is legacy_chain._check_three_way_time_consistency
+    )
+    assert legacy_chain._check_three_way_time_consistency is time_consistency.check_three_way_time_consistency
+
+    assert legacy_chain.scenario_for_source("gfs") == "forecast_gfs_deterministic"
+    assert legacy_chain.scenario_for_source("IFS") == "forecast_ifs_deterministic"
+    assert legacy_chain.scenario_for_source("custom") == "forecast_custom_deterministic"
+    for helper_name in local_helper_names:
+        assert callable(getattr(legacy_chain, helper_name))
+        assert helper_name in classifications
+
+    for source_id, (module_name, adapter_name, config_name) in dynamic_adapters.items():
+        owner_module = importlib.import_module(module_name)
+        expected_workspace_root = tmp_path / source_id.lower() / "workspace"
+        expected_object_store_root = tmp_path / source_id.lower() / "object-store"
+        expected_object_store_prefix = f"s3://nhms/{source_id.lower()}"
+        adapter = legacy_chain._auto_trigger_source_identity_adapter(
+            source_id=source_id,
+            workspace_root=expected_workspace_root,
+            object_store_root=expected_object_store_root,
+            object_store_prefix=expected_object_store_prefix,
+        )
+        assert adapter is not None
+        assert adapter.__class__ is getattr(owner_module, adapter_name)
+        assert adapter.config.__class__ is getattr(owner_module, config_name)
+        assert adapter.config.workspace_root == expected_workspace_root
+        assert adapter.config.object_store_root == expected_object_store_root
+        assert adapter.config.object_store_prefix == expected_object_store_prefix
+    with pytest.raises(ValueError, match="Unknown source_id"):
+        legacy_chain._auto_trigger_source_identity_adapter(
+            source_id="custom",
+            workspace_root=tmp_path / "custom" / "workspace",
+            object_store_root=tmp_path / "custom" / "object-store",
+            object_store_prefix="s3://nhms",
+        )
+
+    _run_fresh_python(
+        """
+import sys
+import services.orchestrator.chain as chain
+assert 'workers.data_adapters.gfs_adapter' not in sys.modules
+assert 'workers.data_adapters.ifs_adapter' not in sys.modules
+assert chain.scenario_for_source('IFS') == 'forecast_ifs_deterministic'
+"""
+    )
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(
+        name for name in vars(legacy_chain) if name.startswith("_CHAIN_WORKER_ADAPTER_COMPAT_")
+    )
+    for token in compat_tokens:
+        assert token in inventory_text
+    for expected_inventory_text in (
+        *expected_alias_names,
+        *expected_time_names,
+        *expected_local_helper_names,
+        "workers.canonical_converter.converter",
+        "workers.data_adapters.base",
+        "workers.data_adapters.gfs_adapter",
+        "workers.data_adapters.ifs_adapter",
+        "services.orchestrator.time_consistency",
+    ):
+        assert expected_inventory_text in inventory_text
 
 
 def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:

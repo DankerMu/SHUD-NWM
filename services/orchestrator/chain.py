@@ -14,8 +14,11 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
+import services.orchestrator.time_consistency as _time_consistency_module
 import services.tile_publisher as _tile_publisher_module
 import services.tile_publisher.publisher as _tile_publisher_publisher_module
+import workers.canonical_converter.converter as _canonical_converter_module
+import workers.data_adapters.base as _data_adapters_base_module
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
@@ -7728,6 +7731,142 @@ def _format_time(value: datetime) -> str:
 
 def _format_time_or_none(value: datetime | None) -> str | None:
     return _format_time(value) if value is not None else None
+
+
+_CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES = (
+    "evaluate_canonical_readiness",
+    "expected_converter_version",
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES = (
+    "parse_cycle_time",
+    "format_cycle_time",
+    "cycle_id_for",
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES = (
+    *_CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES,
+    *_CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES,
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_NAMES = ("_check_three_way_time_consistency",)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_NAMES = MappingProxyType(
+    {"_check_three_way_time_consistency": "check_three_way_time_consistency"}
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_NAMES = (
+    "scenario_for_source",
+    "_auto_trigger_source_policy_identity",
+    "_auto_trigger_source_object_identity",
+    "_auto_trigger_source_identity_adapter",
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = MappingProxyType(
+    {
+        "scenario_for_source": "chain-local-source-scenario-glue",
+        "_auto_trigger_source_policy_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_object_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_identity_adapter": "chain-local-dynamic-adapter-glue",
+    }
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_DYNAMIC_ADAPTERS = MappingProxyType(
+    {
+        "gfs": ("workers.data_adapters.gfs_adapter", "GFSAdapter", "GFSAdapterConfig"),
+        "IFS": ("workers.data_adapters.ifs_adapter", "IFSAdapter", "IFSAdapterConfig"),
+    }
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_OWNER_MISSING = tuple(
+    name
+    for name in _CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES
+    if not hasattr(_canonical_converter_module, name)
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES if not hasattr(_data_adapters_base_module, name)
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES if name not in globals()
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_MISSING = tuple(
+    facade_name
+    for facade_name, owner_name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_NAMES.items()
+    if not hasattr(_time_consistency_module, owner_name)
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_NAMES if name not in globals()
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_MISSING = tuple(
+    name for name in _CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_NAMES if not callable(globals().get(name))
+)
+if _CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain worker canonical compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain worker cycle compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain worker compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain worker time-consistency aliases missing from owner module: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain worker time-consistency aliases missing from facade: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_FACADE_MISSING)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_MISSING:
+    raise RuntimeError(
+        "chain worker/source identity local helpers missing from facade: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_MISSING)}"
+    )
+_CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {
+        **{
+            name: getattr(_canonical_converter_module, name)
+            for name in _CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES
+        },
+        **{name: getattr(_data_adapters_base_module, name) for name in _CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES},
+    }
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES = MappingProxyType(
+    {
+        facade_name: getattr(_time_consistency_module, owner_name)
+        for facade_name, owner_name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_NAMES.items()
+    }
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_NAMES}
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_CHAIN_LOCAL_HELPERS = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_WORKER_ADAPTER_COMPAT_LOCAL_HELPER_NAMES}
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_DRIFT = tuple(
+    name
+    for name in _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES
+    if _CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES[name] is not _CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES[name]
+)
+_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_DRIFT = tuple(
+    name
+    for name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_NAMES
+    if _CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES[name]
+    is not _CHAIN_WORKER_ADAPTER_COMPAT_TIME_FACADE_ALIASES[name]
+)
+if _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_DRIFT:
+    raise RuntimeError(
+        "chain worker adapter direct alias drifted from owner module: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_DRIFT)}"
+    )
+if _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_DRIFT:
+    raise RuntimeError(
+        "chain worker time-consistency alias drifted from owner module: "
+        f"{', '.join(_CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_DRIFT)}"
+    )
 
 
 _CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING = tuple(
