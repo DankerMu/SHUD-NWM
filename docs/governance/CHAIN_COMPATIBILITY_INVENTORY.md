@@ -133,7 +133,7 @@ task to its GitHub issue and implementation PR.
 | 2.8 Chain tile-publisher owner-family completion | #728 | #787 | Tile-publisher alias/function identity, local publish monkeypatch, failure-payload, and redaction coverage. |
 | 2.9 Chain worker/source-identity and time-consistency owner-family completion | #729 | #788 | Worker/source identity aliases, dynamic adapter metadata, time-consistency alias, and fail-closed coverage. |
 | 2.10 Chain persistence/repository ownership decision and extraction/retention | #730 | #789 | Persistence primitive aliases, retained chain-local repository classifications, repository method surface, and scheduler legacy import-token coverage. |
-| 2.11 Chain group verification and evidence closeout | #731 | TBD | Final group verification and this issue/PR mapping. |
+| 2.11 Chain group verification and evidence closeout | #731 | #790 | Final group verification and this issue/PR mapping. |
 
 ## Non-Targets
 
