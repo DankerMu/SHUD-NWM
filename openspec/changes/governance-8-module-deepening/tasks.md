@@ -970,11 +970,63 @@
 
 ## 3. Two-Node E2E Lane Deepening
 
-- [ ] 3.1 Shared two-node evidence contracts.
+- [x] 3.1 Shared two-node evidence contracts.
   - Module/Scope: shared lane result adapter, current-run binding, producer/source artifact validation, strict identity, approved-root path safety, redaction, log URI safety.
   - Dependencies: None.
   - Out of Scope: moving individual lane evaluators or final aggregation.
-  - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`.
+  - Fixture Level: expanded; Repair Intensity: high, because these shared
+    contracts are consumed by every later two-node lane extraction and guard
+    final PASS/BLOCKED/FAIL semantics without moving lane evaluators yet.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (existing evidence bundle aliases and lane summary fields stay
+    accepted); Schema / field names (strict identities, current-run binding
+    aliases, producer proof containers, blocker/finding namespaces, and final
+    summary fields remain unchanged); File IO / path safety / overwrite
+    (approved roots, safe bounded JSON reads, no symlink/traversal, and
+    `EvidenceWriter` safety stay guarded); Error handling / rollback / partial
+    outputs (stale, unsafe, incomplete, non-authoritative, private-log, and
+    unredacted evidence remain blockers/findings, not silent PASS);
+    Documentation / migration notes (two-node lane inventory records shared
+    contract ownership and focused verification). Not Selected: moving
+    metadata, Docker, readonly DB, API, browser, logs, manual ops, simple-live,
+    cross-plane, or final aggregation evaluators; changing live evidence
+    product semantics; changing DB roles/schema; changing API/frontend/display
+    behavior; changing Slurm/compute execution behavior.
+  - Invariant Matrix: Governing invariant: shared two-node contracts are
+    single-source behind the stable validator before lane extraction starts.
+    Source-of-truth identity/contract:
+    `services/production_closure/two_node_e2e_evidence.py` shared contract
+    metadata, `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`, and
+    the two-node E2E spec agree on the lane result adapter, strict identity,
+    current-run binding, producer/source-artifact validation, redaction,
+    approved-root path safety, and log URI safety contracts. Surfaces:
+    Producers: current evidence bundle JSON and future lane owner modules;
+    Compatibility/stable entrypoint: `validate_two_node_e2e_evidence(config)`;
+    Validators/preflight: `tests/test_two_node_e2e_evidence.py` focused
+    producer/source-artifact/strict-identity/metadata/source-scope/safety
+    selectors and OpenSpec validation; Storage/cache/query: bounded JSON evidence artifacts
+    under approved roots; Public outputs: final summary JSON, lane summaries,
+    source-scope results, blockers/findings, and redacted evidence; Failure
+    paths/rollback/stale state: stale current-run IDs, unsafe artifact paths,
+    wrapper-only proof, private or credential-bearing log URIs, and redaction
+    depth failures.
+  - Regression Rows: shared contract metadata contains the seven governed
+    contracts (`lane-result-adapter`, `current-run-binding`,
+    `producer-source-artifacts`, `strict-identity`, `approved-root-path-safety`,
+    `redaction`, and `log-uri-safety`) with owner, consumers, guard symbols,
+    blocker/finding namespaces, and focused verification commands; the two-node
+    inventory contains each shared contract row and Guard Hook Seed token;
+    focused tests prove producer proof cannot be wrapper-only, source artifacts
+    must be current-run and approved-root bound, strict identity feeds
+    source-scope and downstream lane matching, final/lane summaries stay
+    redacted, and private/unsafe log URIs block final PASS; no lane evaluator or
+    final aggregation behavior moves in this slice.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"`.
+    - `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`.
+    - `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"`.
   - Inventory/Evidence Update: update `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md` shared-contract rows.
 - [ ] 3.2 Metadata and strict-identity lane extraction.
   - Module/Scope: metadata aliases, source-scope resolution, reduced-scope flags, five-field identities, downstream source-lane seeding.
