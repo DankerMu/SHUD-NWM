@@ -797,12 +797,64 @@
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group
     `chain-tile-publisher-facade`.
-- [ ] 2.9 Chain worker/source-identity and time-consistency owner-family completion.
-  - Module/Scope: worker/adapter imports, source identity helpers, canonical readiness, cycle id/time helpers, source scenario glue, and `services.orchestrator.time_consistency` aliasing.
+- [x] 2.9 Chain worker/source-identity and time-consistency owner-family completion.
+  - Fixture Level: expanded; Repair Intensity: high.
+  - Module/Scope: worker/adapter imports, source identity helpers, canonical
+    readiness, cycle id/time helpers, source scenario glue, and
+    `services.orchestrator.time_consistency` aliasing.
   - Dependencies: 2.1 and 2.5.
-  - Out of Scope: manifest schema changes, source product policy changes, station-MVT work.
-  - Focused Verification: `uv run pytest -q tests/test_ifs_forecast_integration.py tests/test_source_identity.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py`.
-  - Inventory/Evidence Update: update chain inventory group `chain-worker-adapter-facade`.
+  - Out of Scope: manifest schema changes, source product policy changes,
+    station-MVT work, forcing producer internals, worker adapter download
+    behavior, DB schema, API/frontend/display behavior, Slurm behavior, and
+    production topology.
+  - Stable Facade / Compatibility Surface:
+    - `services.orchestrator.chain.evaluate_canonical_readiness` and
+      `expected_converter_version` stay as legacy aliases backed by
+      `workers.canonical_converter.converter`.
+    - `services.orchestrator.chain.parse_cycle_time`, `format_cycle_time`, and
+      `cycle_id_for` stay as legacy aliases backed by
+      `workers.data_adapters.base`.
+    - `services.orchestrator.chain._check_three_way_time_consistency` stays as
+      a legacy private alias backed by
+      `services.orchestrator.time_consistency.check_three_way_time_consistency`.
+    - `scenario_for_source`, `_auto_trigger_source_policy_identity`,
+      `_auto_trigger_source_object_identity`, and
+      `_auto_trigger_source_identity_adapter` remain chain-local business glue
+      until a later owner decision.
+    - `_auto_trigger_source_identity_adapter` continues dynamic GFS/IFS adapter
+      imports without forcing those modules to load at `chain.py` import time.
+  - Invariants:
+    - Owner/facade identity for canonical readiness and cycle time aliases.
+    - Owner/facade identity for the time-consistency alias.
+    - Chain-local helper classification for scenario/source identity glue.
+    - Dynamic adapter metadata for GFS and IFS matches the adapter modules and
+      returned adapter/config types.
+    - Legacy monkeypatch paths for auto-trigger source policy/object identity
+      still fail closed before submission when the provider errors.
+    - `scenario_for_source` preserves existing GFS/IFS/custom business
+      semantics.
+  - Risk Packs:
+    - Public API / stable facade selected.
+    - Legacy compatibility / examples selected.
+    - Error handling / rollback / partial outputs selected for canonical
+      readiness provider failures.
+    - Config / project setup selected for adapter workspace/object-store
+      construction.
+    - NHMS domain selected for source identity and cycle-time semantics.
+    - Concurrency / shared state / ordering, File IO/path safety, Resource
+      limits / discovery, Schema/columns, Auth/secrets, and Release/packaging
+      not selected because this slice does not change Slurm ordering, adapter
+      download/file IO behavior, discovery limits, schema, credentials,
+      packaging, or display endpoints.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_ifs_forecast_integration.py tests/test_source_identity.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
+  - Inventory/Evidence Update: update chain inventory group
+    `chain-worker-adapter-facade`.
 - [ ] 2.10 Chain persistence/repository ownership decision and extraction/retention.
   - Module/Scope: `PipelineJob`, `PipelineStore`, `OrchestratorRepository`, `PsycopgOrchestratorRepository`, active pipeline detection, candidate state, reservations, events, forecast cycles, hydro run status.
   - Dependencies: 2.1, 2.6, and 2.7.
