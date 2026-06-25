@@ -14,6 +14,8 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
+import services.tile_publisher as _tile_publisher_module
+import services.tile_publisher.publisher as _tile_publisher_publisher_module
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
@@ -576,6 +578,91 @@ _CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS = MappingProxyType(
         )
     }
 )
+
+_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES = (
+    "TilePublisher",
+    "PublishError",
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES = ("failure_payload",)
+_CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_FIELDS = (
+    "tile_publisher_cls",
+    "publish_error_cls",
+    "failure_payload",
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS = (
+    ("tile_publisher_cls", "TilePublisher"),
+    ("publish_error_cls", "PublishError"),
+    ("failure_payload", "failure_payload"),
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES if not hasattr(_tile_publisher_module, name)
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES if name not in globals()
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_OWNER_MISSING = tuple(
+    name
+    for name in _CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES
+    if not hasattr(_tile_publisher_publisher_module, name)
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_FACADE_MISSING = tuple(
+    name for name in _CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES if name not in globals()
+)
+if _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain tile-publisher compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain tile-publisher compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+if _CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_OWNER_MISSING:
+    raise RuntimeError(
+        "chain tile-publisher compatibility functions missing from owner module: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_OWNER_MISSING)}"
+    )
+if _CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_FACADE_MISSING:
+    raise RuntimeError(
+        "chain tile-publisher compatibility functions missing from facade: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_FACADE_MISSING)}"
+    )
+_CHAIN_TILE_PUBLISHER_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {name: getattr(_tile_publisher_module, name) for name in _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_OWNER_FUNCTIONS = MappingProxyType(
+    {
+        name: getattr(_tile_publisher_publisher_module, name)
+        for name in _CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES
+    }
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FACADE_FUNCTIONS = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES}
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_DRIFT = tuple(
+    name
+    for name in _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES
+    if _CHAIN_TILE_PUBLISHER_COMPAT_OWNER_ALIASES[name] is not _CHAIN_TILE_PUBLISHER_COMPAT_FACADE_ALIASES[name]
+)
+_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_DRIFT = tuple(
+    name
+    for name in _CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES
+    if _CHAIN_TILE_PUBLISHER_COMPAT_OWNER_FUNCTIONS[name] is not _CHAIN_TILE_PUBLISHER_COMPAT_FACADE_FUNCTIONS[name]
+)
+if _CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_DRIFT:
+    raise RuntimeError(
+        "chain tile-publisher direct alias drifted from owner module: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_DRIFT)}"
+    )
+if _CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_DRIFT:
+    raise RuntimeError(
+        "chain tile-publisher failure function drifted from owner module: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_DRIFT)}"
+    )
 
 _CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES = (
     "_basin_key",
@@ -7652,6 +7739,16 @@ if _CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING:
         f"{', '.join(_CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING)}"
     )
 _chain_stage_execution_deps = ForecastOrchestrator._chain_stage_execution_dependencies()
+_CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT = tuple(
+    field
+    for field, facade_name in _CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS
+    if getattr(_chain_stage_execution_deps, field) is not globals()[facade_name]
+)
+if _CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT:
+    raise RuntimeError(
+        "chain tile-publisher stage execution dependency bindings drifted from legacy facade: "
+        f"{', '.join(_CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT)}"
+    )
 _CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT = tuple(
     field
     for field, facade_name in _CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS
