@@ -41,6 +41,7 @@ from services.orchestrator import (
     chain_manifests,
     chain_stage_execution,
     production_contract,
+    reservation,
 )
 from services.orchestrator import (
     chain_stages as _chain_stages_module,
@@ -297,6 +298,75 @@ if _CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING:
     raise RuntimeError(
         "chain manifest compatibility functions missing from owner module: "
         f"{', '.join(_CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING)}"
+    )
+
+_CHAIN_RESERVATION_COMPAT_ALIAS_NAMES = (
+    "ReservationResult",
+    "bind_reservation",
+    "reserve_candidate",
+    "slurm_comment_for",
+)
+_CHAIN_RESERVATION_COMPAT_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_RESERVATION_COMPAT_ALIAS_NAMES if not hasattr(reservation, name)
+)
+_CHAIN_RESERVATION_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_RESERVATION_COMPAT_ALIAS_NAMES if name not in globals()
+)
+if _CHAIN_RESERVATION_COMPAT_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain reservation compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_RESERVATION_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain reservation compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+_CHAIN_RESERVATION_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {name: getattr(reservation, name) for name in _CHAIN_RESERVATION_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_RESERVATION_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_RESERVATION_COMPAT_ALIAS_NAMES}
+)
+for _chain_reservation_alias_name, _chain_reservation_owner_value in (
+    _CHAIN_RESERVATION_COMPAT_OWNER_ALIASES.items()
+):
+    if _CHAIN_RESERVATION_COMPAT_FACADE_ALIASES[_chain_reservation_alias_name] is not (
+        _chain_reservation_owner_value
+    ):
+        raise RuntimeError(
+            "chain reservation direct alias drifted from owner module: "
+            f"{_chain_reservation_alias_name}"
+        )
+del _chain_reservation_alias_name, _chain_reservation_owner_value
+
+_CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDER_NAMES = (
+    "_reserve_cycle_stage",
+    "_bind_cycle_stage_reservation",
+)
+_CHAIN_RESERVATION_COMPAT_OWNER_METHOD_OWNER_FUNCTION_NAMES = (
+    "reserve_candidate",
+    "bind_reservation",
+)
+_CHAIN_RESERVATION_COMPAT_LOCAL_METHOD_NAMES = ("_reservation_already_inflight",)
+_CHAIN_RESERVATION_COMPAT_METHOD_FORWARDER_NAMES = (
+    *_CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDER_NAMES,
+    *_CHAIN_RESERVATION_COMPAT_LOCAL_METHOD_NAMES,
+)
+_CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_NAMES = ("_cycle_stage_idempotency_key",)
+_CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS = (
+    ("cycle_stage_idempotency_key", "_cycle_stage_idempotency_key"),
+    ("slurm_comment_for", "slurm_comment_for"),
+)
+_CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING = tuple(
+    name
+    for name in _CHAIN_RESERVATION_COMPAT_OWNER_METHOD_OWNER_FUNCTION_NAMES
+    if not hasattr(reservation, name)
+)
+if _CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING:
+    raise RuntimeError(
+        "chain reservation compatibility functions missing from owner module: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING)}"
     )
 
 _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
@@ -4180,6 +4250,27 @@ if _CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING:
         f"{', '.join(_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING)}"
     )
 
+_CHAIN_RESERVATION_COMPAT_METHOD_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_RESERVATION_COMPAT_METHOD_FORWARDER_NAMES
+    if not callable(getattr(ForecastOrchestrator, name, None))
+)
+if _CHAIN_RESERVATION_COMPAT_METHOD_FACADE_MISSING:
+    raise RuntimeError(
+        "chain reservation compatibility methods missing from facade: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_METHOD_FACADE_MISSING)}"
+    )
+_CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(reservation, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDER_NAMES,
+            _CHAIN_RESERVATION_COMPAT_OWNER_METHOD_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+
 
 class AnalysisOrchestrator(ForecastOrchestrator):
     stages = ANALYSIS_STAGES
@@ -7450,6 +7541,28 @@ def _format_time(value: datetime) -> str:
 
 def _format_time_or_none(value: datetime | None) -> str | None:
     return _format_time(value) if value is not None else None
+
+
+_CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING = tuple(
+    name for name in _CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_NAMES if not callable(globals().get(name))
+)
+if _CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING:
+    raise RuntimeError(
+        "chain reservation compatibility local bindings missing from facade: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING)}"
+    )
+_chain_stage_execution_deps = ForecastOrchestrator._chain_stage_execution_dependencies()
+_CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT = tuple(
+    field
+    for field, facade_name in _CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS
+    if getattr(_chain_stage_execution_deps, field) is not globals()[facade_name]
+)
+if _CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT:
+    raise RuntimeError(
+        "chain reservation stage execution dependency bindings drifted from legacy facade: "
+        f"{', '.join(_CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT)}"
+    )
+del _chain_stage_execution_deps
 
 
 def parse_date_range(value: str | tuple[datetime, datetime]) -> tuple[datetime, datetime]:

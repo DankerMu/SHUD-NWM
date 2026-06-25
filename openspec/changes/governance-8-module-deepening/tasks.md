@@ -679,11 +679,20 @@
     - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-manifest-forwarders`.
-- [ ] 2.6 Chain reservation owner-family completion.
+- [x] 2.6 Chain reservation owner-family completion.
   - Module/Scope: `services.orchestrator.reservation`, reserve/bind/reclaim protocol, Slurm comment contract, chain reservation wrappers.
   - Dependencies: 2.1 and 2.3.
   - Out of Scope: repository extraction, retry service behavior, stage execution body.
-  - Focused Verification: `uv run pytest -q tests/test_gateway_reconcile.py tests/test_orchestration_chain.py`.
+  - Fixture: add explicit `_CHAIN_RESERVATION_COMPAT_*` maps/guards for direct reservation aliases, owner-backed reserve/bind wrappers, local `_reservation_already_inflight` gate classification, chain-local `_cycle_stage_idempotency_key`, and StageExecutionDependencies reservation bindings.
+  - Regression Coverage: extend `tests/test_orchestration_chain.py` to prove owner/facade alias identity, owner wrapper map parity, legacy monkeypatch paths for `reserve_candidate` / `bind_reservation`, local gate behavior, stage-execution dependency bindings, and inventory token coverage.
+  - Risk/Invariant: no repository extraction, retry behavior, stage-execution body, reservation protocol behavior, DB schema, Slurm behavior, API/frontend, or display behavior moves in this slice; this only makes the existing reservation compatibility surface executable and reviewable.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_gateway_reconcile.py tests/test_orchestration_chain.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-reservation-facade`.
 - [ ] 2.7 Chain retry owner-family completion.
   - Module/Scope: `services.orchestrator.retry`, retry service/config/backoff, manual retry identity, partial-array retry bridge, `_retry_service_from_env` classification.
