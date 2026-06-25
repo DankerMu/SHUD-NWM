@@ -17,6 +17,32 @@ DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
     "df_h",
 )
 DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS = ("evidence_root", "tmpdir", "docker_root")
+DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES = (
+    "docker-preflight/summary.json",
+    "docker-preflight/docker-preflight.json",
+    "docker-preflight.json",
+)
+DOCKER_PREFLIGHT_LANE_OWNER = "services.production_closure.two_node_e2e_docker_preflight"
+DOCKER_PREFLIGHT_LANE_VERIFICATION = (
+    'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"'
+)
+DOCKER_PREFLIGHT_LANE_GUARD_SYMBOLS = (
+    "DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES",
+    "DOCKER_PREFLIGHT_SCHEMA",
+    "DOCKER_PREFLIGHT_REQUIRED_COMMANDS",
+    "DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS",
+    "DockerPreflightEvaluationHelpers",
+    "evaluate_docker_preflight",
+    "_docker_preflight_contract_blockers",
+    "_docker_preflight_current_run_blockers",
+)
+DOCKER_PREFLIGHT_BLOCKER_NAMESPACES = (
+    "TWO_NODE_E2E_DOCKER_PREFLIGHT_",
+    "TWO_NODE_E2E_DOCKER_ROOT_",
+    "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS",
+    "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+    "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+)
 
 LaneResultT = TypeVar("LaneResultT")
 LaneResultT_co = TypeVar("LaneResultT_co", covariant=True)
