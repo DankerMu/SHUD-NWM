@@ -89,6 +89,8 @@ from services.production_closure.two_node_e2e_simple_live_lane import (
 DEFAULT_EVIDENCE_ROOT = REPO_ROOT / "artifacts" / "two-node-e2e"
 READONLY_DB_LIVE_SCHEMA = two_node_e2e_readonly_db_lane.READONLY_DB_LIVE_SCHEMA
 FINAL_EVIDENCE_SCHEMA = two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA
+FULL_PASS_SOURCE_SET = two_node_e2e_final_aggregation.FULL_PASS_SOURCE_SET
+SAFE_RUN_ID_RE = two_node_e2e_final_aggregation.SAFE_RUN_ID_RE
 FINAL_AGGREGATION_OWNER = two_node_e2e_final_aggregation.FINAL_AGGREGATION_OWNER
 FINAL_AGGREGATION_VERIFICATION = two_node_e2e_final_aggregation.FINAL_AGGREGATION_VERIFICATION
 FINAL_AGGREGATION_GUARD_SYMBOLS = two_node_e2e_final_aggregation.FINAL_AGGREGATION_GUARD_SYMBOLS
@@ -294,6 +296,7 @@ TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY = (
     "uv run pytest -q tests/test_two_node_e2e_evidence.py "
     '-k "logs or log_uri or redaction or evidence_root or path_safety or stale"'
 )
+TWO_NODE_E2E_FINAL_AGGREGATION_OWNER = two_node_e2e_final_aggregation.FINAL_AGGREGATION_OWNER
 TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     "lane-result-adapter": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
@@ -382,16 +385,32 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     },
     "approved-root-path-safety": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "implementation_owner": TWO_NODE_E2E_FINAL_AGGREGATION_OWNER,
         "consumers": FINAL_REQUIRED_LANES,
         "guard_symbols": (
             "APPROVED_EVIDENCE_ROOTS",
-            "EvidenceWriter",
-            "_safe_resolved_evidence_root",
             "_read_json",
             "_read_json_bytes",
-            "_refuse_symlink_components",
             "_recorded_path_approval_blockers",
             "_producer_source_artifact_record_blockers",
+        ),
+        "facade_alias_symbols": (
+            "APPROVED_EVIDENCE_ROOTS",
+            "EvidenceWriter",
+            "_safe_resolved_evidence_root",
+            "_path_is_relative_to",
+            "_refuse_symlink_components",
+            "_safe_run_id",
+            "_public_path",
+        ),
+        "implementation_guard_symbols": (
+            "two_node_e2e_final_aggregation.APPROVED_EVIDENCE_ROOTS",
+            "two_node_e2e_final_aggregation.EvidenceWriter",
+            "two_node_e2e_final_aggregation._safe_resolved_evidence_root",
+            "two_node_e2e_final_aggregation._path_is_relative_to",
+            "two_node_e2e_final_aggregation._refuse_symlink_components",
+            "two_node_e2e_final_aggregation._safe_run_id",
+            "two_node_e2e_final_aggregation._public_path",
         ),
         "namespaces": (
             "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
@@ -403,14 +422,22 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     },
     "redaction": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "implementation_owner": TWO_NODE_E2E_FINAL_AGGREGATION_OWNER,
         "consumers": FINAL_REQUIRED_LANES,
         "guard_symbols": (
             "LaneEvaluation.to_summary",
-            "EvidenceWriter.write_json",
             "redact_payload",
             "redact_text",
             "_blocker",
             "_finding",
+        ),
+        "facade_alias_symbols": (
+            "EvidenceWriter",
+            "EvidenceWriter.write_json",
+        ),
+        "implementation_guard_symbols": (
+            "two_node_e2e_final_aggregation.EvidenceWriter",
+            "two_node_e2e_final_aggregation.EvidenceWriter.write_json",
         ),
         "namespaces": (
             "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",

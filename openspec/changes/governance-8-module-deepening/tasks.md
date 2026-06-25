@@ -1533,8 +1533,10 @@
     proves final summary assembly and write pass through the owner while the
     stable facade entrypoint remains active; direct owner status-ordering test
     covers fail-over-blocked precedence plus reduced/incomplete source scope;
-    inventory row records the current owner module, retained facade entrypoint,
-    compatibility removal condition, guard symbols, and focused verification.
+    final output regression covers no-clobber plus force overwrite behavior at
+    validator and writer levels; inventory row records the current owner module,
+    retained facade entrypoint, compatibility removal condition, guard symbols,
+    and focused verification.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "final or redaction or evidence_root or stale"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`.
   - Inventory/Evidence Update: update two-node inventory row `final aggregation`.
 - [ ] 3.13 Two-node group verification and evidence closeout.
