@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 import services.production_closure.two_node_e2e_api_lane as two_node_e2e_api_lane
+import services.production_closure.two_node_e2e_browser_lane as two_node_e2e_browser_lane
 import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e_docker_preflight
 import services.production_closure.two_node_e2e_docker_security as two_node_e2e_docker_security
 import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
@@ -30,6 +31,10 @@ from packages.common.safe_fs import (
 from services.production_closure.two_node_e2e_api_lane import (
     ApiLaneEvaluationHelpers,
     evaluate_api_lane,
+)
+from services.production_closure.two_node_e2e_browser_lane import (
+    BrowserLaneEvaluationHelpers,
+    evaluate_browser_lane,
 )
 from services.production_closure.two_node_e2e_docker_preflight import (
     DockerPreflightEvaluationHelpers,
@@ -669,14 +674,12 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             evidence_run_id=config.run_id,
             helpers=_api_lane_helpers(),
         ),
-        "browser": _evaluate_source_lane(
-            "browser",
+        "browser": evaluate_browser_lane(
             lane_docs["browser"],
             declared_sources=scope["declared_sources"],
             strict_identities=strict_identities,
-            required_checks=_browser_required_checks(scope["declared_sources"]),
-            live_flag="live_browser_evidence",
             evidence_run_id=config.run_id,
+            helpers=_browser_lane_helpers(),
         ),
         "logs": _evaluate_source_lane(
             "logs",
@@ -778,7 +781,7 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
             two_node_e2e_readonly_db_lane.READONLY_DB_DOCUMENT_CANDIDATES,
         ),
         "api": _find_first_json(run_dir, two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES),
-        "browser": _find_first_json(run_dir, ("browser/summary.json", "browser/evidence.json")),
+        "browser": _find_first_json(run_dir, two_node_e2e_browser_lane.BROWSER_DOCUMENT_CANDIDATES),
         "cross_plane": _find_first_json(run_dir, ("cross-plane/summary.json", "cross-plane/evidence.json")),
         "manual_ops": _find_first_json(run_dir, ("manual-ops/summary.json", "manual-ops/evidence.json")),
         "slurm": _find_first_json(
@@ -919,6 +922,32 @@ def _api_lane_helpers() -> ApiLaneEvaluationHelpers[LaneEvaluation]:
         has_live_lane_evidence=lambda payload: _has_live_lane_evidence(
             payload,
             live_flag=two_node_e2e_api_lane.API_LIVE_FLAG,
+        ),
+        has_producer_backed_lane_evidence=_has_producer_backed_lane_evidence,
+        has_mock_or_fixture=_has_mock_or_fixture,
+        has_historical_latest=_has_historical_latest,
+        source_records=_source_records,
+        check_results=_check_results,
+        identity_match_status=_identity_match_status,
+        with_context=_with_context,
+    )
+
+
+def _browser_lane_helpers() -> BrowserLaneEvaluationHelpers[LaneEvaluation]:
+    return BrowserLaneEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        blocker=_blocker,
+        finding=_finding,
+        stale_lane_blockers=_stale_lane_blockers,
+        current_run_blockers=_current_run_blockers,
+        recursive_current_run_blockers=_recursive_current_run_blockers,
+        producer_source_artifact_blockers=_producer_source_artifact_blockers,
+        source_lane_check_producer_blockers=_source_lane_check_producer_blockers,
+        has_live_lane_evidence=lambda payload: _has_live_lane_evidence(
+            payload,
+            live_flag=two_node_e2e_browser_lane.BROWSER_LIVE_FLAG,
         ),
         has_producer_backed_lane_evidence=_has_producer_backed_lane_evidence,
         has_mock_or_fixture=_has_mock_or_fixture,
@@ -4903,13 +4932,6 @@ def _identity_value(identity: Mapping[str, Any], field: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _browser_required_checks(declared_sources: tuple[str, ...]) -> tuple[str, ...]:
-    checks = ["hydro_met", "ops", "ops_jobs", "ops_job_logs"]
-    if len(declared_sources) > 1:
-        checks.append("source_switch")
-    return tuple(checks)
 
 
 def _is_full_scope_sources(declared_sources: tuple[str, ...]) -> bool:

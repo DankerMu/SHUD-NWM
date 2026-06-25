@@ -1350,10 +1350,49 @@
     in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "api"`.
   - Inventory/Evidence Update: update two-node inventory row `API proof`.
-- [ ] 3.8 Browser proof lane extraction.
+- [x] 3.8 Browser proof lane extraction.
   - Module/Scope: browser source lane, source-switch proof, job-like check identity, live browser evidence, per-source scope contribution.
   - Dependencies: 3.1, 3.2, and 3.7.
   - Out of Scope: API/logs lane behavior, frontend UI changes, final aggregation.
+  - Fixture Rows: Positive parity: browser PASS bundle keeps identical
+    `lane_summaries.browser` status, summary status, blockers/findings shape,
+    redacted evidence path/hash, and `source_scope_results` GFS/IFS contribution
+    through the stable `validate_two_node_e2e_evidence(config)` entrypoint;
+    Negative/parity: missing browser summary, stale current-run fields, missing
+    live browser flag, missing producer proof, mock/fixture evidence, historical
+    latest fallback, missing declared source, missing/non-PASS required checks,
+    strict identity mismatch/incomplete, job-like check missing `job_id`, and
+    source-switch gaps for multi-source scope preserve existing
+    blocker/finding namespaces; Legacy compatibility: input aliases remain
+    `browser/summary.json` then `browser/evidence.json`, shared producer and
+    strict-identity contracts remain single-source, and API/logs continue
+    through their current owner/source-lane paths.
+  - Risk Axes: Entrypoints: `validate_two_node_e2e_evidence(config)`,
+    `_load_lane_documents`, and `lane_summaries.browser`; Source scope:
+    downstream `source_scope_results` aggregation for full GFS/IFS scope and
+    reduced/single-source scope; Producer proof: browser/network/artifact,
+    command/request/response, and source-scoped per-check evidence; Identity:
+    four-field browser source/check matching plus `job_id` for `ops_jobs` and
+    `ops_job_logs`; Failure paths/rollback/stale state: missing lane file,
+    stale current-run fields, stale nested producer proof, mock/fixture
+    evidence, historical latest fallback, missing source, missing source-switch
+    check, missing required check, non-PASS check, source/check
+    FAIL/BLOCKED/PARTIAL, and job-like identity incompleteness.
+  - Regression Rows: owner module exposes browser document aliases, required
+    check resolver, live flag, helper dataclass, evaluator, guard symbols, and
+    blocker namespaces; aggregator uses owner discovery aliases and helper
+    injection while keeping final summary and source-scope composition
+    unchanged; direct tests prove owner guard metadata, owner-vs-aggregator
+    PASS parity, alias fallback for both browser candidate files, missing
+    browser summary shape, source-scope lane status contribution, single-source
+    source-switch omission allowance, multi-source source-switch requirement,
+    job-like `job_id` binding, required-check missing/failed/blocked/partial
+    paths, strict identity/historical-latest negative paths, source
+    FAIL/BLOCKED/PARTIAL folding, and lane/check mock evidence; inventory row
+    records the current owner and retained aggregator/shared-contract surfaces;
+    no API, logs, manual ops, cross-plane, final aggregation, frontend UI, API
+    route, DB schema/role, Slurm scheduling, or production topology behavior
+    moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "browser"`.
   - Inventory/Evidence Update: update two-node inventory row `browser proof`.
 - [ ] 3.9 Logs lane extraction.
