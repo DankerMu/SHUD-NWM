@@ -740,12 +740,63 @@
     - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-retry-facade`.
-- [ ] 2.8 Chain tile-publisher owner-family completion.
-  - Module/Scope: `services.tile_publisher`, `services.tile_publisher.publisher`, chain tile-publisher imports, failure payload mapping, local publish dependency wiring.
+- [x] 2.8 Chain tile-publisher owner-family completion.
+  - Fixture Level: expanded; Repair Intensity: high.
+  - Module/Scope: `services.tile_publisher`, `services.tile_publisher.publisher`,
+    chain tile-publisher imports, failure payload mapping, local publish
+    dependency wiring, and local publish log URI evidence.
   - Dependencies: 2.1 and 2.3.
-  - Out of Scope: Slurm stage execution semantics, array accounting, repository behavior.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py`.
-  - Inventory/Evidence Update: update chain inventory group `chain-tile-publisher-facade`.
+  - Out of Scope: Slurm stage execution semantics, array accounting,
+    repository behavior, tile-publisher copyback implementation, delivery DB
+    schema, API/frontend/display behavior, and production topology.
+  - Stable Facade / Compatibility Surface:
+    - `services.orchestrator.chain.TilePublisher`,
+      `services.orchestrator.chain.PublishError`, and
+      `services.orchestrator.chain.failure_payload` stay as legacy import and
+      monkeypatch paths backed by `services.tile_publisher` /
+      `services.tile_publisher.publisher`.
+    - `ForecastOrchestrator._chain_stage_execution_dependencies()` continues
+      wiring `tile_publisher_cls`, `publish_error_cls`, and `failure_payload`
+      into `chain_stage_execution.StageExecutionDependencies`.
+    - `ForecastOrchestrator._run_local_publish_stage(...)` remains a legacy
+      chain method that forwards to
+      `services.orchestrator.chain_stage_execution.run_local_publish_stage`.
+  - Invariants:
+    - Owner/facade alias identity for `TilePublisher` and `PublishError`.
+    - Owner/facade function identity for `failure_payload`.
+    - Stage-execution dependency fields and chain bindings for
+      `tile_publisher_cls`, `publish_error_cls`, and `failure_payload`.
+    - Existing monkeypatch path
+      `services.orchestrator.chain.TilePublisher` still controls local publish
+      behavior through dependency construction.
+    - `PublishError` maps through owner `failure_payload` to
+      `failed_publish`; generic local publish failures remain redacted
+      `PUBLISH_TILES_FAILED` payloads.
+    - Local publish still writes advertised published log URIs when
+      `NHMS_PUBLISHED_ARTIFACT_ROOT` is configured.
+  - Risk Packs:
+    - Public API / stable facade selected.
+    - Legacy compatibility / examples selected.
+    - Error handling / rollback / partial outputs selected for
+      `PublishError` and generic local publish failure payloads.
+    - File IO/path safety selected for local publish log URI writes.
+    - Config / project setup selected for publish-root and URI-prefix
+      environment wiring.
+    - Concurrency / shared state / ordering, Resource limits / discovery,
+      Schema/columns, Auth/secrets, Release/packaging, and NHMS domain packs
+      not selected because this slice does not change Slurm ordering,
+      tile-publisher internals, DB schema, credentials, packaging,
+      geospatial/time-series formats, or display endpoints.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py`
+    - `uv run pytest -q tests/test_tile_publisher.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
+  - Inventory/Evidence Update: update chain inventory group
+    `chain-tile-publisher-facade`.
 - [ ] 2.9 Chain worker/source-identity and time-consistency owner-family completion.
   - Module/Scope: worker/adapter imports, source identity helpers, canonical readiness, cycle id/time helpers, source scenario glue, and `services.orchestrator.time_consistency` aliasing.
   - Dependencies: 2.1 and 2.5.

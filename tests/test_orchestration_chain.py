@@ -7460,6 +7460,188 @@ def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventor
         assert token in inventory_text
 
 
+def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    import services.tile_publisher as tile_publisher
+    import services.tile_publisher.publisher as tile_publisher_publisher
+
+    alias_names = legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_NAMES
+    function_names = legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FAILURE_FUNCTION_NAMES
+    dependency_fields = legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_FIELDS
+    dependency_bindings = legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS
+
+    assert len(alias_names) == len(set(alias_names))
+    assert len(function_names) == len(set(function_names))
+    assert dependency_fields == tuple(field for field, _facade_name in dependency_bindings)
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_ALIAS_DRIFT == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FUNCTION_DRIFT == ()
+    assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT == ()
+    assert set(legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_OWNER_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_OWNER_FUNCTIONS) == set(function_names)
+    assert set(legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_FUNCTIONS) == set(function_names)
+
+    for alias_name in alias_names:
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            tile_publisher,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            tile_publisher,
+            alias_name,
+        )
+    for function_name in function_names:
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_OWNER_FUNCTIONS[function_name] is getattr(
+            tile_publisher_publisher,
+            function_name,
+        )
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_FUNCTIONS[function_name] is getattr(
+            legacy_chain,
+            function_name,
+        )
+        assert legacy_chain._CHAIN_TILE_PUBLISHER_COMPAT_FACADE_FUNCTIONS[function_name] is getattr(
+            tile_publisher_publisher,
+            function_name,
+        )
+
+    deps = legacy_chain.ForecastOrchestrator._chain_stage_execution_dependencies()
+    stage_dependency_fields = deps.__dataclass_fields__
+    for field, facade_name in dependency_bindings:
+        assert field in stage_dependency_fields
+        assert getattr(deps, field) is getattr(legacy_chain, facade_name)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")
+    monkeypatch.setattr(legacy_chain, "TilePublisher", _successful_control_node_publisher(calls))
+
+    patched_deps = legacy_chain.ForecastOrchestrator._chain_stage_execution_dependencies()
+    assert patched_deps.tile_publisher_cls is getattr(legacy_chain, "TilePublisher")
+    assert patched_deps.publish_error_cls is legacy_chain.PublishError
+    assert patched_deps.failure_payload is legacy_chain.failure_payload
+
+    repository = FakeCycleRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+
+    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-local-publish")
+
+    assert result.status == "succeeded"
+    assert calls[-1] == {"cycle_id": "gfs_2026050100"}
+    assert calls[0]["init"]["workspace_root"] == orchestrator.config.workspace_root
+    assert calls[0]["init"]["object_store_root"] == orchestrator.config.object_store_root
+    assert calls[0]["init"]["object_store_prefix"] == orchestrator.config.object_store_prefix
+    assert calls[0]["init"]["published_artifact_root"] == str(tmp_path / "published")
+    assert calls[0]["init"]["published_artifact_uri_prefix"] == "published://"
+    assert repository.jobs["job-local-publish"]["status"] == "succeeded"
+    assert repository.jobs["job-local-publish"]["slurm_job_id"] == "local"
+    assert repository.jobs["job-local-publish"]["log_uri"].startswith("published://logs/gfs/2026050100/")
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(
+        name for name in vars(legacy_chain) if name.startswith("_CHAIN_TILE_PUBLISHER_COMPAT_")
+    )
+    for token in (*compat_tokens, "StageExecutionDependencies"):
+        assert token in inventory_text
+
+
+def test_chain_tile_publisher_compat_local_publish_failure_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")
+    repository = FakeCycleRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+
+    class _OwnerPublishErrorPublisher:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def publish_cycle(self, cycle_id: str) -> Any:
+            raise legacy_chain.PublishError(
+                "NO_PUBLISHABLE_PRODUCTS",
+                f"No publishable products for {cycle_id}.",
+                {"cycle_id": cycle_id},
+            )
+
+    monkeypatch.setattr(legacy_chain, "TilePublisher", _OwnerPublishErrorPublisher)
+
+    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-owner-error")
+
+    assert result.status == "failed"
+    assert result.error_code == "NO_PUBLISHABLE_PRODUCTS"
+    assert result.error_message == "No publishable products for gfs_2026050100."
+    owner_error_job = repository.jobs["job-owner-error"]
+    owner_error_payload = json.loads(
+        (tmp_path / "published" / owner_error_job["log_uri"].removeprefix("published://")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert owner_error_payload == {
+        "cycle_id": "gfs_2026050100",
+        "details": {"cycle_id": "gfs_2026050100"},
+        "error_code": "NO_PUBLISHABLE_PRODUCTS",
+        "error_message": "No publishable products for gfs_2026050100.",
+        "layers": [],
+        "status": "failed_publish",
+    }
+
+    class _GenericFailurePublisher:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def publish_cycle(self, _cycle_id: str) -> Any:
+            raise RuntimeError("password=supersecret copyback failed")
+
+    monkeypatch.setattr(legacy_chain, "TilePublisher", _GenericFailurePublisher)
+
+    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-generic-error")
+
+    assert result.status == "failed"
+    assert result.error_code == "PUBLISH_TILES_FAILED"
+    generic_error_job = repository.jobs["job-generic-error"]
+    generic_payload = json.loads(
+        (tmp_path / "published" / generic_error_job["log_uri"].removeprefix("published://")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert generic_payload["cycle_id"] == "gfs_2026050100"
+    assert generic_payload["status"] == "failed_publish"
+    assert generic_payload["error_code"] == "PUBLISH_TILES_FAILED"
+    assert generic_payload["layers"] == []
+    assert "supersecret" not in generic_payload["error_message"]
+    assert "[redacted]" in generic_payload["error_message"]
+
+
 def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stage_execution, reservation
