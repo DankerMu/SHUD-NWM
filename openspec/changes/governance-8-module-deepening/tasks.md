@@ -1299,12 +1299,13 @@
     Slurm/compute/display document aliases, live flags, pass aliases, helper
     dataclass, evaluator, guard symbols, and blocker namespaces; aggregator
     uses owner discovery aliases and helper injection while keeping final
-    summary shape unchanged; direct tests prove owner guard metadata and each
-    lane alias fallback; existing focused tests prove live flag requirements,
-    producer proof requirements, recursive stale current-run blockers,
-    mock/fixture failure, missing lane blockers, ready/submitted pass aliases,
-    and redacted summary shape; inventory rows record current owner and guard
-    hook tokens; no Docker, readonly DB, API/browser/logs, manual ops,
+    summary shape unchanged; direct tests prove owner guard metadata, each lane
+    alias fallback, every pass alias, non-PASS status preservation, missing
+    lane summary shape, mock/fixture failure, and flat-alias producer artifact
+    scope; existing focused tests continue covering live flag constants,
+    producer proof requirements, recursive stale current-run blockers, and
+    final redacted summary compatibility; inventory rows record current owner
+    and guard hook tokens; no Docker, readonly DB, API/browser/logs, manual ops,
     cross-plane, DB schema/role, frontend/display route, Slurm scheduling, or
     final aggregation behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or slurm"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or compute_summary"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or display_summary"`.
