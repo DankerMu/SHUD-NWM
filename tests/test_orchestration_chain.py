@@ -6986,27 +6986,39 @@ def test_ready_cycle_query_uses_stripped_nonblank_checksum_predicate() -> None:
     assert "cmp.checksum <> ''" not in repository.statement
 
 
+@pytest.mark.parametrize(
+    "failing_identity_helper",
+    (
+        "services.orchestrator.chain._auto_trigger_source_policy_identity",
+        "services.orchestrator.chain._auto_trigger_source_object_identity",
+    ),
+    ids=("policy_identity", "object_identity"),
+)
 def test_trigger_ready_forecasts_provider_error_fails_closed_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failing_identity_helper: str,
 ) -> None:
     cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
     repository = ReadyForecastRepository(
         cycle_time=cycle_time,
         canonical_products=_canonical_rows(
             source_id="gfs",
             cycle_time=cycle_time,
             forecast_hours=(0, 3),
-            policy_identity={"source": "gfs", "forecast_hours": [0, 3]},
-            source_object_identity={"source": "gfs", "object": "current"},
+            policy_identity=current_policy,
+            source_object_identity=current_object,
         ),
     )
     client = ImmediateTerminalSlurmClient()
 
-    def fail_policy(**_kwargs: Any) -> dict[str, Any]:
+    def fail_identity(**_kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("identity provider failed")
 
-    monkeypatch.setattr("services.orchestrator.chain._auto_trigger_source_policy_identity", fail_policy)
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    monkeypatch.setattr(failing_identity_helper, fail_identity)
     orchestrator = _orchestrator(tmp_path, repository, client)
 
     results = orchestrator.trigger_ready_forecasts(source_id="gfs")
@@ -7739,15 +7751,21 @@ def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(
 
     for source_id, (module_name, adapter_name, config_name) in dynamic_adapters.items():
         owner_module = importlib.import_module(module_name)
+        expected_workspace_root = tmp_path / source_id.lower() / "workspace"
+        expected_object_store_root = tmp_path / source_id.lower() / "object-store"
+        expected_object_store_prefix = f"s3://nhms/{source_id.lower()}"
         adapter = legacy_chain._auto_trigger_source_identity_adapter(
             source_id=source_id,
-            workspace_root=tmp_path / source_id.lower() / "workspace",
-            object_store_root=tmp_path / source_id.lower() / "object-store",
-            object_store_prefix="s3://nhms",
+            workspace_root=expected_workspace_root,
+            object_store_root=expected_object_store_root,
+            object_store_prefix=expected_object_store_prefix,
         )
         assert adapter is not None
         assert adapter.__class__ is getattr(owner_module, adapter_name)
         assert adapter.config.__class__ is getattr(owner_module, config_name)
+        assert adapter.config.workspace_root == expected_workspace_root
+        assert adapter.config.object_store_root == expected_object_store_root
+        assert adapter.config.object_store_prefix == expected_object_store_prefix
     with pytest.raises(ValueError, match="Unknown source_id"):
         legacy_chain._auto_trigger_source_identity_adapter(
             source_id="custom",
