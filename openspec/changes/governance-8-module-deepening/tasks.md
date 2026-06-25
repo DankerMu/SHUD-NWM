@@ -1310,10 +1310,44 @@
     final aggregation behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or slurm"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or compute_summary"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or display_summary"`.
   - Inventory/Evidence Update: update two-node inventory rows `Slurm proof`, `compute summary`, and `display summary`.
-- [ ] 3.7 API proof lane extraction.
+- [x] 3.7 API proof lane extraction.
   - Module/Scope: API source lane required checks, live proof flags, producer-backed command/request/response/artifact proof, per-source scope contribution.
   - Dependencies: 3.1 and 3.2.
   - Out of Scope: browser/logs source lanes, API route implementation, final aggregation.
+  - Fixture Rows: Positive parity: API PASS bundle keeps identical `lane_summaries.api`
+    status, summary status, blockers/findings shape, redacted evidence path/hash,
+    and `source_scope_results` GFS/IFS contribution through the stable
+    `validate_two_node_e2e_evidence(config)` entrypoint; Negative/parity:
+    missing API summary, stale run IDs, missing live API flag, missing producer
+    proof, mock/fixture evidence, historical latest fallback, missing declared
+    source, missing/non-PASS required checks, and strict identity mismatches
+    preserve existing blocker/finding namespaces; Legacy compatibility: input
+    aliases remain `api/summary.json` then `api/evidence.json`, shared producer
+    and strict-identity contracts remain single-source, and browser/logs
+    continue through their current source-lane path.
+  - Risk Axes: Entrypoints: `validate_two_node_e2e_evidence(config)`,
+    `_load_lane_documents`, and `lane_summaries.api`; Source scope:
+    downstream `source_scope_results` aggregation for full GFS/IFS scope and
+    reduced scope; Producer proof: command/request/response/artifact and
+    source-scoped per-check evidence; Identity: four-field API source/check
+    matching (`run_id`, `source`, `cycle_time`, `model_id`) plus producer proof
+    binding to the check name and evidence run; Failure paths/rollback/stale
+    state: missing lane file, stale current-run fields, stale nested producer
+    proof, mock/fixture evidence, historical latest fallback, missing source,
+    missing required check, non-PASS check, source/check FAIL/BLOCKED/PARTIAL.
+  - Regression Rows: owner module exposes API document aliases, required check
+    tuple, live flag, helper dataclass, evaluator, guard symbols, and blocker
+    namespaces; aggregator uses owner discovery aliases and helper injection
+    while keeping final summary and source-scope composition unchanged; direct
+    tests prove owner guard metadata, owner-vs-aggregator PASS parity, alias
+    fallback for both API candidate files, missing API summary shape, and
+    source-scope lane status contribution; existing focused API tests continue
+    covering producer proof, strict identity, stale current-run, mock/historical
+    evidence, required checks, and source-scoped proof edge cases; inventory row
+    records the current owner and retained aggregator/shared-contract surfaces;
+    no browser, logs, manual ops, cross-plane, final aggregation, API route,
+    frontend/display route, DB schema/role, or Slurm scheduling behavior moves
+    in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "api"`.
   - Inventory/Evidence Update: update two-node inventory row `API proof`.
 - [ ] 3.8 Browser proof lane extraction.

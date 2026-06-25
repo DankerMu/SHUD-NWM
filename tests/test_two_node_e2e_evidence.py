@@ -14,6 +14,7 @@ import services.production_closure.two_node_e2e_evidence as two_node_e2e_evidenc
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.artifacts.reader import published_log_uri
 from services.production_closure import (
+    two_node_e2e_api_lane,
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
     two_node_e2e_metadata_lane,
@@ -1004,6 +1005,283 @@ def test_simple_lane_flat_alias_preserves_legacy_source_artifact_scope(
     assert lane["status"] == STATUS_PASS
     assert "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" not in _codes(
         lane["blockers"]
+    )
+
+
+def test_api_lane_owner_module_covers_api_source_contract() -> None:
+    assert two_node_e2e_api_lane.API_LANE_OWNER == "services.production_closure.two_node_e2e_api_lane"
+    assert two_node_e2e_api_lane.API_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "api"'
+    )
+    assert two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES == (
+        "api/summary.json",
+        "api/evidence.json",
+    )
+    assert two_node_e2e_api_lane.API_REQUIRED_CHECKS == (
+        "latest_product",
+        "series",
+        "ops_status",
+        "ops_stages",
+        "jobs",
+    )
+    assert two_node_e2e_api_lane.API_LIVE_FLAG == "live_api_evidence"
+    assert two_node_e2e_api_lane.API_LANE_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_API_",
+        "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_",
+        "TWO_NODE_E2E_STRICT_IDENTITY_",
+        "TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE",
+        "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    )
+    for symbol in two_node_e2e_api_lane.API_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_api_lane, symbol), symbol
+
+
+def test_api_lane_owner_direct_evaluator_matches_full_validator_pass() -> None:
+    run_id = _run_id("api-owner-pass-parity")
+    config = _seed_pass_bundle(run_id)
+    metadata_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
+    )
+    assert metadata_doc is not None
+    metadata_result = two_node_e2e_metadata_lane.evaluate_metadata_lane(
+        metadata_doc,
+        metadata_doc.payload,
+        evidence_run_id=run_id,
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=two_node_e2e_evidence._metadata_lane_helpers(),
+    )
+    api_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES,
+    )
+    assert api_doc is not None
+
+    api_lane = two_node_e2e_api_lane.evaluate_api_lane(
+        api_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        evidence_run_id=run_id,
+        helpers=two_node_e2e_evidence._api_lane_helpers(),
+    )
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert api_lane.status == STATUS_PASS
+    assert summary["lane_summaries"]["api"] == api_lane.to_summary()
+    assert summary["source_scope_results"]["GFS"]["lane_statuses"]["api"] == STATUS_PASS
+    assert summary["source_scope_results"]["IFS"]["lane_statuses"]["api"] == STATUS_PASS
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES)
+def test_api_lane_owner_discovers_each_api_alias(candidate: str) -> None:
+    run_id = _run_id(f"api-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES[0]
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical:
+        canonical.unlink()
+        _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_api_lane_owner_missing_api_summary_shape_and_source_scope_contribution() -> None:
+    run_id = _run_id("api-missing-owner")
+    config = _seed_pass_bundle(run_id)
+    for candidate in two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES:
+        candidate_path = config.run_dir / candidate
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert lane["evidence_path"] is None
+    assert lane["evidence_sha256"] is None
+    assert lane["summary_status"] is None
+    assert "TWO_NODE_E2E_API_EVIDENCE_MISSING" in _codes(lane["blockers"])
+    assert summary["source_scope_results"]["GFS"]["lane_statuses"]["api"] == STATUS_BLOCKED
+    assert summary["source_scope_results"]["IFS"]["lane_statuses"]["api"] == STATUS_BLOCKED
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("missing", "TWO_NODE_E2E_API_CHECK_MISSING"),
+        ("failed", "TWO_NODE_E2E_API_CHECK_FAILED"),
+        ("blocked", "TWO_NODE_E2E_API_CHECK_BLOCKED"),
+        ("partial", "TWO_NODE_E2E_API_CHECK_BLOCKED"),
+    ],
+)
+def test_api_lane_owner_required_check_gaps_block_via_validator(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"api-required-check-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    checks = api_summary["sources"]["GFS"]["checks"]
+    if mutator == "missing":
+        checks.pop("latest_product")
+    elif mutator == "failed":
+        checks["latest_product"]["status"] = STATUS_FAIL
+    elif mutator == "blocked":
+        checks["latest_product"]["status"] = STATUS_BLOCKED
+    else:
+        checks["latest_product"]["status"] = STATUS_PARTIAL
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    source_scope = summary["source_scope_results"]["GFS"]
+    expected_status = STATUS_FAIL if mutator == "failed" else STATUS_BLOCKED
+    expected_bucket = "findings" if mutator == "failed" else "blockers"
+    assert summary["status"] == expected_status
+    assert api_lane["status"] == expected_status
+    assert expected_code in _codes(api_lane[expected_bucket])
+    assert expected_code in _codes(source_scope[expected_bucket])
+    assert source_scope["lane_statuses"]["api"] == expected_status
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_status", "expected_bucket", "expected_code"),
+    [
+        ("wrong_identity", STATUS_FAIL, "findings", "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH"),
+        (
+            "partial_identity",
+            STATUS_BLOCKED,
+            "blockers",
+            "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+        ),
+        ("historical_latest", STATUS_FAIL, "findings", "TWO_NODE_E2E_API_HISTORICAL_CHECK"),
+    ],
+)
+def test_api_lane_owner_strict_identity_and_historical_latest_negative_cases(
+    mutator: str,
+    expected_status: str,
+    expected_bucket: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"api-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    latest = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    if mutator == "wrong_identity":
+        latest["identity"]["model_id"] = "wrong-model"
+    elif mutator == "partial_identity":
+        latest["identity"].pop("model_id")
+    else:
+        latest["historical_latest"] = True
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    source_scope = summary["source_scope_results"]["GFS"]
+    assert summary["status"] == expected_status
+    assert api_lane["status"] == expected_status
+    assert expected_code in _codes(api_lane[expected_bucket])
+    assert expected_code in _codes(source_scope[expected_bucket])
+
+
+@pytest.mark.parametrize(
+    ("source_status", "expected_status", "expected_bucket", "expected_code"),
+    [
+        (STATUS_FAIL, STATUS_FAIL, "findings", "TWO_NODE_E2E_API_SOURCE_FAILED"),
+        (STATUS_BLOCKED, STATUS_BLOCKED, "blockers", "TWO_NODE_E2E_API_SOURCE_BLOCKED"),
+        (STATUS_PARTIAL, STATUS_PARTIAL, "blockers", None),
+    ],
+)
+def test_api_lane_owner_source_statuses_fold_into_validator_summary(
+    source_status: str,
+    expected_status: str,
+    expected_bucket: str,
+    expected_code: str | None,
+) -> None:
+    run_id = _run_id(f"api-source-{source_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    api_summary["sources"]["GFS"]["status"] = source_status
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == expected_status
+    assert api_lane["status"] == expected_status
+    if expected_code is not None:
+        assert expected_code in _codes(api_lane[expected_bucket])
+        assert expected_code in _codes(summary["source_scope_results"]["GFS"][expected_bucket])
+    else:
+        assert api_lane["blockers"] == []
+        assert api_lane["findings"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("lane", "TWO_NODE_E2E_API_MOCK_EVIDENCE"),
+        ("check", "TWO_NODE_E2E_API_MOCK_CHECK"),
+    ],
+)
+def test_api_lane_owner_mock_evidence_fails_via_validator(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"api-mock-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    if mutator == "lane":
+        api_summary["mock_api_data"] = True
+    else:
+        api_summary["sources"]["GFS"]["checks"]["latest_product"]["mock_api_data"] = True
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_FAIL
+    assert api_lane["status"] == STATUS_FAIL
+    assert expected_code in _codes(api_lane["findings"])
+
+
+def test_api_lane_owner_preserves_flat_alias_producer_artifact_scope() -> None:
+    run_id = _run_id("api-flat-artifact-scope")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES[0]
+    payload = _read(canonical)
+    sibling_artifact = config.run_dir.parent / "api-producer-artifact.json"
+    _write(sibling_artifact, {"status": STATUS_PASS, "evidence_run_id": run_id})
+    payload["source_artifacts"] = [_artifact_summary(sibling_artifact)]
+    flat_path = config.run_dir / "api-summary.json"
+    _write(flat_path, payload)
+    flat_doc = two_node_e2e_evidence._read_json(flat_path, containment_root=config.run_dir.parent)
+    strict_identities = _read(config.run_dir / "run.json")["strict_identities"]
+
+    api_lane = two_node_e2e_api_lane.evaluate_api_lane(
+        flat_doc,
+        declared_sources=config.declared_sources,
+        strict_identities=strict_identities,
+        evidence_run_id=run_id,
+        helpers=two_node_e2e_evidence._api_lane_helpers(),
+    )
+
+    assert api_lane.status == STATUS_PASS
+    assert "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" not in _codes(
+        api_lane.blockers
     )
 
 
