@@ -607,11 +607,62 @@
     - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-stage-execution-forwarders`.
-- [ ] 2.4 Chain array-accounting owner-family completion.
+- [x] 2.4 Chain array-accounting owner-family completion.
   - Module/Scope: `services.orchestrator.chain_array_accounting`, sacct parsing, task evidence, resource metrics, partial status, candidate outcome sanitization.
   - Dependencies: 2.1.
   - Out of Scope: manifest assembly, retry, reservation, tile publication, worker/source identity.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py`.
+  - Fixture Expansion: make the array-accounting compatibility contract
+    explicit in `chain.py` with
+    `_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES`,
+    `_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDER_NAMES`,
+    `_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_FIELDS`, and
+    `_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDINGS`; import-time guards
+    verify owner functions, dependency fields, legacy top-level wrappers,
+    `ForecastOrchestrator` method wrappers, and current legacy dependency
+    bindings stay synchronized.
+  - Risk Pack Selection: Selected: Legacy compatibility (old helper imports,
+    private method paths, and monkeypatch bindings stay callable); Dependency /
+    ownership direction (`chain_array_accounting` remains the owner while
+    `chain.py` keeps compatibility glue); Schema / field names
+    (`ArrayAccountingDependencies` field order/names and binding targets are
+    guarded); Runtime behavior invariants (sacct parsing, task evidence,
+    resource metrics, partial status, candidate outcome sanitization, and
+    incomplete-accounting gap behavior continue through focused tests); Test /
+    evidence coverage (compat maps, inventory tokens, entropy guard, OpenSpec
+    validation, ruff, markdownlint, and diff-check). Not Selected: manifest
+    assembly, retry, reservation, tile publication, worker/source identity,
+    repository behavior, DB schema, API/frontend surfaces, Slurm runtime
+    behavior, or production topology changes.
+  - Invariant Matrix: Governing invariant: every legacy array-accounting helper
+    or method wrapper exposed through `chain.py` maps to its intended owner
+    function or intentionally local legacy binding, and every dependency needed
+    by array-accounting owner functions is present in
+    `ArrayAccountingDependencies`. Source-of-truth identity/contract:
+    `services.orchestrator.chain_array_accounting`,
+    `services.orchestrator.chain`, and
+    `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` agree on the
+    `chain-array-accounting-forwarders` group. Surfaces: Producers:
+    `chain_array_accounting.py` owner functions and dependency dataclass;
+    Compatibility facade: `chain.py` top-level helpers,
+    `_array_accounting_dependencies`, and `ForecastOrchestrator` method
+    wrappers; Validators: orchestration chain tests, partial-success tests,
+    entropy inventory guard, OpenSpec validation, ruff, markdownlint, and
+    diff-check; Storage/cache/query: no DB or artifact schema changes.
+  - Regression Rows: owner function names remain present; top-level helper and
+    method wrapper names remain callable; `_CHAIN_ARRAY_ACCOUNTING_COMPAT_*`
+    maps cover each governed wrapper exactly once; `ArrayAccountingDependencies`
+    field names/order remain unchanged; dependency bindings still point at
+    current legacy chain functions so monkeypatches for log URIs, parse/coerce
+    helpers, resource metrics, production status, and candidate sanitization
+    remain effective; partial-success and malformed accounting behavior remain
+    unchanged.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-array-accounting-forwarders`.
 - [ ] 2.5 Chain manifest owner-family completion.
   - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly builders and payload serialization, runtime manifest safe writes, manifest index, quality states, residual blockers.

@@ -1243,6 +1243,59 @@ def test_chain_stage_catalog_type_compat_reexports_match_owner_modules_and_inven
         assert token in inventory_text
 
 
+def test_chain_array_accounting_compat_forwarders_match_owner_module_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_array_accounting
+
+    top_level_names = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES
+    top_level_owner_names = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES
+    method_names = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDER_NAMES
+    method_owner_names = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_OWNER_FUNCTION_NAMES
+    dependency_fields = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_FIELDS
+    dependency_bindings = legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDINGS
+
+    assert len(top_level_names) == len(set(top_level_names))
+    assert len(top_level_owner_names) == len(set(top_level_owner_names))
+    assert len(top_level_names) == len(top_level_owner_names)
+    assert len(method_names) == len(set(method_names))
+    assert len(method_owner_names) == len(set(method_owner_names))
+    assert len(method_names) == len(method_owner_names)
+    assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT == ()
+    assert tuple(chain_array_accounting.ArrayAccountingDependencies.__dataclass_fields__) == dependency_fields
+    assert tuple(field for field, _ in dependency_bindings) == dependency_fields
+    assert set(legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDERS) == set(top_level_names)
+    assert set(legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDERS) == set(method_names)
+
+    for facade_name, owner_name in zip(top_level_names, top_level_owner_names, strict=True):
+        assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDERS[facade_name] is getattr(
+            chain_array_accounting,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain, facade_name))
+    for facade_name, owner_name in zip(method_names, method_owner_names, strict=True):
+        assert legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDERS[facade_name] is getattr(
+            chain_array_accounting,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
+    for local_name in legacy_chain._CHAIN_ARRAY_ACCOUNTING_COMPAT_LOCAL_BINDING_NAMES:
+        assert callable(getattr(legacy_chain, local_name))
+
+    deps = legacy_chain._array_accounting_dependencies()
+    for field, facade_name in dependency_bindings:
+        assert getattr(deps, field) is getattr(legacy_chain, facade_name)
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(
+        name for name in vars(legacy_chain) if name.startswith("_CHAIN_ARRAY_ACCOUNTING_COMPAT_")
+    )
+    for token in (*compat_tokens, "ArrayAccountingDependencies"):
+        assert token in inventory_text
+
+
 def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_matches(tmp_path: Path) -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_array_accounting
