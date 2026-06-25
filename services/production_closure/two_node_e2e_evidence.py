@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 import services.production_closure.two_node_e2e_api_lane as two_node_e2e_api_lane
 import services.production_closure.two_node_e2e_browser_lane as two_node_e2e_browser_lane
+import services.production_closure.two_node_e2e_cross_plane_lane as two_node_e2e_cross_plane_lane
 import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e_docker_preflight
 import services.production_closure.two_node_e2e_docker_security as two_node_e2e_docker_security
 import services.production_closure.two_node_e2e_logs_lane as two_node_e2e_logs_lane
@@ -37,6 +38,11 @@ from services.production_closure.two_node_e2e_api_lane import (
 from services.production_closure.two_node_e2e_browser_lane import (
     BrowserLaneEvaluationHelpers,
     evaluate_browser_lane,
+)
+from services.production_closure.two_node_e2e_cross_plane_lane import (
+    CrossPlaneEvaluationHelpers,
+    build_source_scope_results,
+    evaluate_cross_plane_lane,
 )
 from services.production_closure.two_node_e2e_docker_preflight import (
     DockerPreflightEvaluationHelpers,
@@ -713,18 +719,21 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             helpers=simple_live_lane_helpers,
         ),
     }
-    source_scope_results = _source_scope_results(
+    cross_plane_helpers = _cross_plane_helpers()
+    source_scope_results = build_source_scope_results(
         declared_sources=scope["declared_sources"],
         strict_identities=strict_identities,
         source_lanes={name: lanes[name] for name in ("api", "browser", "logs")},
+        helpers=cross_plane_helpers,
     )
-    lanes["cross_plane"] = _evaluate_cross_plane(
+    lanes["cross_plane"] = evaluate_cross_plane_lane(
         lane_docs["cross_plane"],
         declared_sources=scope["declared_sources"],
         strict_identities=strict_identities,
         source_scope_results=source_scope_results,
         reduced_scope=scope["reduced_scope"],
         evidence_run_id=config.run_id,
+        helpers=cross_plane_helpers,
     )
 
     final_status = _final_status(lanes, source_scope_results, scope)
@@ -775,7 +784,10 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
         ),
         "api": _find_first_json(run_dir, two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES),
         "browser": _find_first_json(run_dir, two_node_e2e_browser_lane.BROWSER_DOCUMENT_CANDIDATES),
-        "cross_plane": _find_first_json(run_dir, ("cross-plane/summary.json", "cross-plane/evidence.json")),
+        "cross_plane": _find_first_json(
+            run_dir,
+            two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES,
+        ),
         "manual_ops": _find_first_json(
             run_dir,
             two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES,
@@ -982,6 +994,33 @@ def _logs_lane_helpers() -> LogsLaneEvaluationHelpers[LaneEvaluation]:
     )
 
 
+def _cross_plane_helpers() -> CrossPlaneEvaluationHelpers[LaneEvaluation]:
+    return CrossPlaneEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        combined_status=_combined_status,
+        blocker=_blocker,
+        finding=_finding,
+        stale_lane_blockers=_stale_lane_blockers,
+        current_run_blockers=_current_run_blockers,
+        recursive_current_run_blockers=_recursive_current_run_blockers,
+        producer_source_artifact_blockers=_producer_source_artifact_blockers,
+        has_live_lane_evidence=lambda payload: _has_live_lane_evidence(
+            payload,
+            live_flag=two_node_e2e_cross_plane_lane.CROSS_PLANE_LIVE_FLAG,
+        ),
+        has_producer_backed_lane_evidence=_has_producer_backed_lane_evidence,
+        has_mock_or_fixture=_has_mock_or_fixture,
+        has_historical_latest=_has_historical_latest,
+        source_records=_source_records,
+        identity_match_status=_identity_match_status,
+        identity_value=_identity_value,
+        redact_payload=redact_payload,
+        with_context=_with_context,
+    )
+
+
 def _manual_ops_lane_helpers() -> ManualOpsLaneEvaluationHelpers[LaneEvaluation]:
     return ManualOpsLaneEvaluationHelpers(
         missing_lane=_missing_lane,
@@ -1013,143 +1052,6 @@ def _manual_ops_lane_helpers() -> ManualOpsLaneEvaluationHelpers[LaneEvaluation]
     )
 
 
-def _evaluate_cross_plane(
-    doc: EvidenceDocument | None,
-    *,
-    declared_sources: tuple[str, ...],
-    strict_identities: Mapping[str, Mapping[str, Any]],
-    source_scope_results: Mapping[str, Mapping[str, Any]],
-    reduced_scope: bool,
-    evidence_run_id: str,
-) -> LaneEvaluation:
-    if doc is None:
-        return _missing_lane("cross_plane", "TWO_NODE_E2E_CROSS_PLANE_EVIDENCE_MISSING")
-    payload = doc.payload
-    status = _normalized_status(payload.get("status"))
-    blockers = list(_stale_lane_blockers(payload))
-    findings: list[dict[str, Any]] = []
-    if status == STATUS_PASS:
-        blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="cross_plane"))
-        blockers.extend(
-            _recursive_current_run_blockers(payload, evidence_run_id, lane_name="cross_plane")
-        )
-        blockers.extend(
-            _producer_source_artifact_blockers(
-                payload,
-                evidence_run_id=evidence_run_id,
-                lane_name="cross_plane",
-                run_dir=doc.path.parents[1],
-            )
-        )
-        if not _has_producer_backed_lane_evidence(payload):
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_CROSS_PLANE_PRODUCER_EVIDENCE_MISSING",
-                    "Cross-plane PASS requires producer-backed command, artifact, request/response, browser, "
-                    "network, or per-check evidence.",
-                )
-            )
-    if _has_mock_or_fixture(payload):
-        findings.append(
-            _finding(
-                "TWO_NODE_E2E_CROSS_PLANE_MOCK_EVIDENCE",
-                "Cross-plane evidence uses mock or deterministic fixture data.",
-            )
-        )
-    if _has_historical_latest(payload):
-        findings.append(
-            _finding(
-                "TWO_NODE_E2E_CROSS_PLANE_HISTORICAL_LATEST",
-                "Cross-plane evidence uses historical latest or source-only fallback.",
-            )
-        )
-    if status == STATUS_PASS and not _has_live_lane_evidence(payload, live_flag="live_cross_plane_evidence"):
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_CROSS_PLANE_LIVE_EVIDENCE_MISSING",
-                "Cross-plane PASS requires live identity-bound evidence.",
-            )
-        )
-    records = _source_records(payload)
-    for source in declared_sources:
-        record = records.get(source)
-        if record is None:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_CROSS_PLANE_SOURCE_MISSING",
-                    "Cross-plane evidence is missing a declared source.",
-                    source=source,
-                )
-            )
-            continue
-        _, identity_findings, identity_blockers = _identity_match_status(source, record, strict_identities)
-        findings.extend(_with_context(item, lane="cross_plane", source=source) for item in identity_findings)
-        blockers.extend(_with_context(item, lane="cross_plane", source=source) for item in identity_blockers)
-    source_statuses = {source: result.get("status") for source, result in source_scope_results.items()}
-    if status == STATUS_FAIL or any(value == STATUS_FAIL for value in source_statuses.values()):
-        status = STATUS_FAIL
-    elif status == STATUS_BLOCKED or any(value == STATUS_BLOCKED for value in source_statuses.values()):
-        status = STATUS_BLOCKED
-    if findings:
-        status = STATUS_FAIL
-    elif blockers:
-        status = STATUS_BLOCKED
-    elif status == STATUS_PASS and (not _is_full_scope_pass(declared_sources, source_scope_results) or reduced_scope):
-        status = STATUS_PARTIAL
-    return _lane_from_status(
-        "cross_plane",
-        doc,
-        status=status,
-        summary_status=str(payload.get("status", "unknown")),
-        blockers=blockers,
-        findings=findings,
-    )
-
-
-def _source_scope_results(
-    *,
-    declared_sources: tuple[str, ...],
-    strict_identities: Mapping[str, Mapping[str, Any]],
-    source_lanes: Mapping[str, LaneEvaluation],
-) -> dict[str, dict[str, Any]]:
-    results: dict[str, dict[str, Any]] = {}
-    for source in declared_sources:
-        blockers: list[dict[str, Any]] = []
-        findings: list[dict[str, Any]] = []
-        identity = dict(strict_identities.get(source, {}))
-        missing_identity = [field for field in STRICT_LOG_IDENTITY_FIELDS if not _identity_value(identity, field)]
-        if missing_identity:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_SOURCE_STRICT_IDENTITY_INCOMPLETE",
-                    "Source strict identity is incomplete.",
-                    source=source,
-                    missing_fields=missing_identity,
-                )
-            )
-        lane_statuses: dict[str, str] = {}
-        for lane_name, lane in source_lanes.items():
-            lane_statuses[lane_name] = lane.status
-            for finding in lane.findings:
-                if finding.get("source") == source:
-                    findings.append(dict(finding))
-            for blocker in lane.blockers:
-                if blocker.get("source") == source:
-                    blockers.append(dict(blocker))
-        status = _combined_status(
-            [str(value) for value in lane_statuses.values()],
-            findings=findings,
-            blockers=blockers,
-        )
-        results[source] = {
-            "status": status,
-            "identity": redact_payload(identity),
-            "lane_statuses": lane_statuses,
-            "blockers": blockers,
-            "findings": findings,
-        }
-    return results
-
 
 def _final_status(
     lanes: Mapping[str, LaneEvaluation],
@@ -1162,7 +1064,10 @@ def _final_status(
         return STATUS_FAIL
     if STATUS_BLOCKED in lane_statuses or STATUS_BLOCKED in source_statuses:
         return STATUS_BLOCKED
-    if not _is_full_scope_pass(tuple(scope["declared_sources"]), source_scope_results):
+    if not two_node_e2e_cross_plane_lane.is_full_scope_pass(
+        tuple(scope["declared_sources"]),
+        source_scope_results,
+    ):
         return STATUS_PARTIAL
     if STATUS_PARTIAL in lane_statuses or STATUS_PARTIAL in source_statuses:
         return STATUS_PARTIAL
@@ -1183,7 +1088,7 @@ def _collect_blockers_and_findings(
                 "Final evidence requires declared source scope.",
             )
         )
-    if not _is_full_scope_sources(tuple(scope["declared_sources"])):
+    if not two_node_e2e_cross_plane_lane.is_full_scope_sources(tuple(scope["declared_sources"])):
         findings.append(
             _finding(
                 "TWO_NODE_E2E_REDUCED_SOURCE_SCOPE",
@@ -4585,20 +4490,6 @@ def _identity_value(identity: Mapping[str, Any], field: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _is_full_scope_sources(declared_sources: tuple[str, ...]) -> bool:
-    return frozenset(declared_sources) == FULL_PASS_SOURCE_SET
-
-
-def _is_full_scope_pass(
-    declared_sources: tuple[str, ...],
-    source_scope_results: Mapping[str, Mapping[str, Any]],
-) -> bool:
-    return _is_full_scope_sources(declared_sources) and all(
-        source_scope_results.get(source, {}).get("status") == STATUS_PASS
-        for source in sorted(FULL_PASS_SOURCE_SET)
-    )
 
 
 

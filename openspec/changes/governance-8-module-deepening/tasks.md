@@ -1474,10 +1474,35 @@
     identity mismatch behavior.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"`.
   - Inventory/Evidence Update: update two-node inventory row `manual ops receipts`.
-- [ ] 3.11 Cross-plane and source-scope aggregation extraction.
+- [x] 3.11 Cross-plane and source-scope aggregation extraction.
   - Module/Scope: cross-plane lane, source-scope result construction, GFS+IFS full PASS, reduced-scope PARTIAL, strict identity aggregation.
   - Dependencies: 3.2, 3.7, 3.8, and 3.9.
   - Out of Scope: final summary writing, output safety, lane-specific source proof logic.
+  - Fixture Rows: `services.production_closure.two_node_e2e_cross_plane_lane`
+    owns `CROSS_PLANE_DOCUMENT_CANDIDATES`, `CROSS_PLANE_LIVE_FLAG`,
+    cross-plane blocker namespaces, `CrossPlaneEvaluationHelpers`,
+    `build_source_scope_results`, `evaluate_cross_plane_lane`,
+    `is_full_scope_sources`, and `is_full_scope_pass`;
+    `validate_two_node_e2e_evidence(config)` delegates source-scope
+    construction and cross-plane lane evaluation to that owner through
+    `_cross_plane_helpers` while retaining stable final summary writing and
+    blocker/finding collection in the facade.
+  - Risk Axes: preserves GFS+IFS full PASS gating, reduced-scope PARTIAL
+    semantics, strict log identity completeness aggregation, source-lane status
+    folding for API/browser/logs, current-run and producer-backed evidence
+    blockers, live cross-plane proof requirements, mock/historical findings,
+    and source identity mismatch context; no final summary writing, output path
+    safety/redaction, lane-specific source proof logic, API/browser/logs/manual
+    ops lane behavior, DB schema/role, Slurm scheduling, frontend/display UI, or
+    production topology behavior moves in this slice.
+  - Regression Rows: added owner guard, direct evaluator/source-scope parity,
+    validator delegation for both `build_source_scope_results` and
+    `evaluate_cross_plane_lane`, document alias discovery, missing cross-plane
+    lane shape, direct missing strict log identity aggregation, and direct
+    reduced-scope PARTIAL tests; existing focused cross-plane/source-scope tests
+    continue to cover source-scope status folding, boolean-only live evidence,
+    stale/current-run evidence, producer/source-artifact binding, and reduced
+    single-source behavior.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"`.
   - Inventory/Evidence Update: update two-node inventory row `source-scope / cross-plane aggregation`.
 - [ ] 3.12 Two-node final aggregation extraction.

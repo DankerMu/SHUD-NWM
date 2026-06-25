@@ -16,6 +16,7 @@ from services.artifacts.reader import published_log_uri
 from services.production_closure import (
     two_node_e2e_api_lane,
     two_node_e2e_browser_lane,
+    two_node_e2e_cross_plane_lane,
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
     two_node_e2e_logs_lane,
@@ -1898,6 +1899,344 @@ def test_logs_lane_owner_missing_logs_summary_shape_and_source_scope_contributio
     assert "TWO_NODE_E2E_LOGS_EVIDENCE_MISSING" in _codes(lane["blockers"])
     assert summary["source_scope_results"]["GFS"]["lane_statuses"]["logs"] == STATUS_BLOCKED
     assert summary["source_scope_results"]["IFS"]["lane_statuses"]["logs"] == STATUS_BLOCKED
+
+
+def _cross_plane_owner_inputs(
+    config: TwoNodeE2EEvidenceConfig,
+) -> tuple[
+    two_node_e2e_metadata_lane.MetadataLaneEvaluation,
+    two_node_e2e_evidence.EvidenceDocument,
+    dict[str, two_node_e2e_evidence.LaneEvaluation],
+    dict[str, dict[str, Any]],
+]:
+    metadata_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
+    )
+    assert metadata_doc is not None
+    metadata_result = two_node_e2e_metadata_lane.evaluate_metadata_lane(
+        metadata_doc,
+        metadata_doc.payload,
+        evidence_run_id=config.run_id,
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=two_node_e2e_evidence._metadata_lane_helpers(),
+    )
+    api_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_api_lane.API_DOCUMENT_CANDIDATES,
+    )
+    browser_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_browser_lane.BROWSER_DOCUMENT_CANDIDATES,
+    )
+    logs_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES,
+    )
+    docker_security_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES,
+    )
+    assert api_doc is not None
+    assert browser_doc is not None
+    assert logs_doc is not None
+    cross_plane_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES,
+    )
+    assert cross_plane_doc is not None
+    source_lanes = {
+        "api": two_node_e2e_api_lane.evaluate_api_lane(
+            api_doc,
+            declared_sources=metadata_result.scope.declared_sources,
+            strict_identities=metadata_result.strict_identities,
+            evidence_run_id=config.run_id,
+            helpers=two_node_e2e_evidence._api_lane_helpers(),
+        ),
+        "browser": two_node_e2e_browser_lane.evaluate_browser_lane(
+            browser_doc,
+            declared_sources=metadata_result.scope.declared_sources,
+            strict_identities=metadata_result.strict_identities,
+            evidence_run_id=config.run_id,
+            helpers=two_node_e2e_evidence._browser_lane_helpers(),
+        ),
+        "logs": two_node_e2e_logs_lane.evaluate_logs_lane(
+            logs_doc,
+            declared_sources=metadata_result.scope.declared_sources,
+            strict_identities=metadata_result.strict_identities,
+            evidence_run_id=config.run_id,
+            docker_security_doc=docker_security_doc,
+            helpers=two_node_e2e_evidence._logs_lane_helpers(),
+        ),
+    }
+    source_scope_results = two_node_e2e_cross_plane_lane.build_source_scope_results(
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        source_lanes=source_lanes,
+        helpers=two_node_e2e_evidence._cross_plane_helpers(),
+    )
+    return metadata_result, cross_plane_doc, source_lanes, source_scope_results
+
+
+def test_cross_plane_owner_module_covers_source_scope_aggregation_contract() -> None:
+    assert two_node_e2e_cross_plane_lane.CROSS_PLANE_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_cross_plane_lane"
+    )
+    assert two_node_e2e_cross_plane_lane.CROSS_PLANE_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"'
+    )
+    assert two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES == (
+        "cross-plane/summary.json",
+        "cross-plane/evidence.json",
+    )
+    assert two_node_e2e_cross_plane_lane.CROSS_PLANE_LIVE_FLAG == "live_cross_plane_evidence"
+    assert "TWO_NODE_E2E_CROSS_PLANE_" in two_node_e2e_cross_plane_lane.CROSS_PLANE_BLOCKER_NAMESPACES
+    assert "TWO_NODE_E2E_SOURCE_" in two_node_e2e_cross_plane_lane.CROSS_PLANE_BLOCKER_NAMESPACES
+    assert (
+        "TWO_NODE_E2E_REDUCED_SOURCE_SCOPE"
+        in two_node_e2e_cross_plane_lane.CROSS_PLANE_BLOCKER_NAMESPACES
+    )
+    assert two_node_e2e_cross_plane_lane.is_full_scope_sources(("GFS", "IFS")) is True
+    assert two_node_e2e_cross_plane_lane.is_full_scope_sources(("GFS",)) is False
+    for symbol in two_node_e2e_cross_plane_lane.CROSS_PLANE_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_cross_plane_lane, symbol), symbol
+
+
+def test_cross_plane_source_scope_inventory_records_current_owner() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    rows = [
+        line
+        for line in inventory_text.splitlines()
+        if line.startswith("| source-scope / cross-plane aggregation |")
+    ]
+
+    assert len(rows) == 2
+    lane_contract_row, guard_seed_row = rows
+    assert "Current owner `services.production_closure.two_node_e2e_cross_plane_lane`" in lane_contract_row
+    assert "Future owner" not in lane_contract_row
+    assert "`CROSS_PLANE_DOCUMENT_CANDIDATES`" in lane_contract_row
+    assert "`build_source_scope_results`" in lane_contract_row
+    assert "`evaluate_cross_plane_lane(...)`" in lane_contract_row
+    assert "`is_full_scope_pass`" in lane_contract_row
+    assert two_node_e2e_cross_plane_lane.CROSS_PLANE_LANE_VERIFICATION in lane_contract_row
+    for symbol in (
+        "two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES",
+        "CROSS_PLANE_LIVE_FLAG",
+        "CrossPlaneEvaluationHelpers",
+        "build_source_scope_results",
+        "evaluate_cross_plane_lane",
+        "is_full_scope_sources",
+        "is_full_scope_pass",
+        "FULL_PASS_SOURCE_SET",
+        "_cross_plane_helpers",
+    ):
+        assert f"`{symbol}`" in guard_seed_row
+
+
+def test_cross_plane_owner_direct_evaluator_and_source_scope_match_full_validator_pass() -> None:
+    run_id = _run_id("cross-plane-owner-pass-parity")
+    config = _seed_pass_bundle(run_id)
+    metadata_result, cross_plane_doc, source_lanes, source_scope_results = _cross_plane_owner_inputs(config)
+
+    cross_plane_lane = two_node_e2e_cross_plane_lane.evaluate_cross_plane_lane(
+        cross_plane_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        source_scope_results=source_scope_results,
+        reduced_scope=metadata_result.scope.reduced_scope,
+        evidence_run_id=run_id,
+        helpers=two_node_e2e_evidence._cross_plane_helpers(),
+    )
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert cross_plane_lane.status == STATUS_PASS
+    assert summary["lane_summaries"]["cross_plane"] == cross_plane_lane.to_summary()
+    assert summary["source_scope_results"] == source_scope_results
+    assert summary["source_scope_results"]["GFS"]["lane_statuses"] == {
+        lane_name: lane.status for lane_name, lane in source_lanes.items()
+    }
+    assert summary["source_scope_results"]["IFS"]["lane_statuses"] == {
+        lane_name: lane.status for lane_name, lane in source_lanes.items()
+    }
+
+
+def test_cross_plane_source_scope_owner_validator_uses_owner_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = _run_id("cross-plane-owner-validator-call")
+    config = _seed_pass_bundle(run_id)
+    original_build = two_node_e2e_evidence.build_source_scope_results
+    original_evaluate = two_node_e2e_evidence.evaluate_cross_plane_lane
+    assert original_build is two_node_e2e_cross_plane_lane.build_source_scope_results
+    assert original_evaluate is two_node_e2e_cross_plane_lane.evaluate_cross_plane_lane
+    call: dict[str, Any] = {}
+
+    def spy_build_source_scope_results(
+        *,
+        declared_sources: tuple[str, ...],
+        strict_identities: Mapping[str, Mapping[str, Any]],
+        source_lanes: Mapping[str, two_node_e2e_evidence.LaneEvaluation],
+        helpers: two_node_e2e_cross_plane_lane.CrossPlaneEvaluationHelpers[
+            two_node_e2e_evidence.LaneEvaluation
+        ],
+    ) -> dict[str, dict[str, Any]]:
+        call["build_declared_sources"] = declared_sources
+        call["build_strict_identity_sources"] = tuple(sorted(strict_identities))
+        call["build_source_lanes"] = tuple(source_lanes)
+        call["build_helpers_type"] = type(helpers)
+        result = original_build(
+            declared_sources=declared_sources,
+            strict_identities=strict_identities,
+            source_lanes=source_lanes,
+            helpers=helpers,
+        )
+        call["build_result_sources"] = tuple(result)
+        return result
+
+    def spy_evaluate_cross_plane_lane(
+        doc: two_node_e2e_evidence.EvidenceDocument | None,
+        *,
+        declared_sources: tuple[str, ...],
+        strict_identities: Mapping[str, Mapping[str, Any]],
+        source_scope_results: Mapping[str, Mapping[str, Any]],
+        reduced_scope: bool,
+        evidence_run_id: str,
+        helpers: two_node_e2e_cross_plane_lane.CrossPlaneEvaluationHelpers[
+            two_node_e2e_evidence.LaneEvaluation
+        ],
+    ) -> two_node_e2e_evidence.LaneEvaluation:
+        call["eval_doc_path"] = doc.path if doc is not None else None
+        call["eval_declared_sources"] = declared_sources
+        call["eval_strict_identity_sources"] = tuple(sorted(strict_identities))
+        call["eval_source_scope_sources"] = tuple(source_scope_results)
+        call["eval_reduced_scope"] = reduced_scope
+        call["eval_evidence_run_id"] = evidence_run_id
+        call["eval_helpers_type"] = type(helpers)
+        return original_evaluate(
+            doc,
+            declared_sources=declared_sources,
+            strict_identities=strict_identities,
+            source_scope_results=source_scope_results,
+            reduced_scope=reduced_scope,
+            evidence_run_id=evidence_run_id,
+            helpers=helpers,
+        )
+
+    monkeypatch.setattr(
+        two_node_e2e_evidence,
+        "build_source_scope_results",
+        spy_build_source_scope_results,
+    )
+    monkeypatch.setattr(
+        two_node_e2e_evidence,
+        "evaluate_cross_plane_lane",
+        spy_evaluate_cross_plane_lane,
+    )
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["cross_plane"]["status"] == STATUS_PASS
+    assert call == {
+        "build_declared_sources": ("GFS", "IFS"),
+        "build_strict_identity_sources": ("GFS", "IFS"),
+        "build_source_lanes": ("api", "browser", "logs"),
+        "build_helpers_type": two_node_e2e_cross_plane_lane.CrossPlaneEvaluationHelpers,
+        "build_result_sources": ("GFS", "IFS"),
+        "eval_doc_path": (config.run_dir / "cross-plane" / "summary.json").resolve(strict=False),
+        "eval_declared_sources": ("GFS", "IFS"),
+        "eval_strict_identity_sources": ("GFS", "IFS"),
+        "eval_source_scope_sources": ("GFS", "IFS"),
+        "eval_reduced_scope": False,
+        "eval_evidence_run_id": run_id,
+        "eval_helpers_type": two_node_e2e_cross_plane_lane.CrossPlaneEvaluationHelpers,
+    }
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES)
+def test_cross_plane_owner_discovers_each_cross_plane_alias(candidate: str) -> None:
+    run_id = _run_id(f"cross-plane-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES[0]
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical:
+        canonical.unlink()
+        _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["cross_plane"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["cross_plane"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_cross_plane_owner_missing_cross_plane_summary_shape() -> None:
+    run_id = _run_id("cross-plane-owner-missing")
+    config = _seed_pass_bundle(run_id)
+    for candidate in two_node_e2e_cross_plane_lane.CROSS_PLANE_DOCUMENT_CANDIDATES:
+        candidate_path = config.run_dir / candidate
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"]["cross_plane"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert lane["evidence_path"] is None
+    assert lane["evidence_sha256"] is None
+    assert lane["summary_status"] is None
+    assert "TWO_NODE_E2E_CROSS_PLANE_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
+def test_source_scope_cross_plane_owner_flags_missing_strict_log_identity_directly() -> None:
+    run_id = _run_id("source-scope-owner-missing-job")
+    config = _seed_pass_bundle(run_id)
+    metadata_result, _cross_plane_doc, source_lanes, _source_scope_results = _cross_plane_owner_inputs(config)
+    strict_identities = copy.deepcopy(metadata_result.strict_identities)
+    strict_identities["GFS"].pop("job_id")
+
+    source_scope_results = two_node_e2e_cross_plane_lane.build_source_scope_results(
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=strict_identities,
+        source_lanes=source_lanes,
+        helpers=two_node_e2e_evidence._cross_plane_helpers(),
+    )
+
+    assert source_scope_results["GFS"]["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_SOURCE_STRICT_IDENTITY_INCOMPLETE" in _codes(
+        source_scope_results["GFS"]["blockers"]
+    )
+    assert source_scope_results["IFS"]["status"] == STATUS_PASS
+
+
+def test_reduced_scope_cross_plane_owner_marks_partial_after_full_source_lanes() -> None:
+    run_id = _run_id("reduced-scope-cross-plane-owner")
+    config = _seed_pass_bundle(run_id, sources=("GFS",), reduced_scope=True)
+    metadata_result, cross_plane_doc, _source_lanes, source_scope_results = _cross_plane_owner_inputs(config)
+
+    cross_plane_lane = two_node_e2e_cross_plane_lane.evaluate_cross_plane_lane(
+        cross_plane_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        source_scope_results=source_scope_results,
+        reduced_scope=metadata_result.scope.reduced_scope,
+        evidence_run_id=run_id,
+        helpers=two_node_e2e_evidence._cross_plane_helpers(),
+    )
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert source_scope_results["GFS"]["status"] == STATUS_PASS
+    assert two_node_e2e_cross_plane_lane.is_full_scope_sources(("GFS",)) is False
+    assert two_node_e2e_cross_plane_lane.is_full_scope_pass(("GFS",), source_scope_results) is False
+    assert cross_plane_lane.status == STATUS_PARTIAL
+    assert summary["lane_summaries"]["cross_plane"] == cross_plane_lane.to_summary()
+    assert summary["source_scope_results"] == source_scope_results
+    assert summary["status"] == STATUS_PARTIAL
 
 
 def test_logs_lane_owner_missing_declared_source_blocks_via_validator() -> None:
