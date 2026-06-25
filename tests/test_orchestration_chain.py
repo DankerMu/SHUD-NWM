@@ -7597,6 +7597,292 @@ def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monk
         assert token in inventory_text
 
 
+def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import retry
+
+    alias_names = legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_NAMES
+    local_method_names = legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES
+    local_factory_names = legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES
+    classifications = legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS
+
+    assert len(alias_names) == len(set(alias_names))
+    assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_DRIFT == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING == ()
+    assert legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING == ()
+    assert set(legacy_chain._CHAIN_RETRY_COMPAT_OWNER_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_RETRY_COMPAT_FACADE_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_METHODS) == set(local_method_names)
+    assert set(legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES) == set(local_factory_names)
+
+    for alias_name in alias_names:
+        assert hasattr(retry, alias_name)
+        assert hasattr(legacy_chain, alias_name)
+        assert legacy_chain._CHAIN_RETRY_COMPAT_OWNER_ALIASES[alias_name] is getattr(retry, alias_name)
+        assert legacy_chain._CHAIN_RETRY_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_RETRY_COMPAT_FACADE_ALIASES[alias_name] is getattr(retry, alias_name)
+    for local_method_name in local_method_names:
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, local_method_name))
+        assert classifications[local_method_name] == "chain-local-bridge"
+    for local_factory_name in local_factory_names:
+        assert callable(getattr(legacy_chain, local_factory_name))
+        assert classifications[local_factory_name] == "chain-local-factory"
+
+    constructor_signature = inspect.signature(legacy_chain.ForecastOrchestrator.__init__)
+    assert set(legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_NAMES) == {"retry_service"}
+    assert "retry_service" in constructor_signature.parameters
+    assert legacy_chain._CHAIN_RETRY_COMPAT_INSTANCE_CONFIG_NAMES == ("retry_config",)
+    assert "retry_config" not in constructor_signature.parameters
+
+    default_orchestrator = _orchestrator(tmp_path, FakeCycleRepository(), FakeCycleSlurmClient())
+    assert default_orchestrator.retry_service is None
+    assert isinstance(default_orchestrator.retry_config, retry.RetryConfig)
+
+    injected_config = retry.RetryConfig(max_retries=3, backoff_schedule=[11, 22])
+    pipeline_job = PipelineJob(
+        job_id="job_cycle_gfs_2026050100_download",
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        job_type="download_source_cycle",
+        model_id="model-1",
+        status="failed",
+        stage="download",
+    )
+    pipeline_job.retry_count = 1
+    pipeline_job.error_code = "SLURM_TIMEOUT"
+    pipeline_job.error_message = "forced failure"
+    events: list[Any] = []
+
+    class _RetrySession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.expire_all_calls = 0
+            self.in_transaction_calls = 0
+
+        def expire_all(self) -> None:
+            self.expire_all_calls += 1
+            events.append("expire_all")
+
+        def in_transaction(self) -> bool:
+            self.in_transaction_calls += 1
+            events.append("in_transaction")
+            return True
+
+        def commit(self) -> None:
+            self.commits += 1
+            events.append("commit")
+
+    class _RetryStore:
+        def __init__(self, job: PipelineJob) -> None:
+            self.job = job
+            self.session = _RetrySession()
+            self.get_job_ids: list[str] = []
+
+        def get_job(self, job_id: str) -> PipelineJob | None:
+            self.get_job_ids.append(job_id)
+            events.append(("get_job", job_id))
+            return self.job if job_id == self.job.job_id else None
+
+    class _RetryService:
+        def __init__(self, job: PipelineJob) -> None:
+            self.config = injected_config
+            self.store = _RetryStore(job)
+            self.handled_jobs: list[PipelineJob] = []
+
+        def handle_failed_job(self, job: PipelineJob) -> PipelineJob:
+            self.handled_jobs.append(job)
+            events.append(("handle_failed_job", job.job_id))
+            job.job_id = f"{job.job_id}_retry_2"
+            job.retry_count = 2
+            job.status = "pending"
+            return job
+
+    retry_service = _RetryService(pipeline_job)
+    orchestrator = _orchestrator(
+        tmp_path,
+        FakeCycleRepository(),
+        FakeCycleSlurmClient(),
+        retry_service=retry_service,
+    )
+    assert orchestrator.retry_config is injected_config
+
+    backoff_calls: list[tuple[int, list[int]]] = []
+    sleep_calls: list[int] = []
+
+    def fake_compute_backoff_seconds(retry_count: int, backoff_schedule: list[int] | None = None) -> int:
+        assert backoff_schedule is not None
+        backoff_calls.append((retry_count, backoff_schedule))
+        return 0
+
+    monkeypatch.setattr(legacy_chain, "compute_backoff_seconds", fake_compute_backoff_seconds)
+    monkeypatch.setattr(legacy_chain.time, "sleep", sleep_calls.append)
+
+    result = StageRunResult(
+        stage="download",
+        job_type="download_source_cycle",
+        pipeline_job_id="job_cycle_gfs_2026050100_download",
+        slurm_job_id="2001",
+        status="failed",
+        exit_code=1,
+        error_code="SLURM_TIMEOUT",
+        error_message="forced failure",
+    )
+
+    assert default_orchestrator._schedule_cycle_stage_retry(result, 1) is None
+    assert backoff_calls == []
+    assert sleep_calls == []
+
+    missing_events: list[Any] = []
+
+    class _MissingJobRepository(FakeCycleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_pipeline_job_ids: list[str] = []
+
+        def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+            self.get_pipeline_job_ids.append(job_id)
+            missing_events.append(("repository_get_pipeline_job", job_id))
+            return None
+
+        def update_forecast_cycle_status(self, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("retry store miss must not mutate forecast cycle status")
+
+        def upsert_pipeline_job(self, _record: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("retry store miss must not upsert pipeline jobs")
+
+        def reserve_pipeline_job(self, _record: dict[str, Any]) -> dict[str, Any] | None:
+            raise AssertionError("retry store miss must not reserve pipeline jobs")
+
+        def reclaim_pipeline_job_reservation(self, _record: dict[str, Any]) -> dict[str, Any] | None:
+            raise AssertionError("retry store miss must not reclaim pipeline job reservations")
+
+        def bind_pipeline_job_reservation(
+            self,
+            _idempotency_key: str,
+            *,
+            slurm_job_id: str,
+            status: str = "submitted",
+            array_task_id: int | None = None,
+        ) -> dict[str, Any] | None:
+            del slurm_job_id, status, array_task_id
+            raise AssertionError("retry store miss must not bind pipeline job reservations")
+
+        def update_pipeline_job_status(self, *_args: Any, **_kwargs: Any) -> tuple[str | None, dict[str, Any]]:
+            raise AssertionError("retry store miss must not update pipeline job status")
+
+        def insert_pipeline_event(self, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("retry store miss must not insert pipeline events")
+
+    class _MissingRetrySession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.expire_all_calls = 0
+            self.in_transaction_calls = 0
+
+        def expire_all(self) -> None:
+            self.expire_all_calls += 1
+            missing_events.append("missing_expire_all")
+
+        def in_transaction(self) -> bool:
+            self.in_transaction_calls += 1
+            missing_events.append("missing_in_transaction")
+            return True
+
+        def commit(self) -> None:
+            self.commits += 1
+            missing_events.append("missing_commit")
+            raise AssertionError("retry store miss must not commit a transaction")
+
+    class _MissingRetryStore:
+        def __init__(self) -> None:
+            self.session = _MissingRetrySession()
+            self.get_job_ids: list[str] = []
+
+        def get_job(self, job_id: str) -> None:
+            self.get_job_ids.append(job_id)
+            missing_events.append(("missing_store_get_job", job_id))
+            return None
+
+    class _MissingRetryService:
+        def __init__(self) -> None:
+            self.config = injected_config
+            self.store = _MissingRetryStore()
+            self.handled_jobs: list[PipelineJob] = []
+
+        def handle_failed_job(self, job: PipelineJob) -> PipelineJob:
+            self.handled_jobs.append(job)
+            raise AssertionError("retry store miss must not handle a failed job")
+
+    def fail_stage_execution(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("retry store miss must not execute a stage")
+
+    def fail_reservation(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("retry store miss must not reserve a stage")
+
+    missing_repository = _MissingJobRepository()
+    missing_retry_service = _MissingRetryService()
+    missing_orchestrator = _orchestrator(
+        tmp_path,
+        missing_repository,
+        FakeCycleSlurmClient(),
+        retry_service=missing_retry_service,
+    )
+    monkeypatch.setattr(missing_orchestrator, "_submit_and_wait_cycle_stage", fail_stage_execution)
+    monkeypatch.setattr(missing_orchestrator, "_reserve_cycle_stage", fail_reservation)
+
+    assert missing_orchestrator._schedule_cycle_stage_retry(result, 1) is None
+    assert missing_retry_service.store.get_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert missing_retry_service.handled_jobs == []
+    assert missing_retry_service.store.session.expire_all_calls == 1
+    assert missing_retry_service.store.session.in_transaction_calls == 0
+    assert missing_retry_service.store.session.commits == 0
+    assert missing_repository.get_pipeline_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert missing_repository.jobs == {}
+    assert missing_repository.events == []
+    assert missing_repository.cycle_statuses == []
+    assert backoff_calls == []
+    assert sleep_calls == []
+    assert missing_events == [
+        "missing_expire_all",
+        ("missing_store_get_job", "job_cycle_gfs_2026050100_download"),
+        ("repository_get_pipeline_job", "job_cycle_gfs_2026050100_download"),
+    ]
+
+    assert orchestrator._schedule_cycle_stage_retry(result, 1) == "job_cycle_gfs_2026050100_download_retry_2"
+    assert retry_service.store.get_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert retry_service.handled_jobs == [pipeline_job]
+    assert backoff_calls == [(1, injected_config.backoff_schedule)]
+    assert retry_service.store.session.expire_all_calls == 1
+    assert retry_service.store.session.in_transaction_calls == 1
+    assert retry_service.store.session.commits == 1
+    assert sleep_calls == [0]
+    assert events == [
+        "expire_all",
+        ("get_job", "job_cycle_gfs_2026050100_download"),
+        ("handle_failed_job", "job_cycle_gfs_2026050100_download"),
+        "in_transaction",
+        "commit",
+    ]
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert legacy_chain._retry_service_from_env() is None
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(name for name in vars(legacy_chain) if name.startswith("_CHAIN_RETRY_COMPAT_"))
+    for token in compat_tokens:
+        assert token in inventory_text
+
+
 def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
     command = (
         "import sys; "

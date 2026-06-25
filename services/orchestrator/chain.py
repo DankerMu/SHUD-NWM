@@ -42,6 +42,7 @@ from services.orchestrator import (
     chain_stage_execution,
     production_contract,
     reservation,
+    retry,
 )
 from services.orchestrator import (
     chain_stages as _chain_stages_module,
@@ -368,6 +369,60 @@ if _CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING:
         "chain reservation compatibility functions missing from owner module: "
         f"{', '.join(_CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING)}"
     )
+
+_CHAIN_RETRY_COMPAT_ALIAS_NAMES = (
+    "RetryConfig",
+    "RetryService",
+    "compute_backoff_seconds",
+)
+_CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES if not hasattr(retry, name)
+)
+_CHAIN_RETRY_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES if name not in globals()
+)
+if _CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain retry compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_RETRY_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain retry compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+_CHAIN_RETRY_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {name: getattr(retry, name) for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_RETRY_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_RETRY_COMPAT_ALIAS_DRIFT = tuple(
+    name
+    for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES
+    if _CHAIN_RETRY_COMPAT_FACADE_ALIASES[name] is not _CHAIN_RETRY_COMPAT_OWNER_ALIASES[name]
+)
+if _CHAIN_RETRY_COMPAT_ALIAS_DRIFT:
+    raise RuntimeError(
+        "chain retry direct alias drifted from owner module: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_ALIAS_DRIFT)}"
+    )
+
+_CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_NAMES = ("retry_service",)
+_CHAIN_RETRY_COMPAT_INSTANCE_CONFIG_NAMES = ("retry_config",)
+_CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES = (
+    "_schedule_cycle_stage_retry",
+    "_retry_job_for_stage_result",
+    "_retry_partial_array_stage",
+    "_release_retry_store_transaction",
+)
+_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES = ("_retry_service_from_env",)
+_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = MappingProxyType(
+    {
+        **{name: "chain-local-bridge" for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES},
+        **{name: "chain-local-factory" for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES},
+    }
+)
 
 _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
     "ANALYSIS_STAGES",
@@ -4270,6 +4325,38 @@ _CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDERS = MappingProxyType(
         )
     }
 )
+_chain_retry_init_code = ForecastOrchestrator.__init__.__code__
+_chain_retry_init_param_names = _chain_retry_init_code.co_varnames[
+    : _chain_retry_init_code.co_argcount + _chain_retry_init_code.co_kwonlyargcount
+]
+_CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_NAMES if name not in _chain_retry_init_param_names
+)
+_CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_INSTANCE_CONFIG_NAMES if name not in _chain_retry_init_code.co_names
+)
+if _CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING:
+    raise RuntimeError(
+        "chain retry constructor parameters missing from facade: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING)}"
+    )
+if _CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT:
+    raise RuntimeError(
+        "chain retry constructor config binding drifted from facade: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT)}"
+    )
+_CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES if not callable(getattr(ForecastOrchestrator, name, None))
+)
+if _CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING:
+    raise RuntimeError(
+        "chain retry local bridge methods missing from facade: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING)}"
+    )
+_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_METHODS = MappingProxyType(
+    {name: getattr(ForecastOrchestrator, name) for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES}
+)
+del _chain_retry_init_code, _chain_retry_init_param_names
 
 
 class AnalysisOrchestrator(ForecastOrchestrator):
@@ -5800,6 +5887,19 @@ def _retry_service_from_env() -> RetryService | None:
     session = Session(engine)
     store = PipelineStore(session)
     return RetryService(store, RetryConfig.from_settings(SlurmGatewaySettings()))
+
+
+_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING = tuple(
+    name for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES if not callable(globals().get(name))
+)
+if _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING:
+    raise RuntimeError(
+        "chain retry local factories missing from facade: "
+        f"{', '.join(_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING)}"
+    )
+_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES}
+)
 
 
 def _coerce_mapping(value: Any) -> dict[str, Any]:
