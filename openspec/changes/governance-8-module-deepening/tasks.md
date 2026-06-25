@@ -664,11 +664,20 @@
     - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-array-accounting-forwarders`.
-- [ ] 2.5 Chain manifest owner-family completion.
+- [x] 2.5 Chain manifest owner-family completion.
   - Module/Scope: `services.orchestrator.chain_manifests`, `services.orchestrator.production_contract`, model-run assembly builders and payload serialization, runtime manifest safe writes, manifest index, quality states, residual blockers.
   - Dependencies: 2.1 and 2.2.
   - Out of Scope: array accounting, stage execution, repository persistence, tile publishing.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py tests/test_production_scheduler.py`.
+  - Fixture: add explicit `_CHAIN_MANIFEST_COMPAT_*` maps/guards for direct legacy aliases, top-level manifest wrappers, `ForecastOrchestrator` method forwarders, `AnalysisOrchestrator` manifest method forwarders, and monkeypatch dependency bindings that intentionally call the current `chain.py` facade.
+  - Regression Coverage: extend `tests/test_orchestration_chain.py` to prove owner/facade alias identity, wrapper owner maps, forecast/analysis method maps, dependency binding inventory, and inventory token coverage stay aligned with `chain_manifests` / `production_contract`.
+  - Risk/Invariant: no manifest assembly, safe-write, runtime-root, quality-state, residual-blocker, production-contract, repository, Slurm, API, or frontend behavior moves in this slice; this only makes the existing manifest owner-family compatibility surface executable and reviewable.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py tests/test_production_scheduler.py`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-manifest-forwarders`.
 - [ ] 2.6 Chain reservation owner-family completion.
   - Module/Scope: `services.orchestrator.reservation`, reserve/bind/reclaim protocol, Slurm comment contract, chain reservation wrappers.

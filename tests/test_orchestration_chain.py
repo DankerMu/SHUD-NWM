@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import shlex
 import subprocess
@@ -7476,6 +7477,166 @@ def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
     )
 
 
+def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monkeypatch) -> None:
+    from services.orchestrator import chain as legacy_chain
+    from services.orchestrator import chain_manifests, production_contract
+
+    chain_alias_names = legacy_chain._CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES
+    production_alias_names = legacy_chain._CHAIN_MANIFEST_COMPAT_PRODUCTION_CONTRACT_ALIAS_NAMES
+    alias_names = legacy_chain._CHAIN_MANIFEST_COMPAT_ALIAS_NAMES
+    top_level_names = legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES
+    top_level_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES
+    forecast_method_names = legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES
+    forecast_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES
+    analysis_method_names = legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES
+    analysis_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES
+
+    assert len(alias_names) == len(set(alias_names))
+    assert set(alias_names) == {*chain_alias_names, *production_alias_names}
+    assert len(top_level_names) == len(set(top_level_names))
+    assert len(top_level_owner_names) == len(set(top_level_owner_names))
+    assert len(top_level_names) == len(top_level_owner_names)
+    assert len(forecast_method_names) == len(set(forecast_method_names))
+    assert len(forecast_owner_names) == len(set(forecast_owner_names))
+    assert len(forecast_method_names) == len(forecast_owner_names)
+    assert len(analysis_method_names) == len(analysis_owner_names)
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT == ()
+    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_FACADE_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS) == set(top_level_names)
+    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS) == set(forecast_method_names)
+    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS) == set(analysis_method_names)
+
+    for alias_name in chain_alias_names:
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            chain_manifests,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+    for alias_name in production_alias_names:
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            production_contract,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+    for alias_name in alias_names:
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_FACADE_ALIASES[alias_name] is (
+            legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES[alias_name]
+        )
+
+    for facade_name, owner_name in zip(top_level_names, top_level_owner_names, strict=True):
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS[facade_name] is getattr(
+            chain_manifests,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain, facade_name))
+        assert getattr(legacy_chain, facade_name) is not getattr(chain_manifests, owner_name)
+    for facade_name, owner_name in zip(forecast_method_names, forecast_owner_names, strict=True):
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS[facade_name] is getattr(
+            chain_manifests,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
+    for facade_name, owner_name in zip(analysis_method_names, analysis_owner_names, strict=True):
+        assert legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS[facade_name] is getattr(
+            chain_manifests,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.AnalysisOrchestrator, facade_name))
+
+    owner_callable_by_binding = {
+        "build_model_run_assembly": chain_manifests.build_model_run_assembly,
+        "_frequency_quality_state": chain_manifests._frequency_quality_state,
+        "_publish_quality_state": chain_manifests._publish_quality_state,
+        "ForecastOrchestrator._build_cycle_stage_manifest": chain_manifests.build_cycle_stage_manifest,
+        "ForecastOrchestrator._prepare_forecast_runtime_manifests": (
+            chain_manifests.prepare_forecast_runtime_manifests
+        ),
+        "ForecastOrchestrator._build_forecast_runtime_manifest": chain_manifests.build_forecast_runtime_manifest,
+        "ForecastOrchestrator._reindexed_manifest_entries": chain_manifests.reindexed_manifest_entries,
+        "ForecastOrchestrator._build_run_manifest": chain_manifests.build_forecast_run_manifest,
+        "AnalysisOrchestrator._build_run_manifest": chain_manifests.build_analysis_run_manifest,
+    }
+    assert set(owner_callable_by_binding) == set(legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS)
+    for binding_owner, bindings in legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS.items():
+        owner_parameters = inspect.signature(owner_callable_by_binding[binding_owner]).parameters
+        for owner_argument, facade_name in bindings:
+            assert owner_argument in owner_parameters
+            assert callable(getattr(legacy_chain, facade_name))
+
+    top_level_calls: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+
+    def capture_top_level(name: str, result: Any) -> Any:
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            top_level_calls[name] = (args, kwargs)
+            return result
+
+        return _fake
+
+    assembly_result = object()
+    frequency_result = {"state": "frequency"}
+    publish_result = {"state": "publish"}
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_model_run_assembly",
+        capture_top_level("build_model_run_assembly", assembly_result),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "_frequency_quality_state",
+        capture_top_level("_frequency_quality_state", frequency_result),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "_publish_quality_state",
+        capture_top_level("_publish_quality_state", publish_result),
+    )
+
+    object_store = object()
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    assert (
+        legacy_chain.build_model_run_assembly(
+            {"run_id": "run-1"},
+            source_id="gfs",
+            cycle_id="gfs-2024010100",
+            cycle_time=cycle_time,
+            scenario_id="forecast_gfs_deterministic",
+            workspace_root=Path("workspace"),
+            object_store=object_store,
+            default_forecast_horizon_hours=168,
+        )
+        is assembly_result
+    )
+    assert legacy_chain._frequency_quality_state({"run_id": "run-1"}, cycle_id="cycle-1") == frequency_result
+    assert legacy_chain._publish_quality_state({"run_id": "run-1"}, cycle_id="cycle-1") == publish_result
+
+    for binding_owner in (
+        "build_model_run_assembly",
+        "_frequency_quality_state",
+        "_publish_quality_state",
+    ):
+        _args, kwargs = top_level_calls[binding_owner]
+        for owner_argument, facade_name in legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS[binding_owner]:
+            assert kwargs[owner_argument] is getattr(legacy_chain, facade_name)
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(name for name in vars(legacy_chain) if name.startswith("_CHAIN_MANIFEST_COMPAT_"))
+    for token in compat_tokens:
+        assert token in inventory_text
+
+
 def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain_stage_execution
 
@@ -7775,7 +7936,24 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
     }
     assert call_by_name["build_analysis_run_manifest"][0] == (analysis_context,)
+    assert call_by_name["build_analysis_run_manifest"][1] == {
+        "analysis_forcing_causality": chain_runtime._analysis_forcing_causality,
+        "analysis_update_ic_step_minutes": chain_runtime._analysis_update_ic_step_minutes,
+    }
     assert call_by_name["write_run_manifest"][0][1:] == (run_context, manifest)
+
+    binding_owner_to_call_name = {
+        "ForecastOrchestrator._build_cycle_stage_manifest": "build_cycle_stage_manifest",
+        "ForecastOrchestrator._prepare_forecast_runtime_manifests": "prepare_forecast_runtime_manifests",
+        "ForecastOrchestrator._build_forecast_runtime_manifest": "build_forecast_runtime_manifest",
+        "ForecastOrchestrator._reindexed_manifest_entries": "reindexed_manifest_entries",
+        "ForecastOrchestrator._build_run_manifest": "build_forecast_run_manifest",
+        "AnalysisOrchestrator._build_run_manifest": "build_analysis_run_manifest",
+    }
+    for binding_owner, call_name in binding_owner_to_call_name.items():
+        _args, kwargs = call_by_name[call_name]
+        for owner_argument, facade_name in chain_runtime._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS[binding_owner]:
+            assert kwargs[owner_argument] is getattr(chain_runtime, facade_name)
 
 
 def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evidence(monkeypatch) -> None:
