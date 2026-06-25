@@ -19,6 +19,7 @@ from services.production_closure import (
     two_node_e2e_cross_plane_lane,
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
+    two_node_e2e_final_aggregation,
     two_node_e2e_logs_lane,
     two_node_e2e_manual_ops_lane,
     two_node_e2e_metadata_lane,
@@ -2034,6 +2035,167 @@ def test_cross_plane_source_scope_inventory_records_current_owner() -> None:
         "_cross_plane_helpers",
     ):
         assert f"`{symbol}`" in guard_seed_row
+
+
+def test_final_aggregation_owner_module_covers_final_contract() -> None:
+    assert two_node_e2e_final_aggregation.FINAL_AGGREGATION_OWNER == (
+        "services.production_closure.two_node_e2e_final_aggregation"
+    )
+    assert two_node_e2e_final_aggregation.FINAL_AGGREGATION_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "final or redaction or evidence_root or stale"'
+    )
+    assert two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA == (
+        "nhms.two_node_e2e.final_evidence.v1"
+    )
+    assert two_node_e2e_final_aggregation.FINAL_AGGREGATION_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_LANE_",
+        "TWO_NODE_E2E_SOURCE_",
+        "TWO_NODE_E2E_DECLARED_SOURCES_MISSING",
+        "TWO_NODE_E2E_REDUCED_SOURCE_SCOPE",
+        "TWO_NODE_E2E_EVIDENCE_",
+        "TWO_NODE_E2E_RUN_ID_UNSAFE",
+        "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
+    )
+    for symbol in two_node_e2e_final_aggregation.FINAL_AGGREGATION_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_final_aggregation, symbol), symbol
+
+    assert two_node_e2e_evidence.FINAL_EVIDENCE_SCHEMA == two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA
+    assert two_node_e2e_evidence.STATUS_PASS == two_node_e2e_final_aggregation.STATUS_PASS
+    assert two_node_e2e_evidence.STATUS_PARTIAL == two_node_e2e_final_aggregation.STATUS_PARTIAL
+    assert two_node_e2e_evidence.STATUS_BLOCKED == two_node_e2e_final_aggregation.STATUS_BLOCKED
+    assert two_node_e2e_evidence.STATUS_FAIL == two_node_e2e_final_aggregation.STATUS_FAIL
+    assert two_node_e2e_evidence.EvidenceWriter is two_node_e2e_final_aggregation.EvidenceWriter
+    assert two_node_e2e_evidence.TwoNodeE2EEvidenceError is two_node_e2e_final_aggregation.TwoNodeE2EEvidenceError
+    assert (
+        two_node_e2e_evidence._safe_resolved_evidence_root
+        is two_node_e2e_final_aggregation._safe_resolved_evidence_root
+    )
+    assert two_node_e2e_evidence._path_is_relative_to is two_node_e2e_final_aggregation._path_is_relative_to
+    assert (
+        two_node_e2e_evidence._refuse_symlink_components
+        is two_node_e2e_final_aggregation._refuse_symlink_components
+    )
+    assert two_node_e2e_evidence._public_path is two_node_e2e_final_aggregation._public_path
+
+
+def test_final_aggregation_inventory_records_current_owner() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    rows = [line for line in inventory_text.splitlines() if line.startswith("| final aggregation |")]
+
+    assert len(rows) == 2
+    lane_contract_row, guard_seed_row = rows
+    assert (
+        "Current owner `services.production_closure.two_node_e2e_final_aggregation`"
+        in lane_contract_row
+    )
+    assert "Future owner" not in lane_contract_row
+    assert "`validate_two_node_e2e_evidence(config)`" in lane_contract_row
+    assert "`build_final_summary(...)`" in lane_contract_row
+    assert "`write_final_summary(...)`" in lane_contract_row
+    assert two_node_e2e_final_aggregation.FINAL_AGGREGATION_VERIFICATION in lane_contract_row
+    for symbol in (
+        "two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA",
+        "two_node_e2e_final_aggregation.EvidenceWriter",
+        "two_node_e2e_final_aggregation.build_final_summary",
+        "two_node_e2e_final_aggregation.write_final_summary",
+        "two_node_e2e_final_aggregation.final_status",
+        "two_node_e2e_final_aggregation.collect_blockers_and_findings",
+        "two_node_e2e_final_aggregation.metadata_summary",
+        "two_node_e2e_final_aggregation._safe_resolved_evidence_root",
+        "validate_two_node_e2e_evidence",
+    ):
+        assert f"`{symbol}`" in guard_seed_row
+
+
+def test_final_aggregation_validator_delegates_summary_and_write_to_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = _run_id("final-owner-delegates")
+    config = _seed_pass_bundle(run_id)
+    observed: dict[str, Any] = {}
+    original_build = two_node_e2e_final_aggregation.build_final_summary
+    original_write = two_node_e2e_final_aggregation.write_final_summary
+
+    def spy_build_final_summary(**kwargs: Any) -> dict[str, Any]:
+        observed["build_called"] = True
+        observed["helper_type"] = type(kwargs["helpers"])
+        observed["lane_names"] = tuple(kwargs["lanes"])
+        return original_build(**kwargs)
+
+    def spy_write_final_summary(**kwargs: Any) -> Any:
+        observed["write_called"] = True
+        observed["writer_type"] = type(kwargs["writer"])
+        observed["schema"] = kwargs["summary"]["schema"]
+        observed["status"] = kwargs["summary"]["status"]
+        return original_write(**kwargs)
+
+    monkeypatch.setattr(two_node_e2e_final_aggregation, "build_final_summary", spy_build_final_summary)
+    monkeypatch.setattr(two_node_e2e_final_aggregation, "write_final_summary", spy_write_final_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert observed == {
+        "build_called": True,
+        "helper_type": two_node_e2e_final_aggregation.FinalAggregationHelpers,
+        "lane_names": tuple(summary["lane_summaries"]),
+        "write_called": True,
+        "writer_type": two_node_e2e_final_aggregation.EvidenceWriter,
+        "schema": two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA,
+        "status": STATUS_PASS,
+    }
+
+
+def test_final_status_ordering_and_source_scope_semantics_are_owner_owned() -> None:
+    def lane(name: str, status: str) -> two_node_e2e_evidence.LaneEvaluation:
+        return two_node_e2e_evidence.LaneEvaluation(name=name, status=status)
+
+    full_scope = {"declared_sources": ("GFS", "IFS"), "reduced_scope": False}
+    full_sources = {"GFS": {"status": STATUS_PASS}, "IFS": {"status": STATUS_PASS}}
+    pass_lanes = {"metadata": lane("metadata", STATUS_PASS), "api": lane("api", STATUS_PASS)}
+
+    assert two_node_e2e_final_aggregation.final_status(pass_lanes, full_sources, full_scope) == STATUS_PASS
+    assert (
+        two_node_e2e_final_aggregation.final_status(
+            {**pass_lanes, "docker_security": lane("docker_security", STATUS_PARTIAL)},
+            full_sources,
+            full_scope,
+        )
+        == STATUS_PARTIAL
+    )
+    assert (
+        two_node_e2e_final_aggregation.final_status(
+            pass_lanes,
+            {"GFS": {"status": STATUS_PASS}},
+            {"declared_sources": ("GFS",), "reduced_scope": True},
+        )
+        == STATUS_PARTIAL
+    )
+    assert (
+        two_node_e2e_final_aggregation.final_status(
+            {**pass_lanes, "browser": lane("browser", STATUS_BLOCKED)},
+            full_sources,
+            full_scope,
+        )
+        == STATUS_BLOCKED
+    )
+    assert (
+        two_node_e2e_final_aggregation.final_status(
+            {**pass_lanes, "browser": lane("browser", STATUS_BLOCKED), "logs": lane("logs", STATUS_FAIL)},
+            full_sources,
+            full_scope,
+        )
+        == STATUS_FAIL
+    )
+
+    blockers, findings = two_node_e2e_final_aggregation.collect_blockers_and_findings(
+        {"api": lane("api", STATUS_BLOCKED), "logs": lane("logs", STATUS_FAIL)},
+        {"GFS": {"status": STATUS_BLOCKED}, "IFS": {"status": STATUS_FAIL}},
+        full_scope,
+        helpers=two_node_e2e_evidence._final_aggregation_helpers(),
+    )
+    assert _codes(blockers) >= {"TWO_NODE_E2E_LANE_BLOCKED", "TWO_NODE_E2E_SOURCE_BLOCKED"}
+    assert _codes(findings) >= {"TWO_NODE_E2E_LANE_FAILED", "TWO_NODE_E2E_SOURCE_FAILED"}
 
 
 def test_cross_plane_owner_direct_evaluator_and_source_scope_match_full_validator_pass() -> None:
