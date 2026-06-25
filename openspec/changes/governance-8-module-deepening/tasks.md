@@ -1190,10 +1190,67 @@
     API/browser/logs lanes, or manual ops move in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_security or docker_display"`.
   - Inventory/Evidence Update: update two-node inventory row `Docker security`.
-- [ ] 3.5 Readonly DB lane extraction.
+- [x] 3.5 Readonly DB lane extraction.
   - Module/Scope: readonly DB source/sibling artifacts, live readonly proof, route identity, no-write probes, source coverage, recomputed status.
   - Dependencies: 3.1 and 3.2.
   - Out of Scope: Docker security, API/browser/logs source lanes, DB schema or role changes.
+  - Fixture Level: expanded; Repair Intensity: high, because readonly DB
+    moves a large product-safety owner family with authoritative sibling files,
+    merged per-source artifacts, live validation provenance, route strict
+    identity, manual-action no-write probes, permission/catalog mutation
+    findings, and recomputed PASS/BLOCKED/FAIL semantics while preserving the
+    stable final validator entrypoint.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (both readonly DB filename aliases stay accepted in owner
+    discovery order); Schema / field names (`nhms.readonly_db_boundary.evidence.v1`,
+    `validation_provenance`, `role`, `route_smoke`,
+    `permission_probes`, `manual_action_probes`, and blocker/finding namespaces
+    stay stable); File IO / path safety / overwrite (sibling/source artifact
+    paths, sha256, approved roots, current-run binding, bounded JSON, and
+    safe-read checks stay wired through shared helpers); Auth / permissions /
+    secrets (database URL redaction, readonly role proof, mutating catalog
+    privileges, successful mutation probes, and manual-action no-write proof
+    preserve fail-closed behavior); Error handling / partial outputs (missing
+    lane, stale run, missing live provenance, missing source coverage,
+    sibling mismatch, stale/unscoped child evidence, route identity mismatch,
+    manual-action write proof, permission coverage gap, and producer
+    blockers/findings preserve BLOCKED/FAIL semantics); Documentation /
+    migration notes (two-node inventory records the current owner module and
+    guard symbols). Not Selected: Docker security, API/browser/logs lanes,
+    manual ops lane extraction, DB schema/role creation, frontend/display route
+    implementation, Slurm runtime behavior, or final aggregation movement.
+  - Invariant Matrix: Governing invariant: readonly DB contract checks are
+    owned by `services.production_closure.two_node_e2e_readonly_db_lane` while
+    the aggregator keeps stable composition and shared helper injection.
+    Source-of-truth identity/contract: readonly DB document candidates, live
+    schema, required route names, strict route identity fields, required
+    permission targets/operations, required authoritative sibling/source
+    artifact filenames, manual no-write proof aliases, helper dataclass, and
+    `evaluate_readonly_db(...)` agree with the two-node inventory and spec.
+    Surfaces: Producers: `db/readonly-db-boundary/*` and merged per-source
+    readonly DB artifacts; Compatibility/stable entrypoint:
+    `validate_two_node_e2e_evidence(config)`; Validators/security: focused
+    readonly DB tests plus OpenSpec; Public outputs:
+    `lane_summaries.readonly_db`; Failure paths/rollback/stale state:
+    stale/missing current-run IDs, unsupported schema, missing live proof,
+    unsafe/unapproved paths, invalid JSON, hash mismatch, source coverage gaps,
+    sibling mismatch, route strict identity gaps, manual-action write proof,
+    mutating privileges, successful mutation probes, and recomputed status
+    disagreement.
+  - Regression Rows: owner module exposes discovery aliases, live schema,
+    required route/manual/permission/source-artifact constants, helper
+    dataclass, evaluator, guard symbols, and blocker namespaces; aggregator
+    uses owner discovery aliases and helper injection while keeping final
+    summary shape unchanged; direct tests prove owner guard metadata and both
+    readonly DB alias fallbacks; existing focused tests prove live provenance,
+    source artifact path/sha/current-run/root binding, authoritative sibling
+    recomputation, route strict identity, source coverage, manual action
+    no-write proof, permission operation coverage, mutating finding, and
+    fail/block/pass status semantics; inventory row records current owner and
+    guard hook tokens; no Docker security, API/browser/logs, manual ops, DB
+    schema, DB role, or final aggregation behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "readonly_db"`.
   - Inventory/Evidence Update: update two-node inventory row `readonly DB`.
 - [ ] 3.6 Simple live lane helper and Slurm/compute/display lanes.
