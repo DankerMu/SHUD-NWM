@@ -1,13 +1,15 @@
 # Chain Compatibility Inventory
 
-Snapshot date: 2026-06-24
+Snapshot date: 2026-06-25
 
 Scope: Governance-7 issue #670 inventory, Governance-8 issue #721 guard
-fixture, and Governance-8 chain owner-family fixtures #722 through #729 for
+fixture, Governance-8 chain owner-family fixtures #722 through #730, and
+Governance-8 issue #731 chain group closeout evidence for
 `services/orchestrator/chain.py`. This page records chain compatibility export
-groups, monkeypatch bindings, real owner modules, known callers/tests, retention
-reasons, removal conditions, caller migration paths, verification commands, and
-Guard Hook Seed expectations for chain facade growth.
+groups, monkeypatch bindings, real owner modules, known callers/tests,
+retention reasons, removal conditions, caller migration paths, verification
+commands, Guard Hook Seed expectations for chain facade growth, and final
+task-to-issue-to-PR evidence for the chain group.
 
 This inventory is evidence-only. It does not move code, remove symbols, change
 orchestrator behavior, inventory `services/orchestrator/scheduler.py`, or write
@@ -104,6 +106,35 @@ corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/
 git diff --check
 ```
 
+Governance-8 issue #731 chain closeout verification commands:
+
+```bash
+uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py tests/test_real_database_integration.py
+uv run pytest -q tests/test_entropy_audit_script.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
+## Chain Group Closeout Evidence
+
+Governance-8 issue #731 closes chain tasks 2.1 through 2.11. The table below
+is the implementation evidence map for the chain group; it ties each OpenSpec
+task to its GitHub issue and implementation PR.
+
+| Task | Issue | PR | Closeout evidence |
+|---|---|---|---|
+| 2.1 Chain compatibility guard and parity fixture | #721 | #780 | Guard fixture, Guard Hook Seed metadata for all nine chain groups, and compatibility-facade growth checks. |
+| 2.2 Chain stage catalog/type owner-family completion | #722 | #781 | Static stage/type re-export identity, owner/facade map, and inventory-token coverage. |
+| 2.3 Chain stage execution owner-family completion | #723 | #782 | Stage-execution forwarder, dependency-field, owner `__all__`, and legacy wrapper delegation coverage. |
+| 2.4 Chain array-accounting owner-family completion | #724 | #783 | Array-accounting wrapper, dependency binding, partial-success, and monkeypatch-seam coverage. |
+| 2.5 Chain manifest owner-family completion | #725 | #784 | Manifest alias/wrapper/method maps, dependency binding, and quality-state monkeypatch coverage. |
+| 2.6 Chain reservation owner-family completion | #726 | #785 | Reservation alias, reserve/bind wrapper, local idempotency-key glue, and durable reservation coverage. |
+| 2.7 Chain retry owner-family completion | #727 | #786 | Retry alias, constructor seam, chain-local bridge, retry transaction release, and scheduler factory coverage. |
+| 2.8 Chain tile-publisher owner-family completion | #728 | #787 | Tile-publisher alias/function identity, local publish monkeypatch, failure-payload, and redaction coverage. |
+| 2.9 Chain worker/source-identity and time-consistency owner-family completion | #729 | #788 | Worker/source identity aliases, dynamic adapter metadata, time-consistency alias, and fail-closed coverage. |
+| 2.10 Chain persistence/repository ownership decision and extraction/retention | #730 | #789 | Persistence primitive aliases, retained chain-local repository classifications, repository method surface, and scheduler legacy import-token coverage. |
+| 2.11 Chain group verification and evidence closeout | #731 | #790 | Final group verification and this issue/PR mapping. |
+
 ## Non-Targets
 
 - No chain behavior changes, Slurm behavior changes, DB changes, API contract
@@ -133,6 +164,10 @@ git diff --check
   accounting, manifest assembly, tile publication, worker/source identity, DB,
   Slurm, API/frontend, or display behavior movement in #726; it only completes
   the reservation owner-family compatibility contract.
+- No retry policy/backoff behavior, scheduler behavior, reservation protocol,
+  stage execution polling, repository schema, API/frontend, display behavior,
+  or production topology movement in #727; it only completes the retry
+  owner-family compatibility contract.
 - No Slurm stage execution semantics, array accounting, repository behavior,
   tile-publisher copyback implementation, delivery DB schema, API/frontend,
   display behavior, or production topology movement in #728; it only completes
@@ -142,6 +177,13 @@ git diff --check
   behavior, Slurm behavior, or production topology movement in #729; it only
   completes the worker/source-identity and time-consistency compatibility
   contract.
+- No DB migration, scheduler behavior, retry policy, repository SQL behavior,
+  persistence schema, Slurm behavior, API/frontend/display behavior, or
+  production topology movement in #730; it only records persistence primitive
+  aliases and retained chain-local repository classifications.
+- No new chain runtime behavior, Slurm behavior, DB schema, API/frontend/display
+  behavior, or compatibility symbol removal in #731; it only records the final
+  chain issue/PR mapping and verifies the chain group gate.
 - No file splitting or owner-module extraction in this slice.
 - `ForecastOrchestrator`, `AnalysisOrchestrator`, `OrchestratorConfig`,
   `OrchestratorRepository`, `PsycopgOrchestratorRepository`,
