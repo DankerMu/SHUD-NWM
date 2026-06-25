@@ -127,6 +127,178 @@ production_stage_for = chain_manifests.production_stage_for
 production_status_for = production_contract.production_status_for
 serialize_manifest_index = chain_manifests.serialize_manifest_index
 
+_CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES = (
+    "ANALYSIS_SCENARIO_ID",
+    "DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES",
+    "FORCING_CAUSALITY_CAUSAL",
+    "FORCING_CAUSALITY_DELAYED_REANALYSIS",
+    "ManifestValidationError",
+    "PRODUCTION_CONTRACT_ID",
+    "PRODUCTION_CONTRACT_SCHEMA_VERSION",
+    "_analysis_forcing_causality",
+    "_analysis_update_ic_step_minutes",
+    "_assembly_from_entry",
+    "_assembly_payload_from_runtime_manifest",
+    "_assembly_quality_states",
+    "_cycle_residual_blockers",
+    "_default_forcing_uri",
+    "_directory_uri",
+    "_display_contract",
+    "_ensure_segment_utc",
+    "_era5_reanalysis_latency_minutes",
+    "_forecast_state_checkpoint_hours",
+    "_frequency_contract",
+    "_has_uri_scheme",
+    "_model_package_manifest_uri",
+    "_model_run_stage_evidence",
+    "_nested_value",
+    "_output_river_contract",
+    "_preserve_directory_uri",
+    "_project_name_for_basin",
+    "_safe_project_name",
+    "_station_metadata_for_basin",
+    "_tri_state",
+    "build_reindexed_manifest",
+    "production_stage_for",
+    "serialize_manifest_index",
+)
+_CHAIN_MANIFEST_COMPAT_PRODUCTION_CONTRACT_ALIAS_NAMES = ("production_status_for",)
+_CHAIN_MANIFEST_COMPAT_ALIAS_NAMES = (
+    *_CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES,
+    *_CHAIN_MANIFEST_COMPAT_PRODUCTION_CONTRACT_ALIAS_NAMES,
+)
+_CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES if not hasattr(chain_manifests, name)
+)
+_CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING += tuple(
+    name
+    for name in _CHAIN_MANIFEST_COMPAT_PRODUCTION_CONTRACT_ALIAS_NAMES
+    if not hasattr(production_contract, name)
+)
+_CHAIN_MANIFEST_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_MANIFEST_COMPAT_ALIAS_NAMES if name not in globals()
+)
+if _CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility aliases missing from owner modules: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_MANIFEST_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+_CHAIN_MANIFEST_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {
+        **{name: getattr(chain_manifests, name) for name in _CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES},
+        **{
+            name: getattr(production_contract, name)
+            for name in _CHAIN_MANIFEST_COMPAT_PRODUCTION_CONTRACT_ALIAS_NAMES
+        },
+    }
+)
+_CHAIN_MANIFEST_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_MANIFEST_COMPAT_ALIAS_NAMES}
+)
+for _chain_manifest_alias_name, _chain_manifest_owner_value in _CHAIN_MANIFEST_COMPAT_OWNER_ALIASES.items():
+    if _CHAIN_MANIFEST_COMPAT_FACADE_ALIASES[_chain_manifest_alias_name] is not _chain_manifest_owner_value:
+        raise RuntimeError(
+            "chain manifest direct alias drifted from owner module: "
+            f"{_chain_manifest_alias_name}"
+        )
+del _chain_manifest_alias_name, _chain_manifest_owner_value
+
+_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES = (
+    "build_model_run_assembly",
+    "_frequency_quality_state",
+    "_publish_quality_state",
+)
+_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES = (
+    "build_model_run_assembly",
+    "_frequency_quality_state",
+    "_publish_quality_state",
+)
+_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES = (
+    "_build_cycle_stage_manifest",
+    "_write_cycle_manifest_index",
+    "_prepare_forecast_runtime_manifests",
+    "_build_forecast_runtime_manifest",
+    "_validate_forecast_runtime_manifest",
+    "_reindexed_manifest_entries",
+    "_build_run_manifest",
+    "_write_run_manifest",
+)
+_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES = (
+    "build_cycle_stage_manifest",
+    "write_cycle_manifest_index",
+    "prepare_forecast_runtime_manifests",
+    "build_forecast_runtime_manifest",
+    "validate_forecast_runtime_manifest",
+    "reindexed_manifest_entries",
+    "build_forecast_run_manifest",
+    "write_run_manifest",
+)
+_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES = ("_build_run_manifest",)
+_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES = ("build_analysis_run_manifest",)
+_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS = MappingProxyType(
+    {
+        "build_model_run_assembly": (
+            ("default_forcing_uri", "_default_forcing_uri"),
+            ("preserve_directory_uri", "_preserve_directory_uri"),
+            ("station_metadata_for_basin", "_station_metadata_for_basin"),
+            ("output_river_contract", "_output_river_contract"),
+            ("frequency_contract", "_frequency_contract"),
+            ("display_contract", "_display_contract"),
+            ("assembly_quality_states", "_assembly_quality_states"),
+            ("project_name_for_basin", "_project_name_for_basin"),
+            ("model_package_manifest_uri", "_model_package_manifest_uri"),
+        ),
+        "_frequency_quality_state": (("model_run_stage_evidence", "_model_run_stage_evidence"),),
+        "_publish_quality_state": (("model_run_stage_evidence", "_model_run_stage_evidence"),),
+        "ForecastOrchestrator._build_cycle_stage_manifest": (
+            ("model_run_stage_evidence", "_model_run_stage_evidence"),
+            ("frequency_quality_state", "_frequency_quality_state"),
+            ("publish_quality_state", "_publish_quality_state"),
+            ("cycle_residual_blockers", "_cycle_residual_blockers"),
+        ),
+        "ForecastOrchestrator._prepare_forecast_runtime_manifests": (
+            ("assembly_payload_from_runtime_manifest", "_assembly_payload_from_runtime_manifest"),
+        ),
+        "ForecastOrchestrator._build_forecast_runtime_manifest": (
+            ("assembly_builder", "build_model_run_assembly"),
+            ("forecast_state_checkpoint_hours", "_forecast_state_checkpoint_hours"),
+        ),
+        "ForecastOrchestrator._reindexed_manifest_entries": (
+            ("reindex_builder", "build_reindexed_manifest"),
+            ("assembly_builder", "build_model_run_assembly"),
+        ),
+        "ForecastOrchestrator._build_run_manifest": (
+            ("forecast_state_checkpoint_hours", "_forecast_state_checkpoint_hours"),
+        ),
+        "AnalysisOrchestrator._build_run_manifest": (
+            ("analysis_forcing_causality", "_analysis_forcing_causality"),
+            ("analysis_update_ic_step_minutes", "_analysis_update_ic_step_minutes"),
+        ),
+    }
+)
+_CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_NAMES = tuple(
+    dict.fromkeys(
+        (
+            *_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+            *_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES,
+            *_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES,
+        )
+    )
+)
+_CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING = tuple(
+    name for name in _CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_NAMES if not hasattr(chain_manifests, name)
+)
+if _CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility functions missing from owner module: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING)}"
+    )
+
 _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
     "ANALYSIS_STAGES",
     "LEGACY_FORECAST_STAGES",
@@ -466,6 +638,25 @@ def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[s
         cycle_id=cycle_id,
         model_run_stage_evidence=_model_run_stage_evidence,
     )
+
+_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING = tuple(
+    name for name in _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES if not callable(globals().get(name))
+)
+if _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility top-level forwarders missing from facade: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING)}"
+    )
+_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_manifests, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES,
+            _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
@@ -4189,6 +4380,59 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         if self.best_available_manager is None or context.forcing_version_id is None:
             return
         self.best_available_manager.write_forcing_version(context.forcing_version_id)
+
+
+_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES
+    if not callable(getattr(ForecastOrchestrator, name, None))
+)
+if _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility forecast methods missing from facade: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING)}"
+    )
+_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES
+    if not callable(getattr(AnalysisOrchestrator, name, None))
+)
+if _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING:
+    raise RuntimeError(
+        "chain manifest compatibility analysis methods missing from facade: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING)}"
+    )
+_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_manifests, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES,
+            _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_manifests, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES,
+            _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT = tuple(
+    f"{binding_owner}.{field}"
+    for binding_owner, bindings in _CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS.items()
+    for field, facade_name in bindings
+    if not callable(globals().get(facade_name))
+)
+if _CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT:
+    raise RuntimeError(
+        "chain manifest compatibility dependency bindings missing from facade: "
+        f"{', '.join(_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT)}"
+    )
 
 
 @dataclass(frozen=True)
