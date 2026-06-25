@@ -17,6 +17,7 @@ import services.production_closure.two_node_e2e_api_lane as two_node_e2e_api_lan
 import services.production_closure.two_node_e2e_browser_lane as two_node_e2e_browser_lane
 import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e_docker_preflight
 import services.production_closure.two_node_e2e_docker_security as two_node_e2e_docker_security
+import services.production_closure.two_node_e2e_logs_lane as two_node_e2e_logs_lane
 import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
 import services.production_closure.two_node_e2e_readonly_db_lane as two_node_e2e_readonly_db_lane
 import services.production_closure.two_node_e2e_simple_live_lane as two_node_e2e_simple_live_lane
@@ -43,6 +44,10 @@ from services.production_closure.two_node_e2e_docker_preflight import (
 from services.production_closure.two_node_e2e_docker_security import (
     DockerSecurityEvaluationHelpers,
     evaluate_docker_security,
+)
+from services.production_closure.two_node_e2e_logs_lane import (
+    LogsLaneEvaluationHelpers,
+    evaluate_logs_lane,
 )
 from services.production_closure.two_node_e2e_metadata_lane import (
     FULL_PASS_SOURCE_SET,
@@ -681,16 +686,13 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             evidence_run_id=config.run_id,
             helpers=_browser_lane_helpers(),
         ),
-        "logs": _evaluate_source_lane(
-            "logs",
+        "logs": evaluate_logs_lane(
             lane_docs["logs"],
             declared_sources=scope["declared_sources"],
             strict_identities=strict_identities,
-            required_checks=("job_logs",),
-            live_flag="live_log_evidence",
-            require_job_id=True,
             evidence_run_id=config.run_id,
             docker_security_doc=lane_docs["docker_security"],
+            helpers=_logs_lane_helpers(),
         ),
         "slurm": evaluate_simple_live_lane(
             two_node_e2e_simple_live_lane.SLURM_LANE_CONFIG,
@@ -788,7 +790,7 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
             run_dir,
             two_node_e2e_simple_live_lane.SLURM_DOCUMENT_CANDIDATES,
         ),
-        "logs": _find_first_json(run_dir, ("logs/summary.json", "logs/evidence.json")),
+        "logs": _find_first_json(run_dir, two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES),
         "compute_summary": _find_first_json(
             run_dir,
             two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_DOCUMENT_CANDIDATES,
@@ -959,222 +961,30 @@ def _browser_lane_helpers() -> BrowserLaneEvaluationHelpers[LaneEvaluation]:
     )
 
 
-def _evaluate_source_lane(
-    name: str,
-    doc: EvidenceDocument | None,
-    *,
-    declared_sources: tuple[str, ...],
-    strict_identities: Mapping[str, Mapping[str, Any]],
-    required_checks: tuple[str, ...],
-    live_flag: str,
-    require_job_id: bool = False,
-    evidence_run_id: str,
-    docker_security_doc: EvidenceDocument | None = None,
-) -> LaneEvaluation:
-    if doc is None:
-        return _missing_lane(name, f"TWO_NODE_E2E_{name.upper()}_EVIDENCE_MISSING")
-    payload = doc.payload
-    status = _normalized_status(payload.get("status"))
-    blockers = list(_stale_lane_blockers(payload))
-    findings: list[dict[str, Any]] = []
-    partial_sources = False
-    if _has_mock_or_fixture(payload):
-        findings.append(
-            _finding(
-                f"TWO_NODE_E2E_{name.upper()}_MOCK_EVIDENCE",
-                f"{name} evidence uses mock or deterministic fixture data.",
-            )
-        )
-    if _has_historical_latest(payload):
-        findings.append(
-            _finding(
-                f"TWO_NODE_E2E_{name.upper()}_HISTORICAL_LATEST",
-                f"{name} evidence uses historical latest or source-only fallback.",
-            )
-        )
-    if status == STATUS_PASS:
-        blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name=name))
-        blockers.extend(
-            _recursive_current_run_blockers(payload, evidence_run_id, lane_name=name)
-        )
-        blockers.extend(
-            _producer_source_artifact_blockers(
-                payload,
-                evidence_run_id=evidence_run_id,
-                lane_name=name,
-                run_dir=doc.path.parents[1],
-            )
-        )
-        if not _has_live_lane_evidence(payload, live_flag=live_flag):
-            blockers.append(
-                _blocker(
-                    f"TWO_NODE_E2E_{name.upper()}_LIVE_EVIDENCE_MISSING",
-                    f"{name} PASS requires live evidence.",
-                )
-            )
-        if not _has_producer_backed_lane_evidence(payload):
-            blockers.append(
-                _blocker(
-                    f"TWO_NODE_E2E_{name.upper()}_PRODUCER_EVIDENCE_MISSING",
-                    f"{name} PASS requires producer-backed command, artifact, request/response, browser, "
-                    "network, or per-check evidence.",
-                )
-            )
-        if name in {"api", "browser", "logs"}:
-            blockers.extend(
-                _source_lane_check_producer_blockers(
-                    name,
-                    payload,
-                    declared_sources=declared_sources,
-                    required_checks=required_checks,
-                    strict_identities=strict_identities,
-                    evidence_run_id=evidence_run_id,
-                )
-            )
-    records = _source_records(payload)
-    missing_sources = [source for source in declared_sources if source not in records]
-    for source in missing_sources:
-        blockers.append(
-            _blocker(
-                f"TWO_NODE_E2E_{name.upper()}_SOURCE_MISSING",
-                f"{name} evidence is missing declared source {source}.",
-                source=source,
-            )
-        )
-    for source in declared_sources:
-        record = records.get(source)
-        if record is None:
-            continue
-        source_status = _normalized_status(record.get("status"))
-        if source_status == STATUS_FAIL:
-            findings.append(
-                _finding(
-                    f"TWO_NODE_E2E_{name.upper()}_SOURCE_FAILED",
-                    f"{name} source evidence failed.",
-                    source=source,
-                )
-            )
-        elif source_status == STATUS_BLOCKED:
-            blockers.append(
-                _blocker(
-                    f"TWO_NODE_E2E_{name.upper()}_SOURCE_BLOCKED",
-                    f"{name} source evidence is blocked.",
-                    source=source,
-                )
-            )
-        elif source_status == STATUS_PARTIAL:
-            partial_sources = True
-        _, identity_findings, identity_blockers = _identity_match_status(
-            source,
-            record,
-            strict_identities,
-            require_job_id=require_job_id,
-        )
-        findings.extend(
-            _with_context(item, lane=name, source=source)
-            for item in identity_findings
-        )
-        blockers.extend(
-            _with_context(item, lane=name, source=source)
-            for item in identity_blockers
-        )
-        check_results = _check_results(record)
-        for check in required_checks:
-            check_result = check_results.get(check)
-            if check_result is None:
-                blockers.append(
-                    _blocker(
-                        f"TWO_NODE_E2E_{name.upper()}_CHECK_MISSING",
-                        f"{name} source evidence is missing required check {check}.",
-                        source=source,
-                        check=check,
-                    )
-                )
-                continue
-            check_status = _normalized_status(check_result.get("status"))
-            if _has_mock_or_fixture(check_result):
-                findings.append(
-                    _finding(
-                        f"TWO_NODE_E2E_{name.upper()}_MOCK_CHECK",
-                        f"{name} check uses mock or fixture data.",
-                        source=source,
-                        check=check,
-                    )
-                )
-            if _has_historical_latest(check_result):
-                findings.append(
-                    _finding(
-                        f"TWO_NODE_E2E_{name.upper()}_HISTORICAL_CHECK",
-                        f"{name} check uses historical latest or source-only fallback.",
-                        source=source,
-                        check=check,
-                    )
-                )
-            if check_status == STATUS_FAIL:
-                findings.append(
-                    _finding(
-                        f"TWO_NODE_E2E_{name.upper()}_CHECK_FAILED",
-                        f"{name} required check failed.",
-                        source=source,
-                        check=check,
-                    )
-                )
-            elif check_status != STATUS_PASS:
-                blockers.append(
-                    _blocker(
-                        f"TWO_NODE_E2E_{name.upper()}_CHECK_BLOCKED",
-                        f"{name} required check is not PASS.",
-                        source=source,
-                        check=check,
-                        check_status=check_status,
-                    )
-                )
-            _, check_findings, check_blockers = _identity_match_status(
-                source,
-                check_result,
-                strict_identities,
-                require_job_id=require_job_id or check in {"job_logs", "ops_jobs", "ops_job_logs"},
-            )
-            findings.extend(
-                _with_context(item, lane=name, source=source, check=check)
-                for item in check_findings
-            )
-            blockers.extend(
-                _with_context(item, lane=name, source=source, check=check)
-                for item in check_blockers
-            )
-            if name == "logs" and check == "job_logs":
-                blockers.extend(
-                    _with_context(
-                        item,
-                        lane=name,
-                        source=source,
-                        check=check,
-                    )
-                    for item in _logs_check_published_artifact_blockers(
-                        check_result,
-                        source_record=record,
-                        lane_payload=payload,
-                        expected_identity=strict_identities.get(source, {}),
-                        docker_security_payload=(
-                            docker_security_doc.payload if docker_security_doc is not None else None
-                        ),
-                    )
-                )
-    if findings:
-        status = STATUS_FAIL
-    elif status == STATUS_PASS:
-        if blockers:
-            status = STATUS_BLOCKED
-        elif partial_sources:
-            status = STATUS_PARTIAL
-    return _lane_from_status(
-        name,
-        doc,
-        status=status,
-        summary_status=str(payload.get("status", "unknown")),
-        blockers=blockers,
-        findings=findings,
+def _logs_lane_helpers() -> LogsLaneEvaluationHelpers[LaneEvaluation]:
+    return LogsLaneEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        blocker=_blocker,
+        finding=_finding,
+        stale_lane_blockers=_stale_lane_blockers,
+        current_run_blockers=_current_run_blockers,
+        recursive_current_run_blockers=_recursive_current_run_blockers,
+        producer_source_artifact_blockers=_producer_source_artifact_blockers,
+        source_lane_check_producer_blockers=_source_lane_check_producer_blockers,
+        logs_check_published_artifact_blockers=_logs_check_published_artifact_blockers,
+        has_live_lane_evidence=lambda payload: _has_live_lane_evidence(
+            payload,
+            live_flag=two_node_e2e_logs_lane.LOGS_LIVE_FLAG,
+        ),
+        has_producer_backed_lane_evidence=_has_producer_backed_lane_evidence,
+        has_mock_or_fixture=_has_mock_or_fixture,
+        has_historical_latest=_has_historical_latest,
+        source_records=_source_records,
+        check_results=_check_results,
+        identity_match_status=_identity_match_status,
+        with_context=_with_context,
     )
 
 
