@@ -13,6 +13,7 @@ import pytest
 import services.production_closure.two_node_e2e_evidence as two_node_e2e_evidence
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.artifacts.reader import published_log_uri
+from services.production_closure import two_node_e2e_metadata_lane
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
@@ -122,11 +123,11 @@ def _expected_shared_contracts() -> dict[str, dict[str, tuple[str, ...] | str]]:
         "strict-identity": {
             "consumers": ("metadata", "readonly_db", "api", "browser", "logs", "cross_plane", "manual_ops"),
             "guard_symbols": (
-                "STRICT_IDENTITY_FIELDS",
-                "STRICT_LOG_IDENTITY_FIELDS",
+                "two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS",
+                "two_node_e2e_metadata_lane.STRICT_LOG_IDENTITY_FIELDS",
                 "LOG_URI_IDENTITY_FIELDS",
-                "_resolve_strict_identities",
-                "_strict_identity_metadata_issues",
+                "two_node_e2e_metadata_lane.resolve_strict_identities",
+                "two_node_e2e_metadata_lane.strict_identity_metadata_issues",
                 "_strict_identity_value_matches",
                 "_record_identity",
             ),
@@ -234,6 +235,73 @@ def test_shared_two_node_evidence_contract_inventory_covers_metadata_source_scop
             assert f"`{symbol}`" in row
         for namespace in metadata["namespaces"]:
             assert f"`{namespace}`" in row
+
+
+def test_metadata_lane_owner_module_covers_metadata_source_scope_contract() -> None:
+    assert two_node_e2e_metadata_lane.METADATA_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_metadata_lane"
+    )
+    assert two_node_e2e_metadata_lane.METADATA_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"'
+    )
+    assert two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES == (
+        "run.json",
+        "identity.json",
+        "metadata.json",
+        "cross-plane/run.json",
+        "cross-plane/identity.json",
+    )
+    for symbol in two_node_e2e_metadata_lane.METADATA_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_metadata_lane, symbol), symbol
+
+
+def test_metadata_lane_owner_evaluates_scope_identity_and_downstream_seed() -> None:
+    run_id = _run_id("metadata-owner")
+    config = _seed_pass_bundle(run_id, sources=("GFS",), reduced_scope=True)
+    metadata_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
+    )
+    assert metadata_doc is not None
+
+    result = two_node_e2e_metadata_lane.evaluate_metadata_lane(
+        metadata_doc,
+        metadata_doc.payload,
+        evidence_run_id=run_id,
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=two_node_e2e_evidence._metadata_lane_helpers(),
+    )
+
+    assert result.lane.status == STATUS_PASS
+    assert result.scope.declared_sources == ("GFS",)
+    assert result.scope.reduced_scope is True
+    assert result.scope.reduced_scope_declared is True
+    assert set(result.strict_identities) == {"GFS"}
+    for field in two_node_e2e_metadata_lane.STRICT_LOG_IDENTITY_FIELDS:
+        assert result.strict_identities["GFS"][field]
+
+    summary = validate_two_node_e2e_evidence(config)
+    assert summary["strict_identity"]["declared_sources"] == ["GFS"]
+    assert summary["strict_identity"]["reduced_scope"] is True
+    assert summary["strict_identity"]["sources"]["GFS"] == result.strict_identities["GFS"]
+    assert summary["source_scope_results"]["GFS"]["identity"] == result.strict_identities["GFS"]
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES)
+def test_metadata_lane_owner_discovers_each_metadata_alias(candidate: str) -> None:
+    run_id = _run_id(f"metadata-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / "run.json"
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    canonical.unlink()
+    _write(config.run_dir / candidate, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["metadata"]["status"] == STATUS_PASS
+    assert summary["metadata"]["evidence_path"] == str((config.run_dir / candidate).resolve().relative_to(REPO_ROOT))
+    assert summary["strict_identity"]["sources"]["GFS"]["job_id"]
 
 
 def test_complete_synthetic_real_evidence_bundle_passes_with_redaction() -> None:

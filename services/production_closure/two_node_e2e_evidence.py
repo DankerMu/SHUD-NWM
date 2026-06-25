@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
+import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -24,6 +25,13 @@ from packages.common.safe_fs import (
 from services.production_closure.two_node_e2e_docker_preflight import (
     DockerPreflightEvaluationHelpers,
     evaluate_docker_preflight,
+)
+from services.production_closure.two_node_e2e_metadata_lane import (
+    FULL_PASS_SOURCE_SET,
+    STRICT_IDENTITY_FIELDS,
+    STRICT_LOG_IDENTITY_FIELDS,
+    MetadataLaneEvaluationHelpers,
+    evaluate_metadata_lane,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -37,13 +45,6 @@ STATUS_PARTIAL = "PARTIAL"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 FINAL_EVIDENCE_SCHEMA = "nhms.two_node_e2e.final_evidence.v1"
-RUN_METADATA_SCHEMAS = frozenset(
-    {
-        "nhms.two_node_e2e.run.v1",
-        "nhms.two_node_e2e.bundle.v1",
-        "nhms.two_node_e2e.identity.v1",
-    }
-)
 READONLY_DB_LIVE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
 DOCKER_SECURITY_SUMMARY_SCHEMA = "nhms.two_node_docker.security_summary.v1"
 DOCKER_SECURITY_CHILD_SCHEMAS: Mapping[str, str] = {
@@ -85,9 +86,6 @@ FINAL_REQUIRED_LANES = (
     "display_summary",
 )
 
-STRICT_IDENTITY_FIELDS = ("run_id", "source", "cycle_time", "model_id")
-STRICT_LOG_IDENTITY_FIELDS = (*STRICT_IDENTITY_FIELDS, "job_id")
-FULL_PASS_SOURCE_SET = frozenset({"GFS", "IFS"})
 LIVE_EXECUTION_MODES = frozenset(
     {
         "live",
@@ -536,11 +534,11 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
         "consumers": ("metadata", "readonly_db", "api", "browser", "logs", "cross_plane", "manual_ops"),
         "guard_symbols": (
-            "STRICT_IDENTITY_FIELDS",
-            "STRICT_LOG_IDENTITY_FIELDS",
+            "two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS",
+            "two_node_e2e_metadata_lane.STRICT_LOG_IDENTITY_FIELDS",
             "LOG_URI_IDENTITY_FIELDS",
-            "_resolve_strict_identities",
-            "_strict_identity_metadata_issues",
+            "two_node_e2e_metadata_lane.resolve_strict_identities",
+            "two_node_e2e_metadata_lane.strict_identity_metadata_issues",
             "_strict_identity_value_matches",
             "_record_identity",
         ),
@@ -811,26 +809,20 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
 
     metadata_doc = _find_first_json(
         config.run_dir,
-        (
-            "run.json",
-            "identity.json",
-            "metadata.json",
-            "cross-plane/run.json",
-            "cross-plane/identity.json",
-        ),
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
     )
     metadata = metadata_doc.payload if metadata_doc is not None else {}
-    scope = _resolve_scope(config, metadata)
-    metadata_lane = _evaluate_metadata(
+    metadata_result = evaluate_metadata_lane(
         metadata_doc,
         metadata,
         evidence_run_id=config.run_id,
-        declared_sources=scope["declared_sources"],
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=_metadata_lane_helpers(),
     )
-    strict_identities = _resolve_strict_identities(
-        metadata if metadata_lane.status == STATUS_PASS else {},
-        declared_sources=scope["declared_sources"],
-    )
+    scope = metadata_result.scope.as_dict()
+    metadata_lane = metadata_result.lane
+    strict_identities = metadata_result.strict_identities
 
     lane_docs = _load_lane_documents(config.run_dir)
     lanes = {
@@ -1013,6 +1005,23 @@ def _docker_preflight_helpers() -> DockerPreflightEvaluationHelpers[LaneEvaluati
         current_run_blockers=_current_run_blockers,
         recorded_path_approval_blockers=_recorded_path_approval_blockers,
         int_value=_int_value,
+    )
+
+
+def _metadata_lane_helpers() -> MetadataLaneEvaluationHelpers[LaneEvaluation]:
+    return MetadataLaneEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        combined_status=_combined_status,
+        blocker=_blocker,
+        finding=_finding,
+        explicit_bundle_run_ids=_explicit_bundle_run_ids,
+        nested_get=_nested_get,
+        sources_from_value=_sources_from_value,
+        source_name=_source_name,
+        identity_value=_identity_value,
+        optional_bool=_optional_bool,
     )
 
 
@@ -1952,299 +1961,6 @@ def _collect_blockers_and_findings(
                 _finding(
                     "TWO_NODE_E2E_SOURCE_FAILED",
                     "Declared source scope failed.",
-                    source=source,
-                )
-            )
-    return blockers, findings
-
-
-def _resolve_scope(
-    config: TwoNodeE2EEvidenceConfig,
-    metadata: Mapping[str, Any],
-) -> dict[str, Any]:
-    declared = config.declared_sources
-    if not declared:
-        declared = _sources_from_value(
-            metadata.get("declared_sources")
-            or metadata.get("sources")
-            or metadata.get("source_scope")
-            or metadata.get("source_scope_results")
-        )
-    if not declared:
-        declared = _sources_from_value(
-            metadata.get("strict_identities")
-            or metadata.get("source_identities")
-            or _nested_get(metadata, ("strict_identity", "sources"))
-        )
-    reduced_scope_value = config.reduced_scope
-    if reduced_scope_value is None:
-        reduced_scope_value = _optional_bool(metadata.get("reduced_scope"))
-    if reduced_scope_value is None:
-        reduced_scope_value = str(metadata.get("scope") or "").lower() in {"reduced", "single_source"}
-    reduced_declared = config.reduced_scope is not None or "reduced_scope" in metadata or "scope" in metadata
-    if declared and not _is_full_scope_sources(declared):
-        reduced_scope_value = True
-    return {
-        "declared_sources": declared,
-        "reduced_scope": bool(reduced_scope_value),
-        "reduced_scope_declared": bool(reduced_declared),
-    }
-
-
-def _resolve_strict_identities(
-    metadata: Mapping[str, Any],
-    *,
-    declared_sources: tuple[str, ...],
-) -> dict[str, dict[str, Any]]:
-    raw = (
-        metadata.get("strict_identities")
-        or metadata.get("source_identities")
-        or _nested_get(metadata, ("strict_identity", "sources"))
-        or {}
-    )
-    identities: dict[str, dict[str, Any]] = {}
-    if isinstance(raw, Mapping):
-        for source, value in raw.items():
-            source_name = _source_name(source)
-            if source_name and isinstance(value, Mapping):
-                identity = dict(value)
-                identity.setdefault("source", source_name)
-                identities[source_name] = identity
-    elif isinstance(raw, list):
-        for value in raw:
-            if isinstance(value, Mapping):
-                source_name = _source_name(value.get("source") or value.get("source_id"))
-                if source_name:
-                    identities[source_name] = dict(value)
-    for source in declared_sources:
-        identities.setdefault(source, {"source": source})
-    return identities
-
-
-def _evaluate_metadata(
-    doc: EvidenceDocument | None,
-    metadata: Mapping[str, Any],
-    *,
-    evidence_run_id: str,
-    declared_sources: tuple[str, ...],
-) -> LaneEvaluation:
-    if doc is None:
-        return _missing_lane("metadata", "TWO_NODE_E2E_METADATA_MISSING")
-    schema = metadata.get("schema")
-    blockers: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
-    summary_status = str(metadata.get("status", STATUS_PASS))
-    if schema not in RUN_METADATA_SCHEMAS:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_SCHEMA_UNSUPPORTED",
-                "Run metadata must use a recognized two-node E2E schema.",
-                schema=schema,
-                recognized_schemas=sorted(RUN_METADATA_SCHEMAS),
-            )
-        )
-    metadata_declared_sources = _sources_from_value(
-        metadata.get("declared_sources")
-        or metadata.get("sources")
-        or metadata.get("source_scope")
-    )
-    if not metadata_declared_sources:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_DECLARED_SOURCES_MISSING",
-                "Run metadata must declare source scope.",
-            )
-        )
-    elif set(metadata_declared_sources) != set(declared_sources):
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_DECLARED_SOURCES_MISMATCH",
-                "Run metadata declared source scope must match the final configured scope.",
-                metadata_declared_sources=list(metadata_declared_sources),
-                configured_declared_sources=list(declared_sources),
-            )
-        )
-    explicit_ids = _explicit_bundle_run_ids(metadata)
-    if not explicit_ids:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_CURRENT_BUNDLE_ID_MISSING",
-                "Run metadata must declare the current evidence bundle id.",
-                expected_evidence_run_id=evidence_run_id,
-            )
-        )
-    else:
-        for key, value in explicit_ids:
-            if str(value) != evidence_run_id:
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_METADATA_STALE_BUNDLE_ID",
-                        "Run metadata belongs to a different evidence bundle.",
-                        key=key,
-                        evidence_run_id=value,
-                        expected_evidence_run_id=evidence_run_id,
-                    )
-                )
-    if not declared_sources:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DECLARED_SOURCES_MISSING",
-                "Final evidence requires declared source scope.",
-            )
-        )
-    identity_blockers, identity_findings = _strict_identity_metadata_issues(
-        metadata,
-        declared_sources=declared_sources,
-    )
-    blockers.extend(identity_blockers)
-    findings.extend(identity_findings)
-    status = _combined_status(
-        [_normalized_status(metadata.get("status", STATUS_PASS), pass_aliases=(STATUS_PASS, "ready", "current"))],
-        findings=findings,
-        blockers=blockers,
-    )
-    return _lane_from_status(
-        "metadata",
-        doc,
-        status=status,
-        summary_status=summary_status,
-        blockers=blockers,
-        findings=findings,
-    )
-
-
-def _strict_identity_metadata_issues(
-    metadata: Mapping[str, Any],
-    *,
-    declared_sources: tuple[str, ...],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    blockers: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
-    entries: list[tuple[str, dict[str, Any]]] = []
-    raw = (
-        metadata.get("strict_identities")
-        or metadata.get("source_identities")
-        or _nested_get(metadata, ("strict_identity", "sources"))
-    )
-    if raw is None:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_STRICT_IDENTITIES_MISSING",
-                "Run metadata must include strict identities for declared sources.",
-            )
-        )
-        return blockers, findings
-    if isinstance(raw, Mapping):
-        for source_key, value in raw.items():
-            if not isinstance(value, Mapping):
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INVALID",
-                        "Strict identity entry must be an object.",
-                        source_key=source_key,
-                    )
-                )
-                continue
-            entries.append((str(source_key), dict(value)))
-    elif isinstance(raw, list):
-        for index, value in enumerate(raw):
-            if not isinstance(value, Mapping):
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INVALID",
-                        "Strict identity list entry must be an object.",
-                        entry_index=index,
-                    )
-                )
-                continue
-            key = value.get("source") or value.get("source_id") or f"entry[{index}]"
-            entries.append((str(key), dict(value)))
-    else:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_METADATA_STRICT_IDENTITIES_INVALID",
-                "Run metadata strict identities must be a mapping or list.",
-            )
-        )
-        return blockers, findings
-    declared_set = set(declared_sources)
-    seen_embedded_sources: dict[str, str] = {}
-    seen_keys: set[str] = set()
-    for raw_key, identity in entries:
-        source_from_key = _source_name(raw_key)
-        source_from_identity = _source_name(identity.get("source") or identity.get("source_id"))
-        if not source_from_key:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_SOURCE_KEY_MISSING",
-                    "Strict identity entry key must identify a source.",
-                    source_key=raw_key,
-                )
-            )
-            continue
-        if source_from_key in seen_keys:
-            findings.append(
-                _finding(
-                    "TWO_NODE_E2E_METADATA_DUPLICATE_SOURCE_KEY",
-                    "Strict identity contains duplicate source keys.",
-                    source=source_from_key,
-                )
-            )
-        seen_keys.add(source_from_key)
-        if source_from_identity is None:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_SOURCE_MISSING",
-                    "Strict identity entry must declare its embedded source.",
-                    source_key=source_from_key,
-                )
-            )
-        elif source_from_identity != source_from_key:
-            findings.append(
-                _finding(
-                    "TWO_NODE_E2E_METADATA_SOURCE_KEY_MISMATCH",
-                    "Strict identity source key must match its embedded source.",
-                    source_key=source_from_key,
-                    embedded_source=source_from_identity,
-                )
-            )
-        if source_from_key not in declared_set:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_METADATA_UNDECLARED_STRICT_IDENTITY_SOURCE",
-                    "Strict identity source is not declared in source scope.",
-                    source=source_from_key,
-                    declared_sources=list(declared_sources),
-                )
-            )
-        if source_from_identity:
-            previous_key = seen_embedded_sources.get(source_from_identity)
-            if previous_key and previous_key != source_from_key:
-                findings.append(
-                    _finding(
-                        "TWO_NODE_E2E_METADATA_DUPLICATE_EMBEDDED_SOURCE",
-                        "Strict identity embeds the same source under multiple keys.",
-                        embedded_source=source_from_identity,
-                        source_keys=[previous_key, source_from_key],
-                    )
-                )
-            seen_embedded_sources.setdefault(source_from_identity, source_from_key)
-        missing_fields = [field for field in STRICT_LOG_IDENTITY_FIELDS if not _identity_value(identity, field)]
-        if missing_fields:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INCOMPLETE",
-                    "Strict identity entry is incomplete.",
-                    source=source_from_key,
-                    missing_fields=missing_fields,
-                )
-            )
-    for source in declared_sources:
-        if source not in seen_keys:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_METADATA_DECLARED_SOURCE_IDENTITY_MISSING",
-                    "Run metadata is missing strict identity for a declared source.",
                     source=source,
                 )
             )
