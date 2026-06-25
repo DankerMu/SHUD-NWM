@@ -45,6 +45,7 @@ from services.orchestrator import (
     chain_array_accounting,
     chain_manifests,
     chain_stage_execution,
+    persistence,
     production_contract,
     reservation,
     retry,
@@ -81,6 +82,7 @@ from services.orchestrator.chain_types import (
     StageRunResult,
     TerminalJobObservation,
 )
+from services.orchestrator.persistence import PipelineEvent as PipelineEvent
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.reservation import (
     ReservationResult,
@@ -374,6 +376,135 @@ if _CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING:
         "chain reservation compatibility functions missing from owner module: "
         f"{', '.join(_CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING)}"
     )
+
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES = (
+    "PipelineJob",
+    "PipelineEvent",
+    "PipelineStore",
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING = tuple(
+    name for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES if not hasattr(persistence, name)
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING = tuple(
+    name for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES if name not in globals()
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING:
+    raise RuntimeError(
+        "chain persistence compatibility aliases missing from owner module: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING)}"
+    )
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING:
+    raise RuntimeError(
+        "chain persistence compatibility aliases missing from facade: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES = MappingProxyType(
+    {name: getattr(persistence, name) for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES}
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT = tuple(
+    name
+    for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES
+    if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES[name]
+    is not _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES[name]
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT:
+    raise RuntimeError(
+        "chain persistence direct alias drifted from owner module: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT)}"
+    )
+
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES = (
+    "OrchestratorRepository",
+    "PsycopgOrchestratorRepository",
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = MappingProxyType(
+    {
+        "OrchestratorRepository": "chain-local-protocol",
+        "PsycopgOrchestratorRepository": "chain-local-implementation",
+    }
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES = (
+    "has_active_orchestration",
+    "has_active_pipeline",
+    "has_active_analysis_run",
+    "load_model_context",
+    "find_forcing_context",
+    "ensure_forecast_cycle",
+    "create_hydro_run",
+    "create_hydro_run_from_basin",
+    "update_hydro_run_status",
+    "upsert_pipeline_job",
+    "reserve_pipeline_job",
+    "reclaim_pipeline_job_reservation",
+    "bind_pipeline_job_reservation",
+    "query_candidate_state",
+    "update_pipeline_job_status",
+    "get_pipeline_job",
+    "query_pipeline_jobs_by_cycle",
+    "query_pipeline_jobs_by_run",
+    "query_pipeline_job_by_slurm_id",
+    "insert_pipeline_event",
+    "update_forecast_cycle_status",
+    "list_stage_statuses",
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES = (
+    "from_env",
+    "has_active_orchestration",
+    "has_active_pipeline",
+    "has_completed_pipeline",
+    "candidate_state",
+    "active_slurm_jobs",
+    "has_active_analysis_run",
+    "list_canonical_ready_cycles",
+    "list_forecast_model_ids",
+    "load_model_context",
+    "find_forcing_context",
+    "ensure_forecast_cycle",
+    "create_hydro_run",
+    "create_hydro_run_from_basin",
+    "update_hydro_run_status",
+    "upsert_pipeline_job",
+    "reserve_pipeline_job",
+    "reclaim_pipeline_job_reservation",
+    "bind_pipeline_job_reservation",
+    "query_candidate_state",
+    "update_pipeline_job_status",
+    "get_pipeline_job",
+    "query_pipeline_jobs_by_cycle",
+    "query_pipeline_jobs_by_run",
+    "query_pipeline_job_by_slurm_id",
+    "insert_pipeline_event",
+    "update_forecast_cycle_status",
+    "list_stage_statuses",
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS = MappingProxyType(
+    {
+        "services/orchestrator/scheduler.py": (
+            "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+            "PsycopgOrchestratorRepository",
+            "return PsycopgOrchestratorRepository.from_env()",
+        )
+    }
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_FUNCTION_TOKENS = MappingProxyType(
+    {
+        "services/orchestrator/scheduler.py": MappingProxyType(
+            {
+                "_active_repository_from_env": (
+                    "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+                    "return PsycopgOrchestratorRepository.from_env()",
+                ),
+                "_orchestrator_repository_from_env": (
+                    "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+                    "return PsycopgOrchestratorRepository.from_env()",
+                ),
+            }
+        )
+    }
+)
 
 _CHAIN_RETRY_COMPAT_ALIAS_NAMES = (
     "RetryConfig",
@@ -1175,6 +1306,9 @@ class OrchestratorRepository(Protocol):
         raise NotImplementedError
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def bind_pipeline_job_reservation(
@@ -5959,6 +6093,70 @@ class PsycopgOrchestratorRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING = tuple(
+    name
+    for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES
+    if not isinstance(globals().get(name), type)
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING:
+    raise RuntimeError(
+        "chain persistence repository local classes missing from facade: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT = tuple(
+    name
+    for name, classification in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS.items()
+    if "forwarder" in classification or classification.startswith("owner-")
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT:
+    raise RuntimeError(
+        "chain persistence repository classifications must remain chain-local, not pure owner forwarders: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES = MappingProxyType(
+    {name: globals()[name] for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES}
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT = tuple(
+    name
+    for name, repository_type in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES.items()
+    if getattr(repository_type, "__module__", None) != __name__
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT:
+    raise RuntimeError(
+        "chain persistence repository classes must be defined in the chain facade until extraction: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING = tuple(
+    name
+    for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES
+    if not callable(getattr(OrchestratorRepository, name, None))
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING:
+    raise RuntimeError(
+        "chain persistence repository protocol methods missing from local protocol: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING = tuple(
+    name
+    for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES
+    if not callable(getattr(PsycopgOrchestratorRepository, name, None))
+)
+if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING:
+    raise RuntimeError(
+        "chain persistence repository implementation methods missing from local implementation: "
+        f"{', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING)}"
+    )
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS = MappingProxyType(
+    {name: getattr(OrchestratorRepository, name) for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES}
+)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS = MappingProxyType(
+    {
+        name: getattr(PsycopgOrchestratorRepository, name)
+        for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES
+    }
+)
 
 
 def _utcnow() -> datetime:

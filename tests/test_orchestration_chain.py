@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import inspect
@@ -38,7 +39,7 @@ from services.orchestrator.chain import (
     TerminalJobObservation,
     build_model_run_assembly,
 )
-from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
+from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import (
@@ -7938,6 +7939,235 @@ def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monk
     compat_tokens = sorted(name for name in vars(legacy_chain) if name.startswith("_CHAIN_RESERVATION_COMPAT_"))
     for token in compat_tokens:
         assert token in inventory_text
+
+
+def test_chain_persistence_repository_compat_owner_aliases_match_owner_module_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import persistence
+
+    expected_alias_names = ("PipelineJob", "PipelineEvent", "PipelineStore")
+    expected_inventory_tokens = (
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_FUNCTION_TOKENS",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS",
+        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS",
+    )
+
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES == expected_alias_names
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT == ()
+    assert set(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES) == set(expected_alias_names)
+    assert set(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES) == set(expected_alias_names)
+
+    expected_owner_aliases = {
+        "PipelineJob": persistence.PipelineJob,
+        "PipelineEvent": persistence.PipelineEvent,
+        "PipelineStore": persistence.PipelineStore,
+    }
+    expected_facade_aliases = {
+        "PipelineJob": legacy_chain.PipelineJob,
+        "PipelineEvent": legacy_chain.PipelineEvent,
+        "PipelineStore": legacy_chain.PipelineStore,
+    }
+    assert dict(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES) == expected_owner_aliases
+    assert dict(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES) == expected_facade_aliases
+    assert legacy_chain.PipelineJob is PipelineJob
+    assert legacy_chain.PipelineEvent is PipelineEvent
+    assert legacy_chain.PipelineStore is PipelineStore
+
+    inventory_text = _chain_inventory_text()
+    for token in expected_inventory_tokens:
+        assert token in inventory_text
+    for expected_text in (
+        "services.orchestrator.persistence",
+        "PipelineJob",
+        "PipelineEvent",
+        "PipelineStore",
+        "owner `services.orchestrator.persistence`",
+    ):
+        assert expected_text in inventory_text
+
+
+def test_chain_persistence_repository_compat_repository_retention_classification_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+
+    expected_local_repository_names = ("OrchestratorRepository", "PsycopgOrchestratorRepository")
+    expected_classifications = {
+        "OrchestratorRepository": "chain-local-protocol",
+        "PsycopgOrchestratorRepository": "chain-local-implementation",
+    }
+    expected_protocol_method_names = (
+        "has_active_orchestration",
+        "has_active_pipeline",
+        "has_active_analysis_run",
+        "load_model_context",
+        "find_forcing_context",
+        "ensure_forecast_cycle",
+        "create_hydro_run",
+        "create_hydro_run_from_basin",
+        "update_hydro_run_status",
+        "upsert_pipeline_job",
+        "reserve_pipeline_job",
+        "reclaim_pipeline_job_reservation",
+        "bind_pipeline_job_reservation",
+        "query_candidate_state",
+        "update_pipeline_job_status",
+        "get_pipeline_job",
+        "query_pipeline_jobs_by_cycle",
+        "query_pipeline_jobs_by_run",
+        "query_pipeline_job_by_slurm_id",
+        "insert_pipeline_event",
+        "update_forecast_cycle_status",
+        "list_stage_statuses",
+    )
+    expected_implementation_method_names = (
+        "from_env",
+        "has_active_orchestration",
+        "has_active_pipeline",
+        "has_completed_pipeline",
+        "candidate_state",
+        "active_slurm_jobs",
+        "has_active_analysis_run",
+        "list_canonical_ready_cycles",
+        "list_forecast_model_ids",
+        "load_model_context",
+        "find_forcing_context",
+        "ensure_forecast_cycle",
+        "create_hydro_run",
+        "create_hydro_run_from_basin",
+        "update_hydro_run_status",
+        "upsert_pipeline_job",
+        "reserve_pipeline_job",
+        "reclaim_pipeline_job_reservation",
+        "bind_pipeline_job_reservation",
+        "query_candidate_state",
+        "update_pipeline_job_status",
+        "get_pipeline_job",
+        "query_pipeline_jobs_by_cycle",
+        "query_pipeline_jobs_by_run",
+        "query_pipeline_job_by_slurm_id",
+        "insert_pipeline_event",
+        "update_forecast_cycle_status",
+        "list_stage_statuses",
+    )
+    expected_legacy_import_tokens = {
+        "services/orchestrator/scheduler.py": (
+            "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+            "PsycopgOrchestratorRepository",
+            "return PsycopgOrchestratorRepository.from_env()",
+        )
+    }
+    expected_legacy_import_function_tokens = {
+        "services/orchestrator/scheduler.py": {
+            "_active_repository_from_env": (
+                "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+                "return PsycopgOrchestratorRepository.from_env()",
+            ),
+            "_orchestrator_repository_from_env": (
+                "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+                "return PsycopgOrchestratorRepository.from_env()",
+            ),
+        }
+    }
+
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES == (
+        expected_local_repository_names
+    )
+    assert dict(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS) == (
+        expected_classifications
+    )
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING == ()
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT == ()
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES == expected_protocol_method_names
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES == (
+        expected_implementation_method_names
+    )
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING == ()
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING == ()
+    assert dict(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS) == (
+        expected_legacy_import_tokens
+    )
+    assert {
+        path: dict(function_tokens)
+        for path, function_tokens in (
+            legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_FUNCTION_TOKENS.items()
+        )
+    } == expected_legacy_import_function_tokens
+    assert dict(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES) == {
+        "OrchestratorRepository": legacy_chain.OrchestratorRepository,
+        "PsycopgOrchestratorRepository": legacy_chain.PsycopgOrchestratorRepository,
+    }
+    assert legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT == ()
+    assert legacy_chain.OrchestratorRepository.__module__ == legacy_chain.__name__
+    assert legacy_chain.PsycopgOrchestratorRepository.__module__ == legacy_chain.__name__
+    assert set(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS) == set(
+        expected_protocol_method_names
+    )
+    assert set(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS) == set(
+        expected_implementation_method_names
+    )
+    for method_name in expected_protocol_method_names:
+        assert callable(getattr(legacy_chain.OrchestratorRepository, method_name))
+        assert callable(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS[method_name])
+    for method_name in expected_implementation_method_names:
+        assert callable(getattr(legacy_chain.PsycopgOrchestratorRepository, method_name))
+        assert callable(legacy_chain._CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS[method_name])
+    for classification in expected_classifications.values():
+        assert "forwarder" not in classification
+        assert not classification.startswith("owner-")
+
+    repository_root = Path(__file__).resolve().parents[1]
+    for path, tokens in expected_legacy_import_tokens.items():
+        source = (repository_root / path).read_text(encoding="utf-8")
+        for token in tokens:
+            assert token in source
+    for path, function_tokens in expected_legacy_import_function_tokens.items():
+        source_path = repository_root / path
+        source = source_path.read_text(encoding="utf-8")
+        parsed = ast.parse(source)
+        functions = {
+            node.name: ast.get_source_segment(source, node) or ""
+            for node in parsed.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        for function_name, tokens in function_tokens.items():
+            function_source = functions[function_name]
+            for token in tokens:
+                assert token in function_source
+
+    inventory_text = _chain_inventory_text()
+    for expected_text in (
+        "services.orchestrator.persistence",
+        "services.orchestrator.chain",
+        "PsycopgOrchestratorRepository",
+        "OrchestratorRepository.reclaim_pipeline_job_reservation",
+        "owner module cannot host",
+        "follow-up #711",
+        "caller migration path",
+        "removal condition",
+        "not a pure owner-module forwarder",
+        "chain-local local protocol/implementation",
+        "from services.orchestrator.chain import PsycopgOrchestratorRepository",
+        "return PsycopgOrchestratorRepository.from_env()",
+    ):
+        assert expected_text in inventory_text
 
 
 def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
