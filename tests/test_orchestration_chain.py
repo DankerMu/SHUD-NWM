@@ -7649,6 +7649,27 @@ def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(
     from workers.canonical_converter import converter as canonical_converter
     from workers.data_adapters import base as data_adapter_base
 
+    expected_canonical_names = ("evaluate_canonical_readiness", "expected_converter_version")
+    expected_cycle_names = ("parse_cycle_time", "format_cycle_time", "cycle_id_for")
+    expected_alias_names = (*expected_canonical_names, *expected_cycle_names)
+    expected_time_names = ("_check_three_way_time_consistency",)
+    expected_local_helper_names = (
+        "scenario_for_source",
+        "_auto_trigger_source_policy_identity",
+        "_auto_trigger_source_object_identity",
+        "_auto_trigger_source_identity_adapter",
+    )
+    expected_classifications = {
+        "scenario_for_source": "chain-local-source-scenario-glue",
+        "_auto_trigger_source_policy_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_object_identity": "chain-local-source-identity-glue",
+        "_auto_trigger_source_identity_adapter": "chain-local-dynamic-adapter-glue",
+    }
+    expected_dynamic_adapters = {
+        "gfs": ("workers.data_adapters.gfs_adapter", "GFSAdapter", "GFSAdapterConfig"),
+        "IFS": ("workers.data_adapters.ifs_adapter", "IFSAdapter", "IFSAdapterConfig"),
+    }
+
     canonical_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES
     cycle_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES
     alias_names = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_NAMES
@@ -7657,7 +7678,13 @@ def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(
     classifications = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS
     dynamic_adapters = legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_DYNAMIC_ADAPTERS
 
-    assert alias_names == (*canonical_names, *cycle_names)
+    assert canonical_names == expected_canonical_names
+    assert cycle_names == expected_cycle_names
+    assert alias_names == expected_alias_names
+    assert time_names == expected_time_names
+    assert local_helper_names == expected_local_helper_names
+    assert dict(classifications) == expected_classifications
+    assert dict(dynamic_adapters) == expected_dynamic_adapters
     assert len(alias_names) == len(set(alias_names))
     assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_OWNER_MISSING == ()
     assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_OWNER_MISSING == ()
@@ -7745,6 +7772,17 @@ assert chain.scenario_for_source('IFS') == 'forecast_ifs_deterministic'
     )
     for token in compat_tokens:
         assert token in inventory_text
+    for expected_inventory_text in (
+        *expected_alias_names,
+        *expected_time_names,
+        *expected_local_helper_names,
+        "workers.canonical_converter.converter",
+        "workers.data_adapters.base",
+        "workers.data_adapters.gfs_adapter",
+        "workers.data_adapters.ifs_adapter",
+        "services.orchestrator.time_consistency",
+    ):
+        assert expected_inventory_text in inventory_text
 
 
 def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:
