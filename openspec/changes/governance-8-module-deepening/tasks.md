@@ -855,12 +855,70 @@
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group
     `chain-worker-adapter-facade`.
-- [ ] 2.10 Chain persistence/repository ownership decision and extraction/retention.
-  - Module/Scope: `PipelineJob`, `PipelineStore`, `OrchestratorRepository`, `PsycopgOrchestratorRepository`, active pipeline detection, candidate state, reservations, events, forecast cycles, hydro run status.
+- [x] 2.10 Chain persistence/repository ownership decision and extraction/retention.
+  - Fixture Level: expanded; Repair Intensity: high.
+  - Module/Scope: `PipelineJob`, `PipelineEvent`, `PipelineStore`,
+    `OrchestratorRepository`, `PsycopgOrchestratorRepository`, active pipeline
+    detection, candidate state, reservations, events, forecast cycles, hydro
+    run status, and downstream scheduler/test import compatibility.
   - Dependencies: 2.1, 2.6, and 2.7.
-  - Out of Scope: DB migration, scheduler behavior changes, retry policy changes.
-  - Focused Verification: `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py`.
-  - Inventory/Evidence Update: update chain inventory group `chain-persistence-repository-facade` with either the new repository owner module or explicit retained local implementation.
+  - Out of Scope: DB migration, scheduler behavior changes, retry policy
+    changes, repository SQL behavior changes, persistence schema changes,
+    Slurm behavior, API/frontend/display behavior, and production topology.
+  - Stable Facade / Compatibility Surface:
+    - `services.orchestrator.chain.PipelineJob`, `PipelineEvent`, and
+      `PipelineStore` stay as legacy aliases backed by
+      `services.orchestrator.persistence`.
+    - `OrchestratorRepository` remains a chain-local protocol for the current
+      orchestration facade.
+    - `PsycopgOrchestratorRepository` remains a chain-owned local
+      implementation in this slice; it is not a pure owner-module forwarder.
+    - Scheduler/default-orchestrator imports of
+      `services.orchestrator.chain.PsycopgOrchestratorRepository` remain
+      compatible until a later repository-owner extraction migrates callers.
+  - Invariants:
+    - Owner/facade identity for persistence aliases matches
+      `services.orchestrator.persistence`.
+    - Repository protocol and concrete repository surface cover active
+      orchestration/pipeline detection, candidate state, reservation, event,
+      pipeline-job, forecast-cycle, and hydro-run methods.
+    - Inventory metadata records the explicit retained local implementation,
+      removal condition, caller migration path, and focused verification
+      command.
+    - Downstream scheduler/test import paths still resolve through the legacy
+      chain facade without changing scheduler behavior.
+    - The compatibility guard must not classify the local repository
+      implementation as a pure forwarding wrapper.
+    - Focused tests with `persistence_repository_compat` in their names prove
+      persistence owner alias identity and the chain-local repository retention
+      classification; existing package-level legacy export tests are not
+      sufficient evidence by themselves.
+  - Risk Packs:
+    - Public API / stable facade selected.
+    - Legacy compatibility / examples selected.
+    - Concurrency / shared state / ordering selected for durable reservation
+      and active-pipeline semantics.
+    - Schema/columns selected as an explicit no-change invariant for
+      persistence primitives and repository SQL behavior.
+    - Error handling / rollback / partial outputs selected for reservation,
+      event, cycle-status, and hydro-run status mutation paths.
+    - Config / project setup selected for repository `from_env()` and
+      scheduler default-orchestrator construction.
+    - File IO/path safety, Resource limits / discovery, Auth/secrets,
+      Release/packaging, and NHMS domain packs not selected because this slice
+      does not change artifact writes, discovery limits, credentials,
+      packaging, geospatial/time-series formats, or display endpoints.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py`
+    - `uv run pytest -q tests/test_orchestration_chain.py -k "persistence_repository_compat"`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
+  - Inventory/Evidence Update: update chain inventory group
+    `chain-persistence-repository-facade` with explicit retained local
+    implementation evidence and executable guard metadata.
 - [ ] 2.11 Chain group verification and evidence closeout.
   - Module/Scope: integration gate for chain group.
   - Dependencies: 2.1-2.10.
