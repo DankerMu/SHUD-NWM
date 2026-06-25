@@ -13,7 +13,11 @@ import pytest
 import services.production_closure.two_node_e2e_evidence as two_node_e2e_evidence
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.artifacts.reader import published_log_uri
-from services.production_closure import two_node_e2e_docker_preflight, two_node_e2e_metadata_lane
+from services.production_closure import (
+    two_node_e2e_docker_preflight,
+    two_node_e2e_docker_security,
+    two_node_e2e_metadata_lane,
+)
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
@@ -467,6 +471,156 @@ def test_docker_preflight_owner_discovers_each_preflight_alias(candidate: str) -
     assert summary["lane_summaries"]["docker_preflight"]["evidence_path"] == str(
         (config.run_dir / candidate).resolve().relative_to(REPO_ROOT)
     )
+
+
+def test_docker_security_owner_module_covers_child_artifact_display_contract() -> None:
+    assert two_node_e2e_docker_security.DOCKER_SECURITY_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_docker_security"
+    )
+    assert two_node_e2e_docker_security.DOCKER_SECURITY_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_security or docker_display"'
+    )
+    assert two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES == (
+        "docker-security/summary.json",
+        "docker-security/display-isolation.json",
+        "docker-security/docker-smoke.json",
+        "docker-smoke/docker-smoke.json",
+        "docker-smoke.json",
+    )
+    assert two_node_e2e_docker_security.DOCKER_SECURITY_CHILD_SCHEMAS == {
+        "source_trust": "nhms.two_node_docker.source_trust.v1",
+        "static": "nhms.two_node_docker.static_check.v1",
+        "smoke": "nhms.two_node_docker.app_smoke.v1",
+    }
+    assert tuple(two_node_e2e_docker_security.DOCKER_REQUIRED_FALSE_PROOFS) == (
+        "slurm_routes_enabled",
+        "slurm_route_available",
+        "slurm_cli_present",
+        "slurm_config_present",
+        "slurm_socket_present",
+        "munge_path_present",
+        "docker_socket_present",
+        "privileged",
+        "host_network",
+        "host_pid",
+        "host_ipc",
+        "cap_add_present",
+        "forbidden_hostconfig_hazard",
+        "forbidden_mount_hazard",
+        "forbidden_env_hazard",
+        "broad_host_bind_present",
+        "private_workspace_bind_present",
+        "workspace_mount_present",
+        "writable_published_artifact_mount",
+        "display_write_capability_present",
+    )
+    assert tuple(two_node_e2e_docker_security.DOCKER_REQUIRED_TRUE_PROOFS) == (
+        "published_artifacts_readonly",
+        "root_filesystem_readonly",
+        "cap_drop_all",
+    )
+    assert two_node_e2e_docker_security.DOCKER_SECURITY_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_DOCKER_SECURITY_",
+        "TWO_NODE_E2E_DOCKER_LIVE_CONTAINER_EVIDENCE_MISSING",
+        "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_",
+        "TWO_NODE_E2E_DOCKER_STATIC_",
+        "TWO_NODE_E2E_DOCKER_SMOKE_",
+        "TWO_NODE_E2E_DOCKER_DISPLAY_",
+        "TWO_NODE_E2E_DISPLAY_",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    )
+    for symbol in two_node_e2e_docker_security.DOCKER_SECURITY_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_docker_security, symbol), symbol
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES)
+def test_docker_security_owner_discovers_each_security_alias(candidate: str) -> None:
+    run_id = _run_id(f"security-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / "docker-security" / "summary.json"
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    canonical.unlink()
+    candidate_index = two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES.index(candidate)
+    for earlier_candidate in two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES[:candidate_index]:
+        earlier_path = config.run_dir / earlier_candidate
+        if earlier_path.exists():
+            _move_conflicting_docker_security_child_artifact(payload, earlier_path)
+            earlier_path.unlink()
+    candidate_path = config.run_dir / candidate
+    if candidate_path.exists():
+        _move_conflicting_docker_security_child_artifact(payload, candidate_path)
+        candidate_path.unlink()
+    _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["docker_security"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["docker_security"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_docker_security_root_alias_rejects_sibling_run_child_artifact() -> None:
+    run_id = _run_id("security-root-alias-sibling-child")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / "docker-security" / "summary.json"
+    payload = _read(canonical)
+    canonical.unlink()
+    for earlier_candidate in two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES[:-1]:
+        earlier_path = config.run_dir / earlier_candidate
+        if earlier_path.exists():
+            _move_conflicting_docker_security_child_artifact(payload, earlier_path)
+            earlier_path.unlink()
+    static_artifact = payload["source_artifacts"]["static"]
+    sibling_static = config.evidence_root / f"{run_id}-sibling" / "docker-security" / "static-compose-env-check.json"
+    _write(sibling_static, _read(Path(static_artifact["path"])))
+    static_artifact["path"] = str(sibling_static)
+    static_artifact["sha256"] = _sha256_file(sibling_static)
+    _write(config.run_dir / "docker-smoke.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" in _codes(
+        docker_lane["blockers"]
+    )
+
+
+def test_docker_security_emitted_blockers_are_covered_by_owner_namespaces() -> None:
+    namespaces = two_node_e2e_docker_security.DOCKER_SECURITY_BLOCKER_NAMESPACES
+    observed_codes: set[str] = set()
+
+    live_run_id = _run_id("docker-security-live-namespace")
+    live_config = _seed_pass_bundle(live_run_id)
+    live_payload = _read(live_config.run_dir / "docker-security" / "summary.json")
+    live_payload.pop("live_docker_evidence")
+    _write(live_config.run_dir / "docker-security" / "summary.json", live_payload)
+    observed_codes.update(_codes(validate_two_node_e2e_evidence(live_config)["lane_summaries"]["docker_security"]["blockers"]))
+
+    current_run_id = _run_id("docker-security-current-namespace")
+    current_config = _seed_pass_bundle(current_run_id)
+    current_payload = _read(current_config.run_dir / "docker-security" / "summary.json")
+    current_payload["evidence_run_id"] = "older-docker-security"
+    _write(current_config.run_dir / "docker-security" / "summary.json", current_payload)
+    observed_codes.update(
+        _codes(validate_two_node_e2e_evidence(current_config)["lane_summaries"]["docker_security"]["blockers"])
+    )
+
+    stale_run_id = _run_id("docker-security-stale-namespace")
+    stale_config = _seed_pass_bundle(stale_run_id)
+    stale_payload = _read(stale_config.run_dir / "docker-security" / "summary.json")
+    stale_payload["expected_evidence_run_id"] = "newer-docker-security"
+    _write(stale_config.run_dir / "docker-security" / "summary.json", stale_payload)
+    observed_codes.update(_codes(validate_two_node_e2e_evidence(stale_config)["lane_summaries"]["docker_security"]["blockers"]))
+
+    assert {
+        "TWO_NODE_E2E_DOCKER_LIVE_CONTAINER_EVIDENCE_MISSING",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    } <= observed_codes
+    assert all(any(code.startswith(namespace) for namespace in namespaces) for code in observed_codes)
 
 
 def test_docker_preflight_missing_lane_blocks_with_missing_lane_code() -> None:
@@ -5839,6 +5993,50 @@ def test_logs_lane_accepts_published_log_uri_or_typed_unavailable(mutation: str)
 
 
 @pytest.mark.parametrize(
+    ("readonly_proof", "expected_logs_status", "expected_final_status"),
+    [
+        (True, STATUS_PASS, STATUS_PASS),
+        (False, STATUS_BLOCKED, STATUS_FAIL),
+        (None, STATUS_BLOCKED, STATUS_BLOCKED),
+    ],
+)
+def test_logs_lane_uses_docker_security_authoritative_published_log_root(
+    readonly_proof: bool | None,
+    expected_logs_status: str,
+    expected_final_status: str,
+) -> None:
+    run_id = _run_id(f"logs-docker-root-{readonly_proof}")
+    config = _seed_pass_bundle(run_id)
+    published_root = Path("/var/nhms-published-test") / run_id
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security["published_artifact_root"] = str(published_root)
+    if readonly_proof is None:
+        docker_security.pop("published_artifacts_readonly")
+    else:
+        docker_security["published_artifacts_readonly"] = readonly_proof
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    for source, record in logs_summary["sources"].items():
+        check = record["checks"]["job_logs"]
+        identity = check["identity"]
+        uri = f"file://{published_root}/logs/{source.lower()}/{identity['run_id']}/{identity['job_id']}.out"
+        check.pop("published_artifact_root", None)
+        check["log_uri"] = uri
+        check["evidence"]["response"]["body"]["log_uri"] = uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert logs_lane["status"] == expected_logs_status
+    assert summary["status"] == expected_final_status
+    if expected_logs_status == STATUS_PASS:
+        assert not logs_lane["blockers"]
+    else:
+        assert "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI" in _codes(logs_lane["blockers"])
+
+
+@pytest.mark.parametrize(
     ("unavailable_cycle_time", "expected_status"),
     [
         (COMPACT_CYCLE_TIME, STATUS_PASS),
@@ -7164,6 +7362,27 @@ def _source_trust_checked_paths(root: Path) -> list[dict[str, Any]]:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _move_conflicting_docker_security_child_artifact(summary_payload: dict[str, Any], candidate_path: Path) -> None:
+    source_artifacts = summary_payload.get("source_artifacts")
+    assert isinstance(source_artifacts, dict)
+    for artifact in source_artifacts.values():
+        records = artifact if isinstance(artifact, list) else [artifact]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            raw_path = record.get("path")
+            if not isinstance(raw_path, str):
+                continue
+            artifact_path = Path(raw_path)
+            if artifact_path.resolve() != candidate_path.resolve():
+                continue
+            child_payload = _read(candidate_path)
+            child_path = candidate_path.with_name(f"{candidate_path.stem}-child{candidate_path.suffix}")
+            _write(child_path, child_payload)
+            record["path"] = str(child_path)
+            record["sha256"] = _sha256_file(child_path)
 
 
 def _source_lane_payload(
