@@ -7460,6 +7460,143 @@ def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventor
         assert token in inventory_text
 
 
+def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_stage_execution, reservation
+
+    alias_names = legacy_chain._CHAIN_RESERVATION_COMPAT_ALIAS_NAMES
+    owner_method_names = legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDER_NAMES
+    owner_function_names = legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_METHOD_OWNER_FUNCTION_NAMES
+    local_method_names = legacy_chain._CHAIN_RESERVATION_COMPAT_LOCAL_METHOD_NAMES
+    method_names = legacy_chain._CHAIN_RESERVATION_COMPAT_METHOD_FORWARDER_NAMES
+    local_binding_names = legacy_chain._CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_NAMES
+    dependency_bindings = legacy_chain._CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDINGS
+
+    assert len(alias_names) == len(set(alias_names))
+    assert len(owner_method_names) == len(owner_function_names)
+    assert method_names == (*owner_method_names, *local_method_names)
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_ALIAS_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_ALIAS_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_FUNCTION_MISSING == ()
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_METHOD_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_LOCAL_BINDING_MISSING == ()
+    assert legacy_chain._CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT == ()
+    assert set(legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_RESERVATION_COMPAT_FACADE_ALIASES) == set(alias_names)
+    assert set(legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDERS) == set(owner_method_names)
+
+    for alias_name in alias_names:
+        assert legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_ALIASES[alias_name] is getattr(
+            reservation,
+            alias_name,
+        )
+        assert legacy_chain._CHAIN_RESERVATION_COMPAT_FACADE_ALIASES[alias_name] is getattr(
+            legacy_chain,
+            alias_name,
+        )
+    for facade_name, owner_name in zip(owner_method_names, owner_function_names, strict=True):
+        assert legacy_chain._CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDERS[facade_name] is getattr(
+            reservation,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
+    for local_method_name in local_method_names:
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, local_method_name))
+    for local_binding_name in local_binding_names:
+        assert callable(getattr(legacy_chain, local_binding_name))
+
+    dependency_fields = chain_stage_execution.StageExecutionDependencies.__dataclass_fields__
+    deps = legacy_chain.ForecastOrchestrator._chain_stage_execution_dependencies()
+    for field, facade_name in dependency_bindings:
+        assert field in dependency_fields
+        assert getattr(deps, field) is getattr(legacy_chain, facade_name)
+
+    calls: list[tuple[str, Any, dict[str, Any]]] = []
+    reservation_result = object()
+
+    def fake_reserve_candidate(repository: Any, **kwargs: Any) -> object:
+        calls.append(("reserve", repository, kwargs))
+        return reservation_result
+
+    def fake_bind_reservation(repository: Any, **kwargs: Any) -> None:
+        calls.append(("bind", repository, kwargs))
+
+    monkeypatch.setattr(legacy_chain, "reserve_candidate", fake_reserve_candidate)
+    monkeypatch.setattr(legacy_chain, "bind_reservation", fake_bind_reservation)
+
+    class _Repository:
+        def reserve_pipeline_job(self, _record: Mapping[str, Any]) -> None:
+            raise AssertionError("reserve_candidate facade should be patched")
+
+        def bind_pipeline_job_reservation(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("bind_reservation facade should be patched")
+
+    basin = {"model_id": "model-1"}
+    context = types.SimpleNamespace(
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        all_basins=[basin],
+        active_basins=[basin],
+    )
+    stage = types.SimpleNamespace(job_type="download_source_cycle", stage="download")
+    orchestrator = object.__new__(ForecastOrchestrator)
+    orchestrator.repository = _Repository()
+
+    assert (
+        orchestrator._reserve_cycle_stage(
+            stage,
+            context,
+            "job_cycle_gfs_2026050100_download",
+            "cycle_gfs_2026050100:download",
+        )
+        is reservation_result
+    )
+    orchestrator._bind_cycle_stage_reservation(
+        "cycle_gfs_2026050100:download",
+        slurm_job_id="2001",
+        array_task_id=None,
+    )
+
+    assert calls == [
+        (
+            "reserve",
+            orchestrator.repository,
+            {
+                "idempotency_key": "cycle_gfs_2026050100:download",
+                "job_id": "job_cycle_gfs_2026050100_download",
+                "run_id": "cycle_gfs_2026050100",
+                "cycle_id": "gfs_2026050100",
+                "job_type": "download_source_cycle",
+                "model_id": "model-1",
+                "stage": "download",
+                "candidate_id": "cycle_gfs_2026050100",
+            },
+        ),
+        (
+            "bind",
+            orchestrator.repository,
+            {
+                "idempotency_key": "cycle_gfs_2026050100:download",
+                "slurm_job_id": "2001",
+                "status": "submitted",
+                "array_task_id": None,
+            },
+        ),
+    ]
+    assert orchestrator._reservation_already_inflight(
+        reservation.ReservationResult("key", "job", "reserved", created=False)
+    )
+    assert not orchestrator._reservation_already_inflight(
+        reservation.ReservationResult("key", "job", "reserved", created=True)
+    )
+    assert not orchestrator._reservation_already_inflight(None)
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(name for name in vars(legacy_chain) if name.startswith("_CHAIN_RESERVATION_COMPAT_"))
+    for token in compat_tokens:
+        assert token in inventory_text
+
+
 def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
     command = (
         "import sys; "
