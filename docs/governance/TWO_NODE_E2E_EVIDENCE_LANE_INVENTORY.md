@@ -1,11 +1,12 @@
 # Two-Node E2E Evidence Lane Inventory
 
-Snapshot date: 2026-06-24
+Snapshot date: 2026-06-25
 
 Scope: Governance-7 issue #672 inventory for
-`services/production_closure/two_node_e2e_evidence.py`. This page records the
-production-closure two-node E2E evidence lane contracts that future extraction
-work can use without making product decisions.
+`services/production_closure/two_node_e2e_evidence.py` and Governance-8 issue
+`#732` shared-contract guard metadata. This page records the production-closure
+two-node E2E evidence lane contracts that future extraction work can use
+without making product decisions.
 
 This inventory is evidence-only. It does not move code, add runtime behavior,
 extract a lane, change blocker/status semantics, inventory
@@ -40,6 +41,17 @@ Additional PR hygiene evidence:
 git diff --check
 ```
 
+Governance-8 issue #732 shared-contract guard verification commands:
+
+```bash
+uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"
+uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"
+uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"
+uv run pytest -q tests/test_entropy_audit_script.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
 Read-only inventory context was collected from:
 
 ```bash
@@ -55,6 +67,11 @@ rg -n "metadata|docker_preflight|docker_security|readonly_db|api|browser|logs|si
   #674.
 - No new lane rows for implementation phases. This inventory records the
   current #672 two-node E2E evidence lane set only.
+- No individual lane evaluator or final aggregation movement in #732. The
+  shared-contract metadata guards existing aggregator-owned rules so later
+  Governance-8 extraction issues can move lanes without duplicating current-run
+  binding, strict identity, producer/source-artifact, redaction, path-safety, or
+  log URI rules.
 - No weakening of path safety, redaction, readonly DB boundaries,
   current-run binding, producer/source-artifact proof, or final aggregation.
 
@@ -83,6 +100,23 @@ runtime lane summaries but are required extraction contracts for #672:
 - producer identity / source artifacts
 - source-scope / cross-plane aggregation
 - final aggregation
+
+## Shared Contract Guard Metadata
+
+Governance-8 issue #732 records shared contract metadata in
+`TWO_NODE_E2E_SHARED_CONTRACTS`. These are not independent runtime lanes; they
+are aggregator-owned contracts that later lane owner modules must consume or
+preserve behind `validate_two_node_e2e_evidence(config)`.
+
+| Contract ID | Owner | Consumers | Guard symbols | Blocker/finding namespaces | Focused verification command |
+|---|---|---|---|---|---|
+| `lane-result-adapter` | `services.production_closure.two_node_e2e_evidence` | `metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`, `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`, `display_summary` | `LaneEvaluation`, `LaneEvaluation.to_summary`, `validate_two_node_e2e_evidence`, `FINAL_REQUIRED_LANES`, `STATUS_PASS`, `STATUS_PARTIAL`, `STATUS_FAIL`, `STATUS_BLOCKED` | `TWO_NODE_E2E_LANE_`, `TWO_NODE_E2E_SOURCE_`, `TWO_NODE_E2E_EVIDENCE_` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"` |
+| `current-run-binding` | `services.production_closure.two_node_e2e_evidence` | `metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`, `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`, `display_summary` | `CURRENT_EVIDENCE_RUN_ID_KEYS`, `_current_run_blockers`, `_recursive_current_run_blockers`, `_explicit_bundle_run_ids`, `_explicit_bundle_run_ids_from_value` | `TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_`, `TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH`, `TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"` |
+| `producer-source-artifacts` | `services.production_closure.two_node_e2e_evidence` | `docker_preflight`, `docker_security`, `readonly_db`, `api`, `browser`, `logs`, `cross_plane`, `manual_ops`, `slurm`, `compute_summary`, `display_summary` | `PRODUCER_EVIDENCE_KEYS`, `SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS`, `PRODUCER_AUTHORITATIVE_PROOF_CONTAINER_KEYS`, `PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS`, `_has_producer_backed_lane_evidence`, `_source_lane_check_producer_blockers`, `_source_scoped_producer_evidence_blockers`, `_producer_source_artifact_blockers`, `_producer_source_artifact_record_blockers` | `TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_`, `CHECK_PRODUCER_EVIDENCE_MISSING`, `CHECK_PRODUCER_IDENTITY_` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"` |
+| `strict-identity` | `services.production_closure.two_node_e2e_evidence` | `metadata`, `readonly_db`, `api`, `browser`, `logs`, `cross_plane`, `manual_ops` | `STRICT_IDENTITY_FIELDS`, `STRICT_LOG_IDENTITY_FIELDS`, `LOG_URI_IDENTITY_FIELDS`, `_resolve_strict_identities`, `_strict_identity_metadata_issues`, `_strict_identity_value_matches`, `_record_identity` | `TWO_NODE_E2E_STRICT_IDENTITY_`, `TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE`, `TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"` |
+| `approved-root-path-safety` | `services.production_closure.two_node_e2e_evidence` | `metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`, `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`, `display_summary` | `APPROVED_EVIDENCE_ROOTS`, `EvidenceWriter`, `_safe_resolved_evidence_root`, `_read_json`, `_read_json_bytes`, `_refuse_symlink_components`, `_producer_source_artifact_record_blockers` | `TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED`, `TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE`, `TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"` |
+| `redaction` | `services.production_closure.two_node_e2e_evidence` | `metadata`, `docker_preflight`, `docker_security`, `readonly_db`, `api`, `browser`, `cross_plane`, `manual_ops`, `slurm`, `logs`, `compute_summary`, `display_summary` | `LaneEvaluation.to_summary`, `EvidenceWriter.write_json`, `redact_payload`, `redact_text`, `_blocker`, `_finding` | `TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED`, `TWO_NODE_E2E_EVIDENCE_PAYLOAD_TOO_LARGE` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"` |
+| `log-uri-safety` | `services.production_closure.two_node_e2e_evidence` | `logs`, `browser` | `LOG_URI_KEYS`, `LOG_URI_REQUIRED_IDENTITY_FIELDS`, `PUBLISHED_LOG_ROOT_KEYS`, `PUBLISHED_LOG_S3_BUCKET_KEYS`, `_published_log_uri_blockers`, `_published_log_uri_identity_blockers`, `_safe_log_relative_path_blockers`, `_safe_log_absolute_path_blockers`, `_safe_log_uri_summary`, `_unsafe_log_uri_summary` | `TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_`, `TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI`, `TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"` |
 
 ## Lane Contracts
 
@@ -196,6 +230,7 @@ owner map:
 
 | Lane / surface | Owner selector in current aggregator | Guard expectation |
 |---|---|---|
+| shared contracts | `TWO_NODE_E2E_SHARED_CONTRACTS`, `lane-result-adapter`, `current-run-binding`, `producer-source-artifacts`, `strict-identity`, `approved-root-path-safety`, `redaction`, and `log-uri-safety` | New shared contract, shared guard symbol, blocker/finding namespace, or consumer set requires this inventory and the shared-contract metadata tests to change. |
 | lane closure and document discovery | `FINAL_REQUIRED_LANES`, `_load_lane_documents`, lane construction in `validate_two_node_e2e_evidence` | Lane additions/removals, lane order/name changes, discovery alias changes, required checks, live flags, or pass aliases require this inventory to change. |
 | metadata | metadata discovery in `validate_two_node_e2e_evidence`, `_evaluate_metadata`, `_resolve_scope`, `_resolve_strict_identities`, `RUN_METADATA_SCHEMAS`, `STRICT_LOG_IDENTITY_FIELDS` | New metadata schema aliases, pass aliases, source-scope inputs, strict identity fields, or metadata blocker codes require this inventory to change. |
 | Docker preflight | `_evaluate_docker_preflight`, `DOCKER_PREFLIGHT_*`, `docker-preflight/*` discovery | New preflight fields, commands, resource checks, or blocker codes require this inventory to change. |

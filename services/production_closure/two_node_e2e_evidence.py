@@ -454,6 +454,162 @@ READONLY_DB_MANUAL_WRITE_PROOF_ALIASES: Mapping[str, tuple[str, ...]] = {
         "state_mutation_executed",
     ),
 }
+TWO_NODE_E2E_SHARED_CONTRACT_OWNER = "services.production_closure.two_node_e2e_evidence"
+TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_PRODUCER = (
+    'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"'
+)
+TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_METADATA = (
+    'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"'
+)
+TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY = (
+    "uv run pytest -q tests/test_two_node_e2e_evidence.py "
+    '-k "logs or log_uri or redaction or evidence_root or path_safety or stale"'
+)
+TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
+    "lane-result-adapter": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": FINAL_REQUIRED_LANES,
+        "guard_symbols": (
+            "LaneEvaluation",
+            "LaneEvaluation.to_summary",
+            "validate_two_node_e2e_evidence",
+            "FINAL_REQUIRED_LANES",
+            "STATUS_PASS",
+            "STATUS_PARTIAL",
+            "STATUS_FAIL",
+            "STATUS_BLOCKED",
+        ),
+        "namespaces": ("TWO_NODE_E2E_LANE_", "TWO_NODE_E2E_SOURCE_", "TWO_NODE_E2E_EVIDENCE_"),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_METADATA,
+    },
+    "current-run-binding": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": FINAL_REQUIRED_LANES,
+        "guard_symbols": (
+            "CURRENT_EVIDENCE_RUN_ID_KEYS",
+            "_current_run_blockers",
+            "_recursive_current_run_blockers",
+            "_explicit_bundle_run_ids",
+            "_explicit_bundle_run_ids_from_value",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+            "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+            "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_PRODUCER,
+    },
+    "producer-source-artifacts": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": (
+            "docker_preflight",
+            "docker_security",
+            "readonly_db",
+            "api",
+            "browser",
+            "logs",
+            "cross_plane",
+            "manual_ops",
+            "slurm",
+            "compute_summary",
+            "display_summary",
+        ),
+        "guard_symbols": (
+            "PRODUCER_EVIDENCE_KEYS",
+            "SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS",
+            "PRODUCER_AUTHORITATIVE_PROOF_CONTAINER_KEYS",
+            "PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS",
+            "_has_producer_backed_lane_evidence",
+            "_source_lane_check_producer_blockers",
+            "_source_scoped_producer_evidence_blockers",
+            "_producer_source_artifact_blockers",
+            "_producer_source_artifact_record_blockers",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_",
+            "CHECK_PRODUCER_EVIDENCE_MISSING",
+            "CHECK_PRODUCER_IDENTITY_",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_PRODUCER,
+    },
+    "strict-identity": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": ("metadata", "readonly_db", "api", "browser", "logs", "cross_plane", "manual_ops"),
+        "guard_symbols": (
+            "STRICT_IDENTITY_FIELDS",
+            "STRICT_LOG_IDENTITY_FIELDS",
+            "LOG_URI_IDENTITY_FIELDS",
+            "_resolve_strict_identities",
+            "_strict_identity_metadata_issues",
+            "_strict_identity_value_matches",
+            "_record_identity",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_STRICT_IDENTITY_",
+            "TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE",
+            "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_METADATA,
+    },
+    "approved-root-path-safety": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": FINAL_REQUIRED_LANES,
+        "guard_symbols": (
+            "APPROVED_EVIDENCE_ROOTS",
+            "EvidenceWriter",
+            "_safe_resolved_evidence_root",
+            "_read_json",
+            "_read_json_bytes",
+            "_refuse_symlink_components",
+            "_producer_source_artifact_record_blockers",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
+            "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
+            "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY,
+    },
+    "redaction": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": FINAL_REQUIRED_LANES,
+        "guard_symbols": (
+            "LaneEvaluation.to_summary",
+            "EvidenceWriter.write_json",
+            "redact_payload",
+            "redact_text",
+            "_blocker",
+            "_finding",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
+            "TWO_NODE_E2E_EVIDENCE_PAYLOAD_TOO_LARGE",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY,
+    },
+    "log-uri-safety": {
+        "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "consumers": ("logs", "browser"),
+        "guard_symbols": (
+            "LOG_URI_KEYS",
+            "LOG_URI_REQUIRED_IDENTITY_FIELDS",
+            "PUBLISHED_LOG_ROOT_KEYS",
+            "PUBLISHED_LOG_S3_BUCKET_KEYS",
+            "_published_log_uri_blockers",
+            "_published_log_uri_identity_blockers",
+            "_safe_log_relative_path_blockers",
+            "_safe_log_absolute_path_blockers",
+            "_safe_log_uri_summary",
+            "_unsafe_log_uri_summary",
+        ),
+        "namespaces": (
+            "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_",
+            "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+            "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+        "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY,
+    },
+}
 
 
 class TwoNodeE2EEvidenceError(RuntimeError):
