@@ -17,6 +17,7 @@ from services.production_closure import (
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
     two_node_e2e_metadata_lane,
+    two_node_e2e_readonly_db_lane,
 )
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
@@ -621,6 +622,141 @@ def test_docker_security_emitted_blockers_are_covered_by_owner_namespaces() -> N
         "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
     } <= observed_codes
     assert all(any(code.startswith(namespace) for namespace in namespaces) for code in observed_codes)
+
+
+def test_readonly_db_owner_module_covers_live_source_route_permission_contract() -> None:
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_readonly_db_lane"
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "readonly_db"'
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_DOCUMENT_CANDIDATES == (
+        "db/readonly-db-boundary/summary.json",
+        "db/summary.json",
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_LIVE_SCHEMA == READONLY_DB_LIVE_SCHEMA
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_REQUIRED_ROUTE_NAMES == frozenset(
+        {
+            "health",
+            "runtime_config",
+            "models",
+            "stations",
+            "latest_product",
+            "pipeline_status",
+            "pipeline_stages",
+            "jobs",
+            "job_logs",
+        }
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_STRICT_ROUTE_FIELDS == {
+        "latest_product": two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS,
+        "pipeline_status": two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS,
+        "pipeline_stages": two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS,
+        "jobs": two_node_e2e_metadata_lane.STRICT_IDENTITY_FIELDS,
+        "job_logs": two_node_e2e_metadata_lane.STRICT_LOG_IDENTITY_FIELDS,
+    }
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_REQUIRED_MANUAL_ACTIONS == frozenset({"retry", "cancel"})
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_REQUIRED_PERMISSION_TARGETS == frozenset(
+        {
+            "hydro.hydro_run",
+            "hydro.river_timeseries",
+            "met.forecast_cycle",
+            "met.forcing_station_timeseries",
+            "ops.pipeline_job",
+            "ops.pipeline_event",
+            "reachable_roles",
+            "audited_schema_sequences",
+            "current_database",
+            "hydro.*",
+            "met.*",
+            "ops.*",
+        }
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_TABLE_PERMISSION_TARGETS == frozenset(
+        {
+            "hydro.hydro_run",
+            "hydro.river_timeseries",
+            "met.forecast_cycle",
+            "met.forcing_station_timeseries",
+            "ops.pipeline_job",
+            "ops.pipeline_event",
+        }
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_SCHEMA_PERMISSION_TARGETS == frozenset(
+        {"hydro.*", "met.*", "ops.*"}
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_TABLE_REQUIRED_OPERATIONS == frozenset(
+        {"INSERT", "UPDATE", "DELETE"}
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_SCHEMA_REQUIRED_OPERATIONS == frozenset(
+        {"DDL_CREATE_TABLE"}
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_DATABASE_REQUIRED_OPERATIONS == frozenset(
+        {"DATABASE_CREATE"}
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_SEQUENCE_REQUIRED_OPERATIONS == frozenset(
+        {"AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE"}
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_TABLE_MUTATING_FIELDS == (
+        "table_privileges",
+        "column_privileges",
+        "sequence_privileges",
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_MANUAL_WRITE_PROOF_ALIASES == {
+        "write_dependency_constructed": (
+            "write_dependency_constructed",
+            "db_write_dependency_constructed",
+            "control_write_dependency_constructed",
+            "state_mutation_dependency_constructed",
+        ),
+        "write_executed": (
+            "write_executed",
+            "db_write_executed",
+            "control_executed",
+            "state_mutation_executed",
+        ),
+    }
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_SOURCE_ARTIFACT_FILENAMES == (
+        "summary.json",
+        "role.json",
+        "route_smoke.json",
+        "permission_probes.json",
+    )
+    assert two_node_e2e_readonly_db_lane.READONLY_DB_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_READONLY_DB_",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+        "TWO_NODE_E2E_STRICT_IDENTITY_",
+        "TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE",
+        "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+    )
+    for symbol in two_node_e2e_readonly_db_lane.READONLY_DB_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_readonly_db_lane, symbol), symbol
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_readonly_db_lane.READONLY_DB_DOCUMENT_CANDIDATES)
+def test_readonly_db_owner_discovers_each_summary_alias(candidate: str) -> None:
+    run_id = _run_id(f"readonly-db-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical_dir = config.run_dir / "db" / "readonly-db-boundary"
+    canonical_payloads = {
+        filename: json.loads((canonical_dir / filename).read_text(encoding="utf-8"))
+        for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json")
+    }
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical_dir / "summary.json":
+        (canonical_dir / "summary.json").unlink()
+        _write(candidate_path, canonical_payloads["summary.json"])
+        for sibling in ("role.json", "route_smoke.json", "permission_probes.json"):
+            _write(candidate_path.parent / sibling, canonical_payloads[sibling])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["readonly_db"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
 
 
 def test_docker_preflight_missing_lane_blocks_with_missing_lane_code() -> None:
@@ -1656,6 +1792,26 @@ def test_readonly_db_manual_action_no_write_fields_are_independent(mutation: dic
         "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_WRITE_PROOF_FAILED" in _codes(readonly_lane["blockers"])
         or "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_NO_WRITE_PROOF_MISSING" in _codes(readonly_lane["blockers"])
     )
+
+
+def test_readonly_db_manual_action_no_write_aliases_are_contractual() -> None:
+    run_id = _run_id("db-manual-no-write-alias")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    action = db_summary["manual_action_probes"][0]
+    action.pop("write_dependency_constructed", None)
+    action.pop("write_executed", None)
+    action["db_write_dependency_constructed"] = False
+    action["db_write_executed"] = True
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_WRITE_PROOF_FAILED" in _codes(readonly_lane["blockers"])
 
 
 def test_readonly_db_final_accepts_live_producer_manual_action_shape() -> None:
