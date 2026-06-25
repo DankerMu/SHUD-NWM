@@ -1028,10 +1028,53 @@
     - `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`.
     - `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"`.
   - Inventory/Evidence Update: update `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md` shared-contract rows.
-- [ ] 3.2 Metadata and strict-identity lane extraction.
+- [x] 3.2 Metadata and strict-identity lane extraction.
   - Module/Scope: metadata aliases, source-scope resolution, reduced-scope flags, five-field identities, downstream source-lane seeding.
   - Dependencies: 3.1.
   - Out of Scope: source proof lanes, cross-plane aggregation, final aggregation.
+  - Fixture Level: expanded; Repair Intensity: high, because metadata and
+    strict identities seed every downstream source-scoped lane and final source
+    summaries, while the stable public validator entrypoint must remain
+    unchanged.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (metadata filename aliases, status aliases, configured source
+    overrides, and reduced-scope flags remain accepted); Schema / field names
+    (`RUN_METADATA_SCHEMAS`, five-field strict identities, source aliases, and
+    blocker/finding namespaces stay stable); Error handling / partial outputs
+    (missing metadata, stale bundle ID, undeclared source, incomplete identity,
+    duplicate identity, and reduced source scope keep the same blocker/finding
+    behavior); Documentation / migration notes (two-node inventory records the
+    new owner module and guard symbols). Not Selected: moving API/browser/logs
+    source proof lanes; moving readonly DB, manual ops, cross-plane, or final
+    aggregation; changing DB roles/schema; changing API/frontend/display or
+    Slurm behavior.
+  - Invariant Matrix: Governing invariant: metadata source scope and strict
+    identity resolution are owned by
+    `services.production_closure.two_node_e2e_metadata_lane` while
+    `validate_two_node_e2e_evidence(config)` remains the stable composition
+    boundary. Source-of-truth identity/contract:
+    `METADATA_DOCUMENT_CANDIDATES`, `RUN_METADATA_SCHEMAS`,
+    `STRICT_LOG_IDENTITY_FIELDS`, `MetadataScope`, `MetadataLaneEvaluation`, and
+    `evaluate_metadata_lane(...)` agree with the two-node inventory and spec.
+    Surfaces: Producers: run/identity metadata JSON; Compatibility/stable
+    entrypoint: `validate_two_node_e2e_evidence(config)`; Validators/preflight:
+    focused metadata/strict-identity/source-scope tests plus OpenSpec; Public
+    outputs: top-level `metadata`, `strict_identity`, `lane_summaries.metadata`,
+    and downstream `source_scope_results`; Failure paths/rollback/stale state:
+    stale evidence run IDs, unsupported schemas, missing source scope,
+    incomplete strict identities, source key mismatches, duplicate sources, and
+    reduced-scope PARTIAL semantics.
+  - Regression Rows: new owner module exposes metadata aliases, schema
+    constants, strict identity constants, owner result dataclass, scope
+    resolver, metadata evaluator, and strict identity resolver; aggregator calls
+    owner result and still seeds readonly/API/browser/logs/manual/cross-plane
+    lanes with identical `declared_sources` and `strict_identities`; direct
+    owner tests prove reduced-scope flags, five-field identities, and
+    downstream source-scope seeding; inventory row records current owner and
+    guard hook tokens; no source proof lane, cross-plane aggregation, or final
+    aggregation moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`.
   - Inventory/Evidence Update: update two-node inventory row `metadata`.
 - [ ] 3.3 Docker preflight lane extraction.
