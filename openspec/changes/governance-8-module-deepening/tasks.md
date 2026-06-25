@@ -694,11 +694,51 @@
     - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
     - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-reservation-facade`.
-- [ ] 2.7 Chain retry owner-family completion.
+- [x] 2.7 Chain retry owner-family completion.
   - Module/Scope: `services.orchestrator.retry`, retry service/config/backoff, manual retry identity, partial-array retry bridge, `_retry_service_from_env` classification.
   - Dependencies: 2.1 and 2.3.
-  - Out of Scope: reservation protocol, stage execution polling, repository schema.
-  - Focused Verification: `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_e2e_m3.py tests/test_orchestration_chain.py`.
+  - Out of Scope: reservation protocol, stage execution polling, repository schema, cancel endpoint behavior, and Slurm cancellation side effects; cancelled-run manual retry identity remains covered by the retry owner tests.
+  - Fixture Level: expanded; Repair Intensity: high, because retry/cancellation consistency, retry store transaction release, scheduler default-orchestrator construction, and partial-array shared `CycleOrchestrationContext` state are guarded in this slice.
+  - Fixture: add explicit `_CHAIN_RETRY_COMPAT_*` maps/guards for direct retry aliases, constructor retry injection/config seams, local retry bridge methods, store transaction release glue, and chain-local `_retry_service_from_env` factory classification.
+  - Regression Coverage:
+    - Extend `tests/test_orchestration_chain.py` to prove owner/facade alias identity, constructor seam retention, local retry bridge method presence, `_retry_service_from_env` classification, retry service/store transaction behavior through legacy chain paths, and inventory token coverage.
+  - Risk/Invariant:
+    - No retry policy, backoff schedule, conflict detection, runtime-root recovery, partial-array retry semantics, reservation protocol, stage-execution polling, repository schema, Slurm behavior, API/frontend, or display behavior moves in this slice.
+    - This only makes the existing retry compatibility surface executable and reviewable.
+  - Invariant Matrix:
+    - Governing invariant: retry policy and retry identity remain owned by `services.orchestrator.retry`, while `chain.py` only preserves legacy import, injection, factory, and stage-bridge compatibility seams.
+    - Source-of-truth identity/contract: `RetryService` / `RetryConfig` owner aliases, `compute_backoff_seconds`, manual retry `PipelineJob` identity, `ForecastOrchestrator(retry_service=...)`, and `_retry_service_from_env`.
+    - Producers: `services/orchestrator/retry.py` retry classification/submission/runtime-root logic; chain local bridge methods only adapt stage results to retry service inputs.
+    - Validators/preflight: `_CHAIN_RETRY_COMPAT_*` guards and `tests/test_orchestration_chain.py` compat assertions.
+    - Storage/cache/query: `RetryService.store` / `PipelineStore`; repository lookup fallback in `_retry_job_for_stage_result` remains chain-local compatibility glue.
+    - Public routes/entrypoints: no API route change; stable chain facade aliases, `ForecastOrchestrator(retry_service=...)`, `ForecastOrchestrator.from_env()`, and `_retry_service_from_env` legacy import/factory seams stay compatible.
+    - Frontend/downstream consumers: no frontend or display change; `services/orchestrator/scheduler.py` continues importing `_retry_service_from_env` and constructing the default `ForecastOrchestrator` path through `chain.py`.
+    - Failure paths/rollback/stale state: retry service absence returns no retry, transaction release commits retry store changes, and partial-array retry restores context basins.
+    - Evidence/audit/readiness: `chain-retry-facade` inventory row and focused retry/orchestration tests.
+    - Regression rows:
+      - retry owner aliases imported through `chain.py` -> object identity matches `services.orchestrator.retry`.
+      - injected retry service with failed stage result -> legacy chain bridge resolves a retry `PipelineJob`, computes owner backoff, releases store transaction, and returns pending retry job id.
+      - no retry service or missing job -> chain bridge returns `None` without mutating reservation, repository schema, or stage execution polling behavior.
+      - `_retry_service_from_env` without `DATABASE_URL` -> returns `None`; with database settings -> remains classified as chain-local factory for later dependency-injection work.
+      - partial-array retry with original `active_basins` task ids `[0,1,2]`, failed task id `[1]`, and retry success -> second submit contains only basin/task 1.
+      - partial-array retry completion -> final context restores original `active_basins` and preserves cleanup semantics for `had_partial`, `last_partial_status`, and `task_outcomes`.
+      - scheduler default orchestrator without a custom factory -> `scheduler.py` still uses chain's `_retry_service_from_env` path and passes the returned retry service into `ForecastOrchestrator`.
+  - Risk Packs:
+    - Public API / stable facade selected for chain retry aliases, `ForecastOrchestrator(retry_service=...)`, `ForecastOrchestrator.from_env()`, and `_retry_service_from_env`.
+    - Concurrency / shared state / ordering selected.
+    - Legacy compatibility / examples selected.
+    - Error handling / rollback / partial outputs selected.
+    - Config / project setup selected for `_retry_service_from_env`.
+    - Resource limits / discovery selected for bounded retry/backoff semantics through owner tests.
+    - File IO/path safety, Schema/columns, Auth/secrets, Release/packaging, Documentation/migration notes, and NHMS domain packs not selected because this slice does not change file IO, schema, credentials, packaging, geospatial/time-series/runtime formats, or display artifacts.
+  - Focused Verification:
+    - `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_e2e_m3.py tests/test_orchestration_chain.py`
+    - `uv run pytest -q tests/test_production_scheduler.py -k test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path`
+    - `uv run pytest -q tests/test_entropy_audit_script.py`
+    - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
+    - `openspec validate governance-8-module-deepening --strict --no-interactive`
+    - `corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md openspec/changes/governance-8-module-deepening/tasks.md`
+    - `git diff --check`
   - Inventory/Evidence Update: update chain inventory group `chain-retry-facade`.
 - [ ] 2.8 Chain tile-publisher owner-family completion.
   - Module/Scope: `services.tile_publisher`, `services.tile_publisher.publisher`, chain tile-publisher imports, failure payload mapping, local publish dependency wiring.
