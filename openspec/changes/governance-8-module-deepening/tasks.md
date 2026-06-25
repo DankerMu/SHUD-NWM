@@ -1395,10 +1395,55 @@
     moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "browser"`.
   - Inventory/Evidence Update: update two-node inventory row `browser proof`.
-- [ ] 3.9 Logs lane extraction.
+- [x] 3.9 Logs lane extraction.
   - Module/Scope: logs source lane, strict log identity, published log URI safety, typed unavailable proof, redaction.
   - Dependencies: 3.1, 3.2, and 3.7.
   - Out of Scope: private compute log publication changes, API/browser source lanes, final aggregation.
+  - Fixture Rows: Positive parity: logs PASS bundle keeps identical
+    `lane_summaries.logs` status, summary status, blockers/findings shape,
+    redacted evidence path/hash, and `source_scope_results` GFS/IFS
+    contribution through the stable `validate_two_node_e2e_evidence(config)`
+    entrypoint; Negative/parity: missing logs summary, stale current-run
+    fields, missing live log flag, missing producer proof, missing declared
+    source, missing/non-PASS `job_logs` check, strict log identity
+    mismatch/incomplete including missing `job_id`, private or unsupported log
+    URI, unsafe published/file/s3 URI, credential-bearing URI, missing published
+    log read evidence, and typed unavailable identity/status/proof gaps preserve
+    existing blocker/finding namespaces; Legacy compatibility: input aliases
+    remain `logs/summary.json` then `logs/evidence.json`, shared producer,
+    strict-identity, redaction, and log URI safety contracts remain single-source
+    helper contracts, and API/browser behavior continues through their owner
+    paths.
+  - Risk Axes: Entrypoints: `validate_two_node_e2e_evidence(config)`,
+    `_load_lane_documents`, and `lane_summaries.logs`; Source scope:
+    downstream `source_scope_results` aggregation for full GFS/IFS scope and
+    reduced/single-source scope; Producer proof: per-source and per-check
+    command/request/response/artifact evidence plus published log read evidence;
+    Identity: strict log identity fields including `job_id`, published log URI
+    identity parsing, and typed unavailable response identity; Failure
+    paths/rollback/stale state: missing lane file, stale current-run fields,
+    stale nested producer proof, mock/fixture evidence, historical latest
+    fallback, missing source, missing `job_logs`, non-PASS check, source/check
+    FAIL/BLOCKED/PARTIAL, private compute/local log paths, unsupported schemes,
+    unsafe path components, query/fragment/userinfo/credential-like URI parts,
+    missing allowed published roots, and typed unavailable proof gaps.
+  - Regression Rows: owner module exposes logs document aliases, required
+    checks, job-id-required checks, live flag, helper dataclass, evaluator, guard
+    symbols, blocker namespaces, and focused verification constant; aggregator
+    uses owner discovery aliases and helper injection while keeping final summary
+    and source-scope composition unchanged; direct tests prove owner metadata,
+    owner-vs-aggregator PASS parity, validator delegation to owner evaluator,
+    alias fallback for both logs candidate files, missing logs summary shape,
+    missing declared source propagation, missing live flag, `job_logs` `job_id`
+    binding, required-check missing/failed/blocked/partial paths, direct log URI
+    redaction/safety parity, and typed unavailable acceptance; existing focused
+    logs/log_uri tests continue to cover canonical `published://`, `file://`,
+    and `s3://` allowlist behavior, private-path rejection, unavailable-log
+    semantics, identity parsing, and redaction; inventory row records the current
+    owner and retained aggregator/shared-contract surfaces; no API, browser,
+    manual ops, cross-plane, final aggregation, frontend UI, API route, DB
+    schema/role, Slurm scheduling, private compute log publication, or
+    production topology behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs"`.
   - Inventory/Evidence Update: update two-node inventory row `logs`.
 - [ ] 3.10 Manual ops lane extraction.

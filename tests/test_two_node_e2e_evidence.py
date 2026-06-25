@@ -18,6 +18,7 @@ from services.production_closure import (
     two_node_e2e_browser_lane,
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
+    two_node_e2e_logs_lane,
     two_node_e2e_metadata_lane,
     two_node_e2e_readonly_db_lane,
     two_node_e2e_simple_live_lane,
@@ -1720,6 +1721,356 @@ def test_browser_lane_owner_preserves_flat_alias_producer_artifact_scope() -> No
     assert "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" not in _codes(
         browser_lane.blockers
     )
+
+
+def _logs_owner_inputs(
+    config: TwoNodeE2EEvidenceConfig,
+) -> tuple[
+    two_node_e2e_metadata_lane.MetadataLaneEvaluation,
+    two_node_e2e_evidence.EvidenceDocument,
+    two_node_e2e_evidence.EvidenceDocument | None,
+]:
+    metadata_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
+    )
+    assert metadata_doc is not None
+    metadata_result = two_node_e2e_metadata_lane.evaluate_metadata_lane(
+        metadata_doc,
+        metadata_doc.payload,
+        evidence_run_id=config.run_id,
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=two_node_e2e_evidence._metadata_lane_helpers(),
+    )
+    logs_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES,
+    )
+    assert logs_doc is not None
+    docker_security_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_docker_security.DOCKER_SECURITY_DOCUMENT_CANDIDATES,
+    )
+    return metadata_result, logs_doc, docker_security_doc
+
+
+def test_logs_lane_owner_module_covers_logs_source_contract() -> None:
+    assert two_node_e2e_logs_lane.LOGS_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_logs_lane"
+    )
+    assert two_node_e2e_logs_lane.LOGS_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs"'
+    )
+    assert two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES == (
+        "logs/summary.json",
+        "logs/evidence.json",
+    )
+    assert two_node_e2e_logs_lane.LOGS_REQUIRED_CHECKS == ("job_logs",)
+    assert two_node_e2e_logs_lane.LOGS_JOB_ID_REQUIRED_CHECKS == ("job_logs",)
+    assert two_node_e2e_logs_lane.LOGS_LIVE_FLAG == "live_log_evidence"
+    assert two_node_e2e_logs_lane.LOGS_LANE_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_LOGS_",
+        "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_",
+        "TWO_NODE_E2E_STRICT_IDENTITY_",
+        "TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE",
+        "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    )
+    for symbol in two_node_e2e_logs_lane.LOGS_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_logs_lane, symbol), symbol
+
+
+def test_logs_lane_owner_direct_evaluator_matches_full_validator_pass() -> None:
+    run_id = _run_id("logs-owner-pass-parity")
+    config = _seed_pass_bundle(run_id)
+    metadata_result, logs_doc, docker_security_doc = _logs_owner_inputs(config)
+
+    logs_lane = two_node_e2e_logs_lane.evaluate_logs_lane(
+        logs_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        evidence_run_id=run_id,
+        docker_security_doc=docker_security_doc,
+        helpers=two_node_e2e_evidence._logs_lane_helpers(),
+    )
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert logs_lane.status == STATUS_PASS
+    assert summary["lane_summaries"]["logs"] == logs_lane.to_summary()
+    assert summary["source_scope_results"]["GFS"]["lane_statuses"]["logs"] == STATUS_PASS
+    assert summary["source_scope_results"]["IFS"]["lane_statuses"]["logs"] == STATUS_PASS
+
+
+def test_logs_lane_owner_validator_uses_owner_evaluator(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = _run_id("logs-owner-validator-call")
+    config = _seed_pass_bundle(run_id)
+    original = two_node_e2e_evidence.evaluate_logs_lane
+    call: dict[str, Any] = {}
+
+    def spy_evaluate_logs_lane(
+        doc: two_node_e2e_evidence.EvidenceDocument | None,
+        *,
+        declared_sources: tuple[str, ...],
+        strict_identities: Mapping[str, Mapping[str, Any]],
+        evidence_run_id: str,
+        docker_security_doc: two_node_e2e_evidence.EvidenceDocument | None,
+        helpers: two_node_e2e_logs_lane.LogsLaneEvaluationHelpers[
+            two_node_e2e_evidence.LaneEvaluation
+        ],
+    ) -> two_node_e2e_evidence.LaneEvaluation:
+        call["doc_path"] = doc.path if doc is not None else None
+        call["declared_sources"] = declared_sources
+        call["strict_identity_sources"] = tuple(sorted(strict_identities))
+        call["evidence_run_id"] = evidence_run_id
+        call["docker_security_path"] = docker_security_doc.path if docker_security_doc is not None else None
+        call["helpers_type"] = type(helpers)
+        return original(
+            doc,
+            declared_sources=declared_sources,
+            strict_identities=strict_identities,
+            evidence_run_id=evidence_run_id,
+            docker_security_doc=docker_security_doc,
+            helpers=helpers,
+        )
+
+    monkeypatch.setattr(two_node_e2e_evidence, "evaluate_logs_lane", spy_evaluate_logs_lane)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+    assert call == {
+        "doc_path": (config.run_dir / "logs" / "summary.json").resolve(strict=False),
+        "declared_sources": ("GFS", "IFS"),
+        "strict_identity_sources": ("GFS", "IFS"),
+        "evidence_run_id": run_id,
+        "docker_security_path": (
+            config.run_dir / "docker-security" / "summary.json"
+        ).resolve(strict=False),
+        "helpers_type": two_node_e2e_logs_lane.LogsLaneEvaluationHelpers,
+    }
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES)
+def test_logs_lane_owner_discovers_each_logs_alias(candidate: str) -> None:
+    run_id = _run_id(f"logs-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES[0]
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical:
+        canonical.unlink()
+        _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["logs"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_logs_lane_owner_missing_logs_summary_shape_and_source_scope_contribution() -> None:
+    run_id = _run_id("logs-missing-owner")
+    config = _seed_pass_bundle(run_id)
+    for candidate in two_node_e2e_logs_lane.LOGS_DOCUMENT_CANDIDATES:
+        candidate_path = config.run_dir / candidate
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert lane["evidence_path"] is None
+    assert lane["evidence_sha256"] is None
+    assert lane["summary_status"] is None
+    assert "TWO_NODE_E2E_LOGS_EVIDENCE_MISSING" in _codes(lane["blockers"])
+    assert summary["source_scope_results"]["GFS"]["lane_statuses"]["logs"] == STATUS_BLOCKED
+    assert summary["source_scope_results"]["IFS"]["lane_statuses"]["logs"] == STATUS_BLOCKED
+
+
+def test_logs_lane_owner_missing_declared_source_blocks_via_validator() -> None:
+    run_id = _run_id("logs-missing-declared-source")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    logs_summary["sources"].pop("IFS")
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    ifs_scope = summary["source_scope_results"]["IFS"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_SOURCE_MISSING" in _codes(logs_lane["blockers"])
+    assert "TWO_NODE_E2E_LOGS_SOURCE_MISSING" in _codes(ifs_scope["blockers"])
+    assert ifs_scope["lane_statuses"]["logs"] == STATUS_BLOCKED
+
+
+def test_logs_lane_owner_missing_live_log_flag_blocks_via_validator() -> None:
+    run_id = _run_id("logs-missing-live-flag")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    logs_summary.pop(two_node_e2e_logs_lane.LOGS_LIVE_FLAG)
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_LIVE_EVIDENCE_MISSING" in _codes(logs_lane["blockers"])
+
+
+def test_logs_lane_owner_job_logs_check_requires_job_id_binding() -> None:
+    run_id = _run_id("logs-job-logs-no-job")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    logs_summary["sources"]["GFS"]["checks"]["job_logs"]["identity"].pop("job_id")
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    source_scope = summary["source_scope_results"]["GFS"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(logs_lane["blockers"])
+    assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(source_scope["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("missing", "TWO_NODE_E2E_LOGS_CHECK_MISSING"),
+        ("failed", "TWO_NODE_E2E_LOGS_CHECK_FAILED"),
+        ("blocked", "TWO_NODE_E2E_LOGS_CHECK_BLOCKED"),
+        ("partial", "TWO_NODE_E2E_LOGS_CHECK_BLOCKED"),
+    ],
+)
+def test_logs_lane_owner_required_check_gaps_block_via_validator(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"logs-required-check-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    checks = logs_summary["sources"]["GFS"]["checks"]
+    if mutator == "missing":
+        checks.pop("job_logs")
+    elif mutator == "failed":
+        checks["job_logs"]["status"] = STATUS_FAIL
+    elif mutator == "blocked":
+        checks["job_logs"]["status"] = STATUS_BLOCKED
+    else:
+        checks["job_logs"]["status"] = STATUS_PARTIAL
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    source_scope = summary["source_scope_results"]["GFS"]
+    expected_status = STATUS_FAIL if mutator == "failed" else STATUS_BLOCKED
+    expected_bucket = "findings" if mutator == "failed" else "blockers"
+    assert summary["status"] == expected_status
+    assert logs_lane["status"] == expected_status
+    assert expected_code in _codes(logs_lane[expected_bucket])
+    assert expected_code in _codes(source_scope[expected_bucket])
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("lane_mock", "TWO_NODE_E2E_LOGS_MOCK_EVIDENCE"),
+        ("check_mock", "TWO_NODE_E2E_LOGS_MOCK_CHECK"),
+        ("lane_historical", "TWO_NODE_E2E_LOGS_HISTORICAL_LATEST"),
+        ("check_historical", "TWO_NODE_E2E_LOGS_HISTORICAL_CHECK"),
+    ],
+)
+def test_logs_lane_owner_mock_and_historical_evidence_fail_via_validator(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"logs-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    if mutator == "lane_mock":
+        logs_summary["mock"] = True
+    elif mutator == "check_mock":
+        logs_summary["sources"]["GFS"]["checks"]["job_logs"]["mock"] = True
+    elif mutator == "lane_historical":
+        logs_summary["historical_latest"] = True
+    else:
+        logs_summary["sources"]["GFS"]["checks"]["job_logs"]["historical_latest"] = True
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_FAIL
+    assert logs_lane["status"] == STATUS_FAIL
+    assert expected_code in _codes(logs_lane["findings"])
+
+
+def test_logs_lane_owner_direct_evaluator_preserves_log_uri_safety() -> None:
+    run_id = _run_id("logs-owner-direct-uri-safety")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    log_uri = "published://logs/gfs/run/job.out?token=SECRET"
+    check["log_uri"] = log_uri
+    check["evidence"]["response"]["body"]["log_uri"] = log_uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+    metadata_result, logs_doc, docker_security_doc = _logs_owner_inputs(config)
+
+    logs_lane = two_node_e2e_logs_lane.evaluate_logs_lane(
+        logs_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        evidence_run_id=run_id,
+        docker_security_doc=docker_security_doc,
+        helpers=two_node_e2e_evidence._logs_lane_helpers(),
+    )
+
+    assert logs_lane.status == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED" in _codes(logs_lane.blockers)
+    assert "SECRET" not in json.dumps(logs_lane.to_summary()["blockers"])
+
+
+def test_logs_lane_owner_direct_evaluator_accepts_typed_unavailable_proof() -> None:
+    run_id = _run_id("logs-owner-direct-typed-unavailable")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    for record in logs_summary["sources"].values():
+        check = record["checks"]["job_logs"]
+        identity = copy.deepcopy(check["identity"])
+        check.pop("log_uri", None)
+        check.pop("published_log_read", None)
+        check["evidence"]["response"] = {
+            "status_code": 404,
+            "error_code": "JOB_LOG_NOT_PUBLISHED",
+            "method": "GET",
+            "path": f"/api/v1/jobs/{identity['job_id']}/logs",
+            **identity,
+        }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+    metadata_result, logs_doc, docker_security_doc = _logs_owner_inputs(config)
+
+    logs_lane = two_node_e2e_logs_lane.evaluate_logs_lane(
+        logs_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        evidence_run_id=run_id,
+        docker_security_doc=docker_security_doc,
+        helpers=two_node_e2e_evidence._logs_lane_helpers(),
+    )
+
+    assert logs_lane.status == STATUS_PASS
+    assert "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_EVIDENCE_MISSING" not in _codes(logs_lane.blockers)
 
 
 def test_docker_preflight_missing_lane_blocks_with_missing_lane_code() -> None:
@@ -5739,7 +6090,7 @@ def test_source_scoped_check_keyed_root_non_check_hidden_job_id_conflict_blocks(
 @pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts"])
 @pytest.mark.parametrize("metadata_key", ["log_uri", "published_log_uri"])
 @pytest.mark.parametrize("uri_scheme", ["published", "file", "s3"])
-def test_source_scoped_check_keyed_root_non_check_log_uri_identity_conflict_blocks(
+def test_logs_source_scoped_check_keyed_root_non_check_log_uri_identity_conflict_blocks(
     source_evidence_key: str,
     metadata_key: str,
     uri_scheme: str,
@@ -5782,7 +6133,7 @@ def test_source_scoped_check_keyed_root_non_check_log_uri_identity_conflict_bloc
 
 
 @pytest.mark.parametrize("metadata_key", ["log_uri", "published_log_uri"])
-def test_source_scoped_check_keyed_root_matching_log_uri_metadata_does_not_block(
+def test_logs_source_scoped_check_keyed_root_matching_log_uri_metadata_does_not_block(
     metadata_key: str,
 ) -> None:
     run_id = _run_id(f"source-keyed-{metadata_key}-matching-log-uri-pass")
@@ -6093,7 +6444,7 @@ def test_logs_job_logs_check_top_level_log_uri_conflict_blocks_with_source_scope
 
 @pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
 @pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper"])
-def test_source_scoped_check_keyed_root_wrapper_scalar_log_uri_conflict_blocks(
+def test_logs_source_scoped_check_keyed_root_wrapper_scalar_log_uri_conflict_blocks(
     source_evidence_key: str,
     wrapper_key: str,
 ) -> None:
@@ -7163,7 +7514,7 @@ def test_logs_lane_uses_docker_security_authoritative_published_log_root(
         (SHIFTED_CYCLE_TIME, STATUS_BLOCKED),
     ],
 )
-def test_published_log_unavailable_binding_cycle_time_uses_timestamp_semantics(
+def test_logs_published_log_unavailable_binding_cycle_time_uses_timestamp_semantics(
     unavailable_cycle_time: str,
     expected_status: str,
 ) -> None:
