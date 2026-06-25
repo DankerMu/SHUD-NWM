@@ -194,6 +194,7 @@ def evaluate_simple_live_lane(
     blockers = list(helpers.stale_lane_blockers(payload))
     findings: list[dict[str, Any]] = []
     if status == STATUS_PASS:
+        producer_scope_dir = doc.path.parents[1] if len(doc.path.parents) > 1 else run_dir
         blockers.extend(helpers.current_run_blockers(payload, evidence_run_id, lane_name=name))
         blockers.extend(helpers.recursive_current_run_blockers(payload, evidence_run_id, lane_name=name))
         blockers.extend(
@@ -201,7 +202,7 @@ def evaluate_simple_live_lane(
                 payload,
                 evidence_run_id=evidence_run_id,
                 lane_name=name,
-                run_dir=run_dir,
+                run_dir=producer_scope_dir,
             )
         )
         if not helpers.has_live_lane_evidence(payload, live_flag=lane_config.live_flag):
