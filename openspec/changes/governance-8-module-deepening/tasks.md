@@ -1446,10 +1446,32 @@
     production topology behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs"`.
   - Inventory/Evidence Update: update two-node inventory row `logs`.
-- [ ] 3.10 Manual ops lane extraction.
+- [x] 3.10 Manual ops lane extraction.
   - Module/Scope: manual ops receipts, node-27 fail-closed proof, no-side-effect proof, node-22 control receipt provenance, optional receipt artifact validation.
   - Dependencies: 3.1 and 3.2.
   - Out of Scope: production control behavior changes, API route changes, final aggregation.
+  - Fixture Rows: `services.production_closure.two_node_e2e_manual_ops_lane`
+    owns `MANUAL_OPS_DOCUMENT_CANDIDATES`, `MANUAL_OPS_SCHEMA`,
+    required 27 retry/cancel action constants, manual-action response redaction
+    aliases, side-effect categories, `ManualOpsLaneEvaluationHelpers`,
+    `evaluate_manual_ops_lane`, and public `manual_action_name` /
+    `manual_action_outcome_status`; `validate_two_node_e2e_evidence(config)`
+    delegates manual ops evaluation to the owner through `_manual_ops_lane_helpers`
+    while retaining stable final composition and discovery through the facade.
+  - Risk Axes: preserves production operator auth redaction, 27 display
+    fail-closed semantics, no-side-effect proof, node-22 `compute_control`
+    provenance, receipt source coverage, optional receipt artifact validation,
+    strict identity parity, and readonly DB reuse of manual action helpers; no
+    production control behavior, API route, cross-plane/source-scope aggregation,
+    final aggregation, DB schema/role, Slurm scheduling, frontend/display UI, or
+    production topology behavior moves in this slice.
+  - Regression Rows: added owner guard, direct evaluator parity, validator
+    delegation, document alias discovery, and missing manual ops lane shape
+    tests; existing focused manual ops tests continue to cover old boolean-only
+    shapes, production auth, 27 receipt rejection, 22 provenance, artifact
+    safety/hash/payload/identity checks, response evidence, source declaration,
+    fail-closed/no-side-effect matrix, full-source receipt coverage, and IFS
+    identity mismatch behavior.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"`.
   - Inventory/Evidence Update: update two-node inventory row `manual ops receipts`.
 - [ ] 3.11 Cross-plane and source-scope aggregation extraction.
