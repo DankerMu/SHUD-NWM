@@ -1253,10 +1253,61 @@
     schema, DB role, or final aggregation behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "readonly_db"`.
   - Inventory/Evidence Update: update two-node inventory row `readonly DB`.
-- [ ] 3.6 Simple live lane helper and Slurm/compute/display lanes.
+- [x] 3.6 Simple live lane helper and Slurm/compute/display lanes.
   - Module/Scope: shared simple-live helper plus Slurm, compute summary, and display summary lanes.
   - Dependencies: 3.1.
   - Out of Scope: Docker, readonly DB, API/browser/logs, manual ops, cross-plane.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because this
+    slice moves a shared helper used by three runtime summary lanes with
+    different document aliases, live-proof flags, and PASS aliases while
+    preserving stable final-validator composition.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (Slurm, 22-compute, compute-summary, 27-display, and
+    display-summary filename aliases stay accepted in owner discovery order);
+    Schema / field names (live flags `live_slurm_evidence`,
+    `live_compute_evidence`, `live_display_evidence`, and pass aliases
+    `ready`/`submitted` stay stable); File IO / path safety / overwrite
+    (source artifact path, sha256, approved-root, current-run, recursive stale,
+    and bounded JSON checks stay wired through shared helper contracts);
+    Error handling / partial outputs (missing lane, stale run, nested stale
+    evidence, missing live evidence, missing producer proof, mock evidence,
+    and pass-alias mismatch preserve BLOCKED/FAIL semantics); Documentation /
+    migration notes (two-node inventory records current owners and guard
+    symbols for the shared helper plus the three lanes). Not Selected: Docker,
+    readonly DB, API/browser/logs, manual ops, cross-plane/source-scope
+    aggregation, DB schema/role changes, frontend/display route behavior,
+    Slurm scheduling behavior, or final aggregation movement.
+  - Invariant Matrix: Governing invariant: simple-live status/current-run/
+    producer/live-proof/mock semantics are owned by a focused production
+    closure module while the aggregator keeps stable composition and helper
+    injection. Source-of-truth identity/contract: Slurm, compute summary, and
+    display summary document candidates, lane names, live flags, pass aliases,
+    helper dataclass, evaluator, blocker namespaces, and focused verification
+    commands agree with the inventory and spec. Surfaces: Producers:
+    `slurm/*`, `22-compute/*`, `compute*`, `27-display/*`, and `display*`
+    summaries; Compatibility/stable entrypoint:
+    `validate_two_node_e2e_evidence(config)`; Validators/preflight: focused
+    simple-lane selectors plus OpenSpec; Public outputs:
+    `lane_summaries.slurm`, `lane_summaries.compute_summary`, and
+    `lane_summaries.display_summary`; Failure paths/rollback/stale state:
+    missing lane files, stale current-run fields, stale nested producer proof,
+    missing live evidence, missing producer evidence, mock/fixture findings,
+    and pass alias normalization.
+  - Regression Rows: owner module exposes simple-live helper metadata,
+    Slurm/compute/display document aliases, live flags, pass aliases, helper
+    dataclass, evaluator, guard symbols, and blocker namespaces; aggregator
+    uses owner discovery aliases and helper injection while keeping final
+    summary shape unchanged; direct tests prove owner guard metadata, each lane
+    alias fallback, every pass alias, non-PASS status preservation, missing
+    lane summary shape, mock/fixture failure, and flat-alias producer artifact
+    scope; existing focused tests continue covering live flag constants,
+    producer proof requirements, recursive stale current-run blockers, and
+    final redacted summary compatibility; inventory rows record current owner
+    and guard hook tokens; no Docker, readonly DB, API/browser/logs, manual ops,
+    cross-plane, DB schema/role, frontend/display route, Slurm scheduling, or
+    final aggregation behavior moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or slurm"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or compute_summary"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or display_summary"`.
   - Inventory/Evidence Update: update two-node inventory rows `Slurm proof`, `compute summary`, and `display summary`.
 - [ ] 3.7 API proof lane extraction.

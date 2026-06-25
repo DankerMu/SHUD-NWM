@@ -18,6 +18,7 @@ from services.production_closure import (
     two_node_e2e_docker_security,
     two_node_e2e_metadata_lane,
     two_node_e2e_readonly_db_lane,
+    two_node_e2e_simple_live_lane,
 )
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
@@ -209,6 +210,22 @@ def _inventory_row(inventory_text: str, contract_id: str) -> str:
         if line.startswith(prefix):
             return line
     raise AssertionError(f"missing inventory row for {contract_id}")
+
+
+def _simple_live_alias_cases() -> list[tuple[str, str]]:
+    return [
+        (lane_config.name, candidate)
+        for lane_config in two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()
+        for candidate in lane_config.document_candidates
+    ]
+
+
+def _simple_live_pass_alias_cases() -> list[tuple[str, str]]:
+    return [
+        (lane_config.name, pass_alias)
+        for lane_config in two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()
+        for pass_alias in lane_config.pass_aliases
+    ]
 
 
 def test_shared_two_node_evidence_contract_metadata_covers_producer_source_artifact_strict_identity() -> None:
@@ -756,6 +773,237 @@ def test_readonly_db_owner_discovers_each_summary_alias(candidate: str) -> None:
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
     assert summary["lane_summaries"]["readonly_db"]["evidence_path"] == str(
         candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_simple_lane_owner_module_covers_slurm_compute_summary_display_summary_contract() -> None:
+    assert two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_simple_live_lane"
+    )
+    assert two_node_e2e_simple_live_lane.SLURM_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or slurm"'
+    )
+    assert two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or compute_summary"'
+    )
+    assert two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or display_summary"'
+    )
+    assert two_node_e2e_simple_live_lane.SLURM_DOCUMENT_CANDIDATES == (
+        "slurm/summary.json",
+        "slurm/evidence.json",
+    )
+    assert two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_DOCUMENT_CANDIDATES == (
+        "22-compute/summary.json",
+        "compute/summary.json",
+        "compute-summary.json",
+    )
+    assert two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_DOCUMENT_CANDIDATES == (
+        "27-display/summary.json",
+        "display/summary.json",
+        "display-summary.json",
+    )
+    assert two_node_e2e_simple_live_lane.SLURM_LANE_CONFIG.live_flag == "live_slurm_evidence"
+    assert two_node_e2e_simple_live_lane.SLURM_LANE_CONFIG.pass_aliases == (STATUS_PASS,)
+    assert two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_LANE_CONFIG.live_flag == "live_compute_evidence"
+    assert two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_LANE_CONFIG.pass_aliases == (
+        STATUS_PASS,
+        "ready",
+        "submitted",
+    )
+    assert two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_LANE_CONFIG.live_flag == "live_display_evidence"
+    assert two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_LANE_CONFIG.pass_aliases == (
+        STATUS_PASS,
+        "ready",
+    )
+    assert two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS == {
+        "slurm": two_node_e2e_simple_live_lane.SLURM_LANE_CONFIG,
+        "compute_summary": two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_LANE_CONFIG,
+        "display_summary": two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_LANE_CONFIG,
+    }
+    assert two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_SLURM_",
+        "TWO_NODE_E2E_COMPUTE_SUMMARY_",
+        "TWO_NODE_E2E_DISPLAY_SUMMARY_",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+        "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_",
+    )
+    for symbol in two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_simple_live_lane, symbol), symbol
+
+
+@pytest.mark.parametrize(
+    "lane_config",
+    tuple(two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()),
+    ids=lambda lane_config: lane_config.name,
+)
+def test_simple_lane_owner_evaluates_slurm_compute_summary_display_summary_contract(
+    lane_config: two_node_e2e_simple_live_lane.SimpleLiveLaneConfig,
+) -> None:
+    run_id = _run_id(f"{lane_config.name}-owner")
+    config = _seed_pass_bundle(run_id)
+    doc = two_node_e2e_evidence._find_first_json(config.run_dir, lane_config.document_candidates)
+    assert doc is not None
+
+    lane = two_node_e2e_simple_live_lane.evaluate_simple_live_lane(
+        lane_config,
+        doc,
+        evidence_run_id=run_id,
+        run_dir=config.run_dir,
+        helpers=two_node_e2e_evidence._simple_live_lane_helpers(),
+    )
+
+    assert lane.status == STATUS_PASS
+    summary = validate_two_node_e2e_evidence(config)
+    assert summary["lane_summaries"][lane_config.name]["status"] == lane.status
+    assert summary["lane_summaries"][lane_config.name]["summary_status"] == lane.summary_status
+
+
+@pytest.mark.parametrize(("lane_name", "candidate"), _simple_live_alias_cases())
+def test_simple_lane_owner_discovers_slurm_compute_summary_display_summary_aliases(
+    lane_name: str,
+    candidate: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    lane_config = two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS[lane_name]
+    canonical = config.run_dir / lane_config.document_candidates[0]
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical:
+        canonical.unlink()
+        _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"][lane_name]["status"] == STATUS_PASS
+    assert summary["lane_summaries"][lane_name]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+@pytest.mark.parametrize(("lane_name", "pass_alias"), _simple_live_pass_alias_cases())
+def test_simple_lane_owner_preserves_each_pass_alias(lane_name: str, pass_alias: str) -> None:
+    run_id = _run_id(f"{lane_name}-{pass_alias.lower()}-alias")
+    config = _seed_pass_bundle(run_id)
+    lane_config = two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS[lane_name]
+    payload = _read(config.run_dir / lane_config.document_candidates[0])
+    payload["status"] = pass_alias
+    _write(config.run_dir / lane_config.document_candidates[0], payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert lane["status"] == STATUS_PASS
+    assert lane["summary_status"] == pass_alias
+
+
+@pytest.mark.parametrize(
+    "lane_config",
+    tuple(two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()),
+    ids=lambda lane_config: lane_config.name,
+)
+@pytest.mark.parametrize("producer_status", [STATUS_FAIL, STATUS_BLOCKED])
+def test_simple_lane_owner_preserves_non_pass_statuses(
+    lane_config: two_node_e2e_simple_live_lane.SimpleLiveLaneConfig,
+    producer_status: str,
+) -> None:
+    run_id = _run_id(f"{lane_config.name}-{producer_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_config.document_candidates[0])
+    payload["status"] = producer_status
+    payload.pop("commands", None)
+    payload.pop(lane_config.live_flag, None)
+    _write(config.run_dir / lane_config.document_candidates[0], payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_config.name]
+    assert lane["status"] == producer_status
+    assert lane["summary_status"] == producer_status
+    assert f"TWO_NODE_E2E_{lane_config.name.upper()}_PRODUCER_EVIDENCE_MISSING" not in _codes(
+        lane["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    "lane_config",
+    tuple(two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()),
+    ids=lambda lane_config: lane_config.name,
+)
+def test_simple_lane_owner_missing_lane_summary_shape(
+    lane_config: two_node_e2e_simple_live_lane.SimpleLiveLaneConfig,
+) -> None:
+    run_id = _run_id(f"{lane_config.name}-missing-simple-lane")
+    config = _seed_pass_bundle(run_id)
+    for candidate in lane_config.document_candidates:
+        candidate_path = config.run_dir / candidate
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_config.name]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert lane["evidence_path"] is None
+    assert lane["evidence_sha256"] is None
+    assert lane["summary_status"] is None
+    assert f"TWO_NODE_E2E_{lane_config.name.upper()}_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    "lane_config",
+    tuple(two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS.values()),
+    ids=lambda lane_config: lane_config.name,
+)
+def test_simple_lane_owner_mock_pass_becomes_fail(
+    lane_config: two_node_e2e_simple_live_lane.SimpleLiveLaneConfig,
+) -> None:
+    run_id = _run_id(f"{lane_config.name}-mock-simple-lane")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_config.document_candidates[0])
+    payload["execution_mode"] = "fixture"
+    _write(config.run_dir / lane_config.document_candidates[0], payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_config.name]
+    assert summary["status"] == STATUS_FAIL
+    assert lane["status"] == STATUS_FAIL
+    assert f"TWO_NODE_E2E_{lane_config.name.upper()}_MOCK_EVIDENCE" in _codes(lane["findings"])
+
+
+@pytest.mark.parametrize(
+    ("lane_name", "flat_alias"),
+    [
+        ("compute_summary", "compute-summary.json"),
+        ("display_summary", "display-summary.json"),
+    ],
+)
+def test_simple_lane_flat_alias_preserves_legacy_source_artifact_scope(
+    lane_name: str,
+    flat_alias: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-flat-artifact-scope")
+    config = _seed_pass_bundle(run_id)
+    lane_config = two_node_e2e_simple_live_lane.SIMPLE_LIVE_LANE_CONFIGS[lane_name]
+    canonical = config.run_dir / lane_config.document_candidates[0]
+    payload = _read(canonical)
+    sibling_artifact = config.run_dir.parent / f"{lane_name}-producer-artifact.json"
+    _write(sibling_artifact, {"status": STATUS_PASS, "evidence_run_id": run_id})
+    payload["source_artifacts"] = [_artifact_summary(sibling_artifact)]
+    canonical.unlink()
+    _write(config.run_dir / flat_alias, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" not in _codes(
+        lane["blockers"]
     )
 
 
