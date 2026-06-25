@@ -17,6 +17,7 @@ import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e
 import services.production_closure.two_node_e2e_docker_security as two_node_e2e_docker_security
 import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
 import services.production_closure.two_node_e2e_readonly_db_lane as two_node_e2e_readonly_db_lane
+import services.production_closure.two_node_e2e_simple_live_lane as two_node_e2e_simple_live_lane
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -43,6 +44,10 @@ from services.production_closure.two_node_e2e_metadata_lane import (
 from services.production_closure.two_node_e2e_readonly_db_lane import (
     ReadonlyDbEvaluationHelpers,
     evaluate_readonly_db,
+)
+from services.production_closure.two_node_e2e_simple_live_lane import (
+    SimpleLiveLaneEvaluationHelpers,
+    evaluate_simple_live_lane,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -630,6 +635,7 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
     scope = metadata_result.scope.as_dict()
     metadata_lane = metadata_result.lane
     strict_identities = metadata_result.strict_identities
+    simple_live_lane_helpers = _simple_live_lane_helpers()
 
     lane_docs = _load_lane_documents(config.run_dir)
     lanes = {
@@ -680,11 +686,12 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             evidence_run_id=config.run_id,
             docker_security_doc=lane_docs["docker_security"],
         ),
-        "slurm": _evaluate_simple_live_lane(
-            "slurm",
+        "slurm": evaluate_simple_live_lane(
+            two_node_e2e_simple_live_lane.SLURM_LANE_CONFIG,
             lane_docs["slurm"],
-            live_flag="live_slurm_evidence",
             evidence_run_id=config.run_id,
+            run_dir=config.run_dir,
+            helpers=simple_live_lane_helpers,
         ),
         "manual_ops": _evaluate_manual_ops(
             lane_docs["manual_ops"],
@@ -692,19 +699,19 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             strict_identities=strict_identities,
             evidence_run_id=config.run_id,
         ),
-        "compute_summary": _evaluate_simple_live_lane(
-            "compute_summary",
+        "compute_summary": evaluate_simple_live_lane(
+            two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_LANE_CONFIG,
             lane_docs["compute_summary"],
-            live_flag="live_compute_evidence",
-            allowed_statuses=(STATUS_PASS, "ready", "submitted"),
             evidence_run_id=config.run_id,
+            run_dir=config.run_dir,
+            helpers=simple_live_lane_helpers,
         ),
-        "display_summary": _evaluate_simple_live_lane(
-            "display_summary",
+        "display_summary": evaluate_simple_live_lane(
+            two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_LANE_CONFIG,
             lane_docs["display_summary"],
-            live_flag="live_display_evidence",
-            allowed_statuses=(STATUS_PASS, "ready"),
             evidence_run_id=config.run_id,
+            run_dir=config.run_dir,
+            helpers=simple_live_lane_helpers,
         ),
     }
     source_scope_results = _source_scope_results(
@@ -771,23 +778,18 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
         "browser": _find_first_json(run_dir, ("browser/summary.json", "browser/evidence.json")),
         "cross_plane": _find_first_json(run_dir, ("cross-plane/summary.json", "cross-plane/evidence.json")),
         "manual_ops": _find_first_json(run_dir, ("manual-ops/summary.json", "manual-ops/evidence.json")),
-        "slurm": _find_first_json(run_dir, ("slurm/summary.json", "slurm/evidence.json")),
+        "slurm": _find_first_json(
+            run_dir,
+            two_node_e2e_simple_live_lane.SLURM_DOCUMENT_CANDIDATES,
+        ),
         "logs": _find_first_json(run_dir, ("logs/summary.json", "logs/evidence.json")),
         "compute_summary": _find_first_json(
             run_dir,
-            (
-                "22-compute/summary.json",
-                "compute/summary.json",
-                "compute-summary.json",
-            ),
+            two_node_e2e_simple_live_lane.COMPUTE_SUMMARY_DOCUMENT_CANDIDATES,
         ),
         "display_summary": _find_first_json(
             run_dir,
-            (
-                "27-display/summary.json",
-                "display/summary.json",
-                "display-summary.json",
-            ),
+            two_node_e2e_simple_live_lane.DISPLAY_SUMMARY_DOCUMENT_CANDIDATES,
         ),
     }
 
@@ -879,6 +881,23 @@ def _readonly_db_helpers() -> ReadonlyDbEvaluationHelpers[LaneEvaluation]:
         evidence_error_type=TwoNodeE2EEvidenceError,
         safe_filesystem_error_type=SafeFilesystemError,
         max_evidence_payload_bytes=MAX_EVIDENCE_PAYLOAD_BYTES,
+    )
+
+
+def _simple_live_lane_helpers() -> SimpleLiveLaneEvaluationHelpers[LaneEvaluation]:
+    return SimpleLiveLaneEvaluationHelpers(
+        missing_lane=_missing_lane,
+        lane_from_status=_lane_from_status,
+        normalized_status=_normalized_status,
+        blocker=_blocker,
+        finding=_finding,
+        stale_lane_blockers=_stale_lane_blockers,
+        current_run_blockers=_current_run_blockers,
+        recursive_current_run_blockers=_recursive_current_run_blockers,
+        producer_source_artifact_blockers=_producer_source_artifact_blockers,
+        has_live_lane_evidence=_has_live_lane_evidence,
+        has_producer_backed_lane_evidence=_has_producer_backed_lane_evidence,
+        has_mock_or_fixture=_has_mock_or_fixture,
     )
 
 
@@ -1091,70 +1110,6 @@ def _evaluate_source_lane(
             status = STATUS_BLOCKED
         elif partial_sources:
             status = STATUS_PARTIAL
-    return _lane_from_status(
-        name,
-        doc,
-        status=status,
-        summary_status=str(payload.get("status", "unknown")),
-        blockers=blockers,
-        findings=findings,
-    )
-
-
-def _evaluate_simple_live_lane(
-    name: str,
-    doc: EvidenceDocument | None,
-    *,
-    live_flag: str,
-    allowed_statuses: Sequence[str] = (STATUS_PASS,),
-    evidence_run_id: str,
-) -> LaneEvaluation:
-    if doc is None:
-        return _missing_lane(name, f"TWO_NODE_E2E_{name.upper()}_EVIDENCE_MISSING")
-    payload = doc.payload
-    status = _normalized_status(payload.get("status"), pass_aliases=tuple(allowed_statuses))
-    blockers = list(_stale_lane_blockers(payload))
-    findings: list[dict[str, Any]] = []
-    if status == STATUS_PASS:
-        blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name=name))
-        blockers.extend(
-            _recursive_current_run_blockers(payload, evidence_run_id, lane_name=name)
-        )
-        blockers.extend(
-            _producer_source_artifact_blockers(
-                payload,
-                evidence_run_id=evidence_run_id,
-                lane_name=name,
-                run_dir=doc.path.parents[1],
-            )
-        )
-        if not _has_live_lane_evidence(payload, live_flag=live_flag):
-            blockers.append(
-                _blocker(
-                    f"TWO_NODE_E2E_{name.upper()}_LIVE_EVIDENCE_MISSING",
-                    f"{name} PASS requires live evidence.",
-                )
-            )
-        if not _has_producer_backed_lane_evidence(payload):
-            blockers.append(
-                _blocker(
-                    f"TWO_NODE_E2E_{name.upper()}_PRODUCER_EVIDENCE_MISSING",
-                    f"{name} PASS requires producer-backed command, artifact, request/response, browser, "
-                    "network, or per-check evidence.",
-                )
-            )
-    if status == STATUS_PASS and _has_mock_or_fixture(payload):
-        findings.append(
-            _finding(
-                f"TWO_NODE_E2E_{name.upper()}_MOCK_EVIDENCE",
-                f"{name} evidence uses mock or deterministic fixture data.",
-            )
-        )
-    if status == STATUS_PASS:
-        if findings:
-            status = STATUS_FAIL
-        elif blockers:
-            status = STATUS_BLOCKED
     return _lane_from_status(
         name,
         doc,
