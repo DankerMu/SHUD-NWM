@@ -280,6 +280,145 @@ _CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS = MappingProxyType(
     }
 )
 
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES = (
+    "_basin_key",
+    "_basin_identifier",
+    "_basin_original_task_id",
+    "_record_array_task_outcomes",
+    "_candidate_outcomes",
+    "_safe_candidate_outcome_payload",
+    "parse_sacct_array_results",
+    "_coerce_array_aggregation",
+    "_aggregation_from_task_results",
+    "_aggregation_error_code",
+    "_aggregation_error_message",
+    "_sacct_extra_fields",
+    "_slurm_accounting_from_payload",
+    "_resource_metrics_from_payload",
+    "_stage_task_result_evidence",
+    "_array_task_log_uri",
+    "_array_task_status",
+    "_parse_slurm_exit_code",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES = (
+    "basin_key",
+    "basin_identifier",
+    "basin_original_task_id",
+    "record_array_task_outcomes",
+    "candidate_outcomes",
+    "safe_candidate_outcome_payload",
+    "parse_sacct_array_results",
+    "coerce_array_aggregation",
+    "aggregation_from_task_results",
+    "aggregation_error_code",
+    "aggregation_error_message",
+    "sacct_extra_fields",
+    "slurm_accounting_from_payload",
+    "resource_metrics_from_payload",
+    "stage_task_result_evidence",
+    "array_task_log_uri",
+    "array_task_status",
+    "parse_slurm_exit_code",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDER_NAMES = (
+    "_aggregate_array_stage",
+    "_require_complete_array_accounting",
+    "_record_cycle_stage_status_override",
+    "_record_cycle_stage_accounting_event",
+    "_record_cycle_stage_accounting_gap",
+    "_apply_array_progress",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_OWNER_FUNCTION_NAMES = (
+    "aggregate_array_stage",
+    "require_complete_array_accounting",
+    "record_cycle_stage_status_override",
+    "record_cycle_stage_accounting_event",
+    "record_cycle_stage_accounting_gap",
+    "apply_array_progress",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_LOCAL_BINDING_NAMES = (
+    "_array_accounting_dependencies",
+    "_context_array_log_uri",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_FIELDS = (
+    "coerce_mapping",
+    "safe_candidate_outcome_payload",
+    "safe_pipeline_event_details",
+    "record_array_task_outcomes",
+    "stage_task_result_evidence",
+    "parse_sacct_array_results",
+    "coerce_array_aggregation",
+    "aggregation_from_task_results",
+    "aggregation_error_code",
+    "aggregation_error_message",
+    "sacct_extra_fields",
+    "slurm_accounting_from_payload",
+    "resource_metrics_from_payload",
+    "production_status_for",
+    "context_array_log_uri",
+    "array_task_status",
+    "parse_slurm_exit_code",
+    "basin_key",
+    "basin_original_task_id",
+    "status_from_gateway_job",
+    "parse_gateway_time",
+    "utcnow",
+    "build_reindexed_manifest",
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDINGS = (
+    ("coerce_mapping", "_coerce_mapping"),
+    ("safe_candidate_outcome_payload", "_safe_candidate_outcome_payload"),
+    ("safe_pipeline_event_details", "_safe_pipeline_event_details"),
+    ("record_array_task_outcomes", "_record_array_task_outcomes"),
+    ("stage_task_result_evidence", "_stage_task_result_evidence"),
+    ("parse_sacct_array_results", "parse_sacct_array_results"),
+    ("coerce_array_aggregation", "_coerce_array_aggregation"),
+    ("aggregation_from_task_results", "_aggregation_from_task_results"),
+    ("aggregation_error_code", "_aggregation_error_code"),
+    ("aggregation_error_message", "_aggregation_error_message"),
+    ("sacct_extra_fields", "_sacct_extra_fields"),
+    ("slurm_accounting_from_payload", "_slurm_accounting_from_payload"),
+    ("resource_metrics_from_payload", "_resource_metrics_from_payload"),
+    ("production_status_for", "production_status_for"),
+    ("context_array_log_uri", "_context_array_log_uri"),
+    ("array_task_status", "_array_task_status"),
+    ("parse_slurm_exit_code", "_parse_slurm_exit_code"),
+    ("basin_key", "_basin_key"),
+    ("basin_original_task_id", "_basin_original_task_id"),
+    ("status_from_gateway_job", "_status_from_gateway_job"),
+    ("parse_gateway_time", "_parse_gateway_time"),
+    ("utcnow", "_utcnow"),
+    ("build_reindexed_manifest", "build_reindexed_manifest"),
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_FUNCTION_NAMES = tuple(
+    dict.fromkeys(
+        (
+            *_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+            *_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_OWNER_FUNCTION_NAMES,
+            "context_array_log_uri",
+        )
+    )
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_MISSING = tuple(
+    name
+    for name in _CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_FUNCTION_NAMES
+    if not hasattr(chain_array_accounting, name)
+)
+if _CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "chain array accounting compatibility names missing from owner module: "
+        f"{', '.join(_CHAIN_ARRAY_ACCOUNTING_COMPAT_OWNER_MISSING)}"
+    )
+if (
+    tuple(chain_array_accounting.ArrayAccountingDependencies.__dataclass_fields__)
+    != _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_FIELDS
+):
+    raise RuntimeError("chain array accounting dependency fields drifted from compatibility fixture")
+if tuple(field for field, _ in _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDINGS) != (
+    _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_FIELDS
+):
+    raise RuntimeError("chain array accounting dependency bindings drifted from field fixture")
+
 
 def build_model_run_assembly(
     basin: Mapping[str, Any],
@@ -6454,6 +6593,51 @@ def _parse_slurm_exit_code(raw_exit_code: str) -> int | None:
     return chain_array_accounting.parse_slurm_exit_code(raw_exit_code)
 
 
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FACADE_MISSING = tuple(
+    name
+    for name in (
+        *_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES,
+        *_CHAIN_ARRAY_ACCOUNTING_COMPAT_LOCAL_BINDING_NAMES,
+    )
+    if not callable(globals().get(name))
+)
+if _CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FACADE_MISSING:
+    raise RuntimeError(
+        "chain array accounting compatibility names missing from facade: "
+        f"{', '.join(_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FACADE_MISSING)}"
+    )
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDER_NAMES
+    if not callable(getattr(ForecastOrchestrator, name, None))
+)
+if _CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING:
+    raise RuntimeError(
+        "chain array accounting compatibility methods missing from facade: "
+        f"{', '.join(_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING)}"
+    )
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_array_accounting, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDER_NAMES,
+            _CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_array_accounting, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDER_NAMES,
+            _CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+
+
 def _pipeline_job_id(run_id: str, stage: str) -> str:
     return f"job_{run_id}_{stage}"
 
@@ -6994,6 +7178,20 @@ def _parse_gateway_time(value: Any) -> datetime | None:
     if isinstance(value, str):
         return _ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
     return None
+
+
+_chain_array_accounting_deps = _array_accounting_dependencies()
+_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT = tuple(
+    field
+    for field, facade_name in _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDINGS
+    if getattr(_chain_array_accounting_deps, field) is not globals()[facade_name]
+)
+if _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT:
+    raise RuntimeError(
+        "chain array accounting dependency bindings drifted from legacy facade: "
+        f"{', '.join(_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT)}"
+    )
+del _chain_array_accounting_deps
 
 
 def _ensure_utc(value: datetime) -> datetime:
