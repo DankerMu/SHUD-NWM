@@ -14,7 +14,12 @@ import pytest
 import yaml
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
-from services.production_closure import two_node_e2e_evidence as e2e_evidence
+from services.production_closure import (
+    two_node_e2e_docker_security,
+)
+from services.production_closure import (
+    two_node_e2e_evidence as e2e_evidence,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1295,8 +1300,11 @@ def test_two_node_e2e_evidence_rejects_display_scheduler_root_env(
         ]
     }
 
-    proofs = e2e_evidence._docker_display_security_proofs(payload)
-    findings = e2e_evidence._docker_proof_findings(proofs)
+    proofs = two_node_e2e_docker_security.docker_display_security_proofs(payload)
+    findings = two_node_e2e_docker_security._docker_proof_findings(
+        proofs,
+        helpers=e2e_evidence._docker_security_helpers(),
+    )
 
     assert proofs["forbidden_env_hazard"] is True
     assert {

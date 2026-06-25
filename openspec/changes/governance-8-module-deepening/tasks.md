@@ -1128,10 +1128,66 @@
     final aggregation moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"`.
   - Inventory/Evidence Update: update two-node inventory row `Docker preflight`.
-- [ ] 3.4 Docker security lane extraction.
+- [x] 3.4 Docker security lane extraction.
   - Module/Scope: Docker security child/source artifacts, display-readonly runtime proof, forbidden capability findings, readonly published/root filesystem proof.
   - Dependencies: 3.1 and 3.3.
   - Out of Scope: readonly DB lane, API/browser/logs lanes, manual ops.
+  - Fixture Level: expanded; Repair Intensity: high, because Docker security
+    moves a large owner family with child/source artifact reads, raw Docker
+    proof aliasing, source-trust checked-path contracts, display runtime proof,
+    and forbidden capability findings while preserving the stable final
+    validator entrypoint.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (all Docker security filename aliases stay accepted in owner
+    discovery order); Schema / field names (`DOCKER_SECURITY_SUMMARY_SCHEMA`,
+    `DOCKER_SECURITY_CHILD_SCHEMAS`, false/true Docker proof aliases,
+    source-trust required labels, and blocker/finding namespaces stay stable);
+    File IO / path safety / overwrite (child artifact path, sha256, current-run
+    containment, approved-root, bounded JSON, and safe-read checks stay wired
+    through shared helpers); Error handling / partial outputs (missing lane,
+    stale run, missing child, stale/unscoped child, unsafe path, hash mismatch,
+    schema mismatch, producer blockers/findings, missing proof, forbidden
+    capability, and writable published/root evidence preserve BLOCKED/FAIL
+    semantics); Documentation / migration notes (two-node inventory records the
+    current owner module and guard symbols). Not Selected: readonly DB lane,
+    API/browser/logs source lanes, manual ops, DB roles/schema, frontend/display
+    behavior beyond Docker display proof evidence, Slurm runtime behavior, or
+    final aggregation movement.
+  - Invariant Matrix: Governing invariant: Docker security contract checks are
+    owned by `services.production_closure.two_node_e2e_docker_security` while
+    the aggregator keeps stable composition and shared helper injection.
+    Source-of-truth identity/contract: `DOCKER_SECURITY_DOCUMENT_CANDIDATES`,
+    `DOCKER_SECURITY_SUMMARY_SCHEMA`, `DOCKER_SECURITY_CHILD_SCHEMAS`,
+    `DOCKER_REQUIRED_FALSE_PROOFS`, `DOCKER_REQUIRED_TRUE_PROOFS`,
+    `DOCKER_FORBIDDEN_BOOL_KEYS`, `DOCKER_FORBIDDEN_FINDING_TOKENS`,
+    `DOCKER_SOURCE_TRUST_COMMON_REQUIRED_LABELS`,
+    `DOCKER_SOURCE_TRUST_ROLE_LABELS`, `DockerSecurityEvaluationHelpers`, and
+    `evaluate_docker_security(...)` agree with the two-node inventory and spec.
+    Surfaces: Producers: `docker-security/*` and `docker-smoke*` JSON summaries
+    plus source child artifacts; Compatibility/stable entrypoint:
+    `validate_two_node_e2e_evidence(config)`; Validators/security: focused
+    Docker security/display tests plus OpenSpec; Public outputs:
+    `lane_summaries.docker_security`; Failure paths/rollback/stale state:
+    stale/missing current-run IDs, unsupported summary/child schemas, missing or
+    stale children, unsafe/unapproved paths, invalid JSON, hash mismatch,
+    missing live Docker evidence, missing display readonly proof, forbidden
+    Docker capability findings, writable published/root filesystem proof, and
+    producer blockers/findings.
+  - Regression Rows: owner module exposes discovery aliases, summary/child
+    schemas, Docker false/true proof aliases, forbidden bool/finding tokens,
+    source-trust label constants, helper dataclass, evaluator, and blocker
+    namespaces; aggregator uses owner discovery aliases and helper injection
+    while keeping final summary shape unchanged; direct tests prove owner guard
+    metadata and every security alias fallback, including legacy smoke aliases
+    that require child artifact path/sha rewrites in fixtures; existing focused
+    tests prove child/source artifacts, source-trust role env proof, checked
+    paths, raw inspect hazards, published mount readonly proof, root filesystem
+    readonly proof, display runtime role proof, forbidden capability findings,
+    missing-proof blockers, and fail/block status semantics; inventory row
+    records current owner and guard hook tokens; no readonly DB lane,
+    API/browser/logs lanes, or manual ops move in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_security or docker_display"`.
   - Inventory/Evidence Update: update two-node inventory row `Docker security`.
 - [ ] 3.5 Readonly DB lane extraction.
