@@ -64,11 +64,14 @@ DOCKER_SECURITY_LANE_GUARD_SYMBOLS = (
 )
 DOCKER_SECURITY_BLOCKER_NAMESPACES = (
     "TWO_NODE_E2E_DOCKER_SECURITY_",
+    "TWO_NODE_E2E_DOCKER_LIVE_CONTAINER_EVIDENCE_MISSING",
     "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_",
     "TWO_NODE_E2E_DOCKER_STATIC_",
     "TWO_NODE_E2E_DOCKER_SMOKE_",
     "TWO_NODE_E2E_DOCKER_DISPLAY_",
     "TWO_NODE_E2E_DISPLAY_",
+    "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+    "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
 )
 
 LaneResultT = TypeVar("LaneResultT")
@@ -122,6 +125,7 @@ class ReadJson(Protocol):
 
 @dataclass(frozen=True)
 class DockerSecurityEvaluationHelpers(Generic[LaneResultT]):
+    run_dir: Path
     missing_lane: MissingLaneAdapter[LaneResultT]
     lane_from_status: LaneFromStatusAdapter[LaneResultT]
     normalized_status: Callable[[Any], str]
@@ -599,7 +603,7 @@ def _docker_security_single_child_artifact_issues(
             )
         )
         return blockers, findings
-    run_dir = doc.path.parent.parent
+    run_dir = helpers.run_dir
     containment_root = helpers.approved_artifact_containment_root(path)
     if not helpers.path_is_relative_to(path, run_dir):
         blockers.append(

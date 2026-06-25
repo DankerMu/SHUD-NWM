@@ -1303,7 +1303,7 @@ def test_two_node_e2e_evidence_rejects_display_scheduler_root_env(
     proofs = two_node_e2e_docker_security.docker_display_security_proofs(payload)
     findings = two_node_e2e_docker_security._docker_proof_findings(
         proofs,
-        helpers=e2e_evidence._docker_security_helpers(),
+        helpers=e2e_evidence._docker_security_helpers(REPO_ROOT),
     )
 
     assert proofs["forbidden_env_hazard"] is True

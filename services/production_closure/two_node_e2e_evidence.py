@@ -726,7 +726,7 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
         "docker_security": evaluate_docker_security(
             lane_docs["docker_security"],
             evidence_run_id=config.run_id,
-            helpers=_docker_security_helpers(),
+            helpers=_docker_security_helpers(config.run_dir),
         ),
         "readonly_db": _evaluate_readonly_db(
             lane_docs["readonly_db"],
@@ -891,8 +891,9 @@ def _docker_preflight_helpers() -> DockerPreflightEvaluationHelpers[LaneEvaluati
     )
 
 
-def _docker_security_helpers() -> DockerSecurityEvaluationHelpers[LaneEvaluation]:
+def _docker_security_helpers(run_dir: Path) -> DockerSecurityEvaluationHelpers[LaneEvaluation]:
     return DockerSecurityEvaluationHelpers(
+        run_dir=run_dir,
         missing_lane=_missing_lane,
         lane_from_status=_lane_from_status,
         normalized_status=_normalized_status,
