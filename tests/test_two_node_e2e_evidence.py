@@ -13,7 +13,7 @@ import pytest
 import services.production_closure.two_node_e2e_evidence as two_node_e2e_evidence
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.artifacts.reader import published_log_uri
-from services.production_closure import two_node_e2e_metadata_lane
+from services.production_closure import two_node_e2e_docker_preflight, two_node_e2e_metadata_lane
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
@@ -147,11 +147,13 @@ def _expected_shared_contracts() -> dict[str, dict[str, tuple[str, ...] | str]]:
                 "_read_json",
                 "_read_json_bytes",
                 "_refuse_symlink_components",
+                "_recorded_path_approval_blockers",
                 "_producer_source_artifact_record_blockers",
             ),
             "namespaces": (
                 "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
                 "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
+                "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS",
                 "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
             ),
             "verification": safety_verification,
@@ -413,6 +415,58 @@ def test_docker_preflight_current_run_id_can_pass_lane() -> None:
         "docker_system_df",
         "df_h",
     }
+
+
+def test_docker_preflight_owner_module_covers_resource_command_path_contract() -> None:
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_docker_preflight"
+    )
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"'
+    )
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES == (
+        "docker-preflight/summary.json",
+        "docker-preflight/docker-preflight.json",
+        "docker-preflight.json",
+    )
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_REQUIRED_COMMANDS == (
+        "docker_version",
+        "docker_compose_version",
+        "docker_info_docker_root",
+        "docker_system_df",
+        "df_h",
+    )
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS == (
+        "evidence_root",
+        "tmpdir",
+        "docker_root",
+    )
+    assert two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_DOCKER_PREFLIGHT_",
+        "TWO_NODE_E2E_DOCKER_ROOT_",
+        "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    )
+    for symbol in two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_docker_preflight, symbol), symbol
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES)
+def test_docker_preflight_owner_discovers_each_preflight_alias(candidate: str) -> None:
+    run_id = _run_id(f"preflight-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / "docker-preflight" / "summary.json"
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    canonical.unlink()
+    _write(config.run_dir / candidate, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["docker_preflight"]["evidence_path"] == str(
+        (config.run_dir / candidate).resolve().relative_to(REPO_ROOT)
+    )
 
 
 def test_docker_preflight_missing_lane_blocks_with_missing_lane_code() -> None:

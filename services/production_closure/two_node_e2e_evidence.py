@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
+import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e_docker_preflight
 import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -559,11 +560,13 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
             "_read_json",
             "_read_json_bytes",
             "_refuse_symlink_components",
+            "_recorded_path_approval_blockers",
             "_producer_source_artifact_record_blockers",
         ),
         "namespaces": (
             "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
             "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
+            "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS",
             "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
         ),
         "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY,
@@ -947,11 +950,7 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
     return {
         "docker_preflight": _find_first_json(
             run_dir,
-            (
-                "docker-preflight/summary.json",
-                "docker-preflight/docker-preflight.json",
-                "docker-preflight.json",
-            ),
+            two_node_e2e_docker_preflight.DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES,
         ),
         "docker_security": _find_first_json(
             run_dir,

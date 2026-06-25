@@ -1077,10 +1077,55 @@
     aggregation moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`.
   - Inventory/Evidence Update: update two-node inventory row `metadata`.
-- [ ] 3.3 Docker preflight lane extraction.
+- [x] 3.3 Docker preflight lane extraction.
   - Module/Scope: Docker preflight current-run, disk/command/resource checks, approved-root rules, Docker root resource evidence, blocker namespace.
   - Dependencies: 3.1.
   - Out of Scope: Docker security child artifacts, display readonly proof, final aggregation.
+  - Fixture Level: expanded; Repair Intensity: medium-high, because Docker
+    preflight is already a focused owner module but this slice completes its
+    discovery aliases, resource/command/path guard metadata, and inventory
+    ownership without touching Docker security or final aggregation.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, CLI behavior, final summary
+    schema, and `LaneEvaluation.to_summary` stay stable); Legacy compatibility
+    / examples (all Docker preflight filename aliases stay accepted); Schema /
+    field names (`DOCKER_PREFLIGHT_SCHEMA`, required command names, required
+    disk labels, DockerRootDir resource evidence, and blocker namespaces stay
+    stable); File IO / path safety / overwrite (preflight `evidence_root` and
+    `tmpdir` approved-root checks stay wired through shared helpers while
+    host `docker_root_dir` remains resource evidence); Error handling / partial
+    outputs (missing lane, stale run, missing resource, missing/failed command,
+    low/non-numeric disk, unsafe recorded path, and producer blockers keep the
+    same BLOCKED semantics); Documentation / migration notes (two-node
+    inventory records the current owner module and guard symbols). Not
+    Selected: Docker security child artifacts, display readonly proof, final
+    aggregation, DB roles/schema, API/frontend/display behavior, or Slurm
+    behavior.
+  - Invariant Matrix: Governing invariant: Docker preflight contract checks are
+    owned by `services.production_closure.two_node_e2e_docker_preflight` while
+    the aggregator keeps stable composition and shared helper injection.
+    Source-of-truth identity/contract: `DOCKER_PREFLIGHT_DOCUMENT_CANDIDATES`,
+    `DOCKER_PREFLIGHT_SCHEMA`, `DOCKER_PREFLIGHT_REQUIRED_COMMANDS`,
+    `DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS`,
+    `DOCKER_PREFLIGHT_BLOCKER_NAMESPACES`,
+    `DockerPreflightEvaluationHelpers`, and `evaluate_docker_preflight(...)`
+    agree with the two-node inventory and spec. Surfaces: Producers:
+    `docker-preflight/*` JSON summaries; Compatibility/stable entrypoint:
+    `validate_two_node_e2e_evidence(config)`; Validators/preflight: focused
+    Docker preflight tests plus OpenSpec; Public outputs:
+    `lane_summaries.docker_preflight`; Failure paths/rollback/stale state:
+    stale or missing current-run IDs, unsupported schema, missing resource
+    evidence, unsafe recorded paths, missing/failed commands, invalid disk
+    evidence, DockerRootDir absence, and producer blockers.
+  - Regression Rows: owner module exposes discovery aliases, schema,
+    command/disk/resource constants, blocker namespaces, helper dataclass, and
+    evaluator; aggregator uses owner discovery aliases and helper injection
+    while keeping final summary shape unchanged; direct tests prove owner guard
+    metadata and every preflight alias fallback; existing focused tests prove
+    current-run, disk/command/resource, approved-root, DockerRootDir, and
+    blocker namespace behavior; inventory row records current owner and guard
+    hook tokens; no Docker security child artifact, display readonly proof, or
+    final aggregation moves in this slice.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"`.
   - Inventory/Evidence Update: update two-node inventory row `Docker preflight`.
 - [ ] 3.4 Docker security lane extraction.
