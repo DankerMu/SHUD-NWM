@@ -19,6 +19,7 @@ from services.production_closure import (
     two_node_e2e_docker_preflight,
     two_node_e2e_docker_security,
     two_node_e2e_logs_lane,
+    two_node_e2e_manual_ops_lane,
     two_node_e2e_metadata_lane,
     two_node_e2e_readonly_db_lane,
     two_node_e2e_simple_live_lane,
@@ -750,6 +751,12 @@ def test_readonly_db_owner_module_covers_live_source_route_permission_contract()
         "TWO_NODE_E2E_STRICT_IDENTITY_",
         "TWO_NODE_E2E_EXPECTED_STRICT_IDENTITY_INCOMPLETE",
         "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE",
+    )
+    readonly_helpers = two_node_e2e_evidence._readonly_db_helpers()
+    assert readonly_helpers.manual_action_name is two_node_e2e_manual_ops_lane.manual_action_name
+    assert (
+        readonly_helpers.manual_action_outcome_status
+        is two_node_e2e_manual_ops_lane.manual_action_outcome_status
     )
     for symbol in two_node_e2e_readonly_db_lane.READONLY_DB_LANE_GUARD_SYMBOLS:
         assert _module_symbol_exists(two_node_e2e_readonly_db_lane, symbol), symbol
@@ -7590,6 +7597,179 @@ def test_browser_ops_jobs_requires_job_id_binding() -> None:
     assert summary["status"] == STATUS_BLOCKED
     assert browser_lane["status"] == STATUS_BLOCKED
     assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(browser_lane["blockers"])
+
+
+def _manual_ops_owner_inputs(
+    config: TwoNodeE2EEvidenceConfig,
+) -> tuple[
+    two_node_e2e_metadata_lane.MetadataLaneEvaluation,
+    two_node_e2e_evidence.EvidenceDocument,
+]:
+    metadata_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_metadata_lane.METADATA_DOCUMENT_CANDIDATES,
+    )
+    assert metadata_doc is not None
+    metadata_result = two_node_e2e_metadata_lane.evaluate_metadata_lane(
+        metadata_doc,
+        metadata_doc.payload,
+        evidence_run_id=config.run_id,
+        configured_declared_sources=config.declared_sources,
+        configured_reduced_scope=config.reduced_scope,
+        helpers=two_node_e2e_evidence._metadata_lane_helpers(),
+    )
+    manual_ops_doc = two_node_e2e_evidence._find_first_json(
+        config.run_dir,
+        two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES,
+    )
+    assert manual_ops_doc is not None
+    return metadata_result, manual_ops_doc
+
+
+def test_manual_ops_lane_owner_module_covers_manual_ops_receipt_contract() -> None:
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_LANE_OWNER == (
+        "services.production_closure.two_node_e2e_manual_ops_lane"
+    )
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_LANE_VERIFICATION == (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"'
+    )
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES == (
+        "manual-ops/summary.json",
+        "manual-ops/evidence.json",
+    )
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_SCHEMA == "nhms.two_node_e2e.manual_ops.v1"
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS == {
+        "retry",
+        "cancel",
+    }
+    assert (
+        two_node_e2e_manual_ops_lane.MANUAL_OPS_MANUAL_ACTION_ERROR_CODE
+        == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    )
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_RESPONSE_REDACTION_KEYS == (
+        "body_redacted",
+        "redacted",
+        "sensitive_values_redacted",
+    )
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_SIDE_EFFECT_CATEGORIES == {
+        "write": (
+            "write_executed",
+            "db_write_executed",
+            "control_executed",
+            "state_mutation_executed",
+            "write_dependency_constructed",
+        ),
+        "gateway": ("gateway_called", "slurm_gateway_called", "gateway_dependency_constructed"),
+        "receipt": ("receipt_created", "control_receipt_created"),
+    }
+    assert two_node_e2e_manual_ops_lane.MANUAL_OPS_LANE_BLOCKER_NAMESPACES == (
+        "TWO_NODE_E2E_MANUAL_OPS_",
+        "TWO_NODE_E2E_STRICT_IDENTITY_",
+        "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_",
+        "TWO_NODE_E2E_STALE_EVIDENCE_RUN_ID",
+    )
+    for symbol in two_node_e2e_manual_ops_lane.MANUAL_OPS_LANE_GUARD_SYMBOLS:
+        assert _module_symbol_exists(two_node_e2e_manual_ops_lane, symbol), symbol
+
+
+def test_manual_ops_lane_owner_direct_evaluator_matches_full_validator_pass() -> None:
+    run_id = _run_id("manual-ops-owner-pass-parity")
+    config = _seed_pass_bundle(run_id)
+    metadata_result, manual_ops_doc = _manual_ops_owner_inputs(config)
+
+    manual_ops_lane = two_node_e2e_manual_ops_lane.evaluate_manual_ops_lane(
+        manual_ops_doc,
+        declared_sources=metadata_result.scope.declared_sources,
+        strict_identities=metadata_result.strict_identities,
+        evidence_run_id=run_id,
+        helpers=two_node_e2e_evidence._manual_ops_lane_helpers(),
+    )
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert manual_ops_lane.status == STATUS_PASS
+    assert summary["lane_summaries"]["manual_ops"] == manual_ops_lane.to_summary()
+
+
+def test_manual_ops_lane_owner_validator_uses_owner_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = _run_id("manual-ops-owner-validator-call")
+    config = _seed_pass_bundle(run_id)
+    original = two_node_e2e_evidence.evaluate_manual_ops_lane
+    assert original is two_node_e2e_manual_ops_lane.evaluate_manual_ops_lane
+    call: dict[str, Any] = {}
+
+    def spy_evaluate_manual_ops_lane(
+        doc: two_node_e2e_evidence.EvidenceDocument | None,
+        *,
+        declared_sources: tuple[str, ...],
+        strict_identities: Mapping[str, Mapping[str, Any]],
+        evidence_run_id: str,
+        helpers: two_node_e2e_manual_ops_lane.ManualOpsLaneEvaluationHelpers[
+            two_node_e2e_evidence.LaneEvaluation
+        ],
+    ) -> two_node_e2e_evidence.LaneEvaluation:
+        call["doc_path"] = doc.path if doc is not None else None
+        call["declared_sources"] = declared_sources
+        call["strict_identity_sources"] = tuple(sorted(strict_identities))
+        call["evidence_run_id"] = evidence_run_id
+        call["helpers_type"] = type(helpers)
+        return original(
+            doc,
+            declared_sources=declared_sources,
+            strict_identities=strict_identities,
+            evidence_run_id=evidence_run_id,
+            helpers=helpers,
+        )
+
+    monkeypatch.setattr(two_node_e2e_evidence, "evaluate_manual_ops_lane", spy_evaluate_manual_ops_lane)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+    assert call == {
+        "doc_path": (config.run_dir / "manual-ops" / "summary.json").resolve(strict=False),
+        "declared_sources": ("GFS", "IFS"),
+        "strict_identity_sources": ("GFS", "IFS"),
+        "evidence_run_id": run_id,
+        "helpers_type": two_node_e2e_manual_ops_lane.ManualOpsLaneEvaluationHelpers,
+    }
+
+
+@pytest.mark.parametrize("candidate", two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES)
+def test_manual_ops_lane_owner_discovers_each_manual_ops_alias(candidate: str) -> None:
+    run_id = _run_id(f"manual-ops-alias-{candidate.replace('/', '-')}")
+    config = _seed_pass_bundle(run_id)
+    canonical = config.run_dir / two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES[0]
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    candidate_path = config.run_dir / candidate
+    if candidate_path != canonical:
+        canonical.unlink()
+        _write(candidate_path, payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["manual_ops"]["evidence_path"] == str(
+        candidate_path.resolve().relative_to(REPO_ROOT)
+    )
+
+
+def test_manual_ops_lane_owner_missing_manual_ops_summary_shape_and_source_scope() -> None:
+    run_id = _run_id("manual-ops-owner-missing")
+    config = _seed_pass_bundle(run_id)
+    for candidate in two_node_e2e_manual_ops_lane.MANUAL_OPS_DOCUMENT_CANDIDATES:
+        candidate_path = config.run_dir / candidate
+        if candidate_path.exists():
+            candidate_path.unlink()
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert lane["evidence_path"] is None
+    assert "TWO_NODE_E2E_MANUAL_OPS_EVIDENCE_MISSING" in _codes(lane["blockers"])
 
 
 def test_manual_ops_auth_and_receipt_boundaries() -> None:
