@@ -919,10 +919,50 @@
   - Inventory/Evidence Update: update chain inventory group
     `chain-persistence-repository-facade` with explicit retained local
     implementation evidence and executable guard metadata.
-- [ ] 2.11 Chain group verification and evidence closeout.
+- [x] 2.11 Chain group verification and evidence closeout.
   - Module/Scope: integration gate for chain group.
   - Dependencies: 2.1-2.10.
   - Out of Scope: new orchestration behavior, Slurm behavior changes, DB schema changes.
+  - Fixture Level: expanded integration closeout. This slice is evidence-only
+    but high impact because it records the chain group's task-to-issue-to-PR
+    chain and verifies that the compatibility facade did not grow after the
+    owner-family slices.
+  - Risk Pack Selection: Selected: Public API / stable facade
+    (`ForecastOrchestrator`, `AnalysisOrchestrator`, `OrchestratorConfig`,
+    `SlurmGatewayClient`, `HttpSlurmGatewayClient`, and legacy
+    `services.orchestrator.chain` import/monkeypatch paths remain stable);
+    Legacy compatibility (all nine governed chain groups must stay
+    inventoried); Test / evidence coverage (focused chain, retry/cancel,
+    gateway reconcile, real-DB integration, and entropy guard suites form the
+    group gate); Documentation / migration notes (implementation evidence
+    records the chain issue/PR mapping); CI / release governance (closeout
+    evidence must line up with merged PR state). Not Selected: moving owner
+    behavior, changing orchestration runtime behavior, changing Slurm behavior,
+    changing DB schema or SQL semantics, changing API routes, changing
+    frontend/display surfaces, changing scheduler behavior, or deleting
+    compatibility symbols.
+  - Invariant Matrix: Governing invariant: chain group 2.1-2.10 is complete
+    before this closeout is checked. Source-of-truth identity/contract:
+    `docs/review-loop-log.jsonl`, GitHub issue/PR state, and
+    `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` agree on the chain
+    task-to-issue-to-PR mapping. Surfaces: Producers: completed PRs #780-#789
+    and this closeout PR; Compatibility facade:
+    `services/orchestrator/chain.py` plus owner modules; Validators:
+    orchestration chain tests, retry/cancel consistency tests, gateway
+    reconcile tests, real-DB integration tests, entropy inventory guard,
+    OpenSpec validation, and diff-check; Evidence/audit/readiness: chain
+    compatibility inventory closeout map and the post-merge review-loop log.
+  - Regression Rows: every governed chain group remains present in the
+    inventory (`chain-stage-catalog-type-reexports`,
+    `chain-stage-execution-forwarders`, `chain-array-accounting-forwarders`,
+    `chain-manifest-forwarders`, `chain-reservation-facade`,
+    `chain-retry-facade`, `chain-tile-publisher-facade`,
+    `chain-worker-adapter-facade`, and `chain-persistence-repository-facade`);
+    the final chain evidence map records tasks 2.1-2.11 with issue/PR
+    references; focused verification commands pass after the evidence update;
+    no chain runtime code, Slurm behavior, DB schema, API route, scheduler,
+    readiness, two-node, API-bootstrap, or frontend groups change in this
+    slice.
   - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py tests/test_real_database_integration.py`;
     `uv run pytest -q tests/test_entropy_audit_script.py`;
     `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
