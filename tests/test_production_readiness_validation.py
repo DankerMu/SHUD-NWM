@@ -164,6 +164,10 @@ def _blockers(root: Path, run_id: str = "m19") -> list[dict[str, object]]:
     return list(payload["blockers"])
 
 
+def _blocker_payload(root: Path, run_id: str = "m19") -> dict[str, object]:
+    return json.loads((root / run_id / "readiness" / "release_blockers.json").read_text(encoding="utf-8"))
+
+
 def _base_item(status: str, execution_mode: str) -> dict[str, object]:
     return {
         "item_id": "unit-readiness-item",
@@ -2605,9 +2609,26 @@ def test_exclusions_are_not_failed_and_do_not_satisfy_live_proof(tmp_path: Path)
     root = tmp_path / "artifacts"
     validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
 
+    expected_exclusions = [
+        {"id": "cldas-restricted", "surface": "cldas_restricted_source", "status": "not_executed"},
+        {
+            "id": "real-national-data-incomplete",
+            "surface": "incomplete_real_national_data",
+            "status": "not_executed",
+        },
+    ]
     exclusions = _summary(root)["exclusions"]
-    exclusion_ids = {exclusion["id"] for exclusion in exclusions}
-    assert {"cldas-restricted", "real-national-data-incomplete"} <= exclusion_ids
+    assert [
+        {key: exclusion[key] for key in ("id", "surface", "status")}
+        for exclusion in exclusions
+        if exclusion["id"] in {"cldas-restricted", "real-national-data-incomplete"}
+    ] == expected_exclusions
+    blocker_exclusions = _blocker_payload(root)["exclusions"]
+    assert [
+        {key: exclusion[key] for key in ("id", "surface", "status")}
+        for exclusion in blocker_exclusions
+        if exclusion["id"] in {"cldas-restricted", "real-national-data-incomplete"}
+    ] == expected_exclusions
     exclusion_items = [item for item in _items(root) if item["exclusions"]]
     assert {item["status"] for item in exclusion_items} == {"not_executed"}
     assert all(item["execution_mode"] == "not_executed" for item in exclusion_items)
