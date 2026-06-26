@@ -13,6 +13,7 @@ from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
     readiness_dependency_summaries,
     readiness_item_contracts,
+    readiness_scheduler_evidence,
     readiness_shared_artifacts,
     readiness_validation,
     slurm_validation,
@@ -896,6 +897,73 @@ def test_dependency_summary_owner_facade_aliases_are_stable(tmp_path: Path) -> N
     assert readiness_validation._dependency_summary_items(config) == (
         readiness_dependency_summaries._dependency_summary_items(config)
     )
+
+
+def test_scheduler_evidence_owner_facade_aliases_and_outputs_match(tmp_path: Path) -> None:
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path)
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        scheduler_evidence_file=scheduler_path,
+    )
+
+    for name in (
+        "SCHEDULER_EVIDENCE_SCHEMA",
+        "MAX_SCHEDULER_EVIDENCE_BYTES",
+        "MAX_SCHEDULER_EVIDENCE_FILES",
+        "SCHEDULER_REVIEW_EXECUTION_MODES",
+        "SCHEDULER_REVIEW_PASSED_STATUSES",
+        "SCHEDULER_REVIEW_BLOCKED_STATUSES",
+        "SCHEDULER_REQUIRED_COUNT_FIELDS",
+        "SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS",
+        "SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES",
+        "SCHEDULER_LIVE_WORK_STATUSES",
+    ):
+        assert getattr(readiness_validation, name) is getattr(readiness_scheduler_evidence, name)
+    for name in (
+        "_scheduler_evidence_blocked",
+        "_scheduler_bindings",
+        "_safe_scheduler_evidence_file",
+        "_scheduler_evidence_errors",
+        "_scheduler_readiness_status",
+        "_scheduler_evidence_mode",
+        "_scheduler_evidence_artifact_ref",
+        "_scheduler_item_suffix",
+    ):
+        assert getattr(readiness_validation, name) is getattr(readiness_scheduler_evidence, name)
+
+    assert readiness_validation._read_scheduler_evidence_item(scheduler_path, config=config) == (
+        readiness_scheduler_evidence._read_scheduler_evidence_item(scheduler_path, config=config)
+    )
+    assert readiness_validation._scheduler_evidence_items(config) == (
+        readiness_scheduler_evidence._scheduler_evidence_items(config)
+    )
+
+
+def test_scheduler_evidence_facade_read_item_honors_facade_safe_file_monkeypatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_path = tmp_path / "configured" / "scheduler.json"
+    alternate_path = tmp_path / "alternate" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(alternate_path)
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        scheduler_evidence_file=configured_path,
+    )
+
+    def fake_safe_scheduler_evidence_file(path: Path) -> Path:
+        assert path == configured_path
+        return alternate_path
+
+    monkeypatch.setattr(readiness_validation, "_safe_scheduler_evidence_file", fake_safe_scheduler_evidence_file)
+
+    item = readiness_validation._read_scheduler_evidence_item(configured_path, config=config)
+
+    assert item["status"] == "passed"
+    assert item["artifact_refs"] == [readiness_shared_artifacts._path_for_evidence(alternate_path, config=config)]
 
 
 def test_dependency_summary_facade_read_item_honors_facade_find_path_monkeypatch(
