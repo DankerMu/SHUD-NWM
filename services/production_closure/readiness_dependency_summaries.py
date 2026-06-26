@@ -30,6 +30,7 @@ _redact_paths = _readiness_shared_artifacts._redact_paths
 _refuse_symlink_components = _readiness_shared_artifacts._refuse_symlink_components
 
 _DEPENDENCY_SUMMARY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_INVALID_STATUS_TYPE = "[invalid-status-type]"
 
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
@@ -140,10 +141,10 @@ def _read_dependency_summary_item(
             config=config,
             reason=f"Dependency summary could not be read: {_redact_paths(str(error), config=config)}.",
         )
-    status = str(summary.get("status", "unknown"))
+    status = summary.get("status", "unknown")
     schema_ok = summary.get("schema") == contract["schema"]
     issue_ok = summary.get("issue") == contract["issue"]
-    accepted_status = status in contract["allowed_statuses"]
+    accepted_status = isinstance(status, str) and status in contract["allowed_statuses"]
     summary_run_id = summary.get("run_id")
     run_id_ok = _dependency_summary_run_id_is_stable(summary_run_id)
     item_status = "passed" if schema_ok and issue_ok and accepted_status and run_id_ok else "blocked"
@@ -184,7 +185,7 @@ def _read_dependency_summary_item(
                 "summary_schema": summary.get("schema"),
                 "summary_issue": summary.get("issue"),
                 "summary_run_id": _dependency_summary_public_run_id(summary_run_id, config=config),
-                "summary_status": status,
+                "summary_status": public_status,
                 "summary_execution_mode": summary.get("execution_mode"),
                 "summary_final_production_readiness_claimed": summary.get("final_production_readiness_claimed"),
                 "producer_artifact_ref": producer_artifact_ref,
@@ -195,7 +196,9 @@ def _read_dependency_summary_item(
     )
 
 
-def _dependency_summary_public_status(status: str, *, config: Any) -> str:
+def _dependency_summary_public_status(status: Any, *, config: Any) -> str:
+    if not isinstance(status, str):
+        return _INVALID_STATUS_TYPE
     redacted_status = _bounded_redacted_payload(status, config=config)
     return redacted_status if isinstance(redacted_status, str) else str(redacted_status)
 

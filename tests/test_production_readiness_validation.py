@@ -1030,6 +1030,37 @@ def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_rea
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
+@pytest.mark.parametrize("proof_key", ["object_store", "source", "e2e", "mvt"])
+def test_dependency_summary_non_slurm_submitted_status_is_blocked_unbound_without_final_readiness(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / f"{proof_key}-summary"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload(proof_key) | {"status": "submitted"}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            **{f"{proof_key}_evidence_root": summary_root},
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == f"{proof_key}_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "submitted"
+    assert "summary_status=submitted" in item["dependencies"]
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
 def test_dependency_bindings_include_only_passed_dependency_summaries(tmp_path: Path) -> None:
     passed_root = tmp_path / "slurm"
     blocked_root = tmp_path / "source"
@@ -1226,6 +1257,52 @@ def test_dependency_summary_wrong_contract_values_are_blocked_with_public_detail
     assert str(summary_root) not in rendered
     assert item["details"]["summary_checksum"].startswith("sha256:")
     assert _summary(root)["status"] == "release_blocked"
+
+
+@pytest.mark.parametrize("case_name", ["object", "list"])
+def test_dependency_summary_non_string_status_is_blocked_unbound_and_redacted(
+    tmp_path: Path,
+    case_name: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm-summary"
+    summary_root.mkdir()
+    raw_status_path = tmp_path / "private-status-marker" / case_name / "summary.json"
+    raw_status_secret = f"raw-status-secret-{case_name}"
+    if case_name == "object":
+        raw_status: object = {
+            "state": "ready",
+            "path": str(raw_status_path),
+            "token": raw_status_secret,
+        }
+    elif case_name == "list":
+        raw_status = ["ready", str(raw_status_path), {"token": raw_status_secret}]
+    else:
+        raise AssertionError(f"unhandled case: {case_name}")
+    payload = _dependency_summary_payload("slurm") | {"status": raw_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    artifact_text = json.dumps(item, sort_keys=True) + "\n" + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "[invalid-status-type]"
+    assert "summary_status=[invalid-status-type]" in item["dependencies"]
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+    assert "[invalid-status-type]" in artifact_text
+    assert str(raw_status_path) not in artifact_text
+    assert "private-status-marker" not in artifact_text
+    assert raw_status_secret not in artifact_text
 
 
 @pytest.mark.parametrize("proof_key", ["slurm", "object_store", "source", "e2e", "mvt"])
