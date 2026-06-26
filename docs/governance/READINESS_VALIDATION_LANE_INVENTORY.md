@@ -50,7 +50,7 @@ rg -n "DEPENDENCY_SUMMARY_CONTRACTS|PROOF_CONTRACTS|ALLOWED_STATUS_EXECUTION_MOD
 rg -n "dependency|scheduler|live_receipt|proof|exclusion|final|redact|path|bounded|execution_mode|status" tests/test_production_readiness_validation.py
 ```
 
-## Non-Targets
+## Readiness Closeout Non-Targets
 
 - No #672 two-node E2E lane rows. This page does not map
   `two_node_e2e_evidence.py` lanes such as Docker preflight, readonly DB,
