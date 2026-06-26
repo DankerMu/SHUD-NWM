@@ -18,6 +18,9 @@ from services.production_closure import (
     readiness_dependency_summaries as _readiness_dependency_summaries,
 )
 from services.production_closure import (
+    readiness_final_aggregation as _readiness_final_aggregation,
+)
+from services.production_closure import (
     readiness_item_contracts as _readiness_item_contracts,
 )
 from services.production_closure import (
@@ -273,49 +276,26 @@ def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
     )
 
     release_blockers = _release_blockers(items)
-    blocker_payload = {
-        "schema": "nhms.production_readiness.release_blockers.v1",
-        "issue": 181,
-        "run_id": config.run_id,
-        "generated_at": _now(),
-        "final_production_readiness_claimed": _final_ready(items),
-        "blockers": release_blockers,
-        "exclusions": _summary_exclusions(items),
-    }
+    blocker_payload = _readiness_final_aggregation._release_blocker_payload(
+        config,
+        items,
+        release_blockers=release_blockers,
+        final_ready=_final_ready,
+        summary_exclusions=_summary_exclusions,
+    )
     writer.write_json(config.lane_dir / "release_blockers.json", blocker_payload)
 
     environment = _environment_payload(config)
     writer.write_json(config.lane_dir / "environment.json", environment)
 
-    summary = {
-        "schema": "nhms.production_readiness.summary.v1",
-        "issue": 181,
-        "run_id": config.run_id,
-        "status": "ready" if _final_ready(items) else "release_blocked",
-        "evidence_dir": _path_for_evidence(config.lane_dir, config=config),
-        "generated_at": _now(),
-        "final_production_readiness_claimed": _final_ready(items),
-        "deterministic_item_count": sum(1 for item in items if item["execution_mode"] != "live_proof"),
-        "live_proof_item_count": sum(1 for item in items if item["execution_mode"] == "live_proof"),
-        "required_live_proof_count": sum(1 for item in items if item["required_for_final"]),
-        "accepted_live_proof_count": sum(
-            1 for item in items if item["required_for_final"] and item["live_proof_accepted"]
-        ),
-        "release_blockers": release_blockers,
-        "exclusions": _summary_exclusions(items),
-        "artifact_refs": [
-            "preflight.json",
-            "live_proof_receipts.json",
-            "readiness_items.json",
-            "release_blockers.json",
-            "environment.json",
-            "summary.json",
-        ],
-        "interpretation": (
-            "Deterministic readiness evidence is useful for review but is not live production proof. "
-            "Final production readiness remains false until every required live proof item is accepted."
-        ),
-    }
+    summary = _readiness_final_aggregation._summary_payload(
+        config,
+        items,
+        release_blockers=release_blockers,
+        final_ready=_final_ready,
+        summary_exclusions=_summary_exclusions,
+        path_for_evidence=_path_for_evidence,
+    )
     writer.write_json(config.lane_dir / "summary.json", summary)
     return summary
 
@@ -696,38 +676,11 @@ def _validate_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _release_blockers(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    blockers = []
-    for item in items:
-        status = str(item["status"])
-        if status not in {"failed", "blocked", "release_blocked"} and not (
-            item["required_for_final"] and not item["live_proof_accepted"]
-        ):
-            continue
-        blockers.append(
-            {
-                "blocker_id": f"m19-{item['item_id']}",
-                "surface": item["surface"],
-                "status": status,
-                "execution_mode": item["execution_mode"],
-                "owner": item["owner"],
-                "action": item["action"],
-                "residual_risk": item["residual_risk"],
-                "removal_criteria": item["removal_criteria"],
-                "artifact_refs": list(item["artifact_refs"]),
-                "required_for_final": item["required_for_final"],
-                "live_proof_accepted": item["live_proof_accepted"],
-            }
-        )
-    return blockers
+    return _readiness_final_aggregation._release_blockers(items)
 
 
 def _final_ready(items: Sequence[Mapping[str, Any]]) -> bool:
-    for item in items:
-        if item["status"] in {"failed", "blocked", "release_blocked"}:
-            return False
-        if item["required_for_final"] and (item["status"] != "passed" or item["live_proof_accepted"] is not True):
-            return False
-    return True
+    return _readiness_final_aggregation._final_ready(items)
 
 
 def _item(
@@ -769,17 +722,7 @@ def _item(
 
 
 def _summary_exclusions(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    exclusions = []
-    for item in items:
-        for exclusion in item.get("exclusions", []):
-            exclusions.append(
-                {
-                    "surface": item["surface"],
-                    "status": item["status"],
-                    **dict(exclusion),
-                }
-            )
-    return exclusions
+    return _readiness_final_aggregation._summary_exclusions(items)
 
 
 def _facade_first_meaningful_mapping(
@@ -1116,10 +1059,6 @@ def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
     _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
