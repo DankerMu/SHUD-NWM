@@ -76,6 +76,9 @@ _dependency_bindings = _readiness_dependency_summaries._dependency_bindings
 _find_summary_path = _readiness_dependency_summaries._find_summary_path
 DEPENDENCY_PROOF_KEYS = _readiness_dependency_live_proofs.DEPENDENCY_PROOF_KEYS
 DEPENDENCY_BINDING_ALIAS_GROUPS = _readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_GROUPS
+DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES = (
+    _readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES
+)
 _coalesced_binding_value = _readiness_dependency_live_proofs._coalesced_binding_value
 _dependency_producer_binding = _readiness_dependency_live_proofs._dependency_producer_binding
 _binding_values = _readiness_dependency_live_proofs._binding_values
@@ -85,7 +88,6 @@ _dependency_binding_alias_errors = _readiness_dependency_live_proofs._dependency
 _dependency_binding_consistency_errors = _readiness_dependency_live_proofs._dependency_binding_consistency_errors
 _dependency_binding_summary_errors = _readiness_dependency_live_proofs._dependency_binding_summary_errors
 _issue_matches = _readiness_dependency_live_proofs._issue_matches
-_contains_placeholder_value = _readiness_dependency_live_proofs._contains_placeholder_value
 PROOF_ENV = _readiness_shared_artifacts.PROOF_ENV
 SCHEDULER_EVIDENCE_SCHEMA = _readiness_scheduler_evidence.SCHEDULER_EVIDENCE_SCHEMA
 MAX_SCHEDULER_EVIDENCE_BYTES = _readiness_scheduler_evidence.MAX_SCHEDULER_EVIDENCE_BYTES
@@ -1076,6 +1078,13 @@ def _dependency_receipt_errors(
         issue_matches=_issue_matches,
         contains_placeholder_value=_facade_contains_placeholder_value,
         non_empty_string=_non_empty_string,
+        has_meaningful_value=_has_meaningful_value,
+    )
+
+
+def _contains_placeholder_value(value: Any) -> bool:
+    return _readiness_dependency_live_proofs._contains_placeholder_value(
+        value,
         has_meaningful_value=_has_meaningful_value,
     )
 

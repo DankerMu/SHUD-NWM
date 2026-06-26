@@ -795,6 +795,10 @@ def test_dependency_live_proof_owner_facade_exports_and_helper_outputs_match() -
         readiness_validation.DEPENDENCY_BINDING_ALIAS_GROUPS
         is readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_GROUPS
     )
+    assert (
+        readiness_validation.DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES
+        is readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES
+    )
     assert readiness_validation._non_empty_string is readiness_dependency_live_proofs._non_empty_string
     assert readiness_validation._has_meaningful_value is readiness_dependency_live_proofs._has_meaningful_value
 
@@ -808,9 +812,13 @@ def test_dependency_live_proof_owner_facade_exports_and_helper_outputs_match() -
         "_dependency_binding_consistency_errors",
         "_dependency_binding_summary_errors",
         "_issue_matches",
-        "_contains_placeholder_value",
     ):
         assert getattr(readiness_validation, name) is getattr(readiness_dependency_live_proofs, name)
+
+    assert (
+        readiness_validation._contains_placeholder_value
+        is not readiness_dependency_live_proofs._contains_placeholder_value
+    )
 
     payload = json.loads(_bound_proof("slurm"))
     binding = readiness_dependency_live_proofs._dependency_producer_binding(payload)
@@ -831,6 +839,18 @@ def test_dependency_live_proof_owner_facade_exports_and_helper_outputs_match() -
     assert readiness_validation._dependency_binding_summary_errors(binding, summary_binding, source="top_level") == []
     assert readiness_validation._issue_matches("#147", 147) is True
     assert readiness_validation._contains_placeholder_value({"note": "placeholder"}) is True
+
+
+def test_dependency_receipt_facade_direct_placeholder_helper_uses_patched_has_meaningful_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provenance = {"note": "placeholder"}
+
+    assert readiness_validation._contains_placeholder_value(provenance) is True
+
+    monkeypatch.setattr(readiness_validation, "_has_meaningful_value", lambda _value: False)
+
+    assert readiness_validation._contains_placeholder_value(provenance) is False
 
 
 @pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
