@@ -744,6 +744,7 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    request_id = "req-display-retry-manual-action"
     with _store() as store:
         _insert_hydro_run(store, "run_display_retry_state", status="failed")
         _insert_forecast_cycle(store, "cycle_display_retry_state", status="failed_run")
@@ -763,11 +764,16 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/runs/run_display_retry_state/retry",
-                headers=_operator_headers(),
+                headers={**_operator_headers(), "X-Request-ID": request_id},
             )
 
         assert response.status_code == 409
-        assert response.json()["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+        _assert_display_manual_action_error(
+            response,
+            request_id=request_id,
+            run_id="run_display_retry_state",
+            control_action="retry",
+        )
         assert gateway.submissions == []
         assert gateway.cancelled == []
         assert [job.job_id for job in store.query_jobs_by_run("run_display_retry_state")] == [
@@ -840,6 +846,7 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    request_id = "req-display-cancel-manual-action"
     with _store() as store:
         _insert_hydro_run(store, "run_display_cancel_state", status="running")
         _insert_forecast_cycle(store, "cycle_display_cancel_state", status="forecast_running")
@@ -859,11 +866,16 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/runs/run_display_cancel_state/cancel",
-                headers=_operator_headers(),
+                headers={**_operator_headers(), "X-Request-ID": request_id},
             )
 
         assert response.status_code == 409
-        assert response.json()["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+        _assert_display_manual_action_error(
+            response,
+            request_id=request_id,
+            run_id="run_display_cancel_state",
+            control_action="cancel",
+        )
         assert gateway.submissions == []
         assert gateway.cancelled == []
         assert [job.job_id for job in store.query_jobs_by_run("run_display_cancel_state")] == [
@@ -887,6 +899,7 @@ def test_retry_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
     expected_status: int,
     expected_code: str,
 ) -> None:
+    request_id = f"req-retry-authz-{expected_code.lower()}"
     with _store() as store:
         _insert_hydro_run(store, "run_retry_authz", status="failed")
         _insert_forecast_cycle(store, "cycle_retry_authz", status="failed_run")
@@ -901,10 +914,19 @@ def test_retry_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
         with _client(store, gateway=gateway, retry_service=service) as client:
-            response = client.post("/api/v1/runs/run_retry_authz/retry", headers=role_header or {})
+            response = client.post(
+                "/api/v1/runs/run_retry_authz/retry",
+                headers={**(role_header or {}), "X-Request-ID": request_id},
+            )
 
         assert response.status_code == expected_status
-        assert response.json()["error"]["code"] == expected_code
+        _assert_policy_error_response(
+            response,
+            request_id=request_id,
+            expected_code=expected_code,
+            expected_action="pipeline.retry_run",
+            target_id="run_retry_authz",
+        )
         assert gateway.submissions == []
         assert gateway.cancelled == []
         assert store.get_job("job_retry_authz").status == "failed"
@@ -925,6 +947,7 @@ def test_cancel_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
     expected_status: int,
     expected_code: str,
 ) -> None:
+    request_id = f"req-cancel-authz-{expected_code.lower()}"
     with _store() as store:
         _insert_hydro_run(store, "run_cancel_authz", status="running")
         _insert_forecast_cycle(store, "cycle_cancel_authz", status="forecast_running")
@@ -938,10 +961,19 @@ def test_cancel_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
         )
         gateway = _MockGateway()
         with _client(store, gateway=gateway) as client:
-            response = client.post("/api/v1/runs/run_cancel_authz/cancel", headers=role_header or {})
+            response = client.post(
+                "/api/v1/runs/run_cancel_authz/cancel",
+                headers={**(role_header or {}), "X-Request-ID": request_id},
+            )
 
         assert response.status_code == expected_status
-        assert response.json()["error"]["code"] == expected_code
+        _assert_policy_error_response(
+            response,
+            request_id=request_id,
+            expected_code=expected_code,
+            expected_action="pipeline.cancel_run",
+            target_id="run_cancel_authz",
+        )
         assert gateway.submissions == []
         assert gateway.cancelled == []
         assert store.get_job("job_cancel_authz").status == "running"
@@ -1301,6 +1333,59 @@ def _has_active_pipeline(store: PipelineStore, *, source_id: str, cycle_time: da
 def _events(store: PipelineStore) -> list[PipelineEvent]:
     statement = select(PipelineEvent).order_by(PipelineEvent.event_id.asc())
     return list(store.session.scalars(statement))
+
+
+def _assert_policy_error_response(
+    response: Any,
+    *,
+    request_id: str,
+    expected_code: str,
+    expected_action: str,
+    target_id: str,
+) -> None:
+    body = response.json()
+    assert response.headers["X-Request-ID"] == request_id
+    assert body["request_id"] == request_id
+    assert body["status"] == "error"
+    assert body["error"]["code"] == expected_code
+    details = body["error"]["details"]
+    assert set(details) == {"policy_decision", "audit_record"}
+    policy_decision = details["policy_decision"]
+    audit = details["audit_record"]
+    assert policy_decision["action_id"] == expected_action
+    assert policy_decision["target_type"] == "pipeline_run"
+    assert policy_decision["target_id"] == target_id
+    assert policy_decision["no_mutation_expected"] is True
+    assert audit["request_id"] == request_id
+    assert audit["action_id"] == expected_action
+    assert audit["target"] == {"type": "pipeline_run", "id": target_id}
+    assert audit["decision"] == policy_decision["decision"]
+
+
+def _assert_display_manual_action_error(
+    response: Any,
+    *,
+    request_id: str,
+    run_id: str,
+    control_action: str,
+) -> None:
+    body = response.json()
+    assert response.headers["X-Request-ID"] == request_id
+    assert body["request_id"] == request_id
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    assert body["error"]["message"] == (
+        f"Control-plane {control_action} requires manual action in display_readonly mode."
+    )
+    assert body["error"]["details"] == {
+        "run_id": run_id,
+        "display_mode": "display_readonly",
+        "suggested_action": (
+            f"Ask a node 22 operator to {'rerun' if control_action == 'retry' else 'stop'} this run from "
+            "the compute_control API or runbook."
+        ),
+        "recovery_runbook": "node22-control-plane-manual-recovery",
+    }
 
 
 def _migration_enum_values(type_name: str) -> set[str]:
