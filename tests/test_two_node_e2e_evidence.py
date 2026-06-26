@@ -310,6 +310,66 @@ def test_shared_two_node_evidence_contract_inventory_covers_metadata_source_scop
             assert f"`{namespace}`" in row
 
 
+def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    lines = inventory_text.splitlines()
+    table_header = (
+        "| Task | Issue / PR / scope | Owner / surface | Verification | "
+        "Inventory/evidence update |"
+    )
+    table_start = lines.index(table_header)
+    rows: dict[str, tuple[str, str, str, str, str]] = {}
+
+    for line in lines[table_start + 2 :]:
+        if not line.startswith("| "):
+            break
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        assert len(cells) == 5
+        rows[cells[0]] = cells
+
+    expected_rows = (
+        ("3.1", "#732 -> PR #791", "Shared two-node evidence contracts"),
+        ("3.2", "#733 -> PR #792", "Metadata and strict-identity lane extraction"),
+        ("3.3", "#734 -> PR #793", "Docker preflight lane extraction"),
+        ("3.4", "#735 -> PR #794", "Docker security lane extraction"),
+        ("3.5", "#736 -> PR #795", "Readonly DB lane extraction"),
+        ("3.6", "#737 -> PR #796", "Simple live helper and Slurm/compute/display lanes"),
+        ("3.7", "#738 -> PR #797", "API proof lane extraction"),
+        ("3.8", "#739 -> PR #798", "Browser proof lane extraction"),
+        ("3.9", "#740 -> PR #799", "Logs lane extraction"),
+        ("3.10", "#741 -> PR #800", "Manual ops lane extraction"),
+        ("3.11", "#742 -> PR #801", "Cross-plane/source-scope aggregation extraction"),
+        ("3.12", "#743 -> PR #802", "Final aggregation extraction"),
+        ("3.13", "#744 -> this closeout PR pending", "Two-node group verification and evidence closeout"),
+    )
+
+    assert tuple(rows) == tuple(task for task, _, _ in expected_rows)
+    for task, issue_pr, scope in expected_rows:
+        _, issue_pr_scope, owner_surface, verification, inventory_update = rows[task]
+        assert f"`{issue_pr}`" in issue_pr_scope
+        assert scope in issue_pr_scope
+        assert owner_surface
+        assert verification
+        assert inventory_update
+
+    assert "Snapshot date: 2026-06-26" in inventory_text
+    assert "Closeout snapshot date: 2026-06-26." in inventory_text
+    closeout_non_goals = (
+        "no production topology changes",
+        "no station-MVT closure",
+        "no live service deployment",
+        "no DB schema/role changes",
+        "no Slurm scheduling changes",
+        "no API route changes",
+        "no frontend/display UI changes",
+        "no new lane/product semantics",
+    )
+    for non_goal in closeout_non_goals:
+        assert non_goal in inventory_text
+
+
 def test_metadata_lane_owner_module_covers_metadata_source_scope_contract() -> None:
     assert two_node_e2e_metadata_lane.METADATA_LANE_OWNER == (
         "services.production_closure.two_node_e2e_metadata_lane"
