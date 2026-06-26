@@ -12,6 +12,9 @@ from typing import Any, Mapping, Sequence
 
 from packages.common.redaction import redact_payload, redact_text
 from services.production_closure import (
+    readiness_dependency_live_proofs as _readiness_dependency_live_proofs,
+)
+from services.production_closure import (
     readiness_dependency_summaries as _readiness_dependency_summaries,
 )
 from services.production_closure import (
@@ -71,6 +74,20 @@ _dependency_summary_blocked = _readiness_dependency_summaries._dependency_summar
 _dependency_summary_artifact_ref = _readiness_dependency_summaries._dependency_summary_artifact_ref
 _dependency_bindings = _readiness_dependency_summaries._dependency_bindings
 _find_summary_path = _readiness_dependency_summaries._find_summary_path
+DEPENDENCY_PROOF_KEYS = _readiness_dependency_live_proofs.DEPENDENCY_PROOF_KEYS
+DEPENDENCY_BINDING_ALIAS_GROUPS = _readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_GROUPS
+DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES = (
+    _readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES
+)
+_coalesced_binding_value = _readiness_dependency_live_proofs._coalesced_binding_value
+_dependency_producer_binding = _readiness_dependency_live_proofs._dependency_producer_binding
+_binding_values = _readiness_dependency_live_proofs._binding_values
+_binding_canonical_value = _readiness_dependency_live_proofs._binding_canonical_value
+_normalized_binding_value = _readiness_dependency_live_proofs._normalized_binding_value
+_dependency_binding_alias_errors = _readiness_dependency_live_proofs._dependency_binding_alias_errors
+_dependency_binding_consistency_errors = _readiness_dependency_live_proofs._dependency_binding_consistency_errors
+_dependency_binding_summary_errors = _readiness_dependency_live_proofs._dependency_binding_summary_errors
+_issue_matches = _readiness_dependency_live_proofs._issue_matches
 PROOF_ENV = _readiness_shared_artifacts.PROOF_ENV
 SCHEDULER_EVIDENCE_SCHEMA = _readiness_scheduler_evidence.SCHEDULER_EVIDENCE_SCHEMA
 MAX_SCHEDULER_EVIDENCE_BYTES = _readiness_scheduler_evidence.MAX_SCHEDULER_EVIDENCE_BYTES
@@ -136,40 +153,6 @@ SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES = {
     "producer_artifact_ref": "producer_artifact_ref_alias_mismatch",
     "producer_checksum_or_receipt_id": "producer_checksum_or_receipt_id_alias_mismatch",
 }
-DEPENDENCY_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
-    "dependency": ("dependency_surface", "dependency_name", "dependency"),
-    "producer_issue": ("producer_issue", "summary_issue"),
-    "producer_schema": ("producer_schema", "summary_schema"),
-    "producer_run_id": ("producer_run_id", "summary_run_id"),
-    "producer_artifact_ref": (
-        "producer_artifact_ref",
-        "producer_artifact_path",
-        "producer_artifact_uri",
-        "summary_ref",
-        "summary_path",
-        "artifact_ref",
-        "artifact_path",
-        "artifact_uri",
-    ),
-    "producer_checksum_or_receipt_id": (
-        "summary_checksum",
-        "producer_checksum",
-        "checksum",
-        "digest",
-        "producer_receipt_id",
-        "receipt_id",
-    ),
-}
-DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES = {
-    "dependency": "dependency_alias_mismatch",
-    "producer_issue": "producer_issue_alias_mismatch",
-    "producer_schema": "producer_schema_alias_mismatch",
-    "producer_run_id": "producer_run_id_alias_mismatch",
-    "producer_artifact_ref": "producer_artifact_ref_alias_mismatch",
-    "producer_checksum_or_receipt_id": "producer_checksum_or_receipt_id_alias_mismatch",
-}
-
-
 @dataclass(frozen=True)
 class ProductionReadinessConfig:
     evidence_root: Path
@@ -645,7 +628,22 @@ def _surface_live_item(
             receipt_validation_payload=_receipt_validation_payload,
             receipt_details=_receipt_details,
         )
-    if proof_key != "scheduler" and proof_key not in DEPENDENCY_SUMMARY_CONTRACTS:
+    if proof_key in DEPENDENCY_PROOF_KEYS:
+        return _readiness_dependency_live_proofs._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings=dependency_bindings,
+            item_id=item_id,
+            surface=surface,
+            missing_risk=missing_risk,
+            removal=removal,
+            surface_live_receipt_errors=_surface_live_receipt_errors,
+            required_live_blocker=_required_live_blocker,
+            receipt_validation_payload=_receipt_validation_payload,
+            receipt_details=_receipt_details,
+        )
+    if proof_key != "scheduler":
         raise ValueError(f"unsupported facade surface proof key: {proof_key}")
     base = {
         "item_id": item_id,
@@ -1008,10 +1006,15 @@ def _surface_live_receipt_errors(
     dependency_bindings: Mapping[str, Mapping[str, Any]],
     scheduler_binding: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
-    if proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
-        errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
-        errors.extend(_dependency_receipt_errors(payload, proof_key=proof_key, dependency_bindings=dependency_bindings))
-        return errors
+    if proof_key in DEPENDENCY_PROOF_KEYS:
+        return _readiness_dependency_live_proofs._surface_live_receipt_errors(
+            payload,
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings=dependency_bindings,
+            common_live_receipt_errors=_common_live_receipt_errors,
+            dependency_receipt_errors=_dependency_receipt_errors,
+        )
     if proof_key == "scheduler":
         errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
         errors.extend(_scheduler_receipt_errors(payload, scheduler_binding=scheduler_binding))
@@ -1066,158 +1069,33 @@ def _dependency_receipt_errors(
     proof_key: str,
     dependency_bindings: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
-    errors: list[str] = []
-    expected_dependency = str(PROOF_CONTRACTS[proof_key]["dependency"])
-    contract = DEPENDENCY_SUMMARY_CONTRACTS[proof_key]
-    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), Mapping) else {}
-    top_level_binding = _dependency_producer_binding(payload)
-    provenance_binding = _dependency_producer_binding(provenance)
-    binding_values = {
-        field: _coalesced_binding_value(top_level_binding, provenance_binding, field)
-        for field in DEPENDENCY_BINDING_ALIAS_GROUPS
-    }
-    errors.extend(_dependency_binding_alias_errors(top_level_binding, source="top_level"))
-    errors.extend(_dependency_binding_alias_errors(provenance_binding, source="provenance"))
-    errors.extend(_dependency_binding_consistency_errors(top_level_binding, provenance_binding))
-
-    dependency = binding_values["dependency"]
-    if dependency != expected_dependency:
-        errors.append("dependency_surface_mismatch")
-
-    producer_issue = binding_values["producer_issue"]
-    if not _issue_matches(producer_issue, contract["issue"]):
-        errors.append("producer_issue_mismatch")
-
-    producer_schema = binding_values["producer_schema"]
-    if producer_schema != contract["schema"]:
-        errors.append("producer_schema_mismatch")
-
-    producer_run_id = binding_values["producer_run_id"]
-    if not _non_empty_string(producer_run_id):
-        errors.append("missing_producer_run_id")
-
-    artifact_ref = binding_values["producer_artifact_ref"]
-    if not _non_empty_string(artifact_ref):
-        errors.append("missing_producer_artifact_ref")
-
-    checksum_or_receipt = binding_values["producer_checksum_or_receipt_id"]
-    if not _non_empty_string(checksum_or_receipt):
-        errors.append("missing_producer_checksum_or_receipt_id")
-
-    if not _has_meaningful_value(provenance):
-        errors.append("missing_provenance")
-    elif _contains_placeholder_value(provenance):
-        errors.append("placeholder_provenance")
-
-    binding = dependency_bindings.get(expected_dependency)
-    if binding:
-        if producer_run_id != binding.get("summary_run_id"):
-            errors.append("producer_run_id_mismatch")
-        if artifact_ref != binding.get("producer_artifact_ref"):
-            errors.append("producer_artifact_ref_mismatch")
-        if checksum_or_receipt != binding.get("summary_checksum"):
-            errors.append("producer_checksum_mismatch")
-        errors.extend(_dependency_binding_summary_errors(top_level_binding, binding, source="top_level"))
-        errors.extend(_dependency_binding_summary_errors(provenance_binding, binding, source="provenance"))
-    return errors
+    return _readiness_dependency_live_proofs._dependency_receipt_errors(
+        payload,
+        proof_key=proof_key,
+        dependency_bindings=dependency_bindings,
+        proof_contracts=PROOF_CONTRACTS,
+        dependency_summary_contracts=DEPENDENCY_SUMMARY_CONTRACTS,
+        issue_matches=_issue_matches,
+        contains_placeholder_value=_facade_contains_placeholder_value,
+        non_empty_string=_non_empty_string,
+        has_meaningful_value=_has_meaningful_value,
+    )
 
 
-def _coalesced_binding_value(
-    top_level_binding: Mapping[str, Any],
-    provenance_binding: Mapping[str, Any],
-    field: str,
-) -> Any:
-    top_value = _binding_canonical_value(top_level_binding, field)
-    if _has_meaningful_value(top_value):
-        return top_value
-    return _binding_canonical_value(provenance_binding, field)
+def _contains_placeholder_value(value: Any) -> bool:
+    return _readiness_dependency_live_proofs._contains_placeholder_value(
+        value,
+        has_meaningful_value=_has_meaningful_value,
+    )
 
 
-def _dependency_producer_binding(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        field: {
-            key: _normalized_binding_value(payload.get(key), field=field)
-            for key in aliases
-            if _has_meaningful_value(payload.get(key))
-        }
-        for field, aliases in DEPENDENCY_BINDING_ALIAS_GROUPS.items()
-    }
-
-
-def _binding_values(receipt_binding: Mapping[str, Any], field: str) -> dict[str, Any]:
-    values = receipt_binding.get(field)
-    return values if isinstance(values, dict) else {}
-
-
-def _binding_canonical_value(receipt_binding: Mapping[str, Any], field: str) -> Any:
-    values = _binding_values(receipt_binding, field)
-    for alias in DEPENDENCY_BINDING_ALIAS_GROUPS[field]:
-        value = values.get(alias)
-        if _has_meaningful_value(value):
-            return value
-    return None
-
-
-def _normalized_binding_value(value: Any, *, field: str) -> Any:
-    if value is None:
-        return None
-    if field == "producer_issue":
-        if isinstance(value, str):
-            return value.strip().lstrip("#")
-        return str(value).strip()
-    if isinstance(value, str):
-        return value.strip()
-    return value
-
-
-def _dependency_binding_alias_errors(receipt_binding: Mapping[str, Any], *, source: str) -> list[str]:
-    errors: list[str] = []
-    for binding_field, suffix in DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES.items():
-        values = list(_binding_values(receipt_binding, binding_field).values())
-        if values and any(value != values[0] for value in values[1:]):
-            errors.append(f"{source}_{suffix}")
-    return errors
-
-
-def _dependency_binding_consistency_errors(
-    top_level_binding: Mapping[str, Any],
-    provenance_binding: Mapping[str, Any],
-) -> list[str]:
-    errors: list[str] = []
-    for binding_field, error in (
-        ("dependency", "provenance_dependency_mismatch"),
-        ("producer_issue", "provenance_producer_issue_mismatch"),
-        ("producer_schema", "provenance_producer_schema_mismatch"),
-        ("producer_run_id", "provenance_producer_run_id_mismatch"),
-        ("producer_artifact_ref", "provenance_producer_artifact_ref_mismatch"),
-        ("producer_checksum_or_receipt_id", "provenance_producer_checksum_or_receipt_id_mismatch"),
-    ):
-        top_values = list(_binding_values(top_level_binding, binding_field).values())
-        provenance_values = list(_binding_values(provenance_binding, binding_field).values())
-        if top_values and provenance_values and any(
-            top_value != provenance_value for top_value in top_values for provenance_value in provenance_values
-        ):
-            errors.append(error)
-    return errors
-
-
-def _dependency_binding_summary_errors(
-    receipt_binding: Mapping[str, Any],
-    summary_binding: Mapping[str, Any],
-    *,
-    source: str,
-) -> list[str]:
-    errors: list[str] = []
-    for binding_field, summary_field, error_suffix in (
-        ("producer_run_id", "summary_run_id", "producer_run_id_mismatch"),
-        ("producer_artifact_ref", "producer_artifact_ref", "producer_artifact_ref_mismatch"),
-        ("producer_checksum_or_receipt_id", "summary_checksum", "producer_checksum_mismatch"),
-    ):
-        summary_value = summary_binding.get(summary_field)
-        values = list(_binding_values(receipt_binding, binding_field).values())
-        if values and any(value != summary_value for value in values):
-            errors.append(f"{source}_summary_{error_suffix}")
-    return errors
+def _facade_contains_placeholder_value(value: Any) -> bool:
+    if _contains_placeholder_value is _readiness_dependency_live_proofs._contains_placeholder_value:
+        return _readiness_dependency_live_proofs._contains_placeholder_value(
+            value,
+            has_meaningful_value=_has_meaningful_value,
+        )
+    return _contains_placeholder_value(value)
 
 
 def _scheduler_receipt_errors(
@@ -1379,28 +1257,6 @@ def _scheduler_binding_summary_errors(
         if values and any(value != summary_value for value in values):
             errors.append(f"{source}_summary_{error_suffix}")
     return errors
-
-
-def _issue_matches(value: Any, expected: int) -> bool:
-    if value == expected:
-        return True
-    if isinstance(value, str):
-        return value.strip().lstrip("#") == str(expected)
-    return False
-
-
-def _contains_placeholder_value(value: Any) -> bool:
-    placeholders = {"placeholder", "fabricated", "fake", "dummy", "todo", "tbd", "unknown", "null", "none"}
-    if isinstance(value, str):
-        stripped = value.strip().lower()
-        return stripped in placeholders or stripped.startswith("placeholder-")
-    if isinstance(value, Mapping):
-        meaningful = [nested for nested in value.values() if _has_meaningful_value(nested)]
-        return bool(meaningful) and all(_contains_placeholder_value(nested) for nested in meaningful)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        meaningful = [nested for nested in value if _has_meaningful_value(nested)]
-        return bool(meaningful) and all(_contains_placeholder_value(nested) for nested in meaningful)
-    return False
 
 
 def redact_readiness_public_error(value: object) -> str:
