@@ -1030,7 +1030,15 @@ def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_rea
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-@pytest.mark.parametrize("proof_key", ["object_store", "source", "e2e", "mvt"])
+@pytest.mark.parametrize(
+    "proof_key",
+    [
+        pytest.param("object_store", id="object-store-summary"),
+        pytest.param("source", id="source-summary"),
+        pytest.param("e2e", id="end-to-end-summary"),
+        pytest.param("mvt", id="mvt-summary"),
+    ],
+)
 def test_dependency_summary_non_slurm_submitted_status_is_blocked_unbound_without_final_readiness(
     tmp_path: Path,
     proof_key: str,
