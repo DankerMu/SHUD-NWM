@@ -2619,21 +2619,87 @@ def test_final_aggregation_owner_facade_outputs_match(tmp_path: Path) -> None:
         path_for_evidence=readiness_validation._path_for_evidence,
     )
 
+    expected_blocker = {
+        "blocker_id": "m19-live-target-environment-config",
+        "surface": "target_environment_config_proof",
+        "status": "release_blocked",
+        "execution_mode": "not_executed",
+        "owner": "unit-owner",
+        "action": "unit-action",
+        "residual_risk": "unit residual risk",
+        "removal_criteria": "unit removal criteria",
+        "artifact_refs": ["live_proof_receipts.json"],
+        "required_for_final": True,
+        "live_proof_accepted": False,
+    }
+    expected_exclusion = {
+        "surface": "incomplete_real_national_data",
+        "status": "not_executed",
+        "id": "real-national-data-incomplete",
+        "reason": "Incomplete real national data is a scoped exclusion.",
+        "removal_criteria": "Complete national-data coverage and live proof.",
+    }
+    assert set(blocker_payload) == {
+        "schema",
+        "issue",
+        "run_id",
+        "generated_at",
+        "final_production_readiness_claimed",
+        "blockers",
+        "exclusions",
+    }
     assert blocker_payload["schema"] == "nhms.production_readiness.release_blockers.v1"
+    assert blocker_payload["issue"] == 181
+    assert blocker_payload["run_id"] == "m19"
+    assert str(blocker_payload["generated_at"]).endswith("Z")
+    datetime.fromisoformat(str(blocker_payload["generated_at"]).replace("Z", "+00:00"))
     assert blocker_payload["final_production_readiness_claimed"] is False
-    assert [blocker["blocker_id"] for blocker in blocker_payload["blockers"]] == [
-        "m19-live-target-environment-config"
-    ]
-    assert blocker_payload["exclusions"][0]["surface"] == "incomplete_real_national_data"
+    assert blocker_payload["blockers"] == [expected_blocker]
+    assert blocker_payload["exclusions"] == [expected_exclusion]
+
+    assert set(summary) == {
+        "schema",
+        "issue",
+        "run_id",
+        "status",
+        "evidence_dir",
+        "generated_at",
+        "final_production_readiness_claimed",
+        "deterministic_item_count",
+        "live_proof_item_count",
+        "required_live_proof_count",
+        "accepted_live_proof_count",
+        "release_blockers",
+        "exclusions",
+        "artifact_refs",
+        "interpretation",
+    }
     assert summary["schema"] == "nhms.production_readiness.summary.v1"
+    assert summary["issue"] == 181
+    assert summary["run_id"] == "m19"
     assert summary["status"] == "release_blocked"
     assert summary["evidence_dir"] == readiness_validation._path_for_evidence(config.lane_dir, config=config)
+    assert str(summary["generated_at"]).endswith("Z")
+    datetime.fromisoformat(str(summary["generated_at"]).replace("Z", "+00:00"))
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["deterministic_item_count"] == 3
     assert summary["live_proof_item_count"] == 1
     assert summary["required_live_proof_count"] == 2
     assert summary["accepted_live_proof_count"] == 1
-    assert summary["artifact_refs"] == readiness_final_aggregation.SUMMARY_ARTIFACT_REFS
-    assert "Deterministic readiness evidence" in summary["interpretation"]
+    assert summary["release_blockers"] == [expected_blocker]
+    assert summary["exclusions"] == [expected_exclusion]
+    assert summary["artifact_refs"] == [
+        "preflight.json",
+        "live_proof_receipts.json",
+        "readiness_items.json",
+        "release_blockers.json",
+        "environment.json",
+        "summary.json",
+    ]
+    assert summary["interpretation"] == (
+        "Deterministic readiness evidence is useful for review but is not live production proof. "
+        "Final production readiness remains false until every required live proof item is accepted."
+    )
 
 
 def test_default_readiness_lane_is_deterministic_release_blocked_and_side_effect_free(
