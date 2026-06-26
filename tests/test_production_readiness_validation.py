@@ -9,7 +9,12 @@ import pytest
 
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
-from services.production_closure import readiness_item_contracts, readiness_validation, slurm_validation
+from services.production_closure import (
+    readiness_item_contracts,
+    readiness_shared_artifacts,
+    readiness_validation,
+    slurm_validation,
+)
 from services.production_closure.readiness_validation import (
     ALLOWED_STATUS_EXECUTION_MODES,
     EXECUTED_MODES,
@@ -497,6 +502,222 @@ def test_status_execution_mode_truth_table_facade_reexports_owner_contract_objec
         is readiness_item_contracts.ProductionReadinessValidationError
     )
     assert readiness_validation.validate_readiness_item is readiness_item_contracts.validate_readiness_item
+
+
+def test_shared_artifact_facade_reexports_owner_helpers_and_outputs_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper_names = (
+        "EvidenceWriter",
+        "BoundedPayloadResult",
+        "_preflight_payload",
+        "_environment_payload",
+        "_path_for_evidence",
+        "_redact_paths",
+        "_bounded_payload",
+        "_bounded_redacted_payload",
+    )
+    for name in helper_names:
+        assert getattr(readiness_validation, name) is getattr(readiness_shared_artifacts, name)
+
+    for name in (
+        "MAX_EVIDENCE_PAYLOAD_BYTES",
+        "MAX_JSON_DEPTH",
+        "MAX_JSON_NODES",
+        "MAX_STRING_LENGTH",
+    ):
+        assert getattr(readiness_validation, name) == getattr(readiness_shared_artifacts, name)
+    assert readiness_validation.PATH_TOKEN_RE is readiness_shared_artifacts.PATH_TOKEN_RE
+    assert readiness_validation.DEPENDENCY_ROOT_ENV is readiness_shared_artifacts.DEPENDENCY_ROOT_ENV
+    assert readiness_validation.PROOF_FILE_ENV is readiness_shared_artifacts.PROOF_FILE_ENV
+    assert (
+        readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV
+        is readiness_shared_artifacts.SCHEDULER_EVIDENCE_ROOT_ENV
+    )
+    assert (
+        readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV
+        is readiness_shared_artifacts.SCHEDULER_EVIDENCE_FILE_ENV
+    )
+
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        slurm_evidence_root=tmp_path / "artifacts" / "slurm",
+    )
+    receipts = {"auth": {"status": "missing"}, "alert": {"status": "parsed"}}
+    assert readiness_validation._preflight_payload(config, receipts) == readiness_shared_artifacts._preflight_payload(
+        config, receipts
+    )
+
+    monkeypatch.setenv("AUTH_TOKEN", "token=secret")
+    monkeypatch.setattr(readiness_shared_artifacts, "_now", lambda: "2026-01-01T00:00:00Z")
+    assert readiness_validation._environment_payload(config) == readiness_shared_artifacts._environment_payload(config)
+
+
+def test_shared_artifact_preflight_payload_pins_schema_paths_and_side_effect_policy(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = root / "scheduler"
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=root,
+        run_id="m19",
+        slurm_evidence_root=root / "slurm",
+        scheduler_evidence_root=scheduler_root,
+        scheduler_evidence_file=scheduler_root / "pass.json",
+    )
+    receipts = {
+        "auth": {"status": "missing"},
+        "alert": {"status": "parse_failed"},
+        "slurm": {"status": "parsed"},
+    }
+
+    payload = readiness_shared_artifacts._preflight_payload(config, receipts)
+
+    assert payload == readiness_validation._preflight_payload(config, receipts)
+    assert payload["schema"] == "nhms.production_readiness.preflight.v1"
+    assert payload["issue"] == 181
+    assert payload["run_id"] == "m19"
+    assert payload["evidence_root"] == "evidence-root"
+    assert payload["evidence_dir"] == "readiness"
+    assert payload["dependency_roots"]["slurm"] == "evidence-root/slurm"
+    assert payload["dependency_roots"]["object_store"] is None
+    assert payload["scheduler_evidence_root"] == "evidence-root/scheduler"
+    assert payload["scheduler_evidence_file"] == "evidence-root/scheduler/pass.json"
+    assert payload["live_proof_configured"] == {
+        "auth": False,
+        "alert": True,
+        "slurm": True,
+    }
+    assert payload["fast_ci_live_side_effect_policy"] == {
+        "executes_live_idp": False,
+        "executes_live_alert_sink": False,
+        "executes_backend_mutation": False,
+        "executes_live_rollback": False,
+        "executes_live_slurm": False,
+        "executes_live_object_store": False,
+        "executes_live_weather_source": False,
+        "executes_real_national_data": False,
+    }
+
+
+def test_shared_artifact_path_helper_prefixes_and_redacted_fallback(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+
+    assert readiness_shared_artifacts._path_for_evidence(config.lane_dir, config=config) == "readiness"
+    assert (
+        readiness_shared_artifacts._path_for_evidence(config.lane_dir / "preflight.json", config=config)
+        == "readiness/preflight.json"
+    )
+    assert readiness_shared_artifacts._path_for_evidence(config.evidence_root, config=config) == "evidence-root"
+    assert (
+        readiness_shared_artifacts._path_for_evidence(config.evidence_root / "m19", config=config)
+        == "evidence-root/m19"
+    )
+    assert (
+        readiness_shared_artifacts._path_for_evidence(Path.cwd() / "docs" / "governance", config=config)
+        == "workspace/docs/governance"
+    )
+    assert (
+        readiness_shared_artifacts._path_for_evidence(tmp_path / "private" / "secret.json", config=config)
+        == "[redacted-path]"
+    )
+    assert (
+        readiness_validation._path_for_evidence(config.lane_dir / "preflight.json", config=config)
+        == "readiness/preflight.json"
+    )
+
+
+def test_shared_artifact_safe_writer_guards_no_clobber_force_symlink_containment_payload_and_redaction(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "artifacts").resolve()
+    lane = root / "m19" / "readiness"
+    writer = readiness_shared_artifacts.EvidenceWriter(root, lane)
+    writer.prepare()
+    output = lane / "payload.json"
+    writer.write_json(
+        output,
+        {
+            "AUTH_TOKEN": "token=secret",
+            "AWS_SECRET_ACCESS_KEY": "super-secret",
+            "DATABASE_URL": "postgresql://user:password@db.internal:55432/nhms",
+        },
+    )
+    rendered = output.read_text(encoding="utf-8")
+    assert "token=secret" not in rendered
+    assert "super-secret" not in rendered
+    assert "password" not in rendered
+
+    with pytest.raises(ProductionReadinessValidationError) as existing:
+        readiness_shared_artifacts.EvidenceWriter(root, lane).write_json(output, {"status": "blocked"})
+    assert existing.value.error_code == "PRODUCTION_READINESS_EVIDENCE_EXISTS"
+
+    readiness_shared_artifacts.EvidenceWriter(root, lane, force=True).write_json(output, {"status": "overwritten"})
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "overwritten"}
+
+    symlink_path = lane / "symlink.json"
+    symlink_target = tmp_path / "target.json"
+    symlink_target.write_text("{}", encoding="utf-8")
+    symlink_path.symlink_to(symlink_target)
+    with pytest.raises(ProductionReadinessValidationError) as symlink_error:
+        readiness_shared_artifacts.EvidenceWriter(root, lane, force=True).write_json(symlink_path, {"status": "bad"})
+    assert symlink_error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_SYMLINK"
+
+    with pytest.raises(ProductionReadinessValidationError) as containment_error:
+        readiness_shared_artifacts.EvidenceWriter(root, lane, force=True).write_json(
+            lane.parent / "outside.json", {"status": "bad"}
+        )
+    assert containment_error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_PATH_UNSAFE"
+
+    with pytest.raises(ProductionReadinessValidationError) as payload_error:
+        readiness_shared_artifacts.EvidenceWriter(root, lane, force=True, max_payload_bytes=32).write_json(
+            lane / "too-large.json", {"blob": "x" * 80}
+        )
+    assert payload_error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_PAYLOAD_TOO_LARGE"
+
+
+def test_shared_artifact_safe_writer_rejects_non_force_create_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = (tmp_path / "artifacts").resolve()
+    lane = root / "m19" / "readiness"
+    writer = readiness_shared_artifacts.EvidenceWriter(root, lane)
+    writer.prepare()
+    output = lane / "race.json"
+    original_create = readiness_shared_artifacts.write_bytes_no_follow_exclusive
+
+    def create_target_before_exclusive_write(path: Path, content: bytes, **kwargs: object) -> Path:
+        path.write_text('{"status": "competing-writer"}\n', encoding="utf-8")
+        return original_create(path, content, **kwargs)
+
+    monkeypatch.setattr(
+        readiness_shared_artifacts,
+        "write_bytes_no_follow_exclusive",
+        create_target_before_exclusive_write,
+    )
+
+    with pytest.raises(ProductionReadinessValidationError) as error:
+        writer.write_json(output, {"status": "current-writer"})
+
+    assert error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_EXISTS"
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "competing-writer"}
+
+
+def test_shared_artifact_bounded_payload_caps_wide_mapping_output(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    wide_payload = {f"key-{index}": index for index in range(readiness_shared_artifacts.MAX_JSON_NODES + 25)}
+
+    bounded = readiness_shared_artifacts._bounded_payload(wide_payload)
+    redacted = readiness_shared_artifacts._bounded_redacted_payload(wide_payload, config=config)
+
+    assert isinstance(bounded.payload, dict)
+    assert len(bounded.payload) <= readiness_shared_artifacts.MAX_JSON_NODES
+    assert bounded.node_truncated is True
+    assert list(bounded.payload.values()).count("[truncated:max-nodes]") == 1
+    assert isinstance(redacted, dict)
+    assert len(redacted) <= readiness_shared_artifacts.MAX_JSON_NODES
+    assert list(redacted.values()).count("[truncated:max-nodes]") == 1
 
 
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
@@ -1796,7 +2017,7 @@ def test_live_proof_receipts_artifact_omits_raw_payload_and_redacts(tmp_path: Pa
     assert "[redacted" in rendered
 
 
-def test_environment_artifact_uses_allowlist_and_redacts_env_values(
+def test_shared_artifact_environment_artifact_uses_allowlist_and_redacts_env_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1816,6 +2037,16 @@ def test_environment_artifact_uses_allowlist_and_redacts_env_values(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@db.internal:55432/nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_READINESS_AUTH_PROOF_FILE", str(private_proof_path))
+    dependency_roots = {
+        name: tmp_path / "private" / f"{name}-evidence"
+        for name in readiness_validation.DEPENDENCY_ROOT_ENV
+    }
+    for name, private_root in dependency_roots.items():
+        monkeypatch.setenv(readiness_validation.DEPENDENCY_ROOT_ENV[name], str(private_root))
+    scheduler_root = tmp_path / "private" / "scheduler-root"
+    scheduler_file = scheduler_root / "pass.json"
+    monkeypatch.setenv(readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV, str(scheduler_root))
+    monkeypatch.setenv(readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV, str(scheduler_file))
     monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "do-not-capture")
 
     validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
@@ -1825,12 +2056,20 @@ def test_environment_artifact_uses_allowlist_and_redacts_env_values(
     assert artifact["schema"] == "nhms.production_readiness.environment.v1"
     assert artifact["run_id"] == "m19"
     assert set(artifact["env"]).issubset(allowed_keys)
+    for name in readiness_validation.DEPENDENCY_ROOT_ENV:
+        assert readiness_validation.DEPENDENCY_ROOT_ENV[name] in artifact["env"]
+    assert readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV in artifact["env"]
+    assert readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV in artifact["env"]
     assert "UNRELATED_SECRET_TOKEN" not in artifact["env"]
     assert "do-not-capture" not in rendered
     assert "token=secret" not in rendered
     assert "super-secret" not in rendered
     assert "password" not in rendered
     assert str(private_proof_path) not in rendered
+    for private_root in dependency_roots.values():
+        assert str(private_root) not in rendered
+    assert str(scheduler_root) not in rendered
+    assert str(scheduler_file) not in rendered
     assert "[redacted" in rendered
 
 
