@@ -513,6 +513,10 @@ def test_shared_artifact_facade_reexports_owner_helpers_and_outputs_match(
         "BoundedPayloadResult",
         "_preflight_payload",
         "_environment_payload",
+        "_load_proof",
+        "_receipt_artifact",
+        "_receipt_details",
+        "_receipt_validation_payload",
         "_path_for_evidence",
         "_redact_paths",
         "_bounded_payload",
@@ -526,10 +530,14 @@ def test_shared_artifact_facade_reexports_owner_helpers_and_outputs_match(
         "MAX_JSON_DEPTH",
         "MAX_JSON_NODES",
         "MAX_STRING_LENGTH",
+        "MAX_RECEIPT_BYTES",
+        "MAX_RECEIPT_PREVIEW_BYTES",
+        "LIVE_PROOF_SCHEMA",
     ):
         assert getattr(readiness_validation, name) == getattr(readiness_shared_artifacts, name)
     assert readiness_validation.PATH_TOKEN_RE is readiness_shared_artifacts.PATH_TOKEN_RE
     assert readiness_validation.DEPENDENCY_ROOT_ENV is readiness_shared_artifacts.DEPENDENCY_ROOT_ENV
+    assert readiness_validation.PROOF_ENV is readiness_shared_artifacts.PROOF_ENV
     assert readiness_validation.PROOF_FILE_ENV is readiness_shared_artifacts.PROOF_FILE_ENV
     assert (
         readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV
@@ -553,6 +561,199 @@ def test_shared_artifact_facade_reexports_owner_helpers_and_outputs_match(
     monkeypatch.setenv("AUTH_TOKEN", "token=secret")
     monkeypatch.setattr(readiness_shared_artifacts, "_now", lambda: "2026-01-01T00:00:00Z")
     assert readiness_validation._environment_payload(config) == readiness_shared_artifacts._environment_payload(config)
+
+
+def test_live_proof_loader_owner_facade_parity_and_raw_payload_boundary(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    raw_path = "/tmp/private-live-proof/receipt.json"
+    payload = json.loads(_bound_proof("alert"))
+    payload["local_path"] = raw_path
+    payload["signed_uri"] = "https://user:pass@alerts.example.invalid/hook?token=secret"
+    proof = json.dumps(payload)
+
+    owner_receipt = readiness_shared_artifacts._load_proof("alert", proof, None, config=config)
+    facade_receipt = readiness_validation._load_proof("alert", proof, None, config=config)
+
+    assert owner_receipt == facade_receipt
+    assert owner_receipt["status"] == "parsed"
+    validation_payload = readiness_shared_artifacts._receipt_validation_payload(owner_receipt)
+    assert validation_payload["local_path"] == raw_path
+    assert validation_payload["signed_uri"].endswith("token=secret")
+
+    public_details = readiness_shared_artifacts._receipt_details(owner_receipt, config=config)
+    rendered_details = json.dumps(public_details, sort_keys=True)
+    assert public_details == readiness_validation._receipt_details(owner_receipt, config=config)
+    assert "raw_payload" not in rendered_details
+    assert raw_path not in rendered_details
+    assert "token=secret" not in rendered_details
+    assert "user:pass@" not in rendered_details
+    assert "[redacted" in rendered_details
+
+    receipts = {
+        surface: {"surface": surface, "status": "missing", "source": "not_configured"}
+        for surface in readiness_shared_artifacts.PROOF_ENV
+    }
+    receipts["alert"] = owner_receipt
+    artifact = readiness_shared_artifacts._receipt_artifact(config, receipts)
+    rendered_artifact = json.dumps(artifact, sort_keys=True)
+    assert artifact == readiness_validation._receipt_artifact(config, receipts)
+    assert artifact["schema"] == "nhms.production_readiness.live_proof_receipts.v1"
+    assert artifact["run_id"] == "m19"
+    assert set(artifact["receipts"]) == set(readiness_shared_artifacts.PROOF_ENV)
+    assert artifact["redaction"] == {
+        "secrets_redacted": True,
+        "local_paths_redacted": True,
+        "payload_depth_bounded": True,
+        "payload_size_bounded": True,
+    }
+    assert "raw_payload" not in rendered_artifact
+    assert raw_path not in rendered_artifact
+    assert "token=secret" not in rendered_artifact
+
+
+def test_live_proof_loader_ambiguity_missing_and_preflight_status(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    proof_file = tmp_path / "alert-proof.json"
+    proof_file.write_text(_bound_proof("alert"), encoding="utf-8")
+
+    ambiguous = readiness_shared_artifacts._load_proof("alert", _bound_proof("alert"), proof_file, config=config)
+    missing = readiness_shared_artifacts._load_proof("auth", None, None, config=config)
+
+    assert ambiguous["status"] == "invalid"
+    assert ambiguous["error_code"] == "PRODUCTION_READINESS_PROOF_AMBIGUOUS"
+    assert missing["status"] == "missing"
+    preflight = readiness_shared_artifacts._preflight_payload(config, {"auth": missing, "alert": ambiguous})
+    assert preflight["live_proof_configured"] == {"auth": False, "alert": True}
+
+
+def test_live_proof_loader_rejects_unsafe_file_with_redacted_path(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    target = private_dir / "auth-proof.json"
+    target.write_text(_auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()), encoding="utf-8")
+    proof_file = private_dir / "symlink-proof.json"
+    proof_file.symlink_to(target)
+
+    receipt = readiness_shared_artifacts._load_proof("auth", None, proof_file, config=config)
+    details = readiness_shared_artifacts._receipt_details(receipt, config=config)
+    rendered = json.dumps(details, sort_keys=True)
+
+    assert receipt["status"] == "invalid"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_FILE_INVALID"
+    assert receipt["path"] == "[redacted-path]"
+    assert str(proof_file) not in rendered
+    assert "private" not in rendered
+    assert "[redacted-path]" in rendered
+
+
+def test_live_proof_loader_rejects_non_regular_file_with_redacted_reason(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    proof_file = tmp_path / "private" / "auth-proof-dir"
+    proof_file.mkdir(parents=True)
+
+    receipt = readiness_shared_artifacts._load_proof("auth", None, proof_file, config=config)
+    details = readiness_shared_artifacts._receipt_details(receipt, config=config)
+    rendered = json.dumps(details, sort_keys=True)
+
+    assert receipt["status"] == "invalid"
+    assert receipt["source"] == "file"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_FILE_INVALID"
+    assert receipt["path"] == "[redacted-path]"
+    assert receipt["reason"] == "Target file must be a regular file: [redacted-path]"
+    assert details["status"] == "invalid"
+    assert details["source"] == "file"
+    assert details["error_code"] == "PRODUCTION_READINESS_PROOF_FILE_INVALID"
+    assert str(proof_file) not in rendered
+    assert str(proof_file.parent) not in rendered
+    assert "private" not in rendered
+    assert "[redacted-path]" in rendered
+
+
+@pytest.mark.parametrize("source", ["inline", "file"])
+def test_live_proof_loader_oversized_payload_has_bounded_redacted_preview(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    oversized = (
+        '{"signed_uri":"https://user:pass@alerts.example.invalid/hook?token=secret",'
+        '"local_path":"/tmp/private-live-proof/receipt.json",'
+        f'"blob":"{"x" * readiness_shared_artifacts.MAX_RECEIPT_BYTES}"}}'
+    )
+    proof_file = None
+    proof_json = oversized
+    if source == "file":
+        proof_file = tmp_path / "oversized-alert-proof.json"
+        proof_file.write_bytes(oversized.encode("utf-8"))
+        proof_json = None
+
+    receipt = readiness_shared_artifacts._load_proof("alert", proof_json, proof_file, config=config)
+    preview = receipt["raw_preview"]
+
+    assert receipt["status"] == "too_large"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_TOO_LARGE"
+    assert "token=secret" not in preview
+    assert "user:pass@" not in preview
+    assert "/tmp/private-live-proof/receipt.json" not in preview
+    assert "[truncated]" in preview
+    assert len(preview.encode("utf-8")) <= readiness_shared_artifacts.MAX_RECEIPT_PREVIEW_BYTES + 512
+
+
+@pytest.mark.parametrize(
+    ("proof_json", "proof_bytes"),
+    [
+        ("{not-json-token=secret", None),
+        ("[1, 2, 3]", None),
+        (None, b'\xff{"schema": "nhms.production_readiness.live_proof.v1"}'),
+    ],
+)
+def test_live_proof_loader_json_invalid_cases_are_bounded(
+    tmp_path: Path,
+    proof_json: str | None,
+    proof_bytes: bytes | None,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    proof_file = None
+    if proof_bytes is not None:
+        proof_file = tmp_path / "invalid-utf8-proof.json"
+        proof_file.write_bytes(proof_bytes)
+
+    receipt = readiness_shared_artifacts._load_proof("alert", proof_json, proof_file, config=config)
+    rendered = json.dumps(readiness_shared_artifacts._receipt_details(receipt, config=config), sort_keys=True)
+
+    assert receipt["status"] == "invalid"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_JSON_INVALID"
+    assert "raw_preview" in receipt
+    assert "not-json-token=secret" not in rendered
+    assert "Traceback" not in rendered
+
+
+@pytest.mark.parametrize("overflow", ["node", "depth"])
+def test_live_proof_loader_json_limit_output_is_bounded(tmp_path: Path, overflow: str) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    payload = json.loads(_bound_proof("alert"))
+    payload["local_path"] = "/tmp/private-live-proof/receipt.json"
+    if overflow == "node":
+        payload["node_overflow"] = [{"i": index} for index in range(1300)]
+        expected_error = "json_node_limit_exceeded"
+    else:
+        nested: dict[str, object] = {"value": "too deep"}
+        for index in range(20):
+            nested = {f"level_{index}": nested}
+        payload["depth_overflow"] = nested
+        expected_error = "json_depth_limit_exceeded"
+
+    receipt = readiness_shared_artifacts._load_proof("alert", json.dumps(payload), None, config=config)
+    rendered = json.dumps(readiness_shared_artifacts._receipt_details(receipt, config=config), sort_keys=True)
+
+    assert receipt["status"] == "invalid"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_JSON_LIMIT_EXCEEDED"
+    assert expected_error in receipt["json_limit_errors"]
+    assert "raw_payload" not in receipt
+    assert "[truncated:max-" in rendered
+    assert "/tmp/private-live-proof/receipt.json" not in rendered
+    assert len(rendered.encode("utf-8")) < 64 * 1024
 
 
 def test_shared_artifact_preflight_payload_pins_schema_paths_and_side_effect_policy(tmp_path: Path) -> None:
@@ -916,6 +1117,37 @@ def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(
         assert "users.manage" in detailed_artifact
         assert "pipeline.retry_run" in detailed_artifact
         assert "model_admin" in detailed_artifact
+
+
+def test_validate_readiness_write_order_preserves_preflight_receipts_then_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    write_names: list[str] = []
+    original_write_json = readiness_shared_artifacts.EvidenceWriter.write_json
+
+    def recording_write_json(
+        self: readiness_shared_artifacts.EvidenceWriter,
+        path: Path,
+        payload: object,
+    ) -> None:
+        write_names.append(path.name)
+        original_write_json(self, path, payload)
+
+    monkeypatch.setattr(readiness_shared_artifacts.EvidenceWriter, "write_json", recording_write_json)
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
+
+    assert write_names[:3] == [
+        "preflight.json",
+        "live_proof_receipts.json",
+        "readiness_items.json",
+    ]
+    readiness_dir = root / "m19" / "readiness"
+    assert (readiness_dir / "preflight.json").is_file()
+    assert (readiness_dir / "live_proof_receipts.json").is_file()
+    assert (readiness_dir / "readiness_items.json").is_file()
 
 
 def test_contract_mismatched_live_auth_receipt_is_redacted_and_remains_release_blocked(
@@ -2001,6 +2233,8 @@ def test_live_proof_receipts_artifact_omits_raw_payload_and_redacts(tmp_path: Pa
     artifact = json.loads((root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8"))
     rendered = json.dumps(artifact, sort_keys=True)
     assert artifact["schema"] == "nhms.production_readiness.live_proof_receipts.v1"
+    assert artifact["run_id"] == "m19"
+    assert set(artifact["receipts"]) == set(readiness_shared_artifacts.PROOF_ENV)
     assert set(artifact["redaction"]) == {
         "secrets_redacted",
         "local_paths_redacted",
@@ -2015,6 +2249,34 @@ def test_live_proof_receipts_artifact_omits_raw_payload_and_redacts(tmp_path: Pa
     assert "user:pass@" not in rendered
     assert "/tmp/private-live-proof/receipt.json" not in rendered
     assert "[redacted" in rendered
+    assert len(rendered.encode("utf-8")) < 64 * 1024
+
+
+def test_live_proof_file_receipt_still_drives_live_item_semantics(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    proof_file = tmp_path / "private" / "alert-proof.json"
+    proof_file.parent.mkdir()
+    proof_file.write_text(_bound_proof("alert"), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            alert_proof_file=proof_file,
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_alert_sink_delivery")
+    preflight = json.loads((root / "m19" / "readiness" / "preflight.json").read_text(encoding="utf-8"))
+    artifact_text = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
+
+    assert item["status"] == "passed"
+    assert item["execution_mode"] == "live_proof"
+    assert item["live_proof_accepted"] is True
+    assert preflight["live_proof_configured"]["alert"] is True
+    assert str(proof_file) not in artifact_text
+    assert "private" not in artifact_text
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_shared_artifact_environment_artifact_uses_allowlist_and_redacts_env_values(
