@@ -89,6 +89,7 @@ SCHEDULER_LIVE_WORK_STATUSES = _readiness_scheduler_evidence.SCHEDULER_LIVE_WORK
 PROOF_CONTRACTS = _readiness_live_proofs.PROOF_CONTRACTS
 REQUIRED_AUTH_ACTIONS = _readiness_live_proofs.REQUIRED_AUTH_ACTIONS
 PROOF_SPECIFIC_KEYS = _readiness_live_proofs.PROOF_SPECIFIC_KEYS
+SURFACE_PROOF_KEYS = _readiness_live_proofs.SURFACE_PROOF_KEYS
 _is_live_proof_mode = _readiness_live_proofs._is_live_proof_mode
 _has_artifact_or_evidence_refs = _readiness_live_proofs._has_artifact_or_evidence_refs
 _non_empty_string = _readiness_live_proofs._non_empty_string
@@ -601,9 +602,15 @@ def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any
     return _readiness_live_proofs._auth_live_item(
         config,
         receipt,
+        required_auth_actions=REQUIRED_AUTH_ACTIONS,
+        string_set=_string_set,
+        has_meaningful_value=_has_meaningful_value,
+        first_meaningful_mapping=_facade_first_meaningful_mapping,
+        has_any_key_value=_facade_has_any_key_value,
+        non_empty_string=_non_empty_string,
         common_live_receipt_errors=_common_live_receipt_errors,
-        provider_metadata_is_meaningful=_provider_metadata_is_meaningful,
-        role_mapping_is_meaningful=_role_mapping_is_meaningful,
+        provider_metadata_is_meaningful=_facade_provider_metadata_is_meaningful,
+        role_mapping_is_meaningful=_facade_role_mapping_is_meaningful,
         required_live_blocker=_required_live_blocker,
         receipt_validation_payload=_receipt_validation_payload,
         receipt_details=_receipt_details,
@@ -622,7 +629,7 @@ def _surface_live_item(
     missing_risk: str,
     removal: str,
 ) -> dict[str, Any]:
-    if proof_key in PROOF_SPECIFIC_KEYS:
+    if proof_key in SURFACE_PROOF_KEYS:
         return _readiness_live_proofs._surface_live_item(
             config,
             receipt,
@@ -638,6 +645,8 @@ def _surface_live_item(
             receipt_validation_payload=_receipt_validation_payload,
             receipt_details=_receipt_details,
         )
+    if proof_key != "scheduler" and proof_key not in DEPENDENCY_SUMMARY_CONTRACTS:
+        raise ValueError(f"unsupported facade surface proof key: {proof_key}")
     base = {
         "item_id": item_id,
         "surface": surface,
@@ -862,6 +871,135 @@ def _summary_exclusions(items: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return exclusions
 
 
+def _facade_first_meaningful_mapping(
+    payload: Mapping[str, Any],
+    keys: Sequence[str],
+) -> Mapping[str, Any] | None:
+    if _first_meaningful_mapping is _readiness_live_proofs._first_meaningful_mapping:
+        return _readiness_live_proofs._first_meaningful_mapping(
+            payload,
+            keys,
+            has_meaningful_value=_has_meaningful_value,
+        )
+    return _first_meaningful_mapping(payload, keys)
+
+
+def _facade_has_any_key_value(mapping: Mapping[str, Any], keys: Sequence[str]) -> bool:
+    if _has_any_key_value is _readiness_live_proofs._has_any_key_value:
+        return _readiness_live_proofs._has_any_key_value(
+            mapping,
+            keys,
+            has_meaningful_value=_has_meaningful_value,
+        )
+    return _has_any_key_value(mapping, keys)
+
+
+def _facade_value_from(
+    payload: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    fallback: Mapping[str, Any] | None = None,
+) -> Any:
+    if _value_from is _readiness_live_proofs._value_from:
+        return _readiness_live_proofs._value_from(
+            payload,
+            keys,
+            fallback=fallback,
+            has_meaningful_value=_has_meaningful_value,
+        )
+    return _value_from(payload, keys, fallback=fallback)
+
+
+def _facade_has_meaningful_ref(value: Any) -> bool:
+    if _has_meaningful_ref is _readiness_live_proofs._has_meaningful_ref:
+        return _readiness_live_proofs._has_meaningful_ref(
+            value,
+            has_meaningful_value=_has_meaningful_value,
+        )
+    return _has_meaningful_ref(value)
+
+
+def _facade_has_artifact_or_evidence_refs(payload: Mapping[str, Any]) -> bool:
+    if _has_artifact_or_evidence_refs is _readiness_live_proofs._has_artifact_or_evidence_refs:
+        return _readiness_live_proofs._has_artifact_or_evidence_refs(
+            payload,
+            has_meaningful_ref=_facade_has_meaningful_ref,
+        )
+    return _has_artifact_or_evidence_refs(payload)
+
+
+def _facade_provider_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _provider_metadata_is_meaningful is _readiness_live_proofs._provider_metadata_is_meaningful:
+        return _readiness_live_proofs._provider_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=_facade_first_meaningful_mapping,
+            has_any_key_value=_facade_has_any_key_value,
+        )
+    return _provider_metadata_is_meaningful(payload)
+
+
+def _facade_role_mapping_is_meaningful(value: Any) -> bool:
+    if _role_mapping_is_meaningful is _readiness_live_proofs._role_mapping_is_meaningful:
+        return _readiness_live_proofs._role_mapping_is_meaningful(
+            value,
+            non_empty_string=_non_empty_string,
+            string_set=_string_set,
+        )
+    return _role_mapping_is_meaningful(value)
+
+
+def _facade_alert_sink_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _alert_sink_metadata_is_meaningful is _readiness_live_proofs._alert_sink_metadata_is_meaningful:
+        return _readiness_live_proofs._alert_sink_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=_facade_first_meaningful_mapping,
+            has_any_key_value=_facade_has_any_key_value,
+        )
+    return _alert_sink_metadata_is_meaningful(payload)
+
+
+def _facade_alert_delivery_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _alert_delivery_metadata_is_meaningful is _readiness_live_proofs._alert_delivery_metadata_is_meaningful:
+        return _readiness_live_proofs._alert_delivery_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=_facade_first_meaningful_mapping,
+            has_any_key_value=_facade_has_any_key_value,
+        )
+    return _alert_delivery_metadata_is_meaningful(payload)
+
+
+def _facade_rollback_command_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _rollback_command_metadata_is_meaningful is _readiness_live_proofs._rollback_command_metadata_is_meaningful:
+        return _readiness_live_proofs._rollback_command_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=_facade_first_meaningful_mapping,
+            has_any_key_value=_facade_has_any_key_value,
+            non_empty_string=_non_empty_string,
+        )
+    return _rollback_command_metadata_is_meaningful(payload)
+
+
+def _facade_rollback_result_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _rollback_result_is_meaningful is _readiness_live_proofs._rollback_result_is_meaningful:
+        return _readiness_live_proofs._rollback_result_is_meaningful(
+            payload,
+            value_from=_facade_value_from,
+            non_empty_string=_non_empty_string,
+        )
+    return _rollback_result_is_meaningful(payload)
+
+
+def _facade_target_env_config_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
+    if _target_env_config_metadata_is_meaningful is _readiness_live_proofs._target_env_config_metadata_is_meaningful:
+        return _readiness_live_proofs._target_env_config_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=_facade_first_meaningful_mapping,
+            has_meaningful_value=_has_meaningful_value,
+            has_any_key_value=_facade_has_any_key_value,
+        )
+    return _target_env_config_metadata_is_meaningful(payload)
+
+
 def _surface_live_receipt_errors(
     payload: Mapping[str, Any],
     *,
@@ -870,24 +1008,34 @@ def _surface_live_receipt_errors(
     dependency_bindings: Mapping[str, Mapping[str, Any]],
     scheduler_binding: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
-    errors = _readiness_live_proofs._surface_live_receipt_errors(
+    if proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
+        errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
+        errors.extend(_dependency_receipt_errors(payload, proof_key=proof_key, dependency_bindings=dependency_bindings))
+        return errors
+    if proof_key == "scheduler":
+        errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
+        errors.extend(_scheduler_receipt_errors(payload, scheduler_binding=scheduler_binding))
+        return errors
+    if proof_key not in SURFACE_PROOF_KEYS:
+        raise ValueError(f"unsupported facade surface proof key: {proof_key}")
+    return _readiness_live_proofs._surface_live_receipt_errors(
         payload,
         proof_key=proof_key,
         config=config,
         dependency_bindings=dependency_bindings,
         scheduler_binding=scheduler_binding,
         common_live_receipt_errors=_common_live_receipt_errors,
-        alert_sink_metadata_is_meaningful=_alert_sink_metadata_is_meaningful,
-        alert_delivery_metadata_is_meaningful=_alert_delivery_metadata_is_meaningful,
-        rollback_command_metadata_is_meaningful=_rollback_command_metadata_is_meaningful,
-        rollback_result_is_meaningful=_rollback_result_is_meaningful,
-        target_env_config_metadata_is_meaningful=_target_env_config_metadata_is_meaningful,
+        non_empty_string=_non_empty_string,
+        has_meaningful_value=_has_meaningful_value,
+        first_meaningful_mapping=_facade_first_meaningful_mapping,
+        has_any_key_value=_facade_has_any_key_value,
+        value_from=_facade_value_from,
+        alert_sink_metadata_is_meaningful=_facade_alert_sink_metadata_is_meaningful,
+        alert_delivery_metadata_is_meaningful=_facade_alert_delivery_metadata_is_meaningful,
+        rollback_command_metadata_is_meaningful=_facade_rollback_command_metadata_is_meaningful,
+        rollback_result_is_meaningful=_facade_rollback_result_is_meaningful,
+        target_env_config_metadata_is_meaningful=_facade_target_env_config_metadata_is_meaningful,
     )
-    if proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
-        errors.extend(_dependency_receipt_errors(payload, proof_key=proof_key, dependency_bindings=dependency_bindings))
-    elif proof_key == "scheduler":
-        errors.extend(_scheduler_receipt_errors(payload, scheduler_binding=scheduler_binding))
-    return errors
 
 
 def _common_live_receipt_errors(
@@ -905,9 +1053,10 @@ def _common_live_receipt_errors(
         expected_target_environment=EXPECTED_TARGET_ENVIRONMENT,
         non_empty_string=_non_empty_string,
         has_meaningful_value=_has_meaningful_value,
+        has_meaningful_ref=_facade_has_meaningful_ref,
         target_environment_name=_target_environment_name,
         is_live_proof_mode=_is_live_proof_mode,
-        has_artifact_or_evidence_refs=_has_artifact_or_evidence_refs,
+        has_artifact_or_evidence_refs=_facade_has_artifact_or_evidence_refs,
     )
 
 

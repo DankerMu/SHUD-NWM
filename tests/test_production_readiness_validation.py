@@ -273,6 +273,15 @@ def _auth_proof(*, allowed: list[str] | None = None, denied: list[str] | None = 
     return json.dumps(payload)
 
 
+def _live_surface_item_kwargs(proof_key: str) -> dict[str, str]:
+    return {
+        "item_id": f"live-{proof_key.replace('_', '-')}",
+        "surface": PROOF_SURFACES[proof_key],
+        "missing_risk": f"Live {proof_key} proof has not been accepted.",
+        "removal": f"Provide an accepted {proof_key} proof receipt.",
+    }
+
+
 def _all_live_proofs() -> dict[str, str]:
     actions = _all_auth_actions()
     return {
@@ -688,6 +697,7 @@ def test_live_receipt_validator_owner_facade_aliases_and_outputs_match(tmp_path:
     assert readiness_validation.REQUIRED_AUTH_ACTIONS is readiness_live_proofs.REQUIRED_AUTH_ACTIONS
     assert readiness_validation.EXPECTED_TARGET_ENVIRONMENT == readiness_live_proofs.EXPECTED_TARGET_ENVIRONMENT
     assert readiness_validation.PROOF_SPECIFIC_KEYS is readiness_live_proofs.PROOF_SPECIFIC_KEYS
+    assert readiness_validation.SURFACE_PROOF_KEYS is readiness_live_proofs.SURFACE_PROOF_KEYS
     for name in (
         "_is_live_proof_mode",
         "_has_artifact_or_evidence_refs",
@@ -772,6 +782,50 @@ def test_live_receipt_validator_owner_facade_aliases_and_outputs_match(tmp_path:
         )
 
 
+@pytest.mark.parametrize(
+    "proof_key",
+    ("auth", "scheduler", "slurm", "object_store", "source", "e2e", "mvt"),
+)
+def test_live_receipt_validator_owner_surface_item_rejects_non_surface_proof_keys(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    proof = (
+        _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions())
+        if proof_key == "auth"
+        else _bound_proof(proof_key)
+    )
+    receipt = readiness_shared_artifacts._load_proof(proof_key, proof, None, config=config)
+
+    with pytest.raises(ValueError, match=f"unsupported surface proof key: {proof_key}"):
+        readiness_live_proofs._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings={},
+            **_live_surface_item_kwargs(proof_key),
+        )
+
+
+@pytest.mark.parametrize("proof_key", ("scheduler", "slurm"))
+def test_live_receipt_validator_owner_surface_receipt_errors_reject_non_surface_proof_keys(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof(proof_key, _bound_proof(proof_key), None, config=config)
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+
+    with pytest.raises(ValueError, match=f"unsupported surface proof key: {proof_key}"):
+        readiness_live_proofs._surface_live_receipt_errors(
+            payload,
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings={},
+        )
+
+
 def test_live_receipt_validator_facade_honors_old_monkeypatch_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -809,6 +863,112 @@ def test_live_receipt_validator_facade_honors_old_monkeypatch_paths(
 
     assert alert_item["status"] == "release_blocked"
     assert "patched_common_live_error" in alert_item["details"]["acceptance_errors"]["errors"]
+
+
+def test_live_receipt_validator_auth_facade_uses_patched_string_set_for_auth_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof(
+        "auth",
+        _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
+        None,
+        config=config,
+    )
+
+    monkeypatch.setattr(readiness_validation, "_string_set", lambda _value: set())
+    item = readiness_validation._auth_live_item(config, receipt)
+    acceptance_errors = item["details"]["acceptance_errors"]
+
+    assert item["status"] == "release_blocked"
+    assert "missing_allowed_actions" in acceptance_errors["errors"]
+    assert "missing_denied_actions" in acceptance_errors["errors"]
+    assert acceptance_errors["missing_allowed_actions"] == sorted(readiness_validation.REQUIRED_AUTH_ACTIONS)
+    assert acceptance_errors["missing_denied_actions"] == sorted(readiness_validation.REQUIRED_AUTH_ACTIONS)
+
+
+def test_live_receipt_validator_alert_facade_common_uses_patched_has_meaningful_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof("alert", _bound_proof("alert"), None, config=config)
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+
+    monkeypatch.setattr(readiness_validation, "_has_meaningful_ref", lambda _value: False)
+    errors = readiness_validation._surface_live_receipt_errors(
+        payload,
+        proof_key="alert",
+        config=config,
+        dependency_bindings={},
+    )
+
+    assert "missing_artifact_or_evidence_refs" in errors
+
+
+def test_live_receipt_validator_alert_facade_uses_patched_has_any_key_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof("alert", _bound_proof("alert"), None, config=config)
+
+    monkeypatch.setattr(readiness_validation, "_has_any_key_value", lambda _mapping, _keys: False)
+    item = readiness_validation._surface_live_item(
+        config,
+        receipt,
+        proof_key="alert",
+        dependency_bindings={},
+        **_live_surface_item_kwargs("alert"),
+    )
+    errors = item["details"]["acceptance_errors"]["errors"]
+
+    assert item["status"] == "release_blocked"
+    assert "missing_sink_metadata" in errors
+    assert "missing_delivery_metadata" in errors
+
+
+def test_live_receipt_validator_rollback_facade_uses_patched_has_meaningful_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof("rollback", _bound_proof("rollback"), None, config=config)
+
+    monkeypatch.setattr(readiness_validation, "_has_meaningful_value", lambda _value: False)
+    item = readiness_validation._surface_live_item(
+        config,
+        receipt,
+        proof_key="rollback",
+        dependency_bindings={},
+        **_live_surface_item_kwargs("rollback"),
+    )
+    errors = item["details"]["acceptance_errors"]["errors"]
+
+    assert item["status"] == "release_blocked"
+    assert "missing_preconditions" in errors
+
+
+def test_live_receipt_validator_target_env_final_readiness_facade_uses_patched_has_meaningful_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof("target_env", _bound_proof("target_env"), None, config=config)
+
+    monkeypatch.setattr(readiness_validation, "_has_meaningful_value", lambda _value: False)
+    item = readiness_validation._surface_live_item(
+        config,
+        receipt,
+        proof_key="target_env",
+        dependency_bindings={},
+        **_live_surface_item_kwargs("target_env"),
+    )
+    errors = item["details"]["acceptance_errors"]["errors"]
+
+    assert item["status"] == "release_blocked"
+    assert "missing_target_environment_config_metadata" in errors
 
 
 def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(

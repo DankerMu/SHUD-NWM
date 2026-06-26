@@ -16,6 +16,7 @@ validate_readiness_item = _readiness_item_contracts.validate_readiness_item
 
 EXPECTED_TARGET_ENVIRONMENT = "production"
 PROOF_SPECIFIC_KEYS = frozenset({"auth", "alert", "rollback", "target_env"})
+SURFACE_PROOF_KEYS = frozenset({"alert", "rollback", "target_env"})
 PROOF_CONTRACTS = {
     "auth": {
         "proof_type": "auth",
@@ -95,6 +96,12 @@ def _auth_live_item(
     config: Any,
     receipt: Mapping[str, Any],
     *,
+    required_auth_actions: set[str] | frozenset[str] | None = None,
+    string_set: Callable[[Any], set[str]] | None = None,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+    non_empty_string: Callable[[Any], bool] | None = None,
     common_live_receipt_errors: Callable[..., list[str]] | None = None,
     provider_metadata_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
     role_mapping_is_meaningful: Callable[[Any], bool] | None = None,
@@ -102,9 +109,33 @@ def _auth_live_item(
     receipt_validation_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     receipt_details: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if required_auth_actions is None:
+        required_auth_actions = REQUIRED_AUTH_ACTIONS
+    required_auth_actions = frozenset(required_auth_actions)
+    string_set = string_set or _string_set
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
+    first_meaningful_mapping = first_meaningful_mapping or (
+        lambda payload, keys: _first_meaningful_mapping(payload, keys, has_meaningful_value=has_meaningful_value)
+    )
+    has_any_key_value = has_any_key_value or (
+        lambda mapping, keys: _has_any_key_value(mapping, keys, has_meaningful_value=has_meaningful_value)
+    )
+    non_empty_string = non_empty_string or _non_empty_string
     common_live_receipt_errors = common_live_receipt_errors or _common_live_receipt_errors
-    provider_metadata_is_meaningful = provider_metadata_is_meaningful or _provider_metadata_is_meaningful
-    role_mapping_is_meaningful = role_mapping_is_meaningful or _role_mapping_is_meaningful
+    provider_metadata_is_meaningful = provider_metadata_is_meaningful or (
+        lambda payload: _provider_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=first_meaningful_mapping,
+            has_any_key_value=has_any_key_value,
+        )
+    )
+    role_mapping_is_meaningful = role_mapping_is_meaningful or (
+        lambda value: _role_mapping_is_meaningful(
+            value,
+            non_empty_string=non_empty_string,
+            string_set=string_set,
+        )
+    )
     required_live_blocker = required_live_blocker or _required_live_blocker
     receipt_validation_payload = receipt_validation_payload or _receipt_validation_payload
     receipt_details = receipt_details or _receipt_details
@@ -122,10 +153,10 @@ def _auth_live_item(
     if receipt["status"] != "parsed":
         return required_live_blocker(config=config, receipt=receipt, **base)
     payload = receipt_validation_payload(receipt)
-    allowed = _string_set(payload.get("allowed_actions") or payload.get("allowed_coverage"))
-    denied = _string_set(payload.get("denied_actions") or payload.get("denied_coverage"))
-    missing_allowed = sorted(REQUIRED_AUTH_ACTIONS - allowed)
-    missing_denied = sorted(REQUIRED_AUTH_ACTIONS - denied)
+    allowed = set(string_set(payload.get("allowed_actions") or payload.get("allowed_coverage")))
+    denied = set(string_set(payload.get("denied_actions") or payload.get("denied_coverage")))
+    missing_allowed = sorted(required_auth_actions - allowed)
+    missing_denied = sorted(required_auth_actions - denied)
     errors = common_live_receipt_errors(payload, proof_key="auth", config=config)
     if not provider_metadata_is_meaningful(payload):
         errors.append("missing_provider_metadata")
@@ -187,6 +218,8 @@ def _surface_live_item(
     receipt_validation_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     receipt_details: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if proof_key not in SURFACE_PROOF_KEYS:
+        raise ValueError(f"unsupported surface proof key: {proof_key}")
     surface_live_receipt_errors = surface_live_receipt_errors or _surface_live_receipt_errors
     required_live_blocker = required_live_blocker or _required_live_blocker
     receipt_validation_payload = receipt_validation_payload or _receipt_validation_payload
@@ -267,24 +300,82 @@ def _surface_live_receipt_errors(
     dependency_bindings: Mapping[str, Mapping[str, Any]],
     scheduler_binding: Sequence[Mapping[str, Any]] = (),
     common_live_receipt_errors: Callable[..., list[str]] | None = None,
+    non_empty_string: Callable[[Any], bool] | None = None,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+    value_from: Callable[..., Any] | None = None,
     alert_sink_metadata_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
     alert_delivery_metadata_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
     rollback_command_metadata_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
     rollback_result_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
     target_env_config_metadata_is_meaningful: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> list[str]:
+    if proof_key not in SURFACE_PROOF_KEYS:
+        raise ValueError(f"unsupported surface proof key: {proof_key}")
     del dependency_bindings, scheduler_binding
     common_live_receipt_errors = common_live_receipt_errors or _common_live_receipt_errors
-    alert_sink_metadata_is_meaningful = alert_sink_metadata_is_meaningful or _alert_sink_metadata_is_meaningful
+    non_empty_string = non_empty_string or _non_empty_string
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
+    first_meaningful_mapping = first_meaningful_mapping or (
+        lambda payload, keys: _first_meaningful_mapping(payload, keys, has_meaningful_value=has_meaningful_value)
+    )
+    has_any_key_value = has_any_key_value or (
+        lambda mapping, keys: _has_any_key_value(mapping, keys, has_meaningful_value=has_meaningful_value)
+    )
+    value_from = value_from or (
+        lambda payload, keys, *, fallback=None: _value_from(
+            payload,
+            keys,
+            fallback=fallback,
+            has_meaningful_value=has_meaningful_value,
+        )
+    )
+    alert_sink_metadata_is_meaningful = alert_sink_metadata_is_meaningful or (
+        lambda payload: _alert_sink_metadata_is_meaningful(
+            payload,
+            first_meaningful_mapping=first_meaningful_mapping,
+            has_any_key_value=has_any_key_value,
+        )
+    )
     alert_delivery_metadata_is_meaningful = (
-        alert_delivery_metadata_is_meaningful or _alert_delivery_metadata_is_meaningful
+        alert_delivery_metadata_is_meaningful
+        or (
+            lambda payload: _alert_delivery_metadata_is_meaningful(
+                payload,
+                first_meaningful_mapping=first_meaningful_mapping,
+                has_any_key_value=has_any_key_value,
+            )
+        )
     )
     rollback_command_metadata_is_meaningful = (
-        rollback_command_metadata_is_meaningful or _rollback_command_metadata_is_meaningful
+        rollback_command_metadata_is_meaningful
+        or (
+            lambda payload: _rollback_command_metadata_is_meaningful(
+                payload,
+                first_meaningful_mapping=first_meaningful_mapping,
+                has_any_key_value=has_any_key_value,
+                non_empty_string=non_empty_string,
+            )
+        )
     )
-    rollback_result_is_meaningful = rollback_result_is_meaningful or _rollback_result_is_meaningful
+    rollback_result_is_meaningful = rollback_result_is_meaningful or (
+        lambda payload: _rollback_result_is_meaningful(
+            payload,
+            value_from=value_from,
+            non_empty_string=non_empty_string,
+        )
+    )
     target_env_config_metadata_is_meaningful = (
-        target_env_config_metadata_is_meaningful or _target_env_config_metadata_is_meaningful
+        target_env_config_metadata_is_meaningful
+        or (
+            lambda payload: _target_env_config_metadata_is_meaningful(
+                payload,
+                first_meaningful_mapping=first_meaningful_mapping,
+                has_meaningful_value=has_meaningful_value,
+                has_any_key_value=has_any_key_value,
+            )
+        )
     )
     errors = common_live_receipt_errors(payload, proof_key=proof_key, config=config)
     if proof_key == "alert":
@@ -295,7 +386,7 @@ def _surface_live_receipt_errors(
         if payload.get("delivered") is not True and str(payload.get("status", "")) != "delivered":
             errors.append("delivery_not_confirmed")
     elif proof_key == "rollback":
-        if not _has_meaningful_value(payload.get("preconditions")):
+        if not has_meaningful_value(payload.get("preconditions")):
             errors.append("missing_preconditions")
         if not rollback_command_metadata_is_meaningful(payload):
             errors.append("missing_command_or_drill_metadata")
@@ -316,6 +407,7 @@ def _common_live_receipt_errors(
     expected_target_environment: str = EXPECTED_TARGET_ENVIRONMENT,
     non_empty_string: Callable[[Any], bool] | None = None,
     has_meaningful_value: Callable[[Any], bool] | None = None,
+    has_meaningful_ref: Callable[[Any], bool] | None = None,
     target_environment_name: Callable[[Any], str] | None = None,
     is_live_proof_mode: Callable[[Mapping[str, Any]], bool] | None = None,
     has_artifact_or_evidence_refs: Callable[[Mapping[str, Any]], bool] | None = None,
@@ -323,9 +415,14 @@ def _common_live_receipt_errors(
     proof_contracts = proof_contracts or PROOF_CONTRACTS
     non_empty_string = non_empty_string or _non_empty_string
     has_meaningful_value = has_meaningful_value or _has_meaningful_value
+    has_meaningful_ref = has_meaningful_ref or (
+        lambda value: _has_meaningful_ref(value, has_meaningful_value=has_meaningful_value)
+    )
     target_environment_name = target_environment_name or _target_environment_name
     is_live_proof_mode = is_live_proof_mode or _is_live_proof_mode
-    has_artifact_or_evidence_refs = has_artifact_or_evidence_refs or _has_artifact_or_evidence_refs
+    has_artifact_or_evidence_refs = has_artifact_or_evidence_refs or (
+        lambda receipt: _has_artifact_or_evidence_refs(receipt, has_meaningful_ref=has_meaningful_ref)
+    )
     contract = proof_contracts[proof_key]
     errors: list[str] = []
     if payload.get("accepted") is not True:
@@ -364,9 +461,14 @@ def _is_live_proof_mode(payload: Mapping[str, Any]) -> bool:
     return bool(values & {"live_proof", "live_execution", "live"})
 
 
-def _has_artifact_or_evidence_refs(payload: Mapping[str, Any]) -> bool:
+def _has_artifact_or_evidence_refs(
+    payload: Mapping[str, Any],
+    *,
+    has_meaningful_ref: Callable[[Any], bool] | None = None,
+) -> bool:
+    has_meaningful_ref = has_meaningful_ref or _has_meaningful_ref
     for key in ("artifact_refs", "evidence_refs", "artifacts", "evidence"):
-        if _has_meaningful_ref(payload.get(key)):
+        if has_meaningful_ref(payload.get(key)):
             return True
     return False
 
@@ -391,7 +493,12 @@ def _has_meaningful_value(value: Any) -> bool:
     return True
 
 
-def _has_meaningful_ref(value: Any) -> bool:
+def _has_meaningful_ref(
+    value: Any,
+    *,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+) -> bool:
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
     if isinstance(value, str):
         return bool(value.strip())
     if isinstance(value, Mapping):
@@ -411,11 +518,11 @@ def _has_meaningful_ref(value: Any) -> bool:
             "summary_ref",
             "summary_checksum",
         )
-        return any(_has_meaningful_value(value.get(key)) for key in ref_keys) or any(
-            _has_meaningful_ref(nested) for nested in value.values()
+        return any(has_meaningful_value(value.get(key)) for key in ref_keys) or any(
+            _has_meaningful_ref(nested, has_meaningful_value=has_meaningful_value) for nested in value.values()
         )
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return any(_has_meaningful_ref(item) for item in value)
+        return any(_has_meaningful_ref(item, has_meaningful_value=has_meaningful_value) for item in value)
     return False
 
 
@@ -442,9 +549,16 @@ def _string_set(value: Any) -> set[str]:
     return set()
 
 
-def _provider_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    provider = _first_meaningful_mapping(payload, ("provider", "provider_metadata", "idp_metadata"))
-    if provider is not None and _has_any_key_value(
+def _provider_metadata_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+) -> bool:
+    first_meaningful_mapping = first_meaningful_mapping or _first_meaningful_mapping
+    has_any_key_value = has_any_key_value or _has_any_key_value
+    provider = first_meaningful_mapping(payload, ("provider", "provider_metadata", "idp_metadata"))
+    if provider is not None and has_any_key_value(
         provider,
         (
             "issuer",
@@ -460,98 +574,167 @@ def _provider_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
         ),
     ):
         return True
-    return _has_any_key_value(
+    return has_any_key_value(
         payload,
         ("issuer", "issuer_url", "provider_id", "provider_name", "idp_id", "tenant_id", "subject", "client_id"),
     )
 
 
-def _role_mapping_is_meaningful(value: Any) -> bool:
+def _role_mapping_is_meaningful(
+    value: Any,
+    *,
+    non_empty_string: Callable[[Any], bool] | None = None,
+    string_set: Callable[[Any], set[str]] | None = None,
+) -> bool:
+    non_empty_string = non_empty_string or _non_empty_string
+    string_set = string_set or _string_set
     if not isinstance(value, Mapping):
         return False
     for role, mapped in value.items():
-        if not _non_empty_string(role):
+        if not non_empty_string(role):
             continue
-        if _string_set(mapped):
+        if string_set(mapped):
             return True
         if isinstance(mapped, Mapping) and any(
-            _string_set(mapped.get(key)) for key in ("actions", "roles", "permissions", "allowed_actions")
+            string_set(mapped.get(key)) for key in ("actions", "roles", "permissions", "allowed_actions")
         ):
             return True
     return False
 
 
-def _alert_sink_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    sink = _first_meaningful_mapping(payload, ("sink_metadata", "sink"))
-    if sink is not None and _has_any_key_value(sink, ("sink_id", "id", "name", "sink_name", "url", "uri", "channel")):
+def _alert_sink_metadata_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+) -> bool:
+    first_meaningful_mapping = first_meaningful_mapping or _first_meaningful_mapping
+    has_any_key_value = has_any_key_value or _has_any_key_value
+    sink = first_meaningful_mapping(payload, ("sink_metadata", "sink"))
+    if sink is not None and has_any_key_value(sink, ("sink_id", "id", "name", "sink_name", "url", "uri", "channel")):
         return True
-    return _has_any_key_value(payload, ("sink_id", "sink_name", "sink_url", "sink", "channel"))
+    return has_any_key_value(payload, ("sink_id", "sink_name", "sink_url", "sink", "channel"))
 
 
-def _alert_delivery_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    delivery = _first_meaningful_mapping(payload, ("delivery_metadata", "delivery_result", "delivery"))
+def _alert_delivery_metadata_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+) -> bool:
+    first_meaningful_mapping = first_meaningful_mapping or _first_meaningful_mapping
+    has_any_key_value = has_any_key_value or _has_any_key_value
+    delivery = first_meaningful_mapping(payload, ("delivery_metadata", "delivery_result", "delivery"))
     if delivery is None:
         return False
-    has_id = _has_any_key_value(delivery, ("delivery_id", "message_id", "id", "receipt_id"))
-    has_timestamp = _has_any_key_value(delivery, ("delivered_at", "timestamp", "time", "completed_at"))
-    has_result = _has_any_key_value(delivery, ("result", "status", "delivery_status", "outcome"))
+    has_id = has_any_key_value(delivery, ("delivery_id", "message_id", "id", "receipt_id"))
+    has_timestamp = has_any_key_value(delivery, ("delivered_at", "timestamp", "time", "completed_at"))
+    has_result = has_any_key_value(delivery, ("result", "status", "delivery_status", "outcome"))
     return has_id and has_timestamp and has_result
 
 
-def _rollback_command_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    command = _first_meaningful_mapping(payload, ("command_metadata", "drill_metadata", "command"))
+def _rollback_command_metadata_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+    non_empty_string: Callable[[Any], bool] | None = None,
+) -> bool:
+    first_meaningful_mapping = first_meaningful_mapping or _first_meaningful_mapping
+    has_any_key_value = has_any_key_value or _has_any_key_value
+    non_empty_string = non_empty_string or _non_empty_string
+    command = first_meaningful_mapping(payload, ("command_metadata", "drill_metadata", "command"))
     if command is not None and (
-        _has_any_key_value(command, ("command", "command_id", "drill_id", "id", "runbook", "rollback_id"))
-        or _non_empty_string(command.get("argv"))
+        has_any_key_value(command, ("command", "command_id", "drill_id", "id", "runbook", "rollback_id"))
+        or non_empty_string(command.get("argv"))
     ):
         return True
-    return _has_any_key_value(payload, ("command", "command_id", "drill_id", "rollback_id"))
+    return has_any_key_value(payload, ("command", "command_id", "drill_id", "rollback_id"))
 
 
-def _rollback_result_is_meaningful(payload: Mapping[str, Any]) -> bool:
+def _rollback_result_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    value_from: Callable[..., Any] | None = None,
+    non_empty_string: Callable[[Any], bool] | None = None,
+) -> bool:
+    value_from = value_from or _value_from
+    non_empty_string = non_empty_string or _non_empty_string
     if payload.get("executed") is True:
         return True
-    result = _value_from(payload, ("execution_result", "result", "rollback_result", "outcome"))
-    if _non_empty_string(result):
+    result = value_from(payload, ("execution_result", "result", "rollback_result", "outcome"))
+    if non_empty_string(result):
         return str(result).strip().lower() in {"passed", "executed", "success", "succeeded"}
     status = payload.get("status")
     return isinstance(status, str) and status.strip().lower() == "executed"
 
 
-def _target_env_config_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    config_metadata = _first_meaningful_mapping(payload, ("config_metadata", "environment_metadata"))
+def _target_env_config_metadata_is_meaningful(
+    payload: Mapping[str, Any],
+    *,
+    first_meaningful_mapping: Callable[[Mapping[str, Any], Sequence[str]], Mapping[str, Any] | None] | None = None,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+    has_any_key_value: Callable[[Mapping[str, Any], Sequence[str]], bool] | None = None,
+) -> bool:
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
+    first_meaningful_mapping = first_meaningful_mapping or (
+        lambda receipt, keys: _first_meaningful_mapping(receipt, keys, has_meaningful_value=has_meaningful_value)
+    )
+    has_any_key_value = has_any_key_value or (
+        lambda mapping, keys: _has_any_key_value(mapping, keys, has_meaningful_value=has_meaningful_value)
+    )
+    config_metadata = first_meaningful_mapping(payload, ("config_metadata", "environment_metadata"))
     if config_metadata is None:
         return False
-    has_metadata = _has_meaningful_value(config_metadata)
-    has_identifier = _has_any_key_value(
+    has_metadata = has_meaningful_value(config_metadata)
+    has_identifier = has_any_key_value(
         payload,
         ("config_receipt_id", "config_id", "environment_id", "environment_name", "target_config_id"),
-    ) or _has_any_key_value(
+    ) or has_any_key_value(
         config_metadata,
         ("config_receipt_id", "config_id", "environment_id", "environment_name", "name", "id", "cluster"),
     )
     return has_metadata and has_identifier
 
 
-def _first_meaningful_mapping(payload: Mapping[str, Any], keys: Sequence[str]) -> Mapping[str, Any] | None:
+def _first_meaningful_mapping(
+    payload: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+) -> Mapping[str, Any] | None:
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
     for key in keys:
         value = payload.get(key)
-        if isinstance(value, Mapping) and _has_meaningful_value(value):
+        if isinstance(value, Mapping) and has_meaningful_value(value):
             return value
     return None
 
 
-def _has_any_key_value(mapping: Mapping[str, Any], keys: Sequence[str]) -> bool:
-    return any(_has_meaningful_value(mapping.get(key)) for key in keys)
+def _has_any_key_value(
+    mapping: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+) -> bool:
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
+    return any(has_meaningful_value(mapping.get(key)) for key in keys)
 
 
-def _value_from(payload: Mapping[str, Any], keys: Sequence[str], *, fallback: Mapping[str, Any] | None = None) -> Any:
+def _value_from(
+    payload: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    fallback: Mapping[str, Any] | None = None,
+    has_meaningful_value: Callable[[Any], bool] | None = None,
+) -> Any:
+    has_meaningful_value = has_meaningful_value or _has_meaningful_value
     for key in keys:
-        if _has_meaningful_value(payload.get(key)):
+        if has_meaningful_value(payload.get(key)):
             return payload.get(key)
     if fallback is not None:
         for key in keys:
-            if _has_meaningful_value(fallback.get(key)):
+            if has_meaningful_value(fallback.get(key)):
                 return fallback.get(key)
     return None
 
