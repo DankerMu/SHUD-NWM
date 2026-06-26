@@ -169,7 +169,7 @@ git diff --check
 Governance-8 issue #744 two-node group closeout verification commands:
 
 ```bash
-uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory"
+uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"
 uv run pytest -q tests/test_two_node_e2e_evidence.py
 uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py
 openspec validate governance-8-module-deepening --strict --no-interactive
@@ -205,7 +205,7 @@ Closeout non-goals:
 | 3.10 | `#741 -> PR #800` - Manual ops lane extraction | `services.production_closure.two_node_e2e_manual_ops_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"`. | Manual ops row, fail-closed/no-side-effect, and receipt artifact guards added. |
 | 3.11 | `#742 -> PR #801` - Cross-plane/source-scope aggregation extraction | `services.production_closure.two_node_e2e_cross_plane_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"`. | Source-scope/cross-plane row and aggregation guard symbols added. |
 | 3.12 | `#743 -> PR #802` - Final aggregation extraction | `services.production_closure.two_node_e2e_final_aggregation` | Final-focused selector plus full `tests/test_two_node_e2e_evidence.py`, scoped ruff, OpenSpec, and diff-check. | Final aggregation row, output safety, redaction, status-ordering, and facade re-export guards added. |
-| 3.13 | `#744 -> PR #803` - Two-node group verification and evidence closeout | Inventory closeout map and `tests/test_two_node_e2e_evidence.py` closeout guard | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`; `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`. | Final map records tasks 3.1-3.13 and explicit closeout non-goals; no product, topology, DB, Slurm, API, frontend, deployment, station-MVT, or new lane semantics change. |
+| 3.13 | `#744 -> PR #803` - Two-node group verification and evidence closeout | Inventory closeout map and `tests/test_two_node_e2e_evidence.py` closeout guard | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`; `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`. | Final map records tasks 3.1-3.13 and explicit closeout non-goals; no product, topology, DB, Slurm, API, frontend, deployment, station-MVT, or new lane semantics change. |
 
 Read-only inventory context was collected from:
 

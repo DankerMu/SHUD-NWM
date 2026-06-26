@@ -427,7 +427,7 @@ def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> Non
 
     closeout_verification = rows["3.13"][3]
     expected_closeout_commands = (
-        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory"',
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"',
         "uv run pytest -q tests/test_two_node_e2e_evidence.py",
         "uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py",
         "openspec validate governance-8-module-deepening --strict --no-interactive",
@@ -450,6 +450,48 @@ def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> Non
     )
     for non_goal in closeout_non_goals:
         assert non_goal in inventory_text
+
+
+def test_two_node_e2e_cli_forwards_config_and_prints_redacted_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed: dict[str, TwoNodeE2EEvidenceConfig] = {}
+
+    def fake_validate(config: TwoNodeE2EEvidenceConfig) -> dict[str, Any]:
+        observed["config"] = config
+        return {"status": STATUS_PASS, "api_token": "super-secret"}
+
+    monkeypatch.setattr(two_node_e2e_evidence, "validate_two_node_e2e_evidence", fake_validate)
+
+    exit_code = two_node_e2e_evidence.main(
+        [
+            "--evidence-root",
+            str(REPO_ROOT / "artifacts" / "two-node-e2e-cli-smoke"),
+            "--run-id",
+            "cli-smoke",
+            "--source",
+            "gfs",
+            "--source",
+            "ifs",
+            "--source",
+            "gfs",
+            "--full-scope",
+            "--force",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "super-secret" not in captured.out
+    assert json.loads(captured.out) == {"api_token": "[redacted]", "status": STATUS_PASS}
+
+    config = observed["config"]
+    assert config.evidence_root == (REPO_ROOT / "artifacts" / "two-node-e2e-cli-smoke").resolve(strict=False)
+    assert config.run_id == "cli-smoke"
+    assert config.declared_sources == ("GFS", "IFS")
+    assert config.reduced_scope is False
+    assert config.force is True
 
 
 def test_metadata_lane_owner_module_covers_metadata_source_scope_contract() -> None:
