@@ -1587,7 +1587,7 @@
     and existing-output no-clobber behavior; Evidence/audit/readiness: final
     implementation evidence map and two-node inventory.
   - Regression Rows: final evidence map contains tasks 3.1-3.13 with issue
-    #732-#744, PR number or pending closeout marker, owner/surface, verification
+    #732-#744, PR #791-#803 closeout record, owner/surface, verification
     command, and inventory/evidence update; inventory guard seed rows cover
     shared contracts, lane closure/discovery, every extracted lane owner,
     producer/source artifacts, source-scope/cross-plane aggregation, and final
