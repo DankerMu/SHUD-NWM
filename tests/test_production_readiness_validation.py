@@ -998,6 +998,9 @@ def test_dependency_summary_nested_aliases_are_preserved(
     assert item["execution_mode"] == "deterministic"
     assert item["details"]["producer_artifact_ref"] == expected_ref
     assert item["details"]["summary_checksum"].startswith("sha256:")
+    assert readiness_validation._dependency_bindings([item])[proof_key]["summary_run_id"] == (
+        f"{proof_key}-live-run"
+    )
 
 
 def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_readiness(tmp_path: Path) -> None:
@@ -1022,6 +1025,7 @@ def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_rea
     assert "summary_status=submitted" in item["dependencies"]
     assert "producer_artifact_ref=slurm:summary.json" in item["dependencies"]
     assert any(dependency.startswith("summary_checksum=sha256:") for dependency in item["dependencies"])
+    assert readiness_validation._dependency_bindings([item])["slurm"]["summary_run_id"] == "slurm-live-run"
     assert _summary(root)["status"] == "release_blocked"
     assert _summary(root)["final_production_readiness_claimed"] is False
 
@@ -1049,6 +1053,68 @@ def test_dependency_bindings_include_only_passed_dependency_summaries(tmp_path: 
     assert slurm_binding["summary_run_id"] == "slurm-live-run"
     assert slurm_binding["producer_artifact_ref"] == "slurm:summary.json"
     assert slurm_binding["summary_checksum"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_public_run_id", "forbidden_fragment"),
+    [
+        ("missing", None, None),
+        ("blank", "[invalid-run-id]", None),
+        ("path_like_private_path", "[redacted-path]", "private-run-ids"),
+        ("oversized_truncated", "[invalid-run-id][truncated]", "raw-oversized-run-id-tail"),
+    ],
+)
+def test_dependency_summary_run_id_contract_failures_are_blocked_unbound_and_redacted(
+    tmp_path: Path,
+    case_name: str,
+    expected_public_run_id: object,
+    forbidden_fragment: str | None,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload("slurm")
+    raw_run_id = None
+    if case_name == "missing":
+        payload.pop("run_id")
+    elif case_name == "blank":
+        raw_run_id = "   "
+        payload["run_id"] = raw_run_id
+    elif case_name == "path_like_private_path":
+        raw_run_id = str(tmp_path / "private-run-ids" / "slurm-live-run")
+        payload["run_id"] = raw_run_id
+    elif case_name == "oversized_truncated":
+        raw_run_id = (
+            "slurm-live-run-"
+            + ("x" * (readiness_shared_artifacts.MAX_STRING_LENGTH + 512))
+            + "raw-oversized-run-id-tail"
+        )
+        payload["run_id"] = raw_run_id
+    else:
+        raise AssertionError(f"unhandled case: {case_name}")
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    artifact_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["required_for_final"] is False
+    assert item["live_proof_accepted"] is False
+    assert item["details"]["summary_run_id"] == expected_public_run_id
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert readiness_validation._dependency_bindings([item | {"status": "passed"}]) == {}
+    if raw_run_id and raw_run_id.strip():
+        assert raw_run_id not in artifact_text
+    if forbidden_fragment is not None:
+        assert forbidden_fragment not in artifact_text
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 @pytest.mark.parametrize(
@@ -4136,6 +4202,7 @@ def test_existing_m19_dependency_summary_truth_table_unchanged_when_scheduler_ab
     assert all(item["live_proof_accepted"] is False for item in consumed)
     assert all(item["required_for_final"] is False for item in consumed)
     consumed_by_dependency = {item["details"]["dependency"]: item for item in consumed}
+    assert set(readiness_validation._dependency_bindings(consumed)) == set(DEPENDENCY_PROOFS)
     for dependency, (issue, schema) in DEPENDENCY_CONTRACTS.items():
         item = consumed_by_dependency[dependency]
         details = item["details"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -21,10 +22,14 @@ from services.production_closure import (
 validate_readiness_item = _readiness_item_contracts.validate_readiness_item
 
 MAX_RECEIPT_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_BYTES
+MAX_STRING_LENGTH = _readiness_shared_artifacts.MAX_STRING_LENGTH
+PATH_TOKEN_RE = _readiness_shared_artifacts.PATH_TOKEN_RE
 _bounded_redacted_payload = _readiness_shared_artifacts._bounded_redacted_payload
 _path_for_evidence = _readiness_shared_artifacts._path_for_evidence
 _redact_paths = _readiness_shared_artifacts._redact_paths
 _refuse_symlink_components = _readiness_shared_artifacts._refuse_symlink_components
+
+_DEPENDENCY_SUMMARY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
@@ -139,7 +144,9 @@ def _read_dependency_summary_item(
     schema_ok = summary.get("schema") == contract["schema"]
     issue_ok = summary.get("issue") == contract["issue"]
     accepted_status = status in contract["allowed_statuses"]
-    item_status = "passed" if schema_ok and issue_ok and accepted_status else "blocked"
+    summary_run_id = summary.get("run_id")
+    run_id_ok = _dependency_summary_run_id_is_stable(summary_run_id)
+    item_status = "passed" if schema_ok and issue_ok and accepted_status and run_id_ok else "blocked"
     summary_checksum = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     producer_artifact_ref = artifact_ref(name, summary_path, root)
     public_status = _dependency_summary_public_status(status, config=config)
@@ -176,7 +183,7 @@ def _read_dependency_summary_item(
                 "producer_schema": contract["schema"],
                 "summary_schema": summary.get("schema"),
                 "summary_issue": summary.get("issue"),
-                "summary_run_id": summary.get("run_id"),
+                "summary_run_id": _dependency_summary_public_run_id(summary_run_id, config=config),
                 "summary_status": status,
                 "summary_execution_mode": summary.get("execution_mode"),
                 "summary_final_production_readiness_claimed": summary.get("final_production_readiness_claimed"),
@@ -191,6 +198,34 @@ def _read_dependency_summary_item(
 def _dependency_summary_public_status(status: str, *, config: Any) -> str:
     redacted_status = _bounded_redacted_payload(status, config=config)
     return redacted_status if isinstance(redacted_status, str) else str(redacted_status)
+
+
+def _dependency_summary_run_id_is_stable(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) <= MAX_STRING_LENGTH
+        and bool(_DEPENDENCY_SUMMARY_RUN_ID_RE.fullmatch(value))
+        and not PATH_TOKEN_RE.search(value)
+    )
+
+
+def _dependency_summary_public_run_id(value: Any, *, config: Any) -> Any:
+    if _dependency_summary_run_id_is_stable(value):
+        return value
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return _bounded_redacted_payload(value, config=config)
+    if _dependency_summary_run_id_looks_path_like(value):
+        suffix = "[truncated]" if len(value) > MAX_STRING_LENGTH else ""
+        return f"[redacted-path]{suffix}"
+    if len(value) > MAX_STRING_LENGTH:
+        return "[invalid-run-id][truncated]"
+    return "[invalid-run-id]"
+
+
+def _dependency_summary_run_id_looks_path_like(value: str) -> bool:
+    return "/" in value or "\\" in value or ".." in value or bool(PATH_TOKEN_RE.search(value))
 
 
 def _dependency_summary_blocked(
@@ -230,7 +265,11 @@ def _dependency_bindings(items: Sequence[Mapping[str, Any]]) -> dict[str, Mappin
         if not isinstance(details, Mapping):
             continue
         dependency = details.get("dependency")
-        if isinstance(dependency, str) and dependency in DEPENDENCY_SUMMARY_CONTRACTS:
+        if (
+            isinstance(dependency, str)
+            and dependency in DEPENDENCY_SUMMARY_CONTRACTS
+            and _dependency_summary_run_id_is_stable(details.get("summary_run_id"))
+        ):
             bindings[dependency] = details
     return bindings
 
