@@ -342,7 +342,7 @@ def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> Non
         ("3.10", "#741 -> PR #800", "Manual ops lane extraction"),
         ("3.11", "#742 -> PR #801", "Cross-plane/source-scope aggregation extraction"),
         ("3.12", "#743 -> PR #802", "Final aggregation extraction"),
-        ("3.13", "#744 -> this closeout PR pending", "Two-node group verification and evidence closeout"),
+        ("3.13", "#744 -> PR #803", "Two-node group verification and evidence closeout"),
     )
 
     assert tuple(rows) == tuple(task for task, _, _ in expected_rows)
