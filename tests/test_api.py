@@ -203,6 +203,12 @@ async def test_protected_mutation_pre_body_malformed_json_rejects_before_store_c
             b'{"operation": "activate", "padding":"' + (b"x" * _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES) + b'"}',
             "body.operation",
         ),
+        (
+            "POST",
+            "/api/v1/models/inactive_model/preflight",
+            b'{"operation": "activate", "padding":"' + (b"x" * _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES) + b'"}',
+            "body.operation",
+        ),
     ],
 )
 async def test_protected_mutation_oversized_body_with_content_length_stops_before_receive_and_store_call(
@@ -248,6 +254,12 @@ async def test_protected_mutation_oversized_body_with_content_length_stops_befor
         (
             "POST",
             "/api/v1/models/inactive_model/lifecycle",
+            b'{"operation": "activate", "padding":"' + (b"x" * 200_000) + b'"}',
+            "body.operation",
+        ),
+        (
+            "POST",
+            "/api/v1/models/inactive_model/preflight",
             b'{"operation": "activate", "padding":"' + (b"x" * 200_000) + b'"}',
             "body.operation",
         ),
