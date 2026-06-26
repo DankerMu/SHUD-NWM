@@ -647,6 +647,29 @@ def test_live_proof_loader_rejects_unsafe_file_with_redacted_path(tmp_path: Path
     assert "[redacted-path]" in rendered
 
 
+def test_live_proof_loader_rejects_non_regular_file_with_redacted_reason(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    proof_file = tmp_path / "private" / "auth-proof-dir"
+    proof_file.mkdir(parents=True)
+
+    receipt = readiness_shared_artifacts._load_proof("auth", None, proof_file, config=config)
+    details = readiness_shared_artifacts._receipt_details(receipt, config=config)
+    rendered = json.dumps(details, sort_keys=True)
+
+    assert receipt["status"] == "invalid"
+    assert receipt["source"] == "file"
+    assert receipt["error_code"] == "PRODUCTION_READINESS_PROOF_FILE_INVALID"
+    assert receipt["path"] == "[redacted-path]"
+    assert receipt["reason"] == "Target file must be a regular file: [redacted-path]"
+    assert details["status"] == "invalid"
+    assert details["source"] == "file"
+    assert details["error_code"] == "PRODUCTION_READINESS_PROOF_FILE_INVALID"
+    assert str(proof_file) not in rendered
+    assert str(proof_file.parent) not in rendered
+    assert "private" not in rendered
+    assert "[redacted-path]" in rendered
+
+
 @pytest.mark.parametrize("source", ["inline", "file"])
 def test_live_proof_loader_oversized_payload_has_bounded_redacted_preview(
     tmp_path: Path,
@@ -1094,6 +1117,37 @@ def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(
         assert "users.manage" in detailed_artifact
         assert "pipeline.retry_run" in detailed_artifact
         assert "model_admin" in detailed_artifact
+
+
+def test_validate_readiness_write_order_preserves_preflight_receipts_then_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    write_names: list[str] = []
+    original_write_json = readiness_shared_artifacts.EvidenceWriter.write_json
+
+    def recording_write_json(
+        self: readiness_shared_artifacts.EvidenceWriter,
+        path: Path,
+        payload: object,
+    ) -> None:
+        write_names.append(path.name)
+        original_write_json(self, path, payload)
+
+    monkeypatch.setattr(readiness_shared_artifacts.EvidenceWriter, "write_json", recording_write_json)
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
+
+    assert write_names[:3] == [
+        "preflight.json",
+        "live_proof_receipts.json",
+        "readiness_items.json",
+    ]
+    readiness_dir = root / "m19" / "readiness"
+    assert (readiness_dir / "preflight.json").is_file()
+    assert (readiness_dir / "live_proof_receipts.json").is_file()
+    assert (readiness_dir / "readiness_items.json").is_file()
 
 
 def test_contract_mismatched_live_auth_receipt_is_redacted_and_remains_release_blocked(
