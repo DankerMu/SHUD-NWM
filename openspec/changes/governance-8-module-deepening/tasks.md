@@ -2170,12 +2170,56 @@
     --exit-code`; `openspec validate governance-8-module-deepening --strict
     --no-interactive`; `npx --yes markdownlint-cli2 "docs/**/*.md"`;
     `git diff --check`.
-- [ ] 7.3 Run full final verification appropriate to touched surfaces.
+- [x] 7.3 Run full final verification appropriate to touched surfaces.
   - Module/Scope: final local verification gate.
   - Dependencies: 7.1 and 7.2.
   - Out of Scope: replacing node-27 live receipt requirements for future runtime behavior changes.
   - Focused Verification: `uv run ruff check .`; selected backend pytest suites from completed groups; `cd apps/frontend && pnpm test`; `cd apps/frontend && pnpm build`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: final implementation evidence maps each task to PR/issue and command output.
+  - Fixture Level: expanded documentation/evidence fixture. Reason: this task
+    records the final local verification gate across all completed
+    Governance-8 groups and preserves the boundary between local verification
+    evidence and future node-27 live receipts.
+  - Risk Packs Selected: Verification completeness, because the PR records
+    lint, OpenSpec, frontend, backend, and diff evidence; command fidelity,
+    because local `pnpm` wrapper behavior and `corepack pnpm` executable
+    equivalents must be distinguished; group-to-command traceability, because
+    selected backend suites need to map to completed scheduler, chain,
+    two-node, readiness, API, and frontend groups; live-receipt boundary,
+    because local final verification must not be represented as node-27 live
+    proof. Risk Packs Not Selected: runtime behavior change, DB/schema change,
+    Slurm scheduling change, API route behavior change, frontend UI behavior
+    change, generated API type change, production topology change, station-MVT
+    closure, and display-readonly expansion, because this slice changes only
+    docs/OpenSpec evidence.
+  - Invariant Matrix: Governing invariant: the final verification record must
+    faithfully report commands run, results, blocked local wrapper behavior,
+    and group coverage without claiming runtime/product changes or replacing
+    future live receipts. Source-of-truth identity/contract: local command
+    outputs from #769 and the `Governance-8 Final Local Verification Gate`
+    section in `docs/governance/entropy-burndown-triage.md`. Surfaces:
+    Producers: local validation commands; Validators/preflight: ruff,
+    OpenSpec, selected pytest suites, corepack pnpm frontend test/build,
+    markdown/diff hygiene; Storage/cache/query: none - docs-only evidence;
+    Public routes/entrypoints: no route changes; Frontend/downstream consumers:
+    no UI/code changes; Failure paths/stale state: stale command counts,
+    treating a blocked wrapper as pass, missing group coverage, or claiming
+    node-27 live proof; Evidence/audit: final verification gate table.
+  - Boundary Surfaces: This slice may update final verification evidence docs
+    and this task checkbox only. It must not change implementation files,
+    detector logic, generated artifacts, `.entropy-baseline/latest.json`,
+    compatibility symbols, lane semantics, API/frontend behavior, DB/schema,
+    Slurm scheduling, production topology, station-MVT status, or display live
+    evidence.
+  - Regression Rows: `uv run ruff check .` passes; selected scheduler, chain,
+    two-node/readiness, and API pytest suites pass with recorded counts;
+    `cd apps/frontend && pnpm test` and `pnpm build` are recorded as locally
+    blocked before Vitest/Vite by the `esbuild@0.25.12` approve-builds policy;
+    `corepack pnpm test` and `corepack pnpm build` pass; OpenSpec all passes
+    184 items; diff-check passes; no node-27 live receipt replacement is
+    claimed.
+  - Verification Floor: focused verification command above plus the recorded
+    `corepack pnpm` fallback commands for the local pnpm-wrapper policy block.
 - [ ] 7.4 Produce final implementation evidence map.
   - Module/Scope: final evidence document/comment for Governance-8.
   - Dependencies: 7.3.
