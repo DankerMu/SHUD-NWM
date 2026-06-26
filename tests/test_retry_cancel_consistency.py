@@ -756,10 +756,10 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
             status="failed",
             error_code="NODE_FAILURE",
         )
-        gateway = _MockGateway()
+        gateway_probe = _GatewayDependencyProbe()
         app = create_app(_display_env(tmp_path / "display-object-store"))
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
-        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = gateway_probe
 
         with TestClient(app) as client:
             response = client.post(
@@ -774,8 +774,7 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
             run_id="run_display_retry_state",
             control_action="retry",
         )
-        assert gateway.submissions == []
-        assert gateway.cancelled == []
+        assert gateway_probe.calls == 0
         assert [job.job_id for job in store.query_jobs_by_run("run_display_retry_state")] == [
             "job_display_retry_failed"
         ]
@@ -858,10 +857,10 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
             status="running",
             slurm_job_id="slurm_display_cancel",
         )
-        gateway = _MockGateway()
+        gateway_probe = _GatewayDependencyProbe()
         app = create_app(_display_env(tmp_path / "display-object-store"))
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
-        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = gateway_probe
 
         with TestClient(app) as client:
             response = client.post(
@@ -876,8 +875,7 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
             run_id="run_display_cancel_state",
             control_action="cancel",
         )
-        assert gateway.submissions == []
-        assert gateway.cancelled == []
+        assert gateway_probe.calls == 0
         assert [job.job_id for job in store.query_jobs_by_run("run_display_cancel_state")] == [
             "job_display_cancel_running"
         ]
@@ -1112,6 +1110,15 @@ class _MockGateway:
         if job_id in self.responses:
             return self.responses[job_id]
         return {"job_id": job_id, "status": "cancelled"}
+
+
+class _GatewayDependencyProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> _MockGateway:
+        self.calls += 1
+        raise AssertionError("display manual-action path must not resolve the Slurm gateway dependency")
 
 
 def _display_env(object_store_root: Path) -> dict[str, str]:
