@@ -323,11 +323,23 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
 
 
 def _custom_openapi_factory(api: FastAPI) -> Any:
-    return openapi_patching.custom_openapi_factory(api)
+    return openapi_patching.custom_openapi_factory(api, patch_schema=_patch_openapi_schema)
 
 
 def custom_openapi() -> dict[str, Any]:
     return _custom_openapi_factory(app)()
+
+
+def _patch_openapi_schema(schema: dict) -> None:
+    _patch_mvt_tile_openapi(schema)
+    _patch_flood_duration_openapi(schema)
+    _patch_flood_product_quality_openapi(schema)
+    _patch_station_series_openapi(schema)
+    _patch_qhh_latest_product_openapi(schema)
+    _patch_met_stations_list_openapi(schema)
+    _patch_layer_metadata_openapi(schema)
+    _patch_pipeline_openapi(schema)
+    _patch_runtime_openapi(schema)
 
 
 def __getattr__(name: str) -> Any:
@@ -337,6 +349,14 @@ def __getattr__(name: str) -> Any:
 
 
 _patch_mvt_tile_openapi = openapi_patching._patch_mvt_tile_openapi
+_patch_flood_duration_openapi = openapi_patching._patch_flood_duration_openapi
+_patch_flood_product_quality_openapi = openapi_patching._patch_flood_product_quality_openapi
+_patch_station_series_openapi = openapi_patching._patch_station_series_openapi
+_patch_qhh_latest_product_openapi = openapi_patching._patch_qhh_latest_product_openapi
+_patch_met_stations_list_openapi = openapi_patching._patch_met_stations_list_openapi
+_patch_layer_metadata_openapi = openapi_patching._patch_layer_metadata_openapi
+_patch_pipeline_openapi = openapi_patching._patch_pipeline_openapi
+_patch_runtime_openapi = openapi_patching._patch_runtime_openapi
 
 
 def _register_static_and_health_routes(api: FastAPI) -> None:

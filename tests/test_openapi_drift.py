@@ -510,6 +510,25 @@ def test_openapi_patch_owner_module_keeps_main_compatibility_facade() -> None:
     assert api_main.custom_openapi() == app.openapi()
 
 
+def test_openapi_patch_owner_module_preserves_main_monkeypatch_facade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+    api = api_main.create_app()
+
+    def fake_pipeline_patch(schema: dict[str, Any]) -> None:
+        nonlocal called
+        called = True
+        schema.setdefault("x-test-openapi-facade", {})["pipeline_patch"] = "called"
+
+    monkeypatch.setattr(api_main, "_patch_pipeline_openapi", fake_pipeline_patch)
+
+    schema = api.openapi()
+
+    assert called
+    assert schema["x-test-openapi-facade"]["pipeline_patch"] == "called"
+
+
 def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

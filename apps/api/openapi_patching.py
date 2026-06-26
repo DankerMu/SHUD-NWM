@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI
@@ -19,8 +20,10 @@ from services.tiles.mvt import (
     SUPPORTED_HYDRO_MVT_VARIABLES,
 )
 
+OpenApiPatchSchema = Callable[[dict], None]
 
-def custom_openapi_factory(api: FastAPI) -> Any:
+
+def custom_openapi_factory(api: FastAPI, *, patch_schema: OpenApiPatchSchema | None = None) -> Any:
     def custom_openapi() -> dict[str, Any]:
         if api.openapi_schema:
             return api.openapi_schema
@@ -30,19 +33,26 @@ def custom_openapi_factory(api: FastAPI) -> Any:
             description=api.description,
             routes=api.routes,
         )
-        _patch_mvt_tile_openapi(schema)
-        _patch_flood_duration_openapi(schema)
-        _patch_flood_product_quality_openapi(schema)
-        _patch_station_series_openapi(schema)
-        _patch_qhh_latest_product_openapi(schema)
-        _patch_met_stations_list_openapi(schema)
-        _patch_layer_metadata_openapi(schema)
-        _patch_pipeline_openapi(schema)
-        _patch_runtime_openapi(schema)
+        if patch_schema is None:
+            patch_openapi_schema(schema)
+        else:
+            patch_schema(schema)
         api.openapi_schema = schema
         return api.openapi_schema
 
     return custom_openapi
+
+
+def patch_openapi_schema(schema: dict) -> None:
+    _patch_mvt_tile_openapi(schema)
+    _patch_flood_duration_openapi(schema)
+    _patch_flood_product_quality_openapi(schema)
+    _patch_station_series_openapi(schema)
+    _patch_qhh_latest_product_openapi(schema)
+    _patch_met_stations_list_openapi(schema)
+    _patch_layer_metadata_openapi(schema)
+    _patch_pipeline_openapi(schema)
+    _patch_runtime_openapi(schema)
 
 
 def _patch_mvt_tile_openapi(schema: dict) -> None:
