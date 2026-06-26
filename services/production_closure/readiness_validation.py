@@ -46,17 +46,22 @@ EvidenceWriter = _readiness_shared_artifacts.EvidenceWriter
 _bounded_payload = _readiness_shared_artifacts._bounded_payload
 _bounded_redacted_payload = _readiness_shared_artifacts._bounded_redacted_payload
 _environment_payload = _readiness_shared_artifacts._environment_payload
+_load_proof = _readiness_shared_artifacts._load_proof
 _path_for_evidence = _readiness_shared_artifacts._path_for_evidence
 _preflight_payload = _readiness_shared_artifacts._preflight_payload
+_receipt_artifact = _readiness_shared_artifacts._receipt_artifact
+_receipt_details = _readiness_shared_artifacts._receipt_details
+_receipt_validation_payload = _readiness_shared_artifacts._receipt_validation_payload
 _redact_paths = _readiness_shared_artifacts._redact_paths
+_redacted_preview = _readiness_shared_artifacts._redacted_preview
 _refuse_symlink_components = _readiness_shared_artifacts._refuse_symlink_components
 _refuse_symlink_components_to_deepest_existing = (
     _readiness_shared_artifacts._refuse_symlink_components_to_deepest_existing
 )
 
-MAX_RECEIPT_BYTES = 64 * 1024
-MAX_RECEIPT_PREVIEW_BYTES = 2048
-LIVE_PROOF_SCHEMA = "nhms.production_readiness.live_proof.v1"
+MAX_RECEIPT_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_BYTES
+MAX_RECEIPT_PREVIEW_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_PREVIEW_BYTES
+LIVE_PROOF_SCHEMA = _readiness_shared_artifacts.LIVE_PROOF_SCHEMA
 EXPECTED_TARGET_ENVIRONMENT = "production"
 
 DEPENDENCY_SUMMARY_CONTRACTS = {
@@ -86,18 +91,7 @@ DEPENDENCY_SUMMARY_CONTRACTS = {
         "allowed_statuses": {"ready"},
     },
 }
-PROOF_ENV = {
-    "auth": "NHMS_PRODUCTION_READINESS_AUTH_PROOF",
-    "alert": "NHMS_PRODUCTION_READINESS_ALERT_PROOF",
-    "rollback": "NHMS_PRODUCTION_READINESS_ROLLBACK_PROOF",
-    "scheduler": "NHMS_PRODUCTION_READINESS_SCHEDULER_PROOF",
-    "slurm": "NHMS_PRODUCTION_READINESS_SLURM_PROOF",
-    "object_store": "NHMS_PRODUCTION_READINESS_OBJECT_STORE_PROOF",
-    "source": "NHMS_PRODUCTION_READINESS_SOURCE_PROOF",
-    "e2e": "NHMS_PRODUCTION_READINESS_E2E_PROOF",
-    "mvt": "NHMS_PRODUCTION_READINESS_MVT_PROOF",
-    "target_env": "NHMS_PRODUCTION_READINESS_TARGET_ENV_PROOF",
-}
+PROOF_ENV = _readiness_shared_artifacts.PROOF_ENV
 SCHEDULER_EVIDENCE_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"
 MAX_SCHEDULER_EVIDENCE_BYTES = 256 * 1024
 MAX_SCHEDULER_EVIDENCE_FILES = 16
@@ -1376,146 +1370,6 @@ def _item(
         item["details"] = dict(details)
     validate_readiness_item(item)
     return item
-
-
-def _load_proof(
-    surface: str,
-    proof_json: str | None,
-    proof_file: Path | None,
-    *,
-    config: ProductionReadinessConfig,
-) -> dict[str, Any]:
-    if proof_json and proof_file:
-        return {
-            "surface": surface,
-            "status": "invalid",
-            "source": "ambiguous",
-            "error_code": "PRODUCTION_READINESS_PROOF_AMBIGUOUS",
-            "reason": "Provide either a JSON proof string or a proof file, not both.",
-        }
-    if not proof_json and proof_file is None:
-        return {
-            "surface": surface,
-            "status": "missing",
-            "source": "not_configured",
-            "reason": "No live proof receipt configured.",
-        }
-    if proof_file is not None:
-        try:
-            raw = read_bytes_limited_no_follow(proof_file.expanduser(), max_bytes=MAX_RECEIPT_BYTES)
-        except (OSError, SafeFilesystemError) as error:
-            return {
-                "surface": surface,
-                "status": "invalid",
-                "source": "file",
-                "path": _path_for_evidence(proof_file, config=config),
-                "error_code": "PRODUCTION_READINESS_PROOF_FILE_INVALID",
-                "reason": redact_text(str(error)),
-            }
-        source = "file"
-        source_ref = _path_for_evidence(proof_file, config=config)
-    else:
-        raw = str(proof_json).encode("utf-8", errors="replace")
-        source = "json_string"
-        source_ref = "inline_json"
-    if len(raw) > MAX_RECEIPT_BYTES:
-        return {
-            "surface": surface,
-            "status": "too_large",
-            "source": source,
-            "source_ref": source_ref,
-            "error_code": "PRODUCTION_READINESS_PROOF_TOO_LARGE",
-            "reason": f"Live proof payload exceeds {MAX_RECEIPT_BYTES} bytes.",
-            "raw_preview": _redacted_preview(raw, config=config),
-        }
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-        return {
-            "surface": surface,
-            "status": "invalid",
-            "source": source,
-            "source_ref": source_ref,
-            "error_code": "PRODUCTION_READINESS_PROOF_JSON_INVALID",
-            "reason": redact_text(str(error)),
-            "raw_preview": _redacted_preview(raw, config=config),
-        }
-    if not isinstance(parsed, Mapping):
-        return {
-            "surface": surface,
-            "status": "invalid",
-            "source": source,
-            "source_ref": source_ref,
-            "error_code": "PRODUCTION_READINESS_PROOF_JSON_INVALID",
-            "reason": "Live proof payload must be a JSON object.",
-            "raw_preview": _redacted_preview(raw, config=config),
-        }
-    try:
-        bounded = _bounded_payload(parsed)
-        raw_payload = bounded.payload
-        payload = _bounded_redacted_payload(parsed, config=config)
-    except RecursionError as error:
-        return {
-            "surface": surface,
-            "status": "invalid",
-            "source": source,
-            "source_ref": source_ref,
-            "error_code": "PRODUCTION_READINESS_PROOF_JSON_INVALID",
-            "reason": redact_text(str(error)),
-            "raw_preview": _redacted_preview(raw, config=config),
-        }
-    json_limit_errors = []
-    if bounded.node_truncated:
-        json_limit_errors.append("json_node_limit_exceeded")
-    if bounded.depth_truncated:
-        json_limit_errors.append("json_depth_limit_exceeded")
-    if json_limit_errors:
-        return {
-            "surface": surface,
-            "status": "invalid",
-            "parse_status": "json_limit_exceeded",
-            "source": source,
-            "source_ref": source_ref,
-            "error_code": "PRODUCTION_READINESS_PROOF_JSON_LIMIT_EXCEEDED",
-            "reason": "Live proof JSON exceeded bounded traversal limits.",
-            "json_limit_errors": json_limit_errors,
-            "payload": payload,
-        }
-    return {
-        "surface": surface,
-        "status": "parsed",
-        "source": source,
-        "source_ref": source_ref,
-        "raw_payload": raw_payload,
-        "payload": payload,
-    }
-
-
-def _receipt_artifact(config: ProductionReadinessConfig, receipts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    return {
-        "schema": "nhms.production_readiness.live_proof_receipts.v1",
-        "run_id": config.run_id,
-        "receipts": {surface: _receipt_details(receipt, config=config) for surface, receipt in receipts.items()},
-        "redaction": {
-            "secrets_redacted": True,
-            "local_paths_redacted": True,
-            "payload_depth_bounded": True,
-            "payload_size_bounded": True,
-        },
-    }
-
-
-def _receipt_details(receipt: Mapping[str, Any], *, config: ProductionReadinessConfig) -> dict[str, Any]:
-    return _bounded_redacted_payload(
-        {key: value for key, value in receipt.items() if key not in {"payload", "raw_payload"}}
-        | ({"payload": receipt.get("payload")} if "payload" in receipt else {}),
-        config=config,
-    )
-
-
-def _receipt_validation_payload(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
-    payload = receipt.get("raw_payload", receipt.get("payload"))
-    return payload if isinstance(payload, Mapping) else {}
 
 
 def _summary_exclusions(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -2970,13 +2824,6 @@ def _scheduler_item_suffix(payload: Mapping[str, Any], path: Path) -> str:
         return pass_id
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
     return digest
-
-
-def _redacted_preview(raw: bytes, *, config: ProductionReadinessConfig) -> str:
-    preview = raw[:MAX_RECEIPT_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if len(raw) > MAX_RECEIPT_PREVIEW_BYTES:
-        preview += "[truncated]"
-    return str(_bounded_redacted_payload(preview, config=config))
 
 
 def redact_readiness_public_error(value: object) -> str:
