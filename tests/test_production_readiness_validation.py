@@ -4221,6 +4221,37 @@ def test_scheduler_root_entry_limit_bounds_non_json_directory_scans(tmp_path: Pa
     )
 
 
+def test_scheduler_missing_root_is_stable_blocked_discovery_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "missing-scheduler-root"
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_DISCOVERY_FAILED",
+        expected_in="error_code",
+    )
+
+
+def test_scheduler_empty_root_is_stable_blocked_missing_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    scheduler_root.mkdir()
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_MISSING",
+        expected_in="error_code",
+    )
+
+
 @pytest.mark.parametrize(
     "extra_payload",
     [
@@ -4414,7 +4445,7 @@ def test_scheduler_basic_contract_errors_block_evidence_and_live_binding(
             lambda path: path.write_text(json.dumps([_scheduler_evidence_payload()]), encoding="utf-8"),
             "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_JSON_INVALID",
         ),
-        (lambda path: path.write_bytes(b'{"schema": "\\xff"}'), "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
+        (lambda path: path.write_bytes(b"\xff\xfe"), "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
         (lambda path: None, "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
         (lambda path: path.mkdir(parents=True), "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
     ],
