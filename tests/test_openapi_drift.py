@@ -7,6 +7,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from apps.api import main as api_main
+from apps.api import openapi_patching
 from apps.api.main import _patch_mvt_tile_openapi, app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.flood_alerts import RankingItem
@@ -498,6 +500,14 @@ def test_runtime_mvt_openapi_patch_narrows_only_mvt_routes() -> None:
     )
 
     assert mvt_z["schema"]["maximum"] == MVT_MAX_ZOOM
+
+
+def test_openapi_patch_owner_module_keeps_main_compatibility_facade() -> None:
+    from apps.api.main import _patch_pipeline_openapi
+
+    assert api_main._patch_mvt_tile_openapi is openapi_patching._patch_mvt_tile_openapi
+    assert _patch_pipeline_openapi is openapi_patching._patch_pipeline_openapi
+    assert api_main.custom_openapi() == app.openapi()
 
 
 def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
