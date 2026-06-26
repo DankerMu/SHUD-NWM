@@ -87,7 +87,7 @@ When it disagrees with the OpenSpec change, the OpenSpec change wins.
 | 7.1 Inventory synchronization evidence | #767 | #826 | Governance-8 inventory synchronization table in structural inventory. |
 | 7.2 Report-only entropy audit deltas | #768 | #827 | Governance-8 Module Deepening Delta in entropy burndown triage. |
 | 7.3 Final local verification gate | #769 | #828 | Governance-8 Final Local Verification Gate in entropy burndown triage. |
-| 7.4 Final implementation evidence map | #770 | current PR | This final task map and non-goal summary. |
+| 7.4 Final implementation evidence map | #770 | #829 | This final task map and non-goal summary. |
 
 ## Final Local Verification Summary
 
