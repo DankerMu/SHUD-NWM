@@ -37,6 +37,7 @@ _SCHEDULER_ITEM_SUFFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SCHEDULER_EVIDENCE_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"
 MAX_SCHEDULER_EVIDENCE_BYTES = 256 * 1024
 MAX_SCHEDULER_EVIDENCE_FILES = 16
+_MAX_SCHEDULER_EVIDENCE_ROOT_ENTRIES = 256
 SCHEDULER_REVIEW_EXECUTION_MODES = frozenset(
     {
         "deterministic",
@@ -169,6 +170,10 @@ class _SchedulerModelRunOutcome:
     producer_partial: bool
 
 
+class _SchedulerEvidenceRootEntryLimitError(Exception):
+    pass
+
+
 def _scheduler_evidence_items(
     config: Any,
     *,
@@ -217,6 +222,18 @@ def _read_scheduler_evidence_root_items(
         return []
     try:
         evidence_files = finder(root)
+    except _SchedulerEvidenceRootEntryLimitError:
+        return [
+            blocked(
+                root,
+                config=config,
+                reason=(
+                    "Scheduler evidence root contains more than "
+                    f"{_MAX_SCHEDULER_EVIDENCE_ROOT_ENTRIES} top-level entries."
+                ),
+                error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_ROOT_ENTRY_LIMIT",
+            )
+        ]
     except (FileNotFoundError, OSError, SafeFilesystemError, ProductionReadinessValidationError) as error:
         return [
             blocked(
@@ -253,7 +270,7 @@ def _read_scheduler_evidence_item(
     config: Any,
     safe_scheduler_evidence_file: Callable[[Path], Path] | None = None,
     scheduler_evidence_blocked: Callable[..., dict[str, Any]] | None = None,
-    scheduler_evidence_errors: Callable[[Mapping[str, Any]], list[str]] | None = None,
+    scheduler_evidence_errors: Callable[..., list[str]] | None = None,
     scheduler_readiness_status: Callable[..., str] | None = None,
     scheduler_evidence_mode: Callable[[Mapping[str, Any]], str] | None = None,
     scheduler_evidence_artifact_ref: Callable[..., str] | None = None,
@@ -294,6 +311,7 @@ def _read_scheduler_evidence_item(
         OSError,
         RecursionError,
         UnicodeDecodeError,
+        ValueError,
         SafeFilesystemError,
         ProductionReadinessValidationError,
     ) as error:
@@ -304,7 +322,7 @@ def _read_scheduler_evidence_item(
             error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED",
         )
 
-    errors = evidence_errors(raw_payload)
+    errors = evidence_errors(raw_payload, scheduler_evidence_mode=evidence_mode)
     status = str(raw_payload.get("status") or "unknown").strip()
     execution_mode = evidence_mode(raw_payload)
     item_status = readiness_status(raw_payload, errors=errors)
@@ -422,8 +440,12 @@ def _find_scheduler_evidence_files(
     if not stat.S_ISDIR(root_stat.st_mode):
         raise SafeFilesystemError(f"Scheduler evidence root must be a directory: {root}")
     candidates: list[Path] = []
+    entry_count = 0
     with os.scandir(root) as entries:
         for entry in entries:
+            entry_count += 1
+            if entry_count > _MAX_SCHEDULER_EVIDENCE_ROOT_ENTRIES:
+                raise _SchedulerEvidenceRootEntryLimitError
             if not entry.name.endswith(".json"):
                 continue
             candidates.append(root / entry.name)
@@ -446,14 +468,19 @@ def _safe_scheduler_evidence_file(path: Path) -> Path:
     return candidate
 
 
-def _scheduler_evidence_errors(payload: Mapping[str, Any]) -> list[str]:
+def _scheduler_evidence_errors(
+    payload: Mapping[str, Any],
+    *,
+    scheduler_evidence_mode: Callable[[Mapping[str, Any]], str] | None = None,
+) -> list[str]:
     errors: list[str] = []
     schema = payload.get("schema") or payload.get("schema_version")
     if schema != SCHEDULER_EVIDENCE_SCHEMA:
         errors.append("schema_mismatch")
     if not _non_empty_string(payload.get("pass_id")):
         errors.append("missing_pass_id")
-    execution_mode = _scheduler_evidence_mode(payload)
+    evidence_mode = scheduler_evidence_mode or _scheduler_evidence_mode
+    execution_mode = evidence_mode(payload)
     if execution_mode not in SCHEDULER_REVIEW_EXECUTION_MODES:
         errors.append("execution_mode_not_review_evidence")
     status = str(payload.get("status") or "").strip()

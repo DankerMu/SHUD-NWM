@@ -466,6 +466,32 @@ def _write_scheduler_payload(path: Path, payload: dict[str, object]) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+    root: Path,
+    expected: str,
+    *,
+    expected_in: str = "acceptance_errors",
+) -> tuple[dict[str, object], dict[str, object]]:
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["execution_mode"] == "not_executed"
+    assert scheduler_item["live_proof_accepted"] is False
+    if expected_in == "acceptance_errors":
+        assert expected in scheduler_item["details"]["acceptance_errors"]
+    elif expected_in == "error_code":
+        assert scheduler_item["details"]["error_code"] == expected
+    else:
+        raise AssertionError(f"unknown scheduler evidence expectation type: {expected_in}")
+    assert live_item["status"] == "release_blocked"
+    assert live_item["live_proof_accepted"] is False
+    acceptance_errors = live_item.get("details", {}).get("acceptance_errors")
+    if isinstance(acceptance_errors, dict) and "errors" in acceptance_errors:
+        assert "missing_scheduler_evidence_binding" in acceptance_errors["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+    return scheduler_item, live_item
+
+
 def _candidate_for_model(model_id: str) -> dict[str, object]:
     return {
         "candidate_id": f"gfs:2026-05-21T06:00:00Z:{model_id}:forecast_gfs_deterministic",
@@ -964,6 +990,69 @@ def test_scheduler_evidence_facade_read_item_honors_facade_safe_file_monkeypatch
 
     assert item["status"] == "passed"
     assert item["artifact_refs"] == [readiness_shared_artifacts._path_for_evidence(alternate_path, config=config)]
+
+
+def test_scheduler_evidence_facade_read_item_honors_facade_mode_in_acceptance_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    payload = _scheduler_evidence_payload(
+        execution_mode="deterministic",
+        no_mutation_proof={"adapter_download_called": False},
+    )
+    _write_scheduler_payload(scheduler_path, payload)
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        scheduler_evidence_file=scheduler_path,
+    )
+
+    monkeypatch.setattr(readiness_validation, "_scheduler_evidence_mode", lambda _payload: "dry_run")
+
+    item = readiness_validation._read_scheduler_evidence_item(scheduler_path, config=config)
+
+    assert item["status"] == "blocked"
+    assert item["details"]["scheduler_execution_mode"] == "dry_run"
+    assert "dry_run_no_mutation_proof_missing" in item["details"]["acceptance_errors"]
+
+
+def test_scheduler_evidence_facade_items_honors_facade_reader_and_finder_monkeypatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_root = tmp_path / "configured-scheduler"
+    alternate_path = tmp_path / "alternate-scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(alternate_path)
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        scheduler_evidence_root=configured_root,
+    )
+
+    def fake_find_scheduler_evidence_files(root: Path) -> list[Path]:
+        assert root == configured_root
+        return [alternate_path]
+
+    def fake_read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConfig) -> dict[str, object]:
+        assert path == alternate_path
+        return readiness_validation._scheduler_evidence_blocked(
+            path,
+            config=config,
+            reason="patched facade scheduler reader",
+        )
+
+    monkeypatch.setattr(readiness_validation, "_find_scheduler_evidence_files", fake_find_scheduler_evidence_files)
+    monkeypatch.setattr(readiness_validation, "_read_scheduler_evidence_item", fake_read_scheduler_evidence_item)
+
+    item = next(
+        item
+        for item in readiness_validation._scheduler_evidence_items(config)
+        if item["surface"] == "scheduler_production_like_evidence"
+    )
+
+    assert item["status"] == "blocked"
+    assert item["residual_risk"] == "patched facade scheduler reader"
 
 
 def test_dependency_summary_facade_read_item_honors_facade_find_path_monkeypatch(
@@ -4087,6 +4176,51 @@ def test_scheduler_root_file_limit_blocks_before_per_file_validation(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
+def test_scheduler_root_and_file_configuration_is_stable_blocked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler-root"
+    scheduler_path = tmp_path / "scheduler-file" / "scheduler_20260521120000_fixed.json"
+    scheduler_root.mkdir()
+    _write_scheduler_evidence(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_root=scheduler_root,
+            scheduler_evidence_file=scheduler_path,
+        )
+    )
+
+    scheduler_items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    assert len(scheduler_items) == 1
+    assert scheduler_items[0]["status"] == "blocked"
+    assert scheduler_items[0]["details"]["error_code"] == "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_AMBIGUOUS"
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert live_item["status"] == "release_blocked"
+    assert live_item["live_proof_accepted"] is False
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_root_entry_limit_bounds_non_json_directory_scans(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    scheduler_root.mkdir()
+    for index in range(257):
+        (scheduler_root / f"ignored_{index:03d}.txt").write_text("ignored", encoding="utf-8")
+    _write_scheduler_evidence(scheduler_root / "scheduler_20260521120000_fixed.json")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_ROOT_ENTRY_LIMIT",
+        expected_in="error_code",
+    )
+
+
 @pytest.mark.parametrize(
     "extra_payload",
     [
@@ -4235,6 +4369,131 @@ def test_scheduler_live_receipt_rejects_stale_or_identity_mismatched_binding(
     assert item["live_proof_accepted"] is False
     assert expected_error in errors
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (lambda payload: payload.pop("pass_id"), "missing_pass_id"),
+        (lambda payload: payload.__setitem__("status", "unknown_after_secret"), "status_not_allowed"),
+        (
+            lambda payload: payload.__setitem__("execution_mode", "live_unreviewed_side_effect"),
+            "execution_mode_not_review_evidence",
+        ),
+        (lambda payload: payload["counts"].pop("candidate_count"), "missing_candidate_count"),
+        (lambda payload: payload["counts"].pop("blocked_candidate_count"), "missing_blocked_candidate_count"),
+        (lambda payload: payload["counts"].pop("skipped_candidate_count"), "missing_skipped_candidate_count"),
+        (lambda payload: payload["counts"].pop("submitted_count"), "missing_submitted_count"),
+        (lambda payload: payload["counts"].__setitem__("candidate_count", -1), "negative_counts"),
+    ],
+)
+def test_scheduler_basic_contract_errors_block_evidence_and_live_binding(
+    tmp_path: Path,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _scheduler_evidence_payload()
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["execution_mode"] == "not_executed"
+    assert scheduler_item["live_proof_accepted"] is False
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert live_item["live_proof_accepted"] is False
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("writer", "expected_error_code"),
+    [
+        (
+            lambda path: path.write_text(json.dumps([_scheduler_evidence_payload()]), encoding="utf-8"),
+            "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_JSON_INVALID",
+        ),
+        (lambda path: path.write_bytes(b'{"schema": "\\xff"}'), "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
+        (lambda path: None, "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
+        (lambda path: path.mkdir(parents=True), "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED"),
+    ],
+)
+def test_scheduler_safe_read_boundaries_are_stable_blocked_evidence(
+    tmp_path: Path,
+    writer: object,
+    expected_error_code: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "private" / "scheduler" / "scheduler_20260521120000_fixed.json"
+    scheduler_path.parent.mkdir(parents=True)
+    writer(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    scheduler_item, _live_item = _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        expected_error_code,
+        expected_in="error_code",
+    )
+    rendered = json.dumps(scheduler_item, sort_keys=True)
+    assert str(scheduler_path.parent) not in rendered
+
+
+@pytest.mark.parametrize("leaf", [True, False])
+def test_scheduler_symlink_evidence_boundaries_are_stable_blocked_evidence(
+    tmp_path: Path,
+    leaf: bool,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "private" / "scheduler"
+    real_root = tmp_path / "private" / "real-scheduler"
+    real_path = real_root / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(real_path)
+    if leaf:
+        scheduler_root.mkdir(parents=True)
+        scheduler_path = scheduler_root / "scheduler_20260521120000_fixed.json"
+        scheduler_path.symlink_to(real_path)
+    else:
+        scheduler_root.parent.mkdir(parents=True, exist_ok=True)
+        scheduler_root.symlink_to(real_root, target_is_directory=True)
+        scheduler_path = scheduler_root / "scheduler_20260521120000_fixed.json"
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    scheduler_item, _live_item = _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED",
+        expected_in="error_code",
+    )
+    rendered = json.dumps(scheduler_item, sort_keys=True)
+    assert str(scheduler_root.parent) not in rendered
+
+
+def test_scheduler_json_value_error_is_stable_redacted_blocked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "private" / "scheduler" / "scheduler_20260521120000_fixed.json"
+    scheduler_path.parent.mkdir(parents=True)
+    payload = json.dumps(_scheduler_evidence_payload())
+    oversized_int_json = payload.replace('"candidate_count": 2', '"candidate_count": ' + "9" * 5000)
+    scheduler_path.write_text(oversized_int_json, encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    scheduler_item, _live_item = _assert_blocked_scheduler_evidence_with_release_blocked_live_item(
+        root,
+        "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED",
+        expected_in="error_code",
+    )
+    rendered = json.dumps(scheduler_item, sort_keys=True)
+    assert "9999999999" not in rendered
+    assert str(scheduler_path.parent) not in rendered
 
 
 @pytest.mark.parametrize(
