@@ -24,8 +24,13 @@ import {
   type BasinRiverFeature,
 } from '@/components/map/m11MapBuilders'
 import {
-  M11_BASIN_FILL_LAYER_ID,
-  M11_BASIN_RIVER_LINE_LAYER_ID,
+  buildM11InteractiveLayerIds,
+  handleM11MapClick,
+  handleM11MapMouseLeave,
+  handleM11MapMouseMove,
+  type M11MapOverlayInteraction,
+} from '@/components/map/m11MapInteractions'
+import {
   M11BasinLabelMarkers,
   M11BasinPrimitive,
   M11BasinRiverPrimitive,
@@ -33,10 +38,6 @@ import {
   M11OverlayPrimitive,
   M11SelectedSegmentPrimitive,
   M11StationClusterPrimitive,
-  MET_STATION_CLUSTER_LAYER_ID,
-  MET_STATION_POINT_LAYER_ID,
-  MET_STATION_SOURCE_ID,
-  m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
 import {
@@ -45,13 +46,7 @@ import {
   type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
-import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
-
-export interface M11MapOverlayInteraction {
-  layerId: M11Layer | 'met-stations' | 'basin-boundaries' | 'basin-river-segments'
-  event: MapLayerMouseEvent
-  feature?: NonNullable<MapLayerMouseEvent['features']>[number]
-}
+import type { M11Basemap, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapCameraFit {
   bounds: [[number, number], [number, number]]
@@ -90,6 +85,7 @@ export {
   type M11RegisteredOverlay,
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
+export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
@@ -220,12 +216,12 @@ export function M11MapLibreSurface({
   )
   // 代站图层由独立 overlay 状态控制，有非空 features 时渲染/注册（关闭 overlay 不注册 source/layer）。
   const showStationLayer = (metStations ?? state.metStations) && (stationFeatureCollection?.features.length ?? 0) > 0
-  const interactiveLayerIds = [
-    ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
-    ...(basinRiverFeatureCollection.features.length > 0 ? [M11_BASIN_RIVER_LINE_LAYER_ID] : []),
-    ...(basinFeatureCollection.features.length > 0 ? [M11_BASIN_FILL_LAYER_ID] : []),
-    ...(renderableOverlay ? [m11RegisteredOverlayHitLayerId(renderableOverlay)] : []),
-  ]
+  const interactiveLayerIds = buildM11InteractiveLayerIds({
+    showStationLayer,
+    hasBasinRiverFeatures: basinRiverFeatureCollection.features.length > 0,
+    hasBasinFeatures: basinFeatureCollection.features.length > 0,
+    renderableOverlay,
+  })
 
   useEffect(() => {
     setMapSourceError(null)
@@ -256,90 +252,32 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      // 代站点 / cluster hover 优先于河段命中；重叠像素上 station overlay 是最上层交互对象。
-      if (showStationLayer) {
-        const stationFeature =
-          findRenderedFeature(event, mapRef.current, MET_STATION_POINT_LAYER_ID) ??
-          findRenderedFeature(event, mapRef.current, MET_STATION_CLUSTER_LAYER_ID)
-        if (stationFeature) {
-          setHoveredRiverSegmentId(null)
-          onOverlayHover?.(null)
-          event.target.getCanvas().style.cursor = 'pointer'
-          return
-        }
-      }
-      const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
-      if (riverFeature) {
-        const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
-        setHoveredRiverSegmentId(riverSegmentId)
-        onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
-      // 河段 hover 须先于 basin-fill（与点击优先级一致），否则河段高亮被 basin 抢走。
-      const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
-      if (renderableOverlay && overlayFeature) {
-        onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
-      const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
-      if (basinFeature) {
-        setHoveredRiverSegmentId(null)
-        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
-      setHoveredRiverSegmentId(null)
-      onOverlayHover?.(null)
-      event.target.getCanvas().style.cursor = ''
+      handleM11MapMouseMove(event, {
+        showStationLayer,
+        renderableOverlay,
+        mapRef: mapRef.current,
+        onOverlayHover,
+        setHoveredRiverSegmentId,
+      })
     },
     [onOverlayHover, renderableOverlay, showStationLayer],
   )
 
   const handleMouseLeave = useCallback(
     (event: MapLayerMouseEvent) => {
-      setHoveredRiverSegmentId(null)
-      onOverlayHover?.(null)
-      event.target.getCanvas().style.cursor = ''
+      handleM11MapMouseLeave(event, { onOverlayHover, setHoveredRiverSegmentId })
     },
     [onOverlayHover],
   )
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      if (showStationLayer) {
-        // 点 cluster/代站优先于河段：重叠像素上 station overlay 位于 hydrology 上方。
-        // 真实 MapLibre 可能不给 onClick event.features 填 cluster，因此用 queryRenderedFeatures 兜底命中。
-        const clusterFeature = findRenderedFeature(event, mapRef.current, MET_STATION_CLUSTER_LAYER_ID)
-        if (clusterFeature) {
-          expandStationCluster(mapRef.current, clusterFeature)
-          return
-        }
-        // 点单个代站：经 onOverlayClick 以 met-stations 分发，feature 带 station_id（为 #340 popup 预留）。
-        const stationFeature = findRenderedFeature(event, mapRef.current, MET_STATION_POINT_LAYER_ID)
-        if (stationFeature) {
-          onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
-          return
-        }
-      }
-      const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
-      if (riverFeature) {
-        onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-        return
-      }
-      // 河段（流量 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
-      // 否则总览（无 basinSegments）点河段会被底下的 basin-fill 抢走、永远到不了河段分支。
-      const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
-      if (renderableOverlay && overlayFeature) {
-        onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
-        return
-      }
-      // 点流域空白处（无河段命中）→ basin 分支（相机飞到流域）。
-      const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
-      if (basinFeature) {
-        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-      }
+      handleM11MapClick(event, {
+        showStationLayer,
+        renderableOverlay,
+        mapRef: mapRef.current,
+        onOverlayClick,
+      })
     },
     [onOverlayClick, renderableOverlay, showStationLayer],
   )
@@ -516,36 +454,6 @@ function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
   )
 }
 
-type StationClusterSource = {
-  getClusterExpansionZoom?: (
-    clusterId: number,
-    callback?: (error: unknown, zoom: number) => void,
-  ) => Promise<number> | void
-}
-
-function expandStationCluster(
-  mapRef: MapRef | null,
-  feature: NonNullable<MapLayerMouseEvent['features']>[number],
-) {
-  const map = mapRef?.getMap?.()
-  if (!map) return
-  const source = (map.getSource(MET_STATION_SOURCE_ID) as StationClusterSource | undefined) ?? undefined
-  const clusterId = feature.properties?.cluster_id ?? feature.id
-  const geometry = feature.geometry
-  if (!source?.getClusterExpansionZoom || typeof clusterId !== 'number' || geometry?.type !== 'Point') return
-  const [lon, lat] = geometry.coordinates as [number, number]
-  const flyToZoom = (zoom: number) => {
-    if (!Number.isFinite(zoom)) return
-    map.flyTo({ center: [lon, lat], zoom, duration: 450 })
-  }
-  const expansion = source.getClusterExpansionZoom(clusterId, (error, zoom) => {
-    if (!error) flyToZoom(zoom)
-  })
-  if (expansion && typeof expansion.then === 'function') {
-    void expansion.then(flyToZoom).catch(() => undefined)
-  }
-}
-
 function warningLabel(level: M11WarningLevel) {
   const labels: Record<M11WarningLevel, string> = {
     normal: '正常',
@@ -579,27 +487,6 @@ function tiandituStyle(base: string, annotation: string): MapStyle {
       { id: `${annotation}-anno`, type: 'raster', source: `${annotation}-anno` },
     ],
   }
-}
-
-function findEventFeature(event: MapLayerMouseEvent, layerId: string) {
-  return event.features?.find((feature) => feature.layer?.id === layerId) ?? null
-}
-
-function findRenderedFeature(event: MapLayerMouseEvent, mapRef: MapRef | null, layerId: string) {
-  const eventFeature = findEventFeature(event, layerId)
-  if (eventFeature) return eventFeature
-  const map = mapRef?.getMap?.()
-  if (!map) return null
-  try {
-    return map.queryRenderedFeatures(event.point, { layers: [layerId] }).find((feature) => feature.layer?.id === layerId) ?? null
-  } catch {
-    return null
-  }
-}
-
-function featureStringProperty(feature: NonNullable<MapLayerMouseEvent['features']>[number], key: string) {
-  const value = feature.properties?.[key]
-  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 function mapFitKey(fitTo: M11MapCameraFit) {
