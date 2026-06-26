@@ -66,6 +66,13 @@ DEPENDENCY_CONTRACTS = {
     "e2e": (150, "nhms.production_closure.e2e.v1"),
     "mvt": (151, "nhms.production_closure.scale.v1"),
 }
+DEPENDENCY_EVIDENCE_ROOT_OPTIONS = {
+    "slurm": "--slurm-evidence-root",
+    "object_store": "--object-store-evidence-root",
+    "source": "--source-evidence-root",
+    "e2e": "--e2e-evidence-root",
+    "mvt": "--mvt-evidence-root",
+}
 EXPECTED_ALLOWED_STATUS_EXECUTION_MODES = {
     "passed": frozenset(
         {
@@ -958,34 +965,65 @@ def test_dependency_summary_missing_unconfigured_roots_are_not_executed(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("alias_dir", "expected_ref"),
+    ("proof_key", "alias_dir", "expected_ref"),
     [
-        ("object_store", "object_store:object_store/summary.json"),
-        ("object-store", "object_store:object-store/summary.json"),
+        ("slurm", "slurm", "slurm:slurm/summary.json"),
+        ("object_store", "object_store", "object_store:object_store/summary.json"),
+        ("object_store", "object-store", "object_store:object-store/summary.json"),
+        ("source", "source", "source:source/summary.json"),
+        ("e2e", "e2e", "e2e:e2e/summary.json"),
+        ("mvt", "mvt", "mvt:mvt/summary.json"),
     ],
 )
-def test_dependency_summary_object_store_nested_aliases_are_preserved(
+def test_dependency_summary_nested_aliases_are_preserved(
     tmp_path: Path,
+    proof_key: str,
     alias_dir: str,
     expected_ref: str,
 ) -> None:
-    summary_root = tmp_path / "object-store-root"
+    summary_root = tmp_path / f"{proof_key}-root"
     summary_path = summary_root / alias_dir / "summary.json"
     summary_path.parent.mkdir(parents=True)
-    summary_path.write_text(json.dumps(_dependency_summary_payload("object_store")), encoding="utf-8")
+    summary_path.write_text(json.dumps(_dependency_summary_payload(proof_key)), encoding="utf-8")
     config = ProductionReadinessConfig.from_env(
         evidence_root=tmp_path / "artifacts",
         run_id="m19",
-        object_store_evidence_root=summary_root,
+        **{f"{proof_key}_evidence_root": summary_root},
     )
 
-    item = readiness_dependency_summaries._read_dependency_summary_item("object_store", summary_root, config=config)
+    item = readiness_dependency_summaries._read_dependency_summary_item(proof_key, summary_root, config=config)
 
-    assert readiness_validation._find_summary_path("object_store", summary_root) == summary_path
+    assert readiness_validation._find_summary_path(proof_key, summary_root) == summary_path
     assert item["status"] == "passed"
     assert item["execution_mode"] == "deterministic"
     assert item["details"]["producer_artifact_ref"] == expected_ref
     assert item["details"]["summary_checksum"].startswith("sha256:")
+
+
+def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_readiness(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload("slurm") | {"status": "submitted"}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    assert item["status"] == "passed"
+    assert item["execution_mode"] == "deterministic"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "submitted"
+    assert item["details"]["producer_artifact_ref"] == "slurm:summary.json"
+    assert item["details"]["summary_checksum"].startswith("sha256:")
+    assert "summary_status=submitted" in item["dependencies"]
+    assert "producer_artifact_ref=slurm:summary.json" in item["dependencies"]
+    assert any(dependency.startswith("summary_checksum=sha256:") for dependency in item["dependencies"])
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_dependency_bindings_include_only_passed_dependency_summaries(tmp_path: Path) -> None:
@@ -1122,6 +1160,96 @@ def test_dependency_summary_wrong_contract_values_are_blocked_with_public_detail
     assert str(summary_root) not in rendered
     assert item["details"]["summary_checksum"].startswith("sha256:")
     assert _summary(root)["status"] == "release_blocked"
+
+
+@pytest.mark.parametrize("proof_key", ["slurm", "object_store", "source", "e2e", "mvt"])
+def test_dependency_summary_rejected_status_redacts_paths_and_secrets_from_public_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    proof_key: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / f"{proof_key}-summary"
+    summary_root.mkdir()
+    raw_status_path = tmp_path / "private-status-marker" / proof_key / "summary.json"
+    raw_status = f"{raw_status_path}?api_token=raw-status-secret"
+    payload = _dependency_summary_payload(proof_key) | {"status": raw_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            DEPENDENCY_EVIDENCE_ROOT_OPTIONS[proof_key],
+            str(summary_root),
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    item = next(item for item in _items(root) if item["surface"] == f"{proof_key}_production_like_evidence")
+    artifact_text = captured.out + captured.err + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert "summary_status=[redacted-path]" in item["dependencies"]
+    assert raw_status not in artifact_text
+    assert str(raw_status_path) not in artifact_text
+    assert "private-status-marker" not in artifact_text
+    assert "raw-status-secret" not in artifact_text
+    assert "[redacted-path]" in artifact_text
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_summary_rejected_oversized_status_is_bounded_in_public_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    raw_tail = "raw-oversized-status-tail"
+    oversized_status = "oversized-status-" + ("x" * (readiness_shared_artifacts.MAX_STRING_LENGTH + 512)) + raw_tail
+    payload = _dependency_summary_payload("slurm") | {"status": oversized_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--slurm-evidence-root",
+            str(summary_root),
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    status_dependency = next(
+        dependency for dependency in item["dependencies"] if dependency.startswith("summary_status=")
+    )
+    artifact_text = captured.out + captured.err + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert status_dependency.endswith("[truncated]")
+    assert item["details"]["summary_status"].endswith("[truncated]")
+    assert len(status_dependency) <= (
+        len("summary_status=") + readiness_shared_artifacts.MAX_STRING_LENGTH + len("[truncated]")
+    )
+    assert oversized_status not in artifact_text
+    assert raw_tail not in artifact_text
+    assert "[truncated]" in artifact_text
+    assert len(artifact_text) < 80_000
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_shared_artifact_safe_writer_guards_no_clobber_force_symlink_containment_payload_and_redaction(

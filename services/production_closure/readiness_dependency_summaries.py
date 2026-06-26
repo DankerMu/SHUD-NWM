@@ -142,6 +142,7 @@ def _read_dependency_summary_item(
     item_status = "passed" if schema_ok and issue_ok and accepted_status else "blocked"
     summary_checksum = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     producer_artifact_ref = artifact_ref(name, summary_path, root)
+    public_status = _dependency_summary_public_status(status, config=config)
     return _item(
         item_id=f"deterministic-{name}-summary",
         surface=f"{name}_production_like_evidence",
@@ -164,7 +165,7 @@ def _read_dependency_summary_item(
         dependencies=[
             f"issue=#{contract['issue']}",
             f"schema={contract['schema']}",
-            f"summary_status={status}",
+            f"summary_status={public_status}",
             f"producer_artifact_ref={producer_artifact_ref}",
             f"summary_checksum={summary_checksum}",
         ],
@@ -185,6 +186,11 @@ def _read_dependency_summary_item(
             config=config,
         ),
     )
+
+
+def _dependency_summary_public_status(status: str, *, config: Any) -> str:
+    redacted_status = _bounded_redacted_payload(status, config=config)
+    return redacted_status if isinstance(redacted_status, str) else str(redacted_status)
 
 
 def _dependency_summary_blocked(
