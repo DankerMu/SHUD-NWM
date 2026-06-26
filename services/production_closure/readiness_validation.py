@@ -18,6 +18,9 @@ from packages.common.safe_fs import (
     read_bytes_limited_no_follow,
 )
 from services.production_closure import (
+    readiness_dependency_summaries as _readiness_dependency_summaries,
+)
+from services.production_closure import (
     readiness_item_contracts as _readiness_item_contracts,
 )
 from services.production_closure import (
@@ -64,33 +67,11 @@ MAX_RECEIPT_PREVIEW_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_PREVIEW_BYTE
 LIVE_PROOF_SCHEMA = _readiness_shared_artifacts.LIVE_PROOF_SCHEMA
 EXPECTED_TARGET_ENVIRONMENT = "production"
 
-DEPENDENCY_SUMMARY_CONTRACTS = {
-    "slurm": {
-        "issue": 147,
-        "schema": "nhms.production_closure.slurm.v1",
-        "allowed_statuses": {"ready", "submitted"},
-    },
-    "object_store": {
-        "issue": 148,
-        "schema": "nhms.production_closure.object_store.v1",
-        "allowed_statuses": {"ready"},
-    },
-    "source": {
-        "issue": 149,
-        "schema": "nhms.production_closure.met.v1",
-        "allowed_statuses": {"ready"},
-    },
-    "e2e": {
-        "issue": 150,
-        "schema": "nhms.production_closure.e2e.v1",
-        "allowed_statuses": {"ready"},
-    },
-    "mvt": {
-        "issue": 151,
-        "schema": "nhms.production_closure.scale.v1",
-        "allowed_statuses": {"ready"},
-    },
-}
+DEPENDENCY_SUMMARY_CONTRACTS = _readiness_dependency_summaries.DEPENDENCY_SUMMARY_CONTRACTS
+_dependency_summary_blocked = _readiness_dependency_summaries._dependency_summary_blocked
+_dependency_summary_artifact_ref = _readiness_dependency_summaries._dependency_summary_artifact_ref
+_dependency_bindings = _readiness_dependency_summaries._dependency_bindings
+_find_summary_path = _readiness_dependency_summaries._find_summary_path
 PROOF_ENV = _readiness_shared_artifacts.PROOF_ENV
 SCHEDULER_EVIDENCE_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"
 MAX_SCHEDULER_EVIDENCE_BYTES = 256 * 1024
@@ -140,6 +121,7 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "partially_failed",
     }
 )
+
 SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS = (
     "adapter_download_called",
     "slurm_submit_called",
@@ -609,160 +591,21 @@ def _deterministic_items(config: ProductionReadinessConfig) -> list[dict[str, An
 
 
 def _dependency_summary_items(config: ProductionReadinessConfig) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for name in DEPENDENCY_SUMMARY_CONTRACTS:
-        root = config.dependency_roots.get(name)
-        if root is None:
-            items.append(
-                _item(
-                    item_id=f"deterministic-{name}-summary",
-                    surface=f"{name}_production_like_evidence",
-                    status="not_executed",
-                    execution_mode="not_executed",
-                    required_for_final=False,
-                    live_proof_accepted=False,
-                    artifact_refs=[],
-                    residual_risk=(
-                        "No existing production-closure summary was supplied to this readiness run; "
-                        "deterministic fast CI remains self-contained."
-                    ),
-                    removal_criteria=(
-                        f"Run or provide the {name} production-closure summary when deterministic dependency "
-                        "lineage is needed for release review."
-                    ),
-                )
-            )
-            continue
-        items.append(_read_dependency_summary_item(name, root, config=config))
-    return items
+    return _readiness_dependency_summaries._dependency_summary_items(
+        config,
+        read_dependency_summary_item=_read_dependency_summary_item,
+    )
 
 
 def _read_dependency_summary_item(name: str, root: Path, *, config: ProductionReadinessConfig) -> dict[str, Any]:
-    contract = DEPENDENCY_SUMMARY_CONTRACTS[name]
-    try:
-        summary_path = _find_summary_path(name, root)
-        raw = read_bytes_limited_no_follow(summary_path, max_bytes=MAX_RECEIPT_BYTES)
-        if len(raw) > MAX_RECEIPT_BYTES:
-            return _dependency_summary_blocked(
-                name,
-                summary_path,
-                config=config,
-                reason="Dependency summary exceeds bounded readiness ingestion limit.",
-            )
-        summary = json.loads(raw.decode("utf-8"))
-        if not isinstance(summary, Mapping):
-            return _dependency_summary_blocked(
-                name,
-                summary_path,
-                config=config,
-                reason="Dependency summary JSON must be an object.",
-            )
-    except (
-        FileNotFoundError,
-        json.JSONDecodeError,
-        OSError,
-        RecursionError,
-        UnicodeDecodeError,
-        SafeFilesystemError,
-    ) as error:
-        return _dependency_summary_blocked(
-            name,
-            root,
-            config=config,
-            reason=f"Dependency summary could not be read: {_redact_paths(str(error), config=config)}.",
-        )
-    status = str(summary.get("status", "unknown"))
-    schema_ok = summary.get("schema") == contract["schema"]
-    issue_ok = summary.get("issue") == contract["issue"]
-    accepted_status = status in contract["allowed_statuses"]
-    item_status = "passed" if schema_ok and issue_ok and accepted_status else "blocked"
-    summary_checksum = f"sha256:{hashlib.sha256(raw).hexdigest()}"
-    producer_artifact_ref = _dependency_summary_artifact_ref(name, summary_path, root)
-    return _item(
-        item_id=f"deterministic-{name}-summary",
-        surface=f"{name}_production_like_evidence",
-        status=item_status,
-        execution_mode="deterministic" if item_status == "passed" else "not_executed",
-        required_for_final=False,
-        live_proof_accepted=False,
-        artifact_refs=[_path_for_evidence(summary_path, config=config)],
-        residual_risk=(
-            "Existing production-closure summary was consumed as deterministic review evidence; it is not live proof."
-            if item_status == "passed"
-            else "Existing production-closure summary is missing, malformed, or outside the expected contract."
-        ),
-        removal_criteria=(
-            "Provide accepted live proof receipt for final readiness; keep deterministic producer evidence available "
-            "for reviewer lineage."
-            if item_status == "passed"
-            else f"Provide a {contract['schema']} summary with accepted status for deterministic readiness review."
-        ),
-        dependencies=[
-            f"issue=#{contract['issue']}",
-            f"schema={contract['schema']}",
-            f"summary_status={status}",
-            f"producer_artifact_ref={producer_artifact_ref}",
-            f"summary_checksum={summary_checksum}",
-        ],
-        details=_bounded_redacted_payload(
-            {
-                "dependency": name,
-                "producer_issue": contract["issue"],
-                "producer_schema": contract["schema"],
-                "summary_schema": summary.get("schema"),
-                "summary_issue": summary.get("issue"),
-                "summary_run_id": summary.get("run_id"),
-                "summary_status": status,
-                "summary_execution_mode": summary.get("execution_mode"),
-                "summary_final_production_readiness_claimed": summary.get("final_production_readiness_claimed"),
-                "producer_artifact_ref": producer_artifact_ref,
-                "summary_checksum": summary_checksum,
-            },
-            config=config,
-        ),
+    return _readiness_dependency_summaries._read_dependency_summary_item(
+        name,
+        root,
+        config=config,
+        find_summary_path=_find_summary_path,
+        dependency_summary_blocked=_dependency_summary_blocked,
+        dependency_summary_artifact_ref=_dependency_summary_artifact_ref,
     )
-
-
-def _dependency_summary_blocked(
-    name: str,
-    path: Path,
-    *,
-    config: ProductionReadinessConfig,
-    reason: str,
-) -> dict[str, Any]:
-    return _item(
-        item_id=f"deterministic-{name}-summary",
-        surface=f"{name}_production_like_evidence",
-        status="blocked",
-        execution_mode="not_executed",
-        required_for_final=False,
-        live_proof_accepted=False,
-        artifact_refs=[_path_for_evidence(path, config=config)],
-        residual_risk=reason,
-        removal_criteria=f"Provide a readable bounded {name} production-closure summary.json artifact.",
-    )
-
-
-def _dependency_summary_artifact_ref(name: str, summary_path: Path, root: Path) -> str:
-    try:
-        relative = summary_path.resolve(strict=False).relative_to(root.expanduser().resolve(strict=False))
-    except ValueError:
-        relative = Path("summary.json")
-    return f"{name}:{relative.as_posix()}"
-
-
-def _dependency_bindings(items: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
-    bindings: dict[str, Mapping[str, Any]] = {}
-    for item in items:
-        if item.get("status") != "passed":
-            continue
-        details = item.get("details")
-        if not isinstance(details, Mapping):
-            continue
-        dependency = details.get("dependency")
-        if isinstance(dependency, str) and dependency in DEPENDENCY_SUMMARY_CONTRACTS:
-            bindings[dependency] = details
-    return bindings
 
 
 def _scheduler_evidence_items(config: ProductionReadinessConfig) -> list[dict[str, Any]]:
@@ -1996,26 +1839,6 @@ def _contains_placeholder_value(value: Any) -> bool:
         meaningful = [nested for nested in value if _has_meaningful_value(nested)]
         return bool(meaningful) and all(_contains_placeholder_value(nested) for nested in meaningful)
     return False
-
-
-def _find_summary_path(name: str, root: Path) -> Path:
-    root = root.expanduser()
-    candidates = [root / "summary.json", root / name / "summary.json"]
-    if name == "object_store":
-        candidates.append(root / "object-store" / "summary.json")
-    for candidate in candidates:
-        if candidate.exists():
-            _refuse_symlink_components(candidate)
-            if candidate.is_symlink():
-                raise SafeFilesystemError(f"Dependency summary must not be a symlink: {candidate}")
-            try:
-                file_stat = candidate.stat(follow_symlinks=False)
-            except OSError as error:
-                raise SafeFilesystemError(f"Failed to stat dependency summary: {candidate}", kind="io") from error
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise SafeFilesystemError(f"Dependency summary must be a regular file: {candidate}")
-            return candidate
-    raise FileNotFoundError(f"No summary.json found under {root}")
 
 
 def _find_scheduler_evidence_files(root: Path) -> list[Path]:

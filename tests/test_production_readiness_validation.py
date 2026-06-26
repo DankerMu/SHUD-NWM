@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
+    readiness_dependency_summaries,
     readiness_item_contracts,
     readiness_shared_artifacts,
     readiness_validation,
@@ -57,12 +59,26 @@ PROOF_SURFACES = {
     "target_env": "target_environment_config_proof",
 }
 DEPENDENCY_PROOFS = {"slurm", "object_store", "source", "e2e", "mvt"}
+DEPENDENCY_PROOF_PARAMS = (
+    pytest.param("slurm", id="slurm"),
+    pytest.param("object_store", id="object-store"),
+    pytest.param("source", id="source"),
+    pytest.param("e2e", id="end-to-end"),
+    pytest.param("mvt", id="mvt"),
+)
 DEPENDENCY_CONTRACTS = {
     "slurm": (147, "nhms.production_closure.slurm.v1"),
     "object_store": (148, "nhms.production_closure.object_store.v1"),
     "source": (149, "nhms.production_closure.met.v1"),
     "e2e": (150, "nhms.production_closure.e2e.v1"),
     "mvt": (151, "nhms.production_closure.scale.v1"),
+}
+DEPENDENCY_EVIDENCE_ROOT_OPTIONS = {
+    "slurm": "--slurm-evidence-root",
+    "object_store": "--object-store-evidence-root",
+    "source": "--source-evidence-root",
+    "e2e": "--e2e-evidence-root",
+    "mvt": "--mvt-evidence-root",
 }
 EXPECTED_ALLOWED_STATUS_EXECUTION_MODES = {
     "passed": frozenset(
@@ -288,9 +304,16 @@ def _all_auth_actions() -> list[str]:
 
 
 def _write_dependency_summary(root: Path, proof_key: str, *, run_id: str | None = None) -> str:
-    issue, schema = DEPENDENCY_CONTRACTS[proof_key]
+    payload = _dependency_summary_payload(proof_key, run_id=run_id)
     root.mkdir(parents=True, exist_ok=True)
-    payload = {
+    summary_path = root / "summary.json"
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+    return "sha256:" + hashlib.sha256(summary_path.read_bytes()).hexdigest()
+
+
+def _dependency_summary_payload(proof_key: str, *, run_id: str | None = None) -> dict[str, object]:
+    issue, schema = DEPENDENCY_CONTRACTS[proof_key]
+    return {
         "schema": schema,
         "issue": issue,
         "run_id": run_id or f"{proof_key}-live-run",
@@ -298,9 +321,28 @@ def _write_dependency_summary(root: Path, proof_key: str, *, run_id: str | None 
         "execution_mode": "deterministic_fixture",
         "final_production_readiness_claimed": False,
     }
-    summary_path = root / "summary.json"
-    summary_path.write_text(json.dumps(payload), encoding="utf-8")
-    return "sha256:" + hashlib.sha256(summary_path.read_bytes()).hexdigest()
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def _write_symlink_summary(summary_root: Path, *, leaf: bool) -> None:
+    target_root = summary_root.parent / "real-summary"
+    target_root.mkdir(parents=True, exist_ok=True)
+    (target_root / "summary.json").write_text(json.dumps(_dependency_summary_payload("slurm")), encoding="utf-8")
+    if leaf:
+        summary_root.mkdir(parents=True, exist_ok=True)
+        (summary_root / "summary.json").symlink_to(target_root / "summary.json")
+        return
+    summary_root.parent.mkdir(parents=True, exist_ok=True)
+    summary_root.symlink_to(target_root, target_is_directory=True)
 
 
 def _dependency_proof_bound_to_summary(proof_key: str, root: Path, *, run_id: str = "m19", **extra: object) -> str:
@@ -826,6 +868,546 @@ def test_shared_artifact_path_helper_prefixes_and_redacted_fallback(tmp_path: Pa
         readiness_validation._path_for_evidence(config.lane_dir / "preflight.json", config=config)
         == "readiness/preflight.json"
     )
+
+
+def test_dependency_summary_owner_facade_aliases_are_stable(tmp_path: Path) -> None:
+    summary_root = tmp_path / "slurm"
+    _write_dependency_summary(summary_root, "slurm")
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        slurm_evidence_root=summary_root,
+    )
+
+    assert readiness_validation.DEPENDENCY_SUMMARY_CONTRACTS is (
+        readiness_dependency_summaries.DEPENDENCY_SUMMARY_CONTRACTS
+    )
+    assert readiness_validation._dependency_summary_blocked is (
+        readiness_dependency_summaries._dependency_summary_blocked
+    )
+    assert readiness_validation._dependency_summary_artifact_ref is (
+        readiness_dependency_summaries._dependency_summary_artifact_ref
+    )
+    assert readiness_validation._dependency_bindings is readiness_dependency_summaries._dependency_bindings
+    assert readiness_validation._find_summary_path is readiness_dependency_summaries._find_summary_path
+    assert readiness_validation._read_dependency_summary_item("slurm", summary_root, config=config) == (
+        readiness_dependency_summaries._read_dependency_summary_item("slurm", summary_root, config=config)
+    )
+    assert readiness_validation._dependency_summary_items(config) == (
+        readiness_dependency_summaries._dependency_summary_items(config)
+    )
+
+
+def test_dependency_summary_facade_read_item_honors_facade_find_path_monkeypatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_root = tmp_path / "configured-slurm"
+    alternate_root = tmp_path / "alternate-slurm"
+    _write_dependency_summary(alternate_root, "slurm")
+    alternate_path = alternate_root / "summary.json"
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        slurm_evidence_root=configured_root,
+    )
+
+    def fake_find_summary_path(name: str, root: Path) -> Path:
+        assert name == "slurm"
+        assert root == configured_root
+        return alternate_path
+
+    monkeypatch.setattr(readiness_validation, "_find_summary_path", fake_find_summary_path)
+
+    item = readiness_validation._read_dependency_summary_item("slurm", configured_root, config=config)
+
+    assert item["status"] == "passed"
+    assert item["details"]["summary_run_id"] == "slurm-live-run"
+
+
+def test_dependency_summary_facade_items_honors_facade_read_item_monkeypatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary_root = tmp_path / "slurm"
+    _write_dependency_summary(summary_root, "slurm")
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        slurm_evidence_root=summary_root,
+    )
+
+    def fake_read_item(name: str, root: Path, *, config: ProductionReadinessConfig) -> dict[str, object]:
+        return readiness_validation._dependency_summary_blocked(
+            name,
+            root,
+            config=config,
+            reason="patched facade summary reader",
+        )
+
+    monkeypatch.setattr(readiness_validation, "_read_dependency_summary_item", fake_read_item)
+
+    item = next(
+        item
+        for item in readiness_validation._dependency_summary_items(config)
+        if item["surface"] == "slurm_production_like_evidence"
+    )
+
+    assert item["status"] == "blocked"
+    assert item["residual_risk"] == "patched facade summary reader"
+
+
+def test_dependency_summary_missing_unconfigured_roots_are_not_executed(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+
+    items = readiness_dependency_summaries._dependency_summary_items(config)
+
+    assert len(items) == len(readiness_dependency_summaries.DEPENDENCY_SUMMARY_CONTRACTS)
+    assert {item["status"] for item in items} == {"not_executed"}
+    assert {item["execution_mode"] for item in items} == {"not_executed"}
+    assert all(item["required_for_final"] is False for item in items)
+    assert all(item["live_proof_accepted"] is False for item in items)
+    assert all(item["artifact_refs"] == [] for item in items)
+    assert readiness_validation._dependency_bindings(items) == {}
+
+
+@pytest.mark.parametrize(
+    ("proof_key", "alias_dir", "expected_ref"),
+    [
+        ("slurm", "slurm", "slurm:slurm/summary.json"),
+        ("object_store", "object_store", "object_store:object_store/summary.json"),
+        ("object_store", "object-store", "object_store:object-store/summary.json"),
+        ("source", "source", "source:source/summary.json"),
+        ("e2e", "e2e", "e2e:e2e/summary.json"),
+        ("mvt", "mvt", "mvt:mvt/summary.json"),
+    ],
+)
+def test_dependency_summary_nested_aliases_are_preserved(
+    tmp_path: Path,
+    proof_key: str,
+    alias_dir: str,
+    expected_ref: str,
+) -> None:
+    summary_root = tmp_path / f"{proof_key}-root"
+    summary_path = summary_root / alias_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(json.dumps(_dependency_summary_payload(proof_key)), encoding="utf-8")
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        **{f"{proof_key}_evidence_root": summary_root},
+    )
+
+    item = readiness_dependency_summaries._read_dependency_summary_item(proof_key, summary_root, config=config)
+
+    assert readiness_validation._find_summary_path(proof_key, summary_root) == summary_path
+    assert item["status"] == "passed"
+    assert item["execution_mode"] == "deterministic"
+    assert item["details"]["producer_artifact_ref"] == expected_ref
+    assert item["details"]["summary_checksum"].startswith("sha256:")
+    assert readiness_validation._dependency_bindings([item])[proof_key]["summary_run_id"] == (
+        f"{proof_key}-live-run"
+    )
+
+
+def test_dependency_summary_slurm_submitted_status_is_accepted_without_final_readiness(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload("slurm") | {"status": "submitted"}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    assert item["status"] == "passed"
+    assert item["execution_mode"] == "deterministic"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "submitted"
+    assert item["details"]["producer_artifact_ref"] == "slurm:summary.json"
+    assert item["details"]["summary_checksum"].startswith("sha256:")
+    assert "summary_status=submitted" in item["dependencies"]
+    assert "producer_artifact_ref=slurm:summary.json" in item["dependencies"]
+    assert any(dependency.startswith("summary_checksum=sha256:") for dependency in item["dependencies"])
+    assert readiness_validation._dependency_bindings([item])["slurm"]["summary_run_id"] == "slurm-live-run"
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "proof_key",
+    [
+        pytest.param("object_store", id="object-store-summary"),
+        pytest.param("source", id="source-summary"),
+        pytest.param("e2e", id="end-to-end-summary"),
+        pytest.param("mvt", id="mvt-summary"),
+    ],
+)
+def test_dependency_summary_non_slurm_submitted_status_is_blocked_unbound_without_final_readiness(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / f"{proof_key}-summary"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload(proof_key) | {"status": "submitted"}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            **{f"{proof_key}_evidence_root": summary_root},
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == f"{proof_key}_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "submitted"
+    assert "summary_status=submitted" in item["dependencies"]
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_bindings_include_only_passed_dependency_summaries(tmp_path: Path) -> None:
+    passed_root = tmp_path / "slurm"
+    blocked_root = tmp_path / "source"
+    _write_dependency_summary(passed_root, "slurm")
+    blocked_root.mkdir()
+    blocked_payload = _dependency_summary_payload("source") | {"status": "blocked"}
+    (blocked_root / "summary.json").write_text(json.dumps(blocked_payload), encoding="utf-8")
+    config = ProductionReadinessConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m19",
+        slurm_evidence_root=passed_root,
+        source_evidence_root=blocked_root,
+    )
+    items = readiness_dependency_summaries._dependency_summary_items(config)
+
+    bindings = readiness_validation._dependency_bindings(items)
+
+    assert set(bindings) == {"slurm"}
+    slurm_binding = bindings["slurm"]
+    assert slurm_binding["dependency"] == "slurm"
+    assert slurm_binding["summary_run_id"] == "slurm-live-run"
+    assert slurm_binding["producer_artifact_ref"] == "slurm:summary.json"
+    assert slurm_binding["summary_checksum"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_public_run_id", "forbidden_fragment"),
+    [
+        ("missing", None, None),
+        ("blank", "[invalid-run-id]", None),
+        ("path_like_private_path", "[redacted-path]", "private-run-ids"),
+        ("oversized_truncated", "[invalid-run-id][truncated]", "raw-oversized-run-id-tail"),
+    ],
+)
+def test_dependency_summary_run_id_contract_failures_are_blocked_unbound_and_redacted(
+    tmp_path: Path,
+    case_name: str,
+    expected_public_run_id: object,
+    forbidden_fragment: str | None,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    payload = _dependency_summary_payload("slurm")
+    raw_run_id = None
+    if case_name == "missing":
+        payload.pop("run_id")
+    elif case_name == "blank":
+        raw_run_id = "   "
+        payload["run_id"] = raw_run_id
+    elif case_name == "path_like_private_path":
+        raw_run_id = str(tmp_path / "private-run-ids" / "slurm-live-run")
+        payload["run_id"] = raw_run_id
+    elif case_name == "oversized_truncated":
+        raw_run_id = (
+            "slurm-live-run-"
+            + ("x" * (readiness_shared_artifacts.MAX_STRING_LENGTH + 512))
+            + "raw-oversized-run-id-tail"
+        )
+        payload["run_id"] = raw_run_id
+    else:
+        raise AssertionError(f"unhandled case: {case_name}")
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    artifact_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["required_for_final"] is False
+    assert item["live_proof_accepted"] is False
+    assert item["details"]["summary_run_id"] == expected_public_run_id
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert readiness_validation._dependency_bindings([item | {"status": "passed"}]) == {}
+    if raw_run_id and raw_run_id.strip():
+        assert raw_run_id not in artifact_text
+    if forbidden_fragment is not None:
+        assert forbidden_fragment not in artifact_text
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("case_name", "writer", "expected_fragment"),
+    [
+        (
+            "missing_summary",
+            lambda summary_root: summary_root.mkdir(parents=True),
+            "Dependency summary could not be read",
+        ),
+        (
+            "malformed_json",
+            lambda summary_root: _write_text(summary_root / "summary.json", "{not-json-token=secret"),
+            "Dependency summary could not be read",
+        ),
+        (
+            "invalid_utf8",
+            lambda summary_root: _write_bytes(summary_root / "summary.json", b"\xff\xfe"),
+            "Dependency summary could not be read",
+        ),
+        (
+            "non_object_json",
+            lambda summary_root: _write_text(summary_root / "summary.json", "[]"),
+            "Dependency summary JSON must be an object",
+        ),
+        (
+            "oversized_payload",
+            lambda summary_root: _write_text(
+                summary_root / "summary.json",
+                json.dumps(_dependency_summary_payload("slurm") | {"blob": "x" * (70 * 1024)}),
+            ),
+            "Dependency summary exceeds bounded readiness ingestion limit",
+        ),
+        (
+            "directory_leaf",
+            lambda summary_root: (summary_root / "summary.json").mkdir(parents=True),
+            "regular file",
+        ),
+        (
+            "symlink_leaf",
+            lambda summary_root: _write_symlink_summary(summary_root, leaf=True),
+            "symlink",
+        ),
+        (
+            "symlink_ancestor",
+            lambda summary_root: _write_symlink_summary(summary_root, leaf=False),
+            "symlink",
+        ),
+    ],
+)
+def test_dependency_summary_boundary_failures_are_blocked_redacted_and_bounded(
+    tmp_path: Path,
+    case_name: str,
+    writer: Callable[[Path], None],
+    expected_fragment: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "private" / case_name / "slurm"
+    writer(summary_root)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    artifact_text = json.dumps(item, sort_keys=True) + "\n" + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir()
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    assert expected_fragment in artifact_text
+    assert str(summary_root) not in artifact_text
+    assert "not-json-token=secret" not in artifact_text
+    assert "Traceback" not in artifact_text
+    assert len(artifact_text) < 80_000
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_detail"),
+    [
+        ({"issue": 999}, "summary_issue"),
+        ({"schema": "nhms.production_closure.slurm.v0"}, "summary_schema"),
+        ({"status": "failed"}, "summary_status"),
+    ],
+)
+def test_dependency_summary_wrong_contract_values_are_blocked_with_public_details(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_detail: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "private" / "slurm"
+    summary_root.mkdir(parents=True)
+    payload = _dependency_summary_payload("slurm") | override
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    rendered = json.dumps(item, sort_keys=True)
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert expected_detail in rendered
+    assert "Existing production-closure summary is missing, malformed, or outside the expected contract." in rendered
+    assert str(summary_root) not in rendered
+    assert item["details"]["summary_checksum"].startswith("sha256:")
+    assert _summary(root)["status"] == "release_blocked"
+
+
+@pytest.mark.parametrize("case_name", ["object", "list"])
+def test_dependency_summary_non_string_status_is_blocked_unbound_and_redacted(
+    tmp_path: Path,
+    case_name: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm-summary"
+    summary_root.mkdir()
+    raw_status_path = tmp_path / "private-status-marker" / case_name / "summary.json"
+    raw_status_secret = f"raw-status-secret-{case_name}"
+    if case_name == "object":
+        raw_status: object = {
+            "state": "ready",
+            "path": str(raw_status_path),
+            "token": raw_status_secret,
+        }
+    elif case_name == "list":
+        raw_status = ["ready", str(raw_status_path), {"token": raw_status_secret}]
+    else:
+        raise AssertionError(f"unhandled case: {case_name}")
+    payload = _dependency_summary_payload("slurm") | {"status": raw_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    artifact_text = json.dumps(item, sort_keys=True) + "\n" + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    assert item["required_for_final"] is False
+    assert item["details"]["summary_status"] == "[invalid-status-type]"
+    assert "summary_status=[invalid-status-type]" in item["dependencies"]
+    assert readiness_validation._dependency_bindings([item]) == {}
+    assert _summary(root)["status"] == "release_blocked"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+    assert "[invalid-status-type]" in artifact_text
+    assert str(raw_status_path) not in artifact_text
+    assert "private-status-marker" not in artifact_text
+    assert raw_status_secret not in artifact_text
+
+
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
+def test_dependency_summary_rejected_status_redacts_paths_and_secrets_from_public_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    proof_key: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / f"{proof_key}-summary"
+    summary_root.mkdir()
+    raw_status_path = tmp_path / "private-status-marker" / proof_key / "summary.json"
+    raw_status = f"{raw_status_path}?api_token=raw-status-secret"
+    payload = _dependency_summary_payload(proof_key) | {"status": raw_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            DEPENDENCY_EVIDENCE_ROOT_OPTIONS[proof_key],
+            str(summary_root),
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    item = next(item for item in _items(root) if item["surface"] == f"{proof_key}_production_like_evidence")
+    artifact_text = captured.out + captured.err + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert "summary_status=[redacted-path]" in item["dependencies"]
+    assert raw_status not in artifact_text
+    assert str(raw_status_path) not in artifact_text
+    assert "private-status-marker" not in artifact_text
+    assert "raw-status-secret" not in artifact_text
+    assert "[redacted-path]" in artifact_text
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_summary_rejected_oversized_status_is_bounded_in_public_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    raw_tail = "raw-oversized-status-tail"
+    oversized_status = "oversized-status-" + ("x" * (readiness_shared_artifacts.MAX_STRING_LENGTH + 512)) + raw_tail
+    payload = _dependency_summary_payload("slurm") | {"status": oversized_status}
+    (summary_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--slurm-evidence-root",
+            str(summary_root),
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    status_dependency = next(
+        dependency for dependency in item["dependencies"] if dependency.startswith("summary_status=")
+    )
+    artifact_text = captured.out + captured.err + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json")
+    )
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert status_dependency.endswith("[truncated]")
+    assert item["details"]["summary_status"].endswith("[truncated]")
+    assert len(status_dependency) <= (
+        len("summary_status=") + readiness_shared_artifacts.MAX_STRING_LENGTH + len("[truncated]")
+    )
+    assert oversized_status not in artifact_text
+    assert raw_tail not in artifact_text
+    assert "[truncated]" in artifact_text
+    assert len(artifact_text) < 80_000
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_shared_artifact_safe_writer_guards_no_clobber_force_symlink_containment_payload_and_redaction(
@@ -1533,7 +2115,7 @@ def test_dependency_receipts_bind_to_consumed_producer_summary(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-@pytest.mark.parametrize("proof_key", sorted(DEPENDENCY_PROOFS))
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
 def test_dependency_receipts_reject_sibling_nested_provenance(
     tmp_path: Path,
     proof_key: str,
@@ -3710,8 +4292,28 @@ def test_existing_m19_dependency_summary_truth_table_unchanged_when_scheduler_ab
     assert all(item["status"] == "passed" for item in consumed)
     assert all(item["execution_mode"] == "deterministic" for item in consumed)
     assert all(item["live_proof_accepted"] is False for item in consumed)
+    assert all(item["required_for_final"] is False for item in consumed)
+    consumed_by_dependency = {item["details"]["dependency"]: item for item in consumed}
+    assert set(readiness_validation._dependency_bindings(consumed)) == set(DEPENDENCY_PROOFS)
+    for dependency, (issue, schema) in DEPENDENCY_CONTRACTS.items():
+        item = consumed_by_dependency[dependency]
+        details = item["details"]
+        assert details["producer_issue"] == issue
+        assert details["producer_schema"] == schema
+        assert details["summary_issue"] == issue
+        assert details["summary_schema"] == schema
+        assert details["summary_status"] == "ready"
+        assert details["summary_run_id"] in {f"{dependency}-run", "object-store-run"}
+        assert details["producer_artifact_ref"] == f"{dependency}:summary.json"
+        assert details["summary_checksum"].startswith("sha256:")
+        assert f"issue=#{issue}" in item["dependencies"]
+        assert f"schema={schema}" in item["dependencies"]
+        assert "summary_status=ready" in item["dependencies"]
+        assert f"producer_artifact_ref={dependency}:summary.json" in item["dependencies"]
+        assert any(dependency_ref.startswith("summary_checksum=sha256:") for dependency_ref in item["dependencies"])
     assert "live_scheduler_evidence_proof" not in {item["surface"] for item in items}
     assert _summary(root)["final_production_readiness_claimed"] is False
+    assert _summary(root)["status"] == "release_blocked"
 
 
 def test_dependency_receipt_accepts_all_agreeing_aliases(tmp_path: Path) -> None:
