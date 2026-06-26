@@ -1,24 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Map, {
-  Layer,
-  Marker,
   NavigationControl,
   Popup,
   ScaleControl,
-  Source,
   type MapLayerMouseEvent,
   type MapRef,
   type MapStyle,
 } from 'react-map-gl/maplibre'
 import type { ReactNode } from 'react'
 import type { FeatureCollection } from 'geojson'
-import type { LayerProps } from 'react-map-gl/maplibre'
-import type { FilterSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 import type { components } from '@/api/types'
 import { cn } from '@/lib/cn'
-import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
 import {
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
@@ -26,16 +20,25 @@ import {
   buildM11RenderedNationalRiverCollection,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
-  m11BasinLabelAnchor,
   m11SelectedLayerUnavailableReason,
-  segmentFilter,
-  zoomScaledValueWidth,
-  type BasinFeatureCollection,
   type BasinRiverFeature,
-  type BasinRiverFeatureCollection,
-  type M11RegisteredOverlay,
-  type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
+import {
+  M11_BASIN_FILL_LAYER_ID,
+  M11_BASIN_RIVER_LINE_LAYER_ID,
+  M11BasinLabelMarkers,
+  M11BasinPrimitive,
+  M11BasinRiverPrimitive,
+  M11NationalRiverPrimitive,
+  M11OverlayPrimitive,
+  M11SelectedSegmentPrimitive,
+  M11StationClusterPrimitive,
+  MET_STATION_CLUSTER_LAYER_ID,
+  MET_STATION_POINT_LAYER_ID,
+  MET_STATION_SOURCE_ID,
+  m11RegisteredOverlayHitLayerId,
+  type M11StationFeatureCollection,
+} from '@/components/map/m11MapPrimitives'
 import {
   type BasinSegmentRow,
   type LayerState,
@@ -48,22 +51,6 @@ export interface M11MapOverlayInteraction {
   layerId: M11Layer | 'met-stations' | 'basin-boundaries' | 'basin-river-segments'
   event: MapLayerMouseEvent
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
-}
-
-// 代站 clustered-GeoJSON 图层的固定 source/layer id。以 layerId/source 抽象集中于此，
-// 未来切换到后端 station-MVT 点图层瓦片端点时，只需替换 <Source> 实现而无需改交互/分发逻辑。
-const MET_STATION_SOURCE_ID = 'm11-met-stations-source'
-const MET_STATION_CLUSTER_LAYER_ID = 'clusters'
-const MET_STATION_CLUSTER_COUNT_LAYER_ID = 'cluster-count'
-const MET_STATION_POINT_LAYER_ID = 'met-stations-point'
-
-export interface M11StationFeatureCollection {
-  type: 'FeatureCollection'
-  features: Array<{
-    type: 'Feature'
-    geometry: { type: 'Point'; coordinates: [number, number] }
-    properties: { station_id: string; station_name: string | null; basin_id: string | null }
-  }>
 }
 
 export interface M11MapCameraFit {
@@ -103,6 +90,7 @@ export {
   type M11RegisteredOverlay,
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
+export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
 interface M11MapLibreSurfaceProps {
@@ -234,9 +222,9 @@ export function M11MapLibreSurface({
   const showStationLayer = (metStations ?? state.metStations) && (stationFeatureCollection?.features.length ?? 0) > 0
   const interactiveLayerIds = [
     ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
-    ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
-    ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
-    ...(renderableOverlay ? [`${renderableOverlay.layer.id}-hit`] : []),
+    ...(basinRiverFeatureCollection.features.length > 0 ? [M11_BASIN_RIVER_LINE_LAYER_ID] : []),
+    ...(basinFeatureCollection.features.length > 0 ? [M11_BASIN_FILL_LAYER_ID] : []),
+    ...(renderableOverlay ? [m11RegisteredOverlayHitLayerId(renderableOverlay)] : []),
   ]
 
   useEffect(() => {
@@ -280,7 +268,7 @@ export function M11MapLibreSurface({
           return
         }
       }
-      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
       if (riverFeature) {
         const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
         setHoveredRiverSegmentId(riverSegmentId)
@@ -289,13 +277,13 @@ export function M11MapLibreSurface({
         return
       }
       // 河段 hover 须先于 basin-fill（与点击优先级一致），否则河段高亮被 basin 抢走。
-      const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
+      const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
       if (renderableOverlay && overlayFeature) {
         onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
       if (basinFeature) {
         setHoveredRiverSegmentId(null)
         onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
@@ -335,20 +323,20 @@ export function M11MapLibreSurface({
           return
         }
       }
-      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
       if (riverFeature) {
         onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
         return
       }
       // 河段（流量 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
       // 否则总览（无 basinSegments）点河段会被底下的 basin-fill 抢走、永远到不了河段分支。
-      const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
+      const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
       if (renderableOverlay && overlayFeature) {
         onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
         return
       }
       // 点流域空白处（无河段命中）→ basin 分支（相机飞到流域）。
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
       if (basinFeature) {
         onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
       }
@@ -504,338 +492,6 @@ export function M11MapLibreSurface({
   )
 }
 
-function M11OverlayPrimitive({
-  overlay,
-  data,
-  selectedSegmentId,
-}: {
-  overlay: M11RegisteredOverlay
-  data: FloodReturnPeriodFeatureCollection | null
-  selectedSegmentId?: string | null
-}) {
-  // line 叠加层渲染三层（z 序自下而上）：白色光晕底衬 → 彩色主线 → 透明加宽点击热区。
-  // 热区 id 带 -hit 后缀，是唯一进 interactiveLayerIds 的层，让细河段也好点中。
-  const isLine = overlay.layer.type === 'line'
-  const sourceLayerProp = overlay.layer['source-layer'] ? { 'source-layer': overlay.layer['source-layer'] } : {}
-  const casingLayer = isLine
-    ? {
-        id: `${overlay.layer.id}-casing`,
-        type: 'line' as const,
-        source: overlay.sourceId,
-        ...sourceLayerProp,
-        layout: M11_ROUND_LINE_LAYOUT,
-        paint: m11OverlayCasingPaint(overlay.layerId),
-      }
-    : null
-  const hitLayer = isLine
-    ? {
-        id: `${overlay.layer.id}-hit`,
-        type: 'line' as const,
-        source: overlay.sourceId,
-        ...sourceLayerProp,
-        layout: M11_ROUND_LINE_LAYOUT,
-        paint: M11_OVERLAY_HIT_PAINT,
-      }
-    : null
-  const mainLayer = isLine ? { ...overlay.layer, layout: M11_ROUND_LINE_LAYOUT } : overlay.layer
-  const selectedHaloLayer = isLine
-    ? {
-        id: `${overlay.layer.id}-selected-halo`,
-        type: 'line' as const,
-        source: overlay.sourceId,
-        ...sourceLayerProp,
-        layout: M11_ROUND_LINE_LAYOUT,
-        filter: segmentFilter(selectedSegmentId),
-        paint: {
-          'line-color': '#FFFFFF',
-          'line-width': 10,
-          'line-opacity': 0.78,
-        },
-      }
-    : null
-  const selectedLineLayer = isLine
-    ? {
-        id: `${overlay.layer.id}-selected-line`,
-        type: 'line' as const,
-        source: overlay.sourceId,
-        ...sourceLayerProp,
-        layout: M11_ROUND_LINE_LAYOUT,
-        filter: segmentFilter(selectedSegmentId),
-        paint: {
-          'line-color': '#F97316',
-          'line-width': 6,
-          'line-opacity': 1,
-        },
-      }
-    : null
-  if (overlay.source.type === 'vector') {
-    return (
-      <Source
-        key={overlay.sourceKey}
-        id={overlay.sourceId}
-        type="vector"
-        tiles={overlay.source.tiles}
-        minzoom={overlay.source.minzoom}
-        maxzoom={overlay.source.maxzoom}
-        promoteId="feature_id"
-      >
-        {casingLayer ? <Layer {...casingLayer} /> : null}
-        <Layer {...mainLayer} />
-        {hitLayer ? <Layer {...hitLayer} /> : null}
-        {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
-        {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
-      </Source>
-    )
-  }
-  if (!data) return null
-  return (
-    <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
-      {casingLayer ? <Layer {...casingLayer} /> : null}
-      <Layer {...mainLayer} />
-      {hitLayer ? <Layer {...hitLayer} /> : null}
-      {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
-      {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
-    </Source>
-  )
-}
-
-// 光晕底衬 paint：白色、比主线宽约 2px、半透明，给彩色河段一圈干净的描边光晕（类似标注 halo），
-// 浅底图上清晰可辨且不像深色道路（弃用早期深色 casing）。
-// discharge 主线走 log 域：casing 必须同域贴主线（约 +1.2px），线性域下白晕恒比
-// 低流量主线宽一倍，会把彩色稀释成淡白。
-function m11OverlayCasingPaint(_layerId: string): LayerProps['paint'] {
-  const valueStops = [-2, 3, 0, 3.6, 2, 4.6, 4, 6.2, 4.7, 8.2]
-  return {
-    'line-color': '#FFFFFF',
-    'line-opacity': 0.85,
-    'line-width': zoomScaledValueWidth(valueStops, 0.4, true),
-  }
-}
-
-// 透明点击热区 paint：不可见但加宽，便于鼠标点中细河段（可见线仍细）。
-const M11_OVERLAY_HIT_PAINT: LayerProps['paint'] = {
-  'line-color': '#000000',
-  'line-opacity': 0,
-  'line-width': 16,
-}
-const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
-
-// 常态河网底图 paint：按 Type(1..5,5=主干)深浅分级，线宽随 zoom×Type 增大，
-// 透明度按「zoom 越大、Type 越低越晚出现」实现分级常显——低 zoom 只见主干，放大渐显支流。
-// dimmed：彩色水文层（MVT 叠加 / 详情 GeoJSON 河段）激活时降透明衬底，消「双线」毛边；
-// 但只在 zoom≥6 渐进生效——全国 zoom 下彩色层只是细线，静态河网必须保持全可见（缩略显示）。
-// satellite：影像底图换浅青色系，深蓝在影像上不可读。
-export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  // 各 zoom 档独立 fade：3/5 不降（全国缩略），7 起衬底化。
-  const fadeAt = (zoomFade: number) => (dimmed ? zoomFade : 1)
-  const fade5 = fadeAt(0.85)
-  const fade7 = fadeAt(0.45)
-  const fade9 = fadeAt(0.35)
-  return {
-    'line-color': [
-      'interpolate',
-      ['linear'],
-      ['get', 'Type'],
-      1,
-      satellite ? '#9fe0ff' : '#9cc7e8',
-      3,
-      satellite ? '#5fc3f2' : '#3f88c5',
-      5,
-      satellite ? '#2196d8' : '#14487f',
-    ],
-    'line-width': [
-      'interpolate',
-      ['linear'],
-      ['zoom'],
-      3,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.3, 5, 1.4],
-      7,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.8, 5, 2.6],
-      12,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.6, 5, 4.5],
-    ],
-    'line-opacity': [
-      'interpolate',
-      ['linear'],
-      ['zoom'],
-      3,
-      ['match', ['get', 'Type'], 5, 0.9, 4, 0.55, 0],
-      5,
-      ['match', ['get', 'Type'], 5, 0.95 * fade5, 4, 0.85 * fade5, 3, 0.55 * fade5, 0],
-      7,
-      ['match', ['get', 'Type'], 5, 1 * fade7, 4, 0.95 * fade7, 3, 0.85 * fade7, 2, 0.6 * fade7, 0],
-      9,
-      0.9 * fade9,
-    ],
-  }
-}
-
-// 全国静态河网（basin shp 溶出）作为常态底图：秒显、不依赖 discharge run/接口；
-// 流量 MVT 叠加在其上着色。honest：无文件 → 不渲染（OverviewPage 不传即可）。
-function M11NationalRiverPrimitive({
-  collection,
-  dimmed,
-  satellite,
-}: {
-  collection: FeatureCollection
-  dimmed: boolean
-  satellite: boolean
-}) {
-  return (
-    <Source id="m11-national-river-source" type="geojson" data={collection}>
-      <Layer
-        id="m11-national-river-line"
-        type="line"
-        source="m11-national-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        paint={m11NationalRiverPaint({ dimmed, satellite })}
-      />
-    </Source>
-  )
-}
-
-function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection }) {
-  return (
-    <Source id="m11-basin-boundaries-source" type="geojson" data={collection} promoteId="basin_id">
-      <Layer
-        id="m11-basin-fill"
-        type="fill"
-        source="m11-basin-boundaries-source"
-        paint={{
-          'fill-color': '#1E88E5',
-          'fill-opacity': 0.14,
-        }}
-      />
-      <Layer
-        id="m11-basin-outline"
-        type="line"
-        source="m11-basin-boundaries-source"
-        paint={{
-          'line-color': '#0F3460',
-          'line-width': 1.4,
-          'line-opacity': 0.72,
-        }}
-      />
-    </Source>
-  )
-}
-
-/**
- * 流域名 DOM 标注（玻璃 chip）。不用 symbol+text-field：天地图栅格 style 无 glyphs
- * 字体源，symbol 文本层永远无法渲染且会上抛 style 错误；DOM Marker 零字体依赖、
- * 样式可控。pointer-events 关闭，避免挡住边界 fill 的点击钻取。
- */
-function M11BasinLabelMarkers({ collection }: { collection: BasinFeatureCollection }) {
-  return (
-    <>
-      {collection.features.map((feature) => {
-        const anchor = m11BasinLabelAnchor(feature.geometry)
-        if (!anchor) return null
-        return (
-          <Marker key={feature.properties.basin_id} longitude={anchor[0]} latitude={anchor[1]} anchor="center" style={{ pointerEvents: 'none' }}>
-            <span
-              className="pointer-events-none select-none rounded-full border border-white/60 bg-white/80 px-2.5 py-0.5 text-xs font-semibold text-primary-700 shadow-sm backdrop-blur-sm"
-              data-testid="m11-basin-label"
-              data-basin-id={feature.properties.basin_id}
-            >
-              {feature.properties.basin_name}
-            </span>
-          </Marker>
-        )
-      })}
-    </>
-  )
-}
-
-function M11BasinRiverPrimitive({
-  collection,
-  selectedSegmentId,
-  hoveredSegmentId,
-  subdued = false,
-}: {
-  collection: BasinRiverFeatureCollection
-  selectedSegmentId?: string | null
-  hoveredSegmentId?: string | null
-  /** 彩色 MVT 叠加激活时退衬底：流量色由权威 MVT 层纯净呈现，本层只保留点击/hover 热区。 */
-  subdued?: boolean
-}) {
-  return (
-    <Source id="m11-basin-river-source" type="geojson" data={collection.sourceData} promoteId="river_segment_id">
-      {/* 白色光晕衬底：彩色河网在任意底图上都有干净描边，弱化与底图水系的细微错位感。 */}
-      <Layer
-        id="m11-basin-river-casing"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.6, 9, 3.8, 12, 5.2],
-          'line-opacity': subdued ? 0.25 : 0.8,
-        }}
-      />
-      <Layer
-        id="m11-basin-river-line"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        paint={{
-          'line-color': ['get', 'layer_color'],
-          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 1.6, 9, 2.6, 12, 3.6],
-          'line-opacity': subdued ? 0.18 : 0.92,
-        }}
-      />
-      <Layer
-        id="m11-basin-river-hover-halo"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(hoveredSegmentId)}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 8.5,
-          'line-opacity': 0.62,
-        }}
-      />
-      <Layer
-        id="m11-basin-river-selected-halo"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(selectedSegmentId)}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 9.5,
-          'line-opacity': 0.68,
-        }}
-      />
-      <Layer
-        id="m11-basin-river-hover-line"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(hoveredSegmentId)}
-        paint={{
-          'line-color': ['get', 'layer_color'],
-          'line-width': 4.8,
-          'line-opacity': 0.98,
-        }}
-      />
-      <Layer
-        id="m11-basin-river-selected-line"
-        type="line"
-        source="m11-basin-river-source"
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(selectedSegmentId)}
-        paint={{
-          'line-color': '#F97316',
-          'line-width': 5.5,
-          'line-opacity': 1,
-        }}
-      />
-    </Source>
-  )
-}
-
 function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
   if (!feature) return null
   const props = feature.properties
@@ -857,122 +513,6 @@ function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
         <dd>{warningLabel(props.warning_level)}</dd>
       </dl>
     </div>
-  )
-}
-
-function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegmentFeatureCollection }) {
-  return (
-    <Source id="m11-selected-segment-source" type="geojson" data={collection} promoteId="segment_id">
-      <Layer
-        id="m11-selected-segment-halo"
-        type="line"
-        source="m11-selected-segment-source"
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 8,
-          'line-opacity': 0.7,
-        }}
-      />
-      <Layer
-        id="m11-selected-segment-line"
-        type="line"
-        source="m11-selected-segment-source"
-        paint={{
-          'line-color': '#F97316',
-          'line-width': 5,
-          'line-opacity': 0.95,
-        }}
-      />
-    </Source>
-  )
-}
-
-/**
- * 代站 clustered-GeoJSON primitive：以 layerId/source 抽象组织（id 集中常量），未来切换到后端
- * station-MVT 点图层瓦片端点时仅替换 <Source> 实现即可，无需重写交互/popup 分发。
- */
-function M11StationClusterPrimitive({
-  collection,
-  selectedStationId,
-}: {
-  collection: M11StationFeatureCollection
-  selectedStationId?: string | null
-}) {
-  return (
-    <Source
-      id={MET_STATION_SOURCE_ID}
-      type="geojson"
-      data={collection}
-      cluster
-      clusterRadius={50}
-      clusterMaxZoom={14}
-      promoteId="station_id"
-    >
-      <Layer
-        id={MET_STATION_CLUSTER_LAYER_ID}
-        type="circle"
-        source={MET_STATION_SOURCE_ID}
-        filter={['has', 'point_count']}
-        paint={{
-          'circle-color': ['step', ['get', 'point_count'], '#90CAF9', 25, '#42A5F5', 100, '#1E88E5'],
-          'circle-radius': ['step', ['get', 'point_count'], 14, 25, 18, 100, 24],
-          'circle-opacity': 0.85,
-          'circle-stroke-color': '#FFFFFF',
-          'circle-stroke-width': 1.5,
-        }}
-      />
-      <Layer
-        id={MET_STATION_CLUSTER_COUNT_LAYER_ID}
-        type="symbol"
-        source={MET_STATION_SOURCE_ID}
-        filter={['has', 'point_count']}
-        layout={{
-          'text-field': ['get', 'point_count_abbreviated'],
-          'text-size': 12,
-          'text-allow-overlap': true,
-        }}
-        paint={{ 'text-color': '#0A1929' }}
-      />
-      <Layer
-        id={MET_STATION_POINT_LAYER_ID}
-        type="circle"
-        source={MET_STATION_SOURCE_ID}
-        filter={['!', ['has', 'point_count']]}
-        paint={{
-          'circle-color': '#F97316',
-          'circle-radius': 6,
-          'circle-opacity': 0.92,
-          'circle-stroke-color': '#FFFFFF',
-          'circle-stroke-width': 1.5,
-        }}
-      />
-      <Layer
-        id="met-stations-selected-halo"
-        type="circle"
-        source={MET_STATION_SOURCE_ID}
-        filter={stationFilter(selectedStationId)}
-        paint={{
-          'circle-color': '#FFFFFF',
-          'circle-radius': 12,
-          'circle-opacity': 0.82,
-          'circle-stroke-color': '#111827',
-          'circle-stroke-width': 1,
-        }}
-      />
-      <Layer
-        id="met-stations-selected-point"
-        type="circle"
-        source={MET_STATION_SOURCE_ID}
-        filter={stationFilter(selectedStationId)}
-        paint={{
-          'circle-color': '#FACC15',
-          'circle-radius': 7.5,
-          'circle-opacity': 1,
-          'circle-stroke-color': '#111827',
-          'circle-stroke-width': 2,
-        }}
-      />
-    </Source>
   )
 }
 
@@ -1004,14 +544,6 @@ function expandStationCluster(
   if (expansion && typeof expansion.then === 'function') {
     void expansion.then(flyToZoom).catch(() => undefined)
   }
-}
-
-function stationFilter(stationId?: string | null): FilterSpecification {
-  return [
-    'all',
-    ['!', ['has', 'point_count']],
-    ['==', ['get', 'station_id'], stationId ?? ''],
-  ] as FilterSpecification
 }
 
 function warningLabel(level: M11WarningLevel) {

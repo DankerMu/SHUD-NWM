@@ -66,12 +66,13 @@ Current API ownership line-count evidence:
 | `apps/api/route_registry.py` | 36 |
 | `apps/api/startup_wiring.py` | 106 |
 
-Frontend map builder owner-module evidence was updated on 2026-06-26 with:
+Frontend map owner-module evidence was updated on 2026-06-26 with:
 
 ```bash
-wc -l apps/frontend/src/components/map/M11MapLibreSurface.tsx apps/frontend/src/components/map/m11MapBuilders.ts
+wc -l apps/frontend/src/components/map/M11MapLibreSurface.tsx apps/frontend/src/components/map/m11MapBuilders.ts apps/frontend/src/components/map/m11MapPrimitives.tsx
 cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "registers|source|geometry|unavailable|selected segment"
 cd apps/frontend && pnpm test -- src/components/map/__tests__/M11FloatingControls.test.tsx
+cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "registers|layers|cluster|highlight|hover"
 cd apps/frontend && pnpm build
 uv run pytest -q tests/test_entropy_audit_script.py
 openspec validate governance-8-module-deepening --strict --no-interactive
@@ -79,12 +80,13 @@ openspec validate --all --strict --no-interactive
 git diff --check
 ```
 
-Current frontend map builder ownership line-count evidence:
+Current frontend map ownership line-count evidence:
 
 | Path | Current lines |
 |---|---:|
-| `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1080 |
+| `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 612 |
 | `apps/frontend/src/components/map/m11MapBuilders.ts` | 462 |
+| `apps/frontend/src/components/map/m11MapPrimitives.tsx` | 478 |
 
 ## Non-Targets
 
@@ -113,7 +115,7 @@ Current frontend map builder ownership line-count evidence:
 | `services/production_closure/two_node_e2e_evidence.py` | 9098 | P1 | `compute_control` production-closure evidence aggregator with display-readonly evidence consumers | Lane-decomposition plan. Keep the aggregator entrypoint stable while Docker security, readonly DB, API/browser, logs, producer identity, source artifact, and manual ops receipt lanes gain explicit contracts. | #672, #674 | Retain the aggregator until #672 defines lane contracts and #674 extracts governed lane implementation behind equivalent result/status/blocker semantics. No path-safety, redaction, current-run, alias, or final aggregation behavior is removed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #672/#674 own lane contract tests, equivalent-fixture checks, and production-closure verification. |
 | `services/production_closure/readiness_validation.py` | 3517 | P1 | `compute_control` production-closure readiness aggregator | Lane-decomposition plan. Keep readiness aggregation stable while dependency summary, scheduler evidence, live proof, exclusions, and final readiness ownership is mapped. | #673 | Retain current aggregation until #673 records lane owner modules, result shape, blocker namespaces, and focused verification. Reduction is valid only when final readiness semantics stay equivalent for existing receipts. | Current #668 verification is `wc -l` plus the structural audit row. #673 owns readiness lane inventory and focused validation coverage. |
 | `apps/api/main.py` | 339 | P2 | API bootstrap facade shared by `compute_control`, `display_readonly`, and `shared_contract`; OpenAPI patch owner is `apps/api/openapi_patching.py`; role-aware route registry owner is `apps/api/route_registry.py`; startup/static/cache owner is `apps/api/startup_wiring.py`; protected-mutation retained seam remains `apps/api/main.py` | OpenAPI patch owner extracted in #756, role-aware route registry extracted in #757, and startup/static/cache wiring extracted in #758. #759 explicitly retains the protected mutation auth guard, `_protected_mutation_policy`, `_PRE_BODY_PROTECTED_MUTATIONS`, bounded active/lifecycle body readers, and middleware ordering in `apps/api/main.py` while strengthening focused seam tests. #760 records the final API group task-to-issue-to-PR evidence map below. Keep `create_app()`, middleware, protected mutation guard, route registry call, OpenAPI assignment, `custom_openapi()`, `_custom_openapi_factory()`, and compatibility `_patch_*` imports stable. | #686, #756, #757, #758, #759, #760 | `apps/api/openapi_patching.py` owns runtime OpenAPI patch factory/order and runtime, pipeline, station-series, QHH latest-product, MVT, flood, met-stations, and layer metadata schema helpers. `apps/api/route_registry.py` owns business router ordering, runtime-router inclusion, and conditional Slurm router inclusion from `RuntimeConfig.slurm_routes_enabled`. `apps/api/startup_wiring.py` owns app state configuration, runtime config route/router construction, health/static/SPA route mounting, cache-control static files, frontend dist paths, success-envelope helper, and display-readonly cache warmup dispatch. `apps/api/main.py` remains the current retained seam for protected mutation pre-body authorization, request-body classification, request-id/error-envelope production, and no-downstream-write ordering. Future extraction requires a separate recorded owner-module decision that preserves request id/error shape, auth policy decisions/audit records, active/lifecycle bounded body validation, middleware ordering before write-capable handlers, display-readonly fail-closed behavior, route inventory, role-boundary, OpenAPI drift, runtime-mode, and affected frontend type verification. No auth semantics, request-body validation behavior, route registry role decision, OpenAPI patch internals, frontend UI, DB/schema, Slurm scheduling, scheduler, chain, or two-node behavior is changed by #759 or #760. | #756 verification: `uv run pytest -q tests/test_api.py tests/test_openapi_drift.py`; `cd apps/frontend && corepack pnpm check:api-types`. #757 verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py`; `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`. #758 verification: `uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_monitoring_api.py`; `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`; `uv run ruff check apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py apps/api/startup_wiring.py tests/test_api.py tests/test_openapi_drift.py tests/test_static_serving.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_monitoring_api.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`. #759 verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_retry_cancel_consistency.py`; `uv run ruff check apps/api/main.py tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_retry_cancel_consistency.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`. |
-| `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1080 | P2 | `display_readonly` frontend map rendering facade; pure map builder owner is `apps/frontend/src/components/map/m11MapBuilders.ts` | M11 pure map builders extracted in #761. Keep the display map rendering facade stable while registered overlays, vector source keys, GeoJSON collection builders, filters, label anchors, unavailable reasons, national-river filtering, and geometry budget summaries are owned by `m11MapBuilders.ts`. | #687, #761 | `apps/frontend/src/components/map/m11MapBuilders.ts` owns deterministic M11 builder logic and preserves helper re-exports through `M11MapLibreSurface.tsx`. `M11MapLibreSurface.tsx` retains MapLibre primitives, interaction dispatch, popup/selection state, camera/error handling, station clustered-GeoJSON rendering, Tianditu basemap style wiring, and the legacy facade imports used by pages/tests. Future extraction requires preserving source/layer IDs, source keys, tile URL templates, GeoJSON feature properties, budget skip semantics, unavailable reason text, station-MVT non-closure, display identity, and focused frontend verification. No MapLibre primitive extraction, click/hover priority change, popup behavior change, camera/error behavior change, backend station-MVT endpoint completion, generated API type change, or visual redesign is changed by #761. | #761 verification: focused M11 shell builder/source/geometry/unavailable/selected-segment regression, floating controls regression, frontend build, entropy script tests, OpenSpec single-change/all validation, and diff-check. |
+| `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 612 | P2 | `display_readonly` frontend map facade; pure builder owner is `apps/frontend/src/components/map/m11MapBuilders.ts`; MapLibre primitive owner is `apps/frontend/src/components/map/m11MapPrimitives.tsx` | M11 pure map builders extracted in #761 and MapLibre primitives extracted in #762. Keep the display map facade stable while deterministic builder logic is owned by `m11MapBuilders.ts` and source/layer JSX primitives, paint/layout, promote IDs, labels, and station cluster primitives are owned by `m11MapPrimitives.tsx`. | #687, #761, #762 | `apps/frontend/src/components/map/m11MapBuilders.ts` owns registered overlay construction, vector source keys, GeoJSON collections, filters, label anchors, geometry budget summaries, unavailable reasons, and national-river filtering. `apps/frontend/src/components/map/m11MapPrimitives.tsx` owns national river, basin boundary, basin label, basin-river, registered overlay, selected-segment, and station cluster primitives plus source/layer ID constants, paint/layout, promote IDs, selected/hovered filters, and station GeoJSON cluster rendering. `M11MapLibreSurface.tsx` retains query-derived composition, interactive layer ordering, click/hover dispatch, rendered-feature fallback, station cluster expansion, cursor state, popup state/rendering, fit/fly camera effects, map source-error handling, Tianditu style wiring, and legacy facade imports used by pages/tests. Future extraction requires preserving source/layer IDs, source keys, tile URL templates, GeoJSON feature properties, budget skip semantics, unavailable reason text, station-MVT non-closure, display identity, and focused frontend verification. No click/hover dispatch extraction, popup behavior change, camera/error behavior change, backend station-MVT endpoint completion, generated API type change, or visual redesign is changed by #761 or #762. | #761/#762 verification: focused M11 shell builder/source/geometry/unavailable/selected-segment and primitive layer/source/cluster/highlight/hover regressions, floating controls regression, frontend build, entropy script tests, OpenSpec single-change/all validation, and diff-check. |
 
 ## API Bootstrap Group Closeout Evidence
 
@@ -184,15 +186,19 @@ without changing runtime role boundaries or OpenAPI behavior.
 
 ### `apps/frontend/src/components/map/M11MapLibreSurface.tsx`
 
-The map surface remains the display-readonly rendering facade after #761.
+The map surface remains the display-readonly facade after #761 and #762.
 Pure builder ownership now lives in
 `apps/frontend/src/components/map/m11MapBuilders.ts`, which owns registered
 overlay construction, vector source keys, basin and selected-segment GeoJSON
 builders, national-river filtering, segment filters, label anchors, geometry
-budget summaries, and unavailable reason builders. The facade still re-exports
-the legacy helpers imported by M11 pages/tests and retains MapLibre primitive
-rendering, interaction dispatch, popup/selection state, camera/error handling,
-and station clustered-GeoJSON rendering for later scoped issues.
+budget summaries, and unavailable reason builders. MapLibre primitive ownership
+now lives in `apps/frontend/src/components/map/m11MapPrimitives.tsx`, which
+owns source/layer IDs, paint/layout, promote IDs, label markers, selected and
+hovered primitive filters, registered overlay layers, selected-segment layers,
+and the station clustered-GeoJSON primitive. The facade still re-exports the
+legacy helpers imported by M11 pages/tests and retains interaction dispatch,
+rendered-feature fallback, popup/selection state, camera/error handling, and
+Tianditu basemap style wiring for later scoped issues.
 
 ## Related Context
 
