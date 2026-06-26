@@ -199,3 +199,103 @@ Verification:
 - `uv run python scripts/governance/audit_repo_entropy.py --format json
   >/tmp/entropy-678-current.json` passed.
 - `git diff -- .entropy-baseline/latest.json --exit-code` passed.
+
+## Governance-8 Module Deepening Delta
+
+This 2026-06-26 UTC update records the report-only audit after Governance-8
+owner-family groups 1 through 6 completed. It is evidence/worklog only; it does
+not change detector logic, runtime behavior, source code, CI hard gates, or
+baseline state.
+
+| Field | Value |
+|---|---|
+| Command | `uv run python scripts/governance/audit_repo_entropy.py --format json >/tmp/nwm-entropy-768.json` |
+| Mode | `report-only` |
+| Report metadata timestamp | `2026-06-26T17:14:31+00:00` |
+| Schema | `governance-4a.entropy-report.v1` |
+| Total findings | 822 |
+| Global `budget_counted_count` | 338 |
+| Global `gate_eligible_count` | 0 |
+| Baseline exists | `true` |
+| Baseline written | `false` |
+
+### Structural File Budget Delta
+
+The six Governance-7 mandatory source facades now total 21,449 lines, down from
+the Governance-7 structural inventory baseline of 29,467 lines, for a net delta
+of -8,018 lines. This delta is not a hard-gate claim; it is the report-only
+evidence snapshot for #768.
+
+| Path | Governance-7 baseline | Current lines | Delta | Current report class |
+|---|---:|---:|---:|---|
+| `services/orchestrator/scheduler.py` | 6328 | 6815 | +487 | `mandatory-governance` |
+| `services/orchestrator/chain.py` | 6956 | 8222 | +1266 | `mandatory-governance` |
+| `services/production_closure/two_node_e2e_evidence.py` | 9098 | 4526 | -4572 | `mandatory-governance` |
+| `services/production_closure/readiness_validation.py` | 3517 | 1193 | -2324 | `mandatory-governance` |
+| `apps/api/main.py` | 2069 | 339 | -1730 | below current report threshold |
+| `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1499 | 354 | -1145 | below current report threshold |
+
+Current structural budget metadata:
+
+- `mandatory_governance_count`: 99
+- `governed_exemption_count`: 4
+- oversized report class split: 99 `mandatory-governance`, 0 other oversized
+  classes in this report
+
+### Compatibility-Facade Guard Delta
+
+The report-only compatibility-facade guard is clean:
+
+| Facade | Inventory | Status | Signal count |
+|---|---|---|---:|
+| scheduler | `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` | `ok` | 0 |
+| chain | `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` | `ok` | 0 |
+
+### Scoped-Context Delta
+
+The scoped agent context report is clean:
+
+| Metric | Count |
+|---|---:|
+| Governed scopes | 4 |
+| Missing instruction files | 0 |
+| Missing glossary links | 0 |
+| Stale context signals | 0 |
+| Total scoped-context signals | 0 |
+
+| Scope | Status |
+|---|---|
+| `services/orchestrator` | `pass` |
+| `services/production_closure` | `pass` |
+| `apps/api` | `pass` |
+| `apps/frontend` | `pass` |
+
+### Report-Only Finding Summary
+
+| Metric | Count |
+|---|---:|
+| Allowlisted findings | 484 |
+| Unallowlisted findings | 338 |
+| Budget-counted findings | 338 |
+| Not budget-counted findings | 484 |
+| P2 findings | 344 |
+| P3 findings | 478 |
+| `display_readonly` findings | 708 |
+| `shared_contract` findings | 114 |
+
+Current finding families:
+
+| Check ID | Count |
+|---|---:|
+| `stale-display-route-token` | 702 |
+| `placeholder-path-token` | 112 |
+| `broad-e2e-api-mock` | 6 |
+| `openapi-frontend-types-delegated` | 1 |
+| `openapi-frontend-types-signal` | 1 |
+
+Verification:
+
+- `uv run python scripts/governance/audit_repo_entropy.py --format json
+  >/tmp/nwm-entropy-768.json` passed.
+- `uv run pytest -q tests/test_entropy_audit_script.py` passed.
+- `git diff -- .entropy-baseline/latest.json --exit-code` passed.
