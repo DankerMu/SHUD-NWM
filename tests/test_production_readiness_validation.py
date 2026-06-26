@@ -13,6 +13,7 @@ from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
     readiness_dependency_live_proofs,
     readiness_dependency_summaries,
+    readiness_final_aggregation,
     readiness_item_contracts,
     readiness_live_proofs,
     readiness_scheduler_evidence,
@@ -2553,6 +2554,86 @@ def test_readiness_schema_validation_item_is_emitted_for_invalid_item_contract(
     assert any(blocker["surface"] == "readiness_schema_validation" for blocker in blockers)
     assert all(blocker["surface"] != "unit" for blocker in blockers)
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_final_aggregation_owner_facade_outputs_match(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    deterministic = _base_item("passed", "deterministic")
+    deterministic["item_id"] = "deterministic-review"
+    live_accepted = _base_item("passed", "live_proof")
+    live_accepted.update(
+        {
+            "item_id": "live-auth",
+            "surface": "live_backend_auth",
+            "required_for_final": True,
+            "live_proof_accepted": True,
+            "artifact_refs": ["live_proof_receipts.json"],
+        }
+    )
+    live_missing = _base_item("release_blocked", "not_executed")
+    live_missing.update(
+        {
+            "item_id": "live-target-environment-config",
+            "surface": "target_environment_config_proof",
+            "required_for_final": True,
+            "live_proof_accepted": False,
+            "artifact_refs": ["live_proof_receipts.json"],
+        }
+    )
+    exclusion = _base_item("not_executed", "not_executed")
+    exclusion.update(
+        {
+            "item_id": "scope-exclusion-national-data",
+            "surface": "incomplete_real_national_data",
+            "exclusions": [
+                {
+                    "id": "real-national-data-incomplete",
+                    "reason": "Incomplete real national data is a scoped exclusion.",
+                    "status": "not_executed",
+                    "removal_criteria": "Complete national-data coverage and live proof.",
+                }
+            ],
+        }
+    )
+    items = [deterministic, live_accepted, live_missing, exclusion]
+
+    owner_blockers = readiness_final_aggregation._release_blockers(items)
+    assert readiness_validation._release_blockers(items) == owner_blockers
+    assert readiness_validation._final_ready(items) is readiness_final_aggregation._final_ready(items) is False
+    assert readiness_final_aggregation._final_ready([deterministic, live_accepted]) is True
+    assert readiness_validation._summary_exclusions(items) == readiness_final_aggregation._summary_exclusions(items)
+
+    blocker_payload = readiness_final_aggregation._release_blocker_payload(
+        config,
+        items,
+        release_blockers=owner_blockers,
+        final_ready=readiness_final_aggregation._final_ready,
+        summary_exclusions=readiness_final_aggregation._summary_exclusions,
+    )
+    summary = readiness_final_aggregation._summary_payload(
+        config,
+        items,
+        release_blockers=owner_blockers,
+        final_ready=readiness_final_aggregation._final_ready,
+        summary_exclusions=readiness_final_aggregation._summary_exclusions,
+        path_for_evidence=readiness_validation._path_for_evidence,
+    )
+
+    assert blocker_payload["schema"] == "nhms.production_readiness.release_blockers.v1"
+    assert blocker_payload["final_production_readiness_claimed"] is False
+    assert [blocker["blocker_id"] for blocker in blocker_payload["blockers"]] == [
+        "m19-live-target-environment-config"
+    ]
+    assert blocker_payload["exclusions"][0]["surface"] == "incomplete_real_national_data"
+    assert summary["schema"] == "nhms.production_readiness.summary.v1"
+    assert summary["status"] == "release_blocked"
+    assert summary["evidence_dir"] == readiness_validation._path_for_evidence(config.lane_dir, config=config)
+    assert summary["deterministic_item_count"] == 3
+    assert summary["live_proof_item_count"] == 1
+    assert summary["required_live_proof_count"] == 2
+    assert summary["accepted_live_proof_count"] == 1
+    assert summary["artifact_refs"] == readiness_final_aggregation.SUMMARY_ARTIFACT_REFS
+    assert "Deterministic readiness evidence" in summary["interpretation"]
 
 
 def test_default_readiness_lane_is_deterministic_release_blocked_and_side_effect_free(
