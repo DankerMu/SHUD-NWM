@@ -1910,12 +1910,60 @@
   - Boundary Surfaces: This slice may create an interaction owner module and make `M11MapLibreSurface.tsx` call it from React callbacks, but it must not move popup rendering internals, curve-window placement, selected station/segment popup state, fit/fly camera effects, map source-error handling, loading/unavailable rendering, #761 builders, #762 primitives, station-MVT backend work, generated API types, or visual semantics.
   - Regression Rows: interactive layer IDs remain ordered station point/cluster -> basin-river line -> basin fill -> MVT hit; hover prioritizes station cluster/point over basin river, basin river over MVT hit, and MVT hit over basin fill, then clears cursor/hover on no hit; mouseleave clears hovered river segment, hover callback, and cursor; click prioritizes station cluster expansion, station point payload, basin river payload, MVT hit payload, then basin fill payload; rendered-feature fallback catches query errors and returns null; station cluster expansion keeps callback and promise forms, ignores invalid zoom/source/cluster/geometry, and flies to point coordinates with the same duration; event payload `layerId` values and feature forwarding remain unchanged.
   - Verification Floor: focused verification command above; `cd apps/frontend && pnpm build`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
-- [ ] 6.4 M11 camera and map-error helper extraction.
+- [x] 6.4 M11 camera and map-error helper extraction.
   - Module/Scope: initial fit, fit/fly de-dupe, source-error reset, Tianditu glyph warning downgrade, loading/unavailable state rendering.
   - Dependencies: 6.1 and 6.2.
   - Out of Scope: interaction dispatch, popup/selection state.
   - Focused Verification: `cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "camera|fit|source error|glyph|unavailable|loading"`.
   - Inventory/Evidence Update: update structural inventory frontend row or scoped map ownership notes with camera/error owner module and command.
+  - Fixture Level: expanded camera/error/status owner extraction. This slice moves runtime camera, MapLibre source-error,
+    Tianditu style, and loading/unavailable overlay behavior into a focused owner while `M11MapLibreSurface.tsx` remains
+    the query-derived composition facade and keeps popup/selection rendering for 6.5.
+  - Repair Intensity: medium-high, because camera fit/fly dedupe and transient empty-state suppression are visible
+    regressions during route transitions, and MapLibre source errors must remain scoped warnings instead of breaking the
+    surrounding map controls.
+  - Risk Pack Selection: Selected: Public API / CLI / script entry (`M11MapLibreSurface`, `M11MapSurface`,
+    `m11MapStyleUrls`, `M11MapCameraFit`, `M11MapCameraFlyTo`, and existing page imports remain compatible);
+    Schema / columns / units / field names (data test IDs, `data-basemap-style`, selected-segment map-state values,
+    unavailable reason text, and source-error fallback text remain stable); Legacy compatibility / examples (legacy
+    facade re-exports keep `OverviewPage` and `M11Controls` imports unchanged); Error handling / rollback / partial
+    outputs (glyph errors stay console-warning-only, non-glyph source errors stay scoped map banners, and source errors
+    reset when map identity changes); Documentation / migration notes (structural inventory records the runtime owner
+    and retained surface boundary); Release / packaging / dependency compatibility (no new frontend runtime dependency).
+    Domain Selected: Published NHMS artifacts / display identity for preserving display-readonly map empty-state
+    honesty and station-MVT non-closure. Not Selected: Config / project setup beyond existing Tianditu env override;
+    File IO / path safety / overwrite; Auth / permissions / secrets; Concurrency / shared state / ordering beyond React
+    camera effect ordering; Resource limits / large input / discovery beyond consuming #761 geometry budgets;
+    Geospatial / CRS / basin geometry beyond fit bounds forwarding; Hydro-met time series / forcing windows; SHUD
+    numerical runtime / conservation / NaN; PostGIS / TimescaleDB behavior; Slurm production lifecycle; External
+    hydro-met providers / snapshot reproducibility; Run manifest / QC provenance; interaction dispatch; popup internals;
+    backend station-MVT endpoint completion; visual redesign.
+  - Invariant Matrix: Governing invariant: extracting runtime camera/error/status helpers must not change initial view,
+    fit/fly commands, dedupe keys, source-error reset behavior, glyph warning downgrade, basemap style identity, or
+    loading/unavailable notice visibility. Source-of-truth identity/contract: the runtime owner module owns
+    `m11MapStyleUrls`, Tianditu `MapStyle` construction, initial camera state, fit/fly effect keys, source-error reset
+    keys, MapLibre error handling, and status overlay rendering. Surfaces: Producers: `fitTo`, `flyTo`, `MapRef`,
+    `M11QueryState.basemap/layer/validTime`, registered overlay source id, basin feature counts, unavailable reasons,
+    selected-segment map state, and loading flags; Validators/preflight: focused M11Shell camera/fit/source-error/glyph/
+    unavailable/loading tests, frontend build, OpenSpec validation, and inventory evidence; Public entrypoints:
+    `M11MapLibreSurface`, `M11MapSurface`, `m11MapStyleUrls`, camera prop types, status test IDs, and map data
+    attributes; Consumers/downstream: OverviewPage route fit state, M11Controls basemap options, map error banners, and
+    selected-segment unavailable notices; Failure paths/stale state: duplicate equal fit/fly props, map remount with
+    synchronous `fitTo`, non-glyph source errors, glyph-only symbol-layer errors, loading/boundaryLoading frame-1
+    suppression, over-budget basin boundaries, missing basin river geometry, and malformed selected-segment geometry.
+  - Boundary Surfaces: This slice may create a runtime owner module and make `M11MapLibreSurface.tsx` consume its hook,
+    style constants, source-error handler, and status overlay component, but it must not move click/hover dispatch,
+    rendered-feature fallback, cluster expansion behavior, popup rendering internals, curve-window placement, selected
+    station/segment popup state, #761 builders, #762 primitives, #763 interactions, station-MVT backend work, generated
+    API types, or visual semantics.
+  - Regression Rows: initial view uses `fitTo` bounds with padding when mounted with synchronous fit data, otherwise
+    falls back to the China overview camera; equal `fitTo` and equal `flyTo` props do not repeat MapLibre commands across
+    rerenders; distinct fit/fly keys still call `fitBounds`/`flyTo` with the same duration and padding/zoom semantics;
+    source errors clear when basin feature count, overlay source id, basemap, layer, or valid time changes; glyph errors
+    warn without rendering `m11-map-source-error`; non-glyph source errors render the same scoped banner while other map
+    controls remain usable; loading and boundaryLoading suppress transient basin/map unavailable notices until data
+    settles; basin, overlay, basin-river, and selected-segment unavailable test IDs and Chinese copy remain unchanged.
+  - Verification Floor: focused verification command above; `cd apps/frontend && pnpm build`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
 - [ ] 6.5 M11 popup and selection boundary stabilization.
   - Module/Scope: popup slot, curve-window placement, selected station data attributes, selected segment data attributes, popup identity updates after drag, station-MVT separation.
   - Dependencies: 6.3.
