@@ -30,6 +30,9 @@ from services.production_closure import (
     readiness_scheduler_live_proof as _readiness_scheduler_live_proof,
 )
 from services.production_closure import (
+    readiness_scope_exclusions as _readiness_scope_exclusions,
+)
+from services.production_closure import (
     readiness_shared_artifacts as _readiness_shared_artifacts,
 )
 
@@ -665,52 +668,7 @@ def _required_live_blocker(
 
 
 def _exclusion_items(config: ProductionReadinessConfig) -> list[dict[str, Any]]:
-    del config
-    return [
-        _item(
-            item_id="scope-exclusion-cldas",
-            surface="cldas_restricted_source",
-            status="not_executed",
-            execution_mode="not_executed",
-            required_for_final=False,
-            live_proof_accepted=False,
-            artifact_refs=["readiness_items.json", "summary.json"],
-            residual_risk="CLDAS restricted data is outside the current M19 readiness scope.",
-            removal_criteria=(
-                "Enable CLDAS adapter, credentials, data-quality checks, and accepted live proof in a later scope."
-            ),
-            exclusions=[
-                {
-                    "id": "cldas-restricted",
-                    "reason": "CLDAS is excluded by current product decision for M19.",
-                    "status": "not_executed",
-                    "removal_criteria": "Complete CLDAS authorization and production best-available integration.",
-                }
-            ],
-        ),
-        _item(
-            item_id="scope-exclusion-national-data",
-            surface="incomplete_real_national_data",
-            status="not_executed",
-            execution_mode="not_executed",
-            required_for_final=False,
-            live_proof_accepted=False,
-            artifact_refs=["readiness_items.json", "summary.json"],
-            residual_risk="Complete real national data coverage is outside the current deterministic M19 scope.",
-            removal_criteria=(
-                "Attach accepted target-environment national-data, live PostGIS, and performance evidence in a later "
-                "scope."
-            ),
-            exclusions=[
-                {
-                    "id": "real-national-data-incomplete",
-                    "reason": "Incomplete real national data is a scoped exclusion, not deterministic failure.",
-                    "status": "not_executed",
-                    "removal_criteria": "Complete national-data coverage and live MVT/performance proof.",
-                }
-            ],
-        ),
-    ]
+    return _readiness_scope_exclusions._exclusion_items(config, item_factory=_item)
 
 
 def _validate_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

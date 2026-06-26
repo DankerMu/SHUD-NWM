@@ -17,6 +17,7 @@ from services.production_closure import (
     readiness_live_proofs,
     readiness_scheduler_evidence,
     readiness_scheduler_live_proof,
+    readiness_scope_exclusions,
     readiness_shared_artifacts,
     readiness_validation,
     slurm_validation,
@@ -2611,6 +2612,48 @@ def test_exclusions_are_not_failed_and_do_not_satisfy_live_proof(tmp_path: Path)
     assert {item["status"] for item in exclusion_items} == {"not_executed"}
     assert all(item["execution_mode"] == "not_executed" for item in exclusion_items)
     assert all(item["live_proof_accepted"] is False for item in exclusion_items)
+
+
+def test_scope_exclusion_owner_facade_outputs_match(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+
+    owner_items = readiness_scope_exclusions._exclusion_items(config, item_factory=readiness_validation._item)
+    facade_items = readiness_validation._exclusion_items(config)
+
+    assert facade_items == owner_items
+    assert [item["item_id"] for item in owner_items] == [
+        "scope-exclusion-cldas",
+        "scope-exclusion-national-data",
+    ]
+    assert [item["surface"] for item in owner_items] == [
+        "cldas_restricted_source",
+        "incomplete_real_national_data",
+    ]
+    assert [item["exclusions"][0]["id"] for item in owner_items] == [
+        "cldas-restricted",
+        "real-national-data-incomplete",
+    ]
+    assert all(item["status"] == "not_executed" for item in owner_items)
+    assert all(item["execution_mode"] == "not_executed" for item in owner_items)
+    assert all(item["required_for_final"] is False for item in owner_items)
+    assert all(item["live_proof_accepted"] is False for item in owner_items)
+    assert all(item["artifact_refs"] == ["readiness_items.json", "summary.json"] for item in owner_items)
+    assert all(item["residual_risk"] for item in owner_items)
+    assert all(item["removal_criteria"] for item in owner_items)
+
+
+def test_scope_exclusions_do_not_add_live_counts_or_release_blockers(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
+
+    summary = _summary(root)
+    assert summary["live_proof_item_count"] == 0
+    assert summary["required_live_proof_count"] == 9
+    assert summary["accepted_live_proof_count"] == 0
+    assert not {
+        "cldas_restricted_source",
+        "incomplete_real_national_data",
+    } & {blocker["surface"] for blocker in _blockers(root)}
 
 
 def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(
