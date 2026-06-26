@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -18,6 +18,7 @@ import services.production_closure.two_node_e2e_browser_lane as two_node_e2e_bro
 import services.production_closure.two_node_e2e_cross_plane_lane as two_node_e2e_cross_plane_lane
 import services.production_closure.two_node_e2e_docker_preflight as two_node_e2e_docker_preflight
 import services.production_closure.two_node_e2e_docker_security as two_node_e2e_docker_security
+import services.production_closure.two_node_e2e_final_aggregation as two_node_e2e_final_aggregation
 import services.production_closure.two_node_e2e_logs_lane as two_node_e2e_logs_lane
 import services.production_closure.two_node_e2e_manual_ops_lane as two_node_e2e_manual_ops_lane
 import services.production_closure.two_node_e2e_metadata_lane as two_node_e2e_metadata_lane
@@ -26,8 +27,6 @@ import services.production_closure.two_node_e2e_simple_live_lane as two_node_e2e
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
-    atomic_write_bytes_no_follow,
-    ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
@@ -52,6 +51,18 @@ from services.production_closure.two_node_e2e_docker_security import (
     DockerSecurityEvaluationHelpers,
     evaluate_docker_security,
 )
+from services.production_closure.two_node_e2e_final_aggregation import (
+    APPROVED_EVIDENCE_ROOTS,
+    MAX_EVIDENCE_PAYLOAD_BYTES,
+    REPO_ROOT,
+    STATUS_BLOCKED,
+    STATUS_FAIL,
+    STATUS_PARTIAL,
+    STATUS_PASS,
+    EvidenceWriter,
+    FinalAggregationHelpers,
+    TwoNodeE2EEvidenceError,
+)
 from services.production_closure.two_node_e2e_logs_lane import (
     LogsLaneEvaluationHelpers,
     evaluate_logs_lane,
@@ -61,7 +72,6 @@ from services.production_closure.two_node_e2e_manual_ops_lane import (
     evaluate_manual_ops_lane,
 )
 from services.production_closure.two_node_e2e_metadata_lane import (
-    FULL_PASS_SOURCE_SET,
     STRICT_IDENTITY_FIELDS,
     STRICT_LOG_IDENTITY_FIELDS,
     MetadataLaneEvaluationHelpers,
@@ -76,18 +86,20 @@ from services.production_closure.two_node_e2e_simple_live_lane import (
     evaluate_simple_live_lane,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVIDENCE_ROOT = REPO_ROOT / "artifacts" / "two-node-e2e"
-APPROVED_EVIDENCE_ROOTS = (REPO_ROOT / "artifacts", Path("/scratch/frd_muziyao"))
-SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-MAX_EVIDENCE_PAYLOAD_BYTES = 1024 * 1024
-
-STATUS_PASS = "PASS"
-STATUS_PARTIAL = "PARTIAL"
-STATUS_FAIL = "FAIL"
-STATUS_BLOCKED = "BLOCKED"
-FINAL_EVIDENCE_SCHEMA = "nhms.two_node_e2e.final_evidence.v1"
 READONLY_DB_LIVE_SCHEMA = two_node_e2e_readonly_db_lane.READONLY_DB_LIVE_SCHEMA
+FINAL_EVIDENCE_SCHEMA = two_node_e2e_final_aggregation.FINAL_EVIDENCE_SCHEMA
+FULL_PASS_SOURCE_SET = two_node_e2e_final_aggregation.FULL_PASS_SOURCE_SET
+SAFE_RUN_ID_RE = two_node_e2e_final_aggregation.SAFE_RUN_ID_RE
+FINAL_AGGREGATION_OWNER = two_node_e2e_final_aggregation.FINAL_AGGREGATION_OWNER
+FINAL_AGGREGATION_VERIFICATION = two_node_e2e_final_aggregation.FINAL_AGGREGATION_VERIFICATION
+FINAL_AGGREGATION_GUARD_SYMBOLS = two_node_e2e_final_aggregation.FINAL_AGGREGATION_GUARD_SYMBOLS
+FINAL_AGGREGATION_BLOCKER_NAMESPACES = two_node_e2e_final_aggregation.FINAL_AGGREGATION_BLOCKER_NAMESPACES
+_safe_resolved_evidence_root = two_node_e2e_final_aggregation._safe_resolved_evidence_root
+_path_is_relative_to = two_node_e2e_final_aggregation._path_is_relative_to
+_refuse_symlink_components = two_node_e2e_final_aggregation._refuse_symlink_components
+_safe_run_id = two_node_e2e_final_aggregation._safe_run_id
+_public_path = two_node_e2e_final_aggregation._public_path
 
 FINAL_REQUIRED_LANES = (
     "metadata",
@@ -284,6 +296,7 @@ TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY = (
     "uv run pytest -q tests/test_two_node_e2e_evidence.py "
     '-k "logs or log_uri or redaction or evidence_root or path_safety or stale"'
 )
+TWO_NODE_E2E_FINAL_AGGREGATION_OWNER = two_node_e2e_final_aggregation.FINAL_AGGREGATION_OWNER
 TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     "lane-result-adapter": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
@@ -372,16 +385,32 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     },
     "approved-root-path-safety": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "implementation_owner": TWO_NODE_E2E_FINAL_AGGREGATION_OWNER,
         "consumers": FINAL_REQUIRED_LANES,
         "guard_symbols": (
             "APPROVED_EVIDENCE_ROOTS",
-            "EvidenceWriter",
-            "_safe_resolved_evidence_root",
             "_read_json",
             "_read_json_bytes",
-            "_refuse_symlink_components",
             "_recorded_path_approval_blockers",
             "_producer_source_artifact_record_blockers",
+        ),
+        "facade_alias_symbols": (
+            "APPROVED_EVIDENCE_ROOTS",
+            "EvidenceWriter",
+            "_safe_resolved_evidence_root",
+            "_path_is_relative_to",
+            "_refuse_symlink_components",
+            "_safe_run_id",
+            "_public_path",
+        ),
+        "implementation_guard_symbols": (
+            "two_node_e2e_final_aggregation.APPROVED_EVIDENCE_ROOTS",
+            "two_node_e2e_final_aggregation.EvidenceWriter",
+            "two_node_e2e_final_aggregation._safe_resolved_evidence_root",
+            "two_node_e2e_final_aggregation._path_is_relative_to",
+            "two_node_e2e_final_aggregation._refuse_symlink_components",
+            "two_node_e2e_final_aggregation._safe_run_id",
+            "two_node_e2e_final_aggregation._public_path",
         ),
         "namespaces": (
             "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
@@ -393,14 +422,22 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
     },
     "redaction": {
         "owner": TWO_NODE_E2E_SHARED_CONTRACT_OWNER,
+        "implementation_owner": TWO_NODE_E2E_FINAL_AGGREGATION_OWNER,
         "consumers": FINAL_REQUIRED_LANES,
         "guard_symbols": (
             "LaneEvaluation.to_summary",
-            "EvidenceWriter.write_json",
             "redact_payload",
             "redact_text",
             "_blocker",
             "_finding",
+        ),
+        "facade_alias_symbols": (
+            "EvidenceWriter",
+            "EvidenceWriter.write_json",
+        ),
+        "implementation_guard_symbols": (
+            "two_node_e2e_final_aggregation.EvidenceWriter",
+            "two_node_e2e_final_aggregation.EvidenceWriter.write_json",
         ),
         "namespaces": (
             "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
@@ -431,13 +468,6 @@ TWO_NODE_E2E_SHARED_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
         "verification": TWO_NODE_E2E_SHARED_CONTRACT_VERIFICATION_SAFETY,
     },
 }
-
-
-class TwoNodeE2EEvidenceError(RuntimeError):
-    def __init__(self, error_code: str, message: str) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
 
 
 @dataclass(frozen=True)
@@ -477,109 +507,6 @@ class TwoNodeE2EEvidenceConfig:
             reduced_scope=reduced_scope if reduced_scope is not None else env_reduced_scope,
             force=force,
         )
-
-
-@dataclass
-class EvidenceWriter:
-    evidence_root: Path
-    lane_dir: Path
-    force: bool = False
-    _created_paths: set[Path] = field(default_factory=set)
-
-    def prepare(self) -> None:
-        evidence_root = _safe_resolved_evidence_root(self.evidence_root)
-        lane_dir = self.lane_dir.resolve(strict=False)
-        try:
-            lane_dir.relative_to(evidence_root)
-        except ValueError as error:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                "Final evidence lane directory must stay under the approved evidence root.",
-            ) from error
-        _refuse_symlink_components(evidence_root)
-        _refuse_symlink_components(lane_dir.parent)
-        if lane_dir.exists() and lane_dir.is_symlink():
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                f"Final evidence lane path must not be a symlink: {lane_dir}.",
-            )
-        if lane_dir.exists() and not lane_dir.is_dir():
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                f"Final evidence lane path must be a directory: {lane_dir}.",
-            )
-        if lane_dir.exists() and any(lane_dir.iterdir()) and not self.force:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_EXISTS",
-                f"Final evidence bundle already exists: {lane_dir}. Use --force to overwrite this run_id.",
-            )
-        try:
-            ensure_directory_no_follow(evidence_root)
-            ensure_directory_no_follow(lane_dir, containment_root=evidence_root)
-        except SafeFilesystemError as error:
-            error_code = (
-                "TWO_NODE_E2E_EVIDENCE_WRITE_FAILED"
-                if error.kind == "io"
-                else "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE"
-            )
-            raise TwoNodeE2EEvidenceError(error_code, f"Failed to prepare final evidence lane: {error}") from error
-
-    def write_json(self, path: Path, payload: Any) -> None:
-        safe_path = self._safe_file_path(path)
-        if safe_path.exists() and safe_path not in self._created_paths and not self.force:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_EXISTS",
-                f"Final evidence file already exists: {safe_path}. Use --force to overwrite this run_id.",
-            )
-        try:
-            content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
-        except RecursionError as error:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
-                "Final evidence payload is too deeply nested to redact safely.",
-            ) from error
-        if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PAYLOAD_TOO_LARGE",
-                f"Final evidence payload exceeds {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
-            )
-        try:
-            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
-            self._created_paths.add(safe_path)
-        except SafeFilesystemError as error:
-            error_code = (
-                "TWO_NODE_E2E_EVIDENCE_WRITE_FAILED"
-                if error.kind == "io"
-                else "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE"
-            )
-            raise TwoNodeE2EEvidenceError(error_code, f"Failed to write final evidence file: {error}") from error
-
-    def _safe_file_path(self, path: Path) -> Path:
-        if path.is_symlink():
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                f"Final evidence file must not be a symlink: {path}.",
-            )
-        lane_dir = self.lane_dir.resolve(strict=False)
-        parent = path.parent.resolve(strict=False)
-        try:
-            parent.relative_to(lane_dir)
-        except ValueError as error:
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                "Final evidence file path must stay under the final evidence lane.",
-            ) from error
-        _refuse_symlink_components(path.parent)
-        try:
-            ensure_directory_no_follow(path.parent, containment_root=self.lane_dir)
-        except SafeFilesystemError as error:
-            error_code = (
-                "TWO_NODE_E2E_EVIDENCE_WRITE_FAILED"
-                if error.kind == "io"
-                else "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE"
-            )
-            raise TwoNodeE2EEvidenceError(error_code, f"Failed to prepare final evidence parent: {error}") from error
-        return parent / path.name
 
 
 @dataclass(frozen=True)
@@ -736,36 +663,22 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
         helpers=cross_plane_helpers,
     )
 
-    final_status = _final_status(lanes, source_scope_results, scope)
-    blockers, findings = _collect_blockers_and_findings(lanes, source_scope_results, scope)
-    summary = {
-        "schema": FINAL_EVIDENCE_SCHEMA,
-        "status": final_status,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "run_id": config.run_id,
-        "evidence_root": _public_path(config.evidence_root),
-        "run_dir": _public_path(config.run_dir),
-        "evidence_dir": _public_path(config.lane_dir),
-        "metadata": _metadata_summary(metadata_doc, metadata, metadata_lane),
-        "strict_identity": {
-            "declared_sources": list(scope["declared_sources"]),
-            "reduced_scope": scope["reduced_scope"],
-            "reduced_scope_declared": scope["reduced_scope_declared"],
-            "full_pass_source_set": sorted(FULL_PASS_SOURCE_SET),
-            "sources": redact_payload(strict_identities),
-        },
-        "lane_summaries": {name: lane.to_summary() for name, lane in lanes.items()},
-        "source_scope_results": source_scope_results,
-        "blockers": blockers,
-        "findings": findings,
-        "redaction": {
-            "sensitive_values_redacted": True,
-            "raw_secret_material_written": False,
-            "evidence_root_approved": True,
-        },
-    }
-    writer.write_json(config.lane_dir / "summary.json", summary)
-    return redact_payload(summary)
+    summary = two_node_e2e_final_aggregation.build_final_summary(
+        config=config,
+        metadata_doc=metadata_doc,
+        metadata=metadata,
+        metadata_lane=metadata_lane,
+        strict_identities=strict_identities,
+        lanes=lanes,
+        source_scope_results=source_scope_results,
+        scope=scope,
+        helpers=_final_aggregation_helpers(),
+    )
+    return two_node_e2e_final_aggregation.write_final_summary(
+        writer=writer,
+        config=config,
+        summary=summary,
+    )
 
 
 def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
@@ -1021,6 +934,14 @@ def _cross_plane_helpers() -> CrossPlaneEvaluationHelpers[LaneEvaluation]:
     )
 
 
+def _final_aggregation_helpers() -> FinalAggregationHelpers:
+    return FinalAggregationHelpers(
+        blocker=_blocker,
+        finding=_finding,
+        with_context=_with_context,
+    )
+
+
 def _manual_ops_lane_helpers() -> ManualOpsLaneEvaluationHelpers[LaneEvaluation]:
     return ManualOpsLaneEvaluationHelpers(
         missing_lane=_missing_lane,
@@ -1058,20 +979,7 @@ def _final_status(
     source_scope_results: Mapping[str, Mapping[str, Any]],
     scope: Mapping[str, Any],
 ) -> str:
-    lane_statuses = [lane.status for lane in lanes.values()]
-    source_statuses = [str(result.get("status")) for result in source_scope_results.values()]
-    if STATUS_FAIL in lane_statuses or STATUS_FAIL in source_statuses:
-        return STATUS_FAIL
-    if STATUS_BLOCKED in lane_statuses or STATUS_BLOCKED in source_statuses:
-        return STATUS_BLOCKED
-    if not two_node_e2e_cross_plane_lane.is_full_scope_pass(
-        tuple(scope["declared_sources"]),
-        source_scope_results,
-    ):
-        return STATUS_PARTIAL
-    if STATUS_PARTIAL in lane_statuses or STATUS_PARTIAL in source_statuses:
-        return STATUS_PARTIAL
-    return STATUS_PASS
+    return two_node_e2e_final_aggregation.final_status(lanes, source_scope_results, scope)
 
 
 def _collect_blockers_and_findings(
@@ -1079,63 +987,12 @@ def _collect_blockers_and_findings(
     source_scope_results: Mapping[str, Mapping[str, Any]],
     scope: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    blockers: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
-    if not scope["declared_sources"]:
-        blockers.append(
-            _blocker(
-                "TWO_NODE_E2E_DECLARED_SOURCES_MISSING",
-                "Final evidence requires declared source scope.",
-            )
-        )
-    if not two_node_e2e_cross_plane_lane.is_full_scope_sources(tuple(scope["declared_sources"])):
-        findings.append(
-            _finding(
-                "TWO_NODE_E2E_REDUCED_SOURCE_SCOPE",
-                "Final evidence is not full GFS/IFS scope and cannot be full PASS.",
-                declared_sources=list(scope["declared_sources"]),
-                reduced_scope=scope["reduced_scope"],
-            )
-        )
-    for lane_name, lane in lanes.items():
-        for blocker in lane.blockers:
-            blockers.append(_with_context(blocker, lane=lane_name))
-        for finding in lane.findings:
-            findings.append(_with_context(finding, lane=lane_name))
-        if lane.status == STATUS_BLOCKED:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_LANE_BLOCKED",
-                    f"Required lane {lane_name} is BLOCKED.",
-                    lane=lane_name,
-                )
-            )
-        elif lane.status == STATUS_FAIL:
-            findings.append(
-                _finding(
-                    "TWO_NODE_E2E_LANE_FAILED",
-                    f"Required lane {lane_name} failed.",
-                    lane=lane_name,
-                )
-            )
-    for source, result in source_scope_results.items():
-        if result.get("status") == STATUS_BLOCKED:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_SOURCE_BLOCKED",
-                    "Declared source scope is blocked.",
-                    source=source,
-                )
-            )
-        elif result.get("status") == STATUS_FAIL:
-            findings.append(
-                _finding(
-                    "TWO_NODE_E2E_SOURCE_FAILED",
-                    "Declared source scope failed.",
-                    source=source,
-                )
-            )
-    return blockers, findings
+    return two_node_e2e_final_aggregation.collect_blockers_and_findings(
+        lanes,
+        source_scope_results,
+        scope,
+        helpers=_final_aggregation_helpers(),
+    )
 
 
 def _metadata_summary(
@@ -1143,21 +1000,7 @@ def _metadata_summary(
     metadata: Mapping[str, Any],
     metadata_lane: LaneEvaluation,
 ) -> dict[str, Any]:
-    if doc is None:
-        return {
-            "status": metadata_lane.status,
-            "evidence_path": None,
-            "schema": None,
-            "reason": "No run metadata/identity file was found.",
-        }
-    return {
-        "status": metadata_lane.status,
-        "evidence_path": _public_path(doc.path),
-        "evidence_sha256": doc.sha256,
-        "schema": metadata.get("schema"),
-        "blockers": list(metadata_lane.blockers),
-        "findings": list(metadata_lane.findings),
-    }
+    return two_node_e2e_final_aggregation.metadata_summary(doc, metadata, metadata_lane)
 
 
 def _find_first_json(run_dir: Path, candidates: Sequence[str]) -> EvidenceDocument | None:
@@ -4563,21 +4406,6 @@ def _bounded_value(value: Any, *, depth: int) -> tuple[Any, bool]:
     return value, False
 
 
-def _safe_resolved_evidence_root(path: Path) -> Path:
-    resolved = path.expanduser().resolve(strict=False)
-    approved_roots = tuple(root.expanduser().resolve(strict=False) for root in APPROVED_EVIDENCE_ROOTS)
-    for root in approved_roots:
-        try:
-            resolved.relative_to(root)
-            return resolved
-        except ValueError:
-            continue
-    raise TwoNodeE2EEvidenceError(
-        "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
-        "Two-node E2E evidence root must be under repository artifacts/ or /scratch/frd_muziyao.",
-    )
-
-
 def _approved_artifact_path(value: str) -> Path:
     path = Path(value).expanduser()
     resolved = path.resolve(strict=False)
@@ -4603,14 +4431,6 @@ def _approved_artifact_containment_root(path: Path) -> Path:
     )
 
 
-def _path_is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
-    except ValueError:
-        return False
-
-
 def _normalize_posix_path(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -4621,26 +4441,6 @@ def _normalize_posix_path(value: str) -> str:
     if len(normalized) > 1 and normalized.endswith("/"):
         normalized = normalized.rstrip("/")
     return normalized
-
-
-def _refuse_symlink_components(path: Path) -> None:
-    current = path.expanduser()
-    for component in (current, *current.parents):
-        if component.exists() and component.is_symlink():
-            raise TwoNodeE2EEvidenceError(
-                "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE",
-                f"Evidence path component must not be a symlink: {component}.",
-            )
-
-
-def _safe_run_id(value: str) -> str:
-    text = value.strip()
-    if not SAFE_RUN_ID_RE.fullmatch(text) or ".." in text:
-        raise TwoNodeE2EEvidenceError(
-            "TWO_NODE_E2E_RUN_ID_UNSAFE",
-            "run_id must be a bounded alphanumeric identifier using only '.', '_' or '-'.",
-        )
-    return text
 
 
 def _default_run_id() -> str:
@@ -4665,14 +4465,6 @@ def _optional_bool(value: Any) -> bool | None:
     if text in {"0", "false", "no", "off", "full"}:
         return False
     return None
-
-
-def _public_path(path: Path) -> str:
-    resolved = path.resolve(strict=False)
-    try:
-        return str(resolved.relative_to(REPO_ROOT))
-    except ValueError:
-        return str(resolved)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

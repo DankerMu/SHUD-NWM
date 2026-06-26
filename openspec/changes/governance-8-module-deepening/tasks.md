@@ -1505,10 +1505,38 @@
     single-source behavior.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"`.
   - Inventory/Evidence Update: update two-node inventory row `source-scope / cross-plane aggregation`.
-- [ ] 3.12 Two-node final aggregation extraction.
+- [x] 3.12 Two-node final aggregation extraction.
   - Module/Scope: final status ordering, final summary schema, blocker/finding collection, output path safety, redaction, force/existing-output behavior.
   - Dependencies: 3.1-3.11.
   - Out of Scope: moving any lane not already interface-stable, changing final status semantics.
+  - Fixture Rows: `services.production_closure.two_node_e2e_final_aggregation`
+    owns `FINAL_EVIDENCE_SCHEMA`, final status constants,
+    `FINAL_AGGREGATION_*` guard metadata, `TwoNodeE2EEvidenceError`,
+    `APPROVED_EVIDENCE_ROOTS`, final output path-safety helpers,
+    `EvidenceWriter`, `FinalAggregationHelpers`, `final_status`,
+    `collect_blockers_and_findings`, `metadata_summary`,
+    `build_final_summary`, and `write_final_summary`;
+    `validate_two_node_e2e_evidence(config)` keeps lane orchestration and
+    delegates final summary/status/write behavior to the owner after
+    `writer.prepare()` has already enforced early output path safety.
+  - Risk Axes: preserves FAIL > BLOCKED > PARTIAL > PASS ordering, GFS+IFS
+    full PASS requirements, reduced/incomplete source-scope PARTIAL semantics,
+    blocker versus finding split, public final summary schema, strict identity
+    redaction, approved-root path checks, unsafe run ID rejection, symlink and
+    traversal rejection, existing-output `force` behavior, oversized/deep JSON
+    write blockers, and facade compatibility re-exports; no lane evaluator,
+    source proof contract, cross-plane/source-scope semantics, DB schema/role,
+    Slurm scheduling, frontend/display UI, or production topology behavior
+    moves in this slice.
+  - Regression Rows: added owner guard and facade re-export parity tests for
+    final schema/status/error/writer/path helpers; validator delegation test
+    proves final summary assembly and write pass through the owner while the
+    stable facade entrypoint remains active; direct owner status-ordering test
+    covers fail-over-blocked precedence plus reduced/incomplete source scope;
+    final output regression covers no-clobber plus force overwrite behavior at
+    validator and writer levels; inventory row records the current owner module,
+    retained facade entrypoint, compatibility removal condition, guard symbols,
+    and focused verification.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "final or redaction or evidence_root or stale"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`.
   - Inventory/Evidence Update: update two-node inventory row `final aggregation`.
 - [ ] 3.13 Two-node group verification and evidence closeout.
