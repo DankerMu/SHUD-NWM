@@ -1964,7 +1964,7 @@
     controls remain usable; loading and boundaryLoading suppress transient basin/map unavailable notices until data
     settles; basin, overlay, basin-river, and selected-segment unavailable test IDs and Chinese copy remain unchanged.
   - Verification Floor: focused verification command above; `cd apps/frontend && pnpm build`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
-- [ ] 6.5 M11 popup and selection boundary stabilization.
+- [x] 6.5 M11 popup and selection boundary stabilization.
   - Module/Scope: popup slot, curve-window placement, selected station data attributes, selected segment data attributes, popup identity updates after drag, station-MVT separation.
   - Dependencies: 6.3.
   - Out of Scope: backend station-MVT endpoint completion, hydrology/station series API behavior changes.
@@ -1972,6 +1972,56 @@
     `cd apps/frontend && pnpm test -- src/components/map/__tests__/M11StationForcingPopup.test.tsx`;
     `cd apps/frontend && pnpm test -- src/pages/__tests__/M11Shell.test.tsx -t "selected|popup|station overlay|selected station"`.
   - Inventory/Evidence Update: update structural inventory frontend row or scoped map ownership notes with popup/selection retained surface and command.
+  - Fixture Level: expanded popup/selection boundary owner extraction. This slice makes popup slot mounting, selected
+    segment map-state resolution, and selected feature data attributes explicit in a focused owner while leaving curve
+    window internals, popup product requests, and map interaction dispatch behavior unchanged.
+  - Repair Intensity: medium-high, because selected feature identity and popup placement are the observable bridge
+    between MapLibre interactions, draggable curve windows, station overlay UI, and route-driven basin detail state.
+  - Risk Pack Selection: Selected: Public API / CLI / script entry (`M11MapLibreSurface`, `M11MapSurface`,
+    `M11MapPopupSlot`, selected segment/station props, and existing page imports remain compatible);
+    Schema / columns / units / field names (selected feature data attributes, popup slot longitude/latitude/content,
+    selected map-state values, station id, segment id, and station GeoJSON overlay boundary remain stable);
+    Legacy compatibility / examples (legacy facade re-export keeps `OverviewPage` and `M11Controls` imports unchanged);
+    Error handling / rollback / partial outputs (malformed/oversized selected segment geometry remains an unavailable
+    selected state without registering fake selected sources); Documentation / migration notes (structural inventory
+    records the selection owner and retained surface boundary); Release / packaging / dependency compatibility (no new
+    frontend runtime dependency). Domain Selected: Geospatial / CRS / basin geometry for popup coordinates and selected
+    segment geometry omission; Published NHMS artifacts / display identity for preserving display-readonly station
+    overlay semantics and station-MVT non-closure. Not Selected: Config / project setup; File IO / path safety /
+    overwrite; Auth / permissions / secrets; Concurrency / shared state / ordering beyond existing popup state updates
+    and draggable window identity retention; Resource limits / large input / discovery beyond consuming #761 selected
+    geometry budgets; Hydro-met time series / forcing windows; SHUD numerical runtime / conservation / NaN; PostGIS /
+    TimescaleDB behavior; Slurm production lifecycle; External hydro-met providers / snapshot reproducibility; Run
+    manifest / QC provenance; backend station-MVT endpoint completion; hydrology/station series API behavior changes;
+    visual redesign.
+  - Invariant Matrix: Governing invariant: selected-feature identity, popup slot mounting, and draggable popup window
+    placement must remain stable after extraction. Source-of-truth identity/contract: the selection owner module owns
+    `M11MapPopupSlot`, MapLibre popup slot rendering, selected segment map-state resolution, and selected station/segment
+    data attributes. Surfaces: Producers: selected segment id/geometry, selected station id, renderable hydrology
+    overlay state, basin-river feature availability, popup slot coordinates/content/onClose, station overlay toggle, and
+    route/detail state; Validators/preflight: river forecast panel tests, station forcing popup tests, selected/popup/
+    station overlay M11Shell tests, frontend build, OpenSpec validation, and inventory evidence; Public entrypoints:
+    `M11MapLibreSurface`, `M11MapSurface`, `M11MapPopupSlot`, `data-selected-segment-id`,
+    `data-selected-segment-map-state`, `data-segment-highlight-hook`, `data-selected-station-id`, and popup test IDs;
+    Consumers/downstream: OverviewPage river/station popup state, draggable curve windows, station overlay controls,
+    selected segment/source layers, station selected highlight layers, and M11 popup product hooks; Failure paths/stale
+    state: station overlay disabled after popup opens, malformed selected segment geometry, oversized selected geometry,
+    popup identity changes after drag, river/station window clamp in nonzero containers, selected station changes, and
+    station overlay staying GeoJSON-backed.
+  - Boundary Surfaces: This slice may create a selection owner module and make `M11MapLibreSurface.tsx` consume its
+    popup slot primitive, selected map-state resolver, and selected data-attribute helper, but it must not move click/
+    hover dispatch, rendered-feature fallback, cluster expansion behavior, #761 builders, #762 primitives, #763
+    interactions, #764 runtime helpers, river/station forecast panel internals, hydrology/station series API behavior,
+    backend station-MVT endpoint work, generated API types, or visual semantics.
+  - Regression Rows: `M11MapPopupSlot` remains import-compatible through the surface facade; popup slot still renders
+    inside `<Map>` with unchanged longitude/latitude, `closeOnClick=false`, `maxWidth=none`, content, and onClose wiring;
+    selected segment data attributes still expose the raw selected segment id and `selected-layer`/`unavailable` state;
+    selected station data attributes still expose the selected station id and station selected highlight layers;
+    malformed/oversized selected segment geometry still omits selected sources/layers and shows selected unavailable
+    state; river and station curve windows remain draggable only from headers, clamp inside nonzero containers, and keep
+    dragged placement across identity changes; disabling station overlay clears station popup without changing basin route
+    state; station overlay remains clustered GeoJSON-backed and no station-MVT backend closure is claimed.
+  - Verification Floor: focused verification commands above; `cd apps/frontend && pnpm build`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
 - [ ] 6.6 Frontend group verification and evidence closeout.
   - Module/Scope: integration gate for frontend map group.
   - Dependencies: 6.1-6.5.
