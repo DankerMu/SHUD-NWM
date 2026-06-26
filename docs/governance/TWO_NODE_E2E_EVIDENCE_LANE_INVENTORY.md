@@ -1,6 +1,6 @@
 # Two-Node E2E Evidence Lane Inventory
 
-Snapshot date: 2026-06-25
+Snapshot date: 2026-06-26
 
 Scope: Governance-7 issue #672 inventory for
 `services/production_closure/two_node_e2e_evidence.py` and Governance-8 issue
@@ -12,7 +12,8 @@ owner extraction, issue `#738` API proof lane owner extraction, issue `#739`
 browser proof lane owner extraction, and issue `#740` logs lane owner
 extraction, issue `#741` manual ops lane owner extraction, and issue `#742`
 cross-plane/source-scope aggregation owner extraction, and issue `#743` final
-aggregation owner extraction. This page records the
+aggregation owner extraction, plus issue `#744` two-node group verification and
+evidence closeout. This page records the
 production-closure two-node E2E evidence lane contracts that future extraction
 work can use without making product decisions.
 
@@ -165,6 +166,47 @@ openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
 
+Governance-8 issue #744 two-node group closeout verification commands:
+
+```bash
+uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"
+uv run pytest -q tests/test_two_node_e2e_evidence.py
+uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+git diff --check
+```
+
+## Final Two-Node Implementation Evidence Map
+
+Closeout snapshot date: 2026-06-26.
+
+Closeout non-goals:
+
+- no production topology changes
+- no station-MVT closure
+- no live service deployment
+- no DB schema/role changes
+- no Slurm scheduling changes
+- no API route changes
+- no frontend/display UI changes
+- no new lane/product semantics
+
+| Task | Issue / PR / scope | Owner / surface | Verification | Inventory/evidence update |
+|---|---|---|---|---|
+| 3.1 | `#732 -> PR #791` - Shared two-node evidence contracts | Shared contracts in `services.production_closure.two_node_e2e_evidence` | Shared-contract focused selectors plus OpenSpec and diff-check. | Shared-contract rows and guard metadata added. |
+| 3.2 | `#733 -> PR #792` - Metadata and strict-identity lane extraction | `services.production_closure.two_node_e2e_metadata_lane` metadata/source-scope seeding | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"`. | Metadata owner row and guard symbols added. |
+| 3.3 | `#734 -> PR #793` - Docker preflight lane extraction | `services.production_closure.two_node_e2e_docker_preflight` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"`. | Docker preflight row and resource/path guard symbols added. |
+| 3.4 | `#735 -> PR #794` - Docker security lane extraction | `services.production_closure.two_node_e2e_docker_security` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_security or docker_display"`. | Docker security row, child artifact, display readonly, and capability guard symbols added. |
+| 3.5 | `#736 -> PR #795` - Readonly DB lane extraction | `services.production_closure.two_node_e2e_readonly_db_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "readonly_db"`. | Readonly DB row, route identity, source artifact, and no-write proof guards added. |
+| 3.6 | `#737 -> PR #796` - Simple live helper and Slurm/compute/display lanes | `services.production_closure.two_node_e2e_simple_live_lane` for Slurm, compute summary, and display summary | Focused `simple_lane`, `slurm`, `compute_summary`, and `display_summary` selectors. | Simple-live lane rows and helper guard symbols added. |
+| 3.7 | `#738 -> PR #797` - API proof lane extraction | `services.production_closure.two_node_e2e_api_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "api"`. | API proof row, required checks, live flag, and helper guards added. |
+| 3.8 | `#739 -> PR #798` - Browser proof lane extraction | `services.production_closure.two_node_e2e_browser_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "browser"`. | Browser proof row, source-switch/job identity, and helper guards added. |
+| 3.9 | `#740 -> PR #799` - Logs lane extraction | `services.production_closure.two_node_e2e_logs_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs"`. | Logs row, published log URI, unavailable proof, and redaction guards added. |
+| 3.10 | `#741 -> PR #800` - Manual ops lane extraction | `services.production_closure.two_node_e2e_manual_ops_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"`. | Manual ops row, fail-closed/no-side-effect, and receipt artifact guards added. |
+| 3.11 | `#742 -> PR #801` - Cross-plane/source-scope aggregation extraction | `services.production_closure.two_node_e2e_cross_plane_lane` | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"`. | Source-scope/cross-plane row and aggregation guard symbols added. |
+| 3.12 | `#743 -> PR #802` - Final aggregation extraction | `services.production_closure.two_node_e2e_final_aggregation` | Final-focused selector plus full `tests/test_two_node_e2e_evidence.py`, scoped ruff, OpenSpec, and diff-check. | Final aggregation row, output safety, redaction, status-ordering, and facade re-export guards added. |
+| 3.13 | `#744 -> PR #803` - Two-node group verification and evidence closeout | Inventory closeout map and `tests/test_two_node_e2e_evidence.py` closeout guard | `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`; `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`. | Final map records tasks 3.1-3.13 and explicit closeout non-goals; no product, topology, DB, Slurm, API, frontend, deployment, station-MVT, or new lane semantics change. |
+
 Read-only inventory context was collected from:
 
 ```bash
@@ -204,6 +246,10 @@ rg -n "metadata|docker_preflight|docker_security|readonly_db|api|browser|logs|si
   shared Slurm, compute summary, and display summary evaluator ownership.
 - No weakening of path safety, redaction, readonly DB boundaries,
   current-run binding, producer/source-artifact proof, or final aggregation.
+- No production topology changes, station-MVT closure, live service deployment,
+  DB schema/role changes, Slurm scheduling changes, API route changes,
+  frontend/display UI changes, or new lane/product semantics in the #744
+  closeout.
 
 ## Lane Set
 

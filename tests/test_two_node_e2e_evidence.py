@@ -310,6 +310,190 @@ def test_shared_two_node_evidence_contract_inventory_covers_metadata_source_scop
             assert f"`{namespace}`" in row
 
 
+def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> None:
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md"
+    ).read_text(encoding="utf-8")
+    lines = inventory_text.splitlines()
+    table_header = (
+        "| Task | Issue / PR / scope | Owner / surface | Verification | "
+        "Inventory/evidence update |"
+    )
+    table_start = lines.index(table_header)
+    row_entries: list[tuple[str, str, str, str, str]] = []
+
+    for line in lines[table_start + 2 :]:
+        if not line.startswith("| "):
+            break
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        assert len(cells) == 5
+        row_entries.append(cells)
+
+    expected_rows = (
+        (
+            "3.1",
+            "#732 -> PR #791",
+            "Shared two-node evidence contracts",
+            "Shared contracts in `services.production_closure.two_node_e2e_evidence`",
+        ),
+        (
+            "3.2",
+            "#733 -> PR #792",
+            "Metadata and strict-identity lane extraction",
+            "`services.production_closure.two_node_e2e_metadata_lane` metadata/source-scope seeding",
+        ),
+        (
+            "3.3",
+            "#734 -> PR #793",
+            "Docker preflight lane extraction",
+            "`services.production_closure.two_node_e2e_docker_preflight`",
+        ),
+        (
+            "3.4",
+            "#735 -> PR #794",
+            "Docker security lane extraction",
+            "`services.production_closure.two_node_e2e_docker_security`",
+        ),
+        (
+            "3.5",
+            "#736 -> PR #795",
+            "Readonly DB lane extraction",
+            "`services.production_closure.two_node_e2e_readonly_db_lane`",
+        ),
+        (
+            "3.6",
+            "#737 -> PR #796",
+            "Simple live helper and Slurm/compute/display lanes",
+            (
+                "`services.production_closure.two_node_e2e_simple_live_lane` "
+                "for Slurm, compute summary, and display summary"
+            ),
+        ),
+        (
+            "3.7",
+            "#738 -> PR #797",
+            "API proof lane extraction",
+            "`services.production_closure.two_node_e2e_api_lane`",
+        ),
+        (
+            "3.8",
+            "#739 -> PR #798",
+            "Browser proof lane extraction",
+            "`services.production_closure.two_node_e2e_browser_lane`",
+        ),
+        (
+            "3.9",
+            "#740 -> PR #799",
+            "Logs lane extraction",
+            "`services.production_closure.two_node_e2e_logs_lane`",
+        ),
+        (
+            "3.10",
+            "#741 -> PR #800",
+            "Manual ops lane extraction",
+            "`services.production_closure.two_node_e2e_manual_ops_lane`",
+        ),
+        (
+            "3.11",
+            "#742 -> PR #801",
+            "Cross-plane/source-scope aggregation extraction",
+            "`services.production_closure.two_node_e2e_cross_plane_lane`",
+        ),
+        (
+            "3.12",
+            "#743 -> PR #802",
+            "Final aggregation extraction",
+            "`services.production_closure.two_node_e2e_final_aggregation`",
+        ),
+        (
+            "3.13",
+            "#744 -> PR #803",
+            "Two-node group verification and evidence closeout",
+            "Inventory closeout map and `tests/test_two_node_e2e_evidence.py` closeout guard",
+        ),
+    )
+
+    assert len(row_entries) == len(expected_rows)
+    task_ids = tuple(row[0] for row in row_entries)
+    assert len(set(task_ids)) == len(task_ids)
+    assert task_ids == tuple(task for task, _, _, _ in expected_rows)
+    rows = {row[0]: row for row in row_entries}
+    for task, issue_pr, scope, expected_owner_surface in expected_rows:
+        _, issue_pr_scope, owner_surface, verification, inventory_update = rows[task]
+        assert issue_pr_scope == f"`{issue_pr}` - {scope}"
+        assert owner_surface == expected_owner_surface
+        assert verification
+        assert inventory_update
+
+    closeout_verification = rows["3.13"][3]
+    expected_closeout_commands = (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory or cli"',
+        "uv run pytest -q tests/test_two_node_e2e_evidence.py",
+        "uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py",
+        "openspec validate governance-8-module-deepening --strict --no-interactive",
+        "git diff --check",
+    )
+    assert tuple(closeout_verification.split("`")[1::2]) == expected_closeout_commands
+
+    assert "Snapshot date: 2026-06-26" in inventory_text
+    assert "Closeout snapshot date: 2026-06-26." in inventory_text
+    assert "this closeout PR pending" not in inventory_text
+    closeout_non_goals = (
+        "no production topology changes",
+        "no station-MVT closure",
+        "no live service deployment",
+        "no DB schema/role changes",
+        "no Slurm scheduling changes",
+        "no API route changes",
+        "no frontend/display UI changes",
+        "no new lane/product semantics",
+    )
+    for non_goal in closeout_non_goals:
+        assert non_goal in inventory_text
+
+
+def test_two_node_e2e_cli_forwards_config_and_prints_redacted_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed: dict[str, TwoNodeE2EEvidenceConfig] = {}
+
+    def fake_validate(config: TwoNodeE2EEvidenceConfig) -> dict[str, Any]:
+        observed["config"] = config
+        return {"status": STATUS_PASS, "api_token": "super-secret"}
+
+    monkeypatch.setattr(two_node_e2e_evidence, "validate_two_node_e2e_evidence", fake_validate)
+
+    exit_code = two_node_e2e_evidence.main(
+        [
+            "--evidence-root",
+            str(REPO_ROOT / "artifacts" / "two-node-e2e-cli-smoke"),
+            "--run-id",
+            "cli-smoke",
+            "--source",
+            "gfs",
+            "--source",
+            "ifs",
+            "--source",
+            "gfs",
+            "--full-scope",
+            "--force",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "super-secret" not in captured.out
+    assert json.loads(captured.out) == {"api_token": "[redacted]", "status": STATUS_PASS}
+
+    config = observed["config"]
+    assert config.evidence_root == (REPO_ROOT / "artifacts" / "two-node-e2e-cli-smoke").resolve(strict=False)
+    assert config.run_id == "cli-smoke"
+    assert config.declared_sources == ("GFS", "IFS")
+    assert config.reduced_scope is False
+    assert config.force is True
+
+
 def test_metadata_lane_owner_module_covers_metadata_source_scope_contract() -> None:
     assert two_node_e2e_metadata_lane.METADATA_LANE_OWNER == (
         "services.production_closure.two_node_e2e_metadata_lane"

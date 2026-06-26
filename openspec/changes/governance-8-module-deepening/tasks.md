@@ -1539,12 +1539,75 @@
     and focused verification.
   - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py -k "final or redaction or evidence_root or stale"`; `uv run pytest -q tests/test_two_node_e2e_evidence.py`.
   - Inventory/Evidence Update: update two-node inventory row `final aggregation`.
-- [ ] 3.13 Two-node group verification and evidence closeout.
+- [x] 3.13 Two-node group verification and evidence closeout.
   - Module/Scope: integration gate for two-node E2E group.
   - Dependencies: 3.1-3.12.
   - Out of Scope: production topology changes, station-MVT closure, live service deployment.
-  - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py`; `uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
-  - Inventory/Evidence Update: record final two-node issue/PR mapping in implementation evidence.
+  - Fixture Level: expanded integration closeout; Repair Intensity: high,
+    because this evidence-only gate closes the full two-node owner-family
+    extraction set and verifies the stable validator entrypoint, lane summary
+    schema, final summary schema, blocker/finding namespaces, source-scope
+    semantics, and output safety did not drift after tasks 3.1-3.12.
+  - Selected Risk Packs: Public API / stable validator entry
+    (`validate_two_node_e2e_evidence(config)`, module CLI behavior, lane
+    summaries, and final summary schema stay stable); Legacy compatibility /
+    facade re-exports (retained aggregator aliases and owner-module guard
+    symbols remain inventoried); Schema / field names (lane names, source-scope
+    result shape, strict identities, blocker/finding namespaces, and final
+    schema remain frozen); File IO / path safety / overwrite (approved evidence
+    roots, bounded reads, redaction, no-clobber, `force`, and final output
+    safety remain owner-tested); Auth / permissions / secrets (readonly DB,
+    manual ops, Docker display proof, redacted database/operator evidence, and
+    private log URI boundaries remain fail-closed); Error handling / rollback /
+    partial outputs (missing, stale, unsafe, incomplete, non-authoritative,
+    reduced-scope, and proven-unsafe evidence still map to BLOCKED, PARTIAL, or
+    FAIL rather than silent PASS); Documentation / migration notes (the final
+    implementation evidence map records every two-node task, issue, PR, owner,
+    and verification command). Not Selected: production topology changes,
+    station-MVT closure, live service deployment, DB schema/role changes, Slurm
+    scheduling behavior, API route behavior, frontend/display UI behavior, or
+    new lane/product semantics.
+  - Invariant Matrix: Governing invariant: the completed two-node E2E lane
+    decomposition is fully accounted for by owner modules and inventory
+    evidence, while `validate_two_node_e2e_evidence(config)` remains the stable
+    compatibility boundary. Source-of-truth identity/contract: completed tasks
+    3.1-3.12, issue/PR records #732-#743, the two-node E2E spec, the
+    inventory guard seed, and focused tests agree on shared contracts, lane
+    closure/discovery, metadata, Docker preflight/security, readonly DB, API,
+    browser, logs, simple-live lanes, manual ops, cross-plane/source-scope
+    aggregation, producer/source artifacts, and final aggregation. Surfaces:
+    Producers: owner modules under `services.production_closure.two_node_e2e_*`;
+    Compatibility/stable entrypoint: `services.production_closure.two_node_e2e_evidence`;
+    Validators/preflight: full `tests/test_two_node_e2e_evidence.py`, scoped
+    ruff, OpenSpec validation, and diff-check; Public outputs:
+    `lane_summaries`, `source_scope_results`, final summary JSON, blockers,
+    findings, and redacted evidence; Failure paths/rollback/stale state:
+    stale run IDs, unsafe artifact/output paths, private logs, reduced source
+    scope, missing producer proof, failed Docker/readonly/manual/source lanes,
+    and existing-output no-clobber behavior; Evidence/audit/readiness: final
+    implementation evidence map and two-node inventory.
+  - Regression Rows: final evidence map contains tasks 3.1-3.13 with issue
+    #732-#744, PR #791-#803 closeout record, owner/surface, verification
+    command, and inventory/evidence update; inventory guard seed rows cover
+    shared contracts, lane closure/discovery, every extracted lane owner,
+    producer/source artifacts, source-scope/cross-plane aggregation, and final
+    aggregation; full two-node evidence tests pass after the evidence map and
+    prove stable validator compatibility; scoped ruff passes for
+    `services/production_closure` and the two-node test file; OpenSpec strict
+    validation passes; `git diff --check` passes; no out-of-scope production
+    topology, station-MVT, live deployment, DB schema/role, Slurm scheduling,
+    API route, frontend/display UI, or new lane semantics change in this slice.
+  - Focused Verification: `uv run pytest -q tests/test_two_node_e2e_evidence.py`
+    -> all two-node owner, facade, path-safety, source-scope, and final
+    aggregation regressions pass; `uv run ruff check services/production_closure
+    tests/test_two_node_e2e_evidence.py` -> scoped lint passes; `openspec
+    validate governance-8-module-deepening --strict --no-interactive` -> change
+    remains valid; `git diff --check` -> no whitespace errors.
+  - Inventory/Evidence Update: record final two-node issue/PR mapping in
+    `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`, covering tasks
+    3.1-3.13, issues #732-#744, PR numbers, owner/surface, verification
+    commands, inventory updates or explicit non-goals, closeout date, and the
+    closeout commit/PR once available.
 
 ## 4. Readiness Validation Lane Deepening
 
