@@ -3286,10 +3286,26 @@ def test_scheduler_dry_run_evidence_ingests_as_deterministic_non_final_review_ev
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("scheduler_status", "model_run_status"),
+    [
+        ("submitted", "submitted"),
+        ("completed", "completed"),
+        ("succeeded", "succeeded"),
+        ("passed", "passed"),
+    ],
+)
+def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(
+    tmp_path: Path,
+    scheduler_status: str,
+    model_run_status: str,
+) -> None:
     root = tmp_path / "artifacts"
     scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
-    _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
+    _write_scheduler_payload(
+        scheduler_path,
+        _live_scheduler_payload(status=scheduler_status, model_run_status=model_run_status),
+    )
 
     validate_readiness(
         ProductionReadinessConfig.from_env(
@@ -3304,10 +3320,12 @@ def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp
     live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
     assert scheduler_review["status"] == "passed"
     assert scheduler_review["live_proof_accepted"] is False
+    assert scheduler_review["details"]["scheduler_status"] == scheduler_status
     assert scheduler_review["details"]["submitted_count"] == 1
     assert live_item["status"] == "passed"
     assert live_item["execution_mode"] == "live_proof"
     assert live_item["live_proof_accepted"] is True
+    assert "acceptance_errors" not in live_item["details"]
     assert live_item["details"]["payload"]["producer_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
     assert _summary(root)["final_production_readiness_claimed"] is False
 
@@ -3978,8 +3996,12 @@ def _validate_scheduler_payload_with_matching_live_proof(
     return _summary(root), scheduler_item, live_item
 
 
-def _submitted_scheduler_payload() -> dict[str, object]:
-    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+def _live_scheduler_payload(
+    *,
+    status: str = "submitted",
+    model_run_status: str = "submitted",
+) -> dict[str, object]:
+    payload = _scheduler_evidence_payload(status=status, execution_mode="production_orchestration")
     payload["counts"]["candidate_count"] = 1
     payload["counts"]["skipped_candidate_count"] = 0
     payload["counts"]["submitted_count"] = 1
@@ -3987,11 +4009,15 @@ def _submitted_scheduler_payload() -> dict[str, object]:
     payload["model_run_evidence"] = [
         {
             **_candidate_for_model("model_a"),
-            "status": "submitted",
+            "status": model_run_status,
             "submitted": True,
         }
     ]
     return payload
+
+
+def _submitted_scheduler_payload() -> dict[str, object]:
+    return _live_scheduler_payload()
 
 
 def _submitted_scheduler_payload_with_pass_id(pass_id: str) -> dict[str, object]:
@@ -5739,6 +5765,89 @@ def test_all_live_receipts_accepted_claims_final_readiness(tmp_path: Path) -> No
     assert summary["status"] == "ready"
     assert summary["release_blockers"] == []
     assert summary["accepted_live_proof_count"] == summary["required_live_proof_count"] == 9
+
+
+def test_all_live_receipts_except_configured_scheduler_keeps_final_count_blocked(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    object_store_root = tmp_path / "object-store"
+    source_root = tmp_path / "source"
+    e2e_root = tmp_path / "e2e"
+    mvt_root = tmp_path / "mvt"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_payload(scheduler_path, _live_scheduler_payload())
+    proofs = _all_live_proofs()
+    proofs |= {
+        "slurm_proof": _dependency_proof_bound_to_summary("slurm", slurm_root),
+        "object_store_proof": _dependency_proof_bound_to_summary("object_store", object_store_root),
+        "source_proof": _dependency_proof_bound_to_summary("source", source_root),
+        "e2e_proof": _dependency_proof_bound_to_summary("e2e", e2e_root),
+        "mvt_proof": _dependency_proof_bound_to_summary("mvt", mvt_root),
+    }
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            object_store_evidence_root=object_store_root,
+            source_evidence_root=source_root,
+            e2e_evidence_root=e2e_root,
+            mvt_evidence_root=mvt_root,
+            scheduler_evidence_file=scheduler_path,
+            **proofs,
+        )
+    )
+
+    summary = _summary(root)
+    assert summary["final_production_readiness_claimed"] is False
+    assert summary["status"] == "release_blocked"
+    assert summary["required_live_proof_count"] == 10
+    assert summary["accepted_live_proof_count"] == 9
+    scheduler_blocker = next(
+        blocker for blocker in _blockers(root) if blocker["surface"] == "live_scheduler_evidence_proof"
+    )
+    assert scheduler_blocker["blocker_id"] == "m19-live-scheduler-evidence"
+
+
+def test_all_live_receipts_and_scheduler_proof_accepted_claims_final_readiness(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    object_store_root = tmp_path / "object-store"
+    source_root = tmp_path / "source"
+    e2e_root = tmp_path / "e2e"
+    mvt_root = tmp_path / "mvt"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_payload(scheduler_path, _live_scheduler_payload(status="passed", model_run_status="passed"))
+    proofs = _all_live_proofs()
+    proofs |= {
+        "slurm_proof": _dependency_proof_bound_to_summary("slurm", slurm_root),
+        "object_store_proof": _dependency_proof_bound_to_summary("object_store", object_store_root),
+        "source_proof": _dependency_proof_bound_to_summary("source", source_root),
+        "e2e_proof": _dependency_proof_bound_to_summary("e2e", e2e_root),
+        "mvt_proof": _dependency_proof_bound_to_summary("mvt", mvt_root),
+        "scheduler_proof": _scheduler_proof_bound_to_evidence(scheduler_path),
+    }
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            object_store_evidence_root=object_store_root,
+            source_evidence_root=source_root,
+            e2e_evidence_root=e2e_root,
+            mvt_evidence_root=mvt_root,
+            scheduler_evidence_file=scheduler_path,
+            **proofs,
+        )
+    )
+
+    summary = _summary(root)
+    assert summary["final_production_readiness_claimed"] is True
+    assert summary["status"] == "ready"
+    assert summary["release_blockers"] == []
+    assert summary["accepted_live_proof_count"] == summary["required_live_proof_count"] == 10
 
 
 def test_any_required_live_blocker_keeps_final_readiness_false_and_lists_blocker(tmp_path: Path) -> None:
