@@ -5,8 +5,10 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
+from apps.api import route_registry
 from apps.api.main import create_app
 from apps.api.runtime_mode import RuntimeModeError, ServiceRole, display_boundary_blockers, load_runtime_config
 
@@ -183,6 +185,32 @@ def test_display_route_inventory_preserves_non_slurm_business_routes(tmp_path: P
     assert not display_routes - compute_routes
     assert expected_business_read_routes <= display_routes
     assert expected_business_read_routes <= compute_routes
+
+
+def test_route_registry_owner_preserves_role_aware_slurm_inclusion(tmp_path: Path) -> None:
+    display_app = FastAPI()
+    compute_app = FastAPI()
+    runtime_router = APIRouter(prefix="/api/v1/runtime", tags=["runtime"])
+
+    @runtime_router.get("/config")
+    def owner_test_runtime_config() -> dict[str, str]:
+        return {"status": "ok"}
+
+    route_registry.register_role_aware_routes(
+        display_app,
+        load_runtime_config(_display_env(tmp_path)),
+        runtime_router=runtime_router,
+    )
+    route_registry.register_role_aware_routes(
+        compute_app,
+        load_runtime_config(_clean_env({"NHMS_SERVICE_ROLE": "compute_control"})),
+        runtime_router=runtime_router,
+    )
+
+    assert "/api/v1/runtime/config" in _route_paths(display_app, "/api/v1/runtime")
+    assert "/api/v1/runtime/config" in _route_paths(compute_app, "/api/v1/runtime")
+    assert not _route_paths(display_app, "/api/v1/slurm")
+    assert "/api/v1/slurm/health" in _route_paths(compute_app, "/api/v1/slurm")
 
 
 @pytest.mark.parametrize(
