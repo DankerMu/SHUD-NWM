@@ -59,6 +59,13 @@ PROOF_SURFACES = {
     "target_env": "target_environment_config_proof",
 }
 DEPENDENCY_PROOFS = {"slurm", "object_store", "source", "e2e", "mvt"}
+DEPENDENCY_PROOF_PARAMS = (
+    pytest.param("slurm", id="slurm"),
+    pytest.param("object_store", id="object-store"),
+    pytest.param("source", id="source"),
+    pytest.param("e2e", id="end-to-end"),
+    pytest.param("mvt", id="mvt"),
+)
 DEPENDENCY_CONTRACTS = {
     "slurm": (147, "nhms.production_closure.slurm.v1"),
     "object_store": (148, "nhms.production_closure.object_store.v1"),
@@ -1313,7 +1320,7 @@ def test_dependency_summary_non_string_status_is_blocked_unbound_and_redacted(
     assert raw_status_secret not in artifact_text
 
 
-@pytest.mark.parametrize("proof_key", ["slurm", "object_store", "source", "e2e", "mvt"])
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
 def test_dependency_summary_rejected_status_redacts_paths_and_secrets_from_public_artifacts(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2108,7 +2115,7 @@ def test_dependency_receipts_bind_to_consumed_producer_summary(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-@pytest.mark.parametrize("proof_key", sorted(DEPENDENCY_PROOFS))
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
 def test_dependency_receipts_reject_sibling_nested_provenance(
     tmp_path: Path,
     proof_key: str,
