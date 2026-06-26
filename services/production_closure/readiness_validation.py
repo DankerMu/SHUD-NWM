@@ -18,6 +18,9 @@ from services.production_closure import (
     readiness_item_contracts as _readiness_item_contracts,
 )
 from services.production_closure import (
+    readiness_live_proofs as _readiness_live_proofs,
+)
+from services.production_closure import (
     readiness_scheduler_evidence as _readiness_scheduler_evidence,
 )
 from services.production_closure import (
@@ -61,7 +64,7 @@ _refuse_symlink_components_to_deepest_existing = (
 MAX_RECEIPT_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_BYTES
 MAX_RECEIPT_PREVIEW_BYTES = _readiness_shared_artifacts.MAX_RECEIPT_PREVIEW_BYTES
 LIVE_PROOF_SCHEMA = _readiness_shared_artifacts.LIVE_PROOF_SCHEMA
-EXPECTED_TARGET_ENVIRONMENT = "production"
+EXPECTED_TARGET_ENVIRONMENT = _readiness_live_proofs.EXPECTED_TARGET_ENVIRONMENT
 
 DEPENDENCY_SUMMARY_CONTRACTS = _readiness_dependency_summaries.DEPENDENCY_SUMMARY_CONTRACTS
 _dependency_summary_blocked = _readiness_dependency_summaries._dependency_summary_blocked
@@ -83,6 +86,26 @@ SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES = (
     _readiness_scheduler_evidence.SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES
 )
 SCHEDULER_LIVE_WORK_STATUSES = _readiness_scheduler_evidence.SCHEDULER_LIVE_WORK_STATUSES
+PROOF_CONTRACTS = _readiness_live_proofs.PROOF_CONTRACTS
+REQUIRED_AUTH_ACTIONS = _readiness_live_proofs.REQUIRED_AUTH_ACTIONS
+PROOF_SPECIFIC_KEYS = _readiness_live_proofs.PROOF_SPECIFIC_KEYS
+_is_live_proof_mode = _readiness_live_proofs._is_live_proof_mode
+_has_artifact_or_evidence_refs = _readiness_live_proofs._has_artifact_or_evidence_refs
+_non_empty_string = _readiness_live_proofs._non_empty_string
+_has_meaningful_value = _readiness_live_proofs._has_meaningful_value
+_has_meaningful_ref = _readiness_live_proofs._has_meaningful_ref
+_target_environment_name = _readiness_live_proofs._target_environment_name
+_string_set = _readiness_live_proofs._string_set
+_provider_metadata_is_meaningful = _readiness_live_proofs._provider_metadata_is_meaningful
+_role_mapping_is_meaningful = _readiness_live_proofs._role_mapping_is_meaningful
+_alert_sink_metadata_is_meaningful = _readiness_live_proofs._alert_sink_metadata_is_meaningful
+_alert_delivery_metadata_is_meaningful = _readiness_live_proofs._alert_delivery_metadata_is_meaningful
+_rollback_command_metadata_is_meaningful = _readiness_live_proofs._rollback_command_metadata_is_meaningful
+_rollback_result_is_meaningful = _readiness_live_proofs._rollback_result_is_meaningful
+_target_env_config_metadata_is_meaningful = _readiness_live_proofs._target_env_config_metadata_is_meaningful
+_first_meaningful_mapping = _readiness_live_proofs._first_meaningful_mapping
+_has_any_key_value = _readiness_live_proofs._has_any_key_value
+_value_from = _readiness_live_proofs._value_from
 SCHEDULER_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
     "producer_schema": ("producer_schema", "scheduler_schema"),
     "producer_run_id": ("producer_run_id", "scheduler_pass_id", "pass_id"),
@@ -144,79 +167,6 @@ DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES = {
     "producer_artifact_ref": "producer_artifact_ref_alias_mismatch",
     "producer_checksum_or_receipt_id": "producer_checksum_or_receipt_id_alias_mismatch",
 }
-PROOF_CONTRACTS = {
-    "auth": {
-        "proof_type": "auth",
-        "surface": "live_backend_auth",
-        "allowed_statuses": {"passed"},
-    },
-    "alert": {
-        "proof_type": "alert",
-        "surface": "live_alert_sink_delivery",
-        "allowed_statuses": {"passed", "delivered"},
-    },
-    "rollback": {
-        "proof_type": "rollback",
-        "surface": "live_rollback_execution",
-        "allowed_statuses": {"passed", "executed"},
-    },
-    "scheduler": {
-        "proof_type": "scheduler_evidence",
-        "surface": "live_scheduler_evidence_proof",
-        "allowed_statuses": {"passed", "accepted", "ready", "submitted", "completed"},
-    },
-    "slurm": {
-        "proof_type": "dependency",
-        "surface": "live_slurm_dependency_proof",
-        "dependency": "slurm",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-    "object_store": {
-        "proof_type": "dependency",
-        "surface": "live_object_store_dependency_proof",
-        "dependency": "object_store",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-    "source": {
-        "proof_type": "dependency",
-        "surface": "live_source_weather_dependency_proof",
-        "dependency": "source",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-    "e2e": {
-        "proof_type": "dependency",
-        "surface": "live_e2e_dependency_proof",
-        "dependency": "e2e",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-    "mvt": {
-        "proof_type": "dependency",
-        "surface": "live_mvt_performance_proof",
-        "dependency": "mvt",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-    "target_env": {
-        "proof_type": "target_env",
-        "surface": "target_environment_config_proof",
-        "allowed_statuses": {"passed", "accepted", "ready"},
-    },
-}
-REQUIRED_AUTH_ACTIONS = frozenset(
-    {
-        "pipeline.retry_run",
-        "pipeline.cancel_run",
-        "pipeline.rerun_cycle",
-        "qc.override_result",
-        "tiles.republish",
-        "sources.update_config",
-        "models.activate",
-        "models.deactivate",
-        "models.switch_version",
-        "models.rollback_version",
-        "models.supersede",
-        "users.manage",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -648,66 +598,15 @@ def _live_proof_items(
 
 
 def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any]) -> dict[str, Any]:
-    base = {
-        "item_id": "live-backend-auth",
-        "surface": "live_backend_auth",
-        "required_for_final": True,
-        "artifact_refs": ["live_proof_receipts.json"],
-        "residual_risk": "Live backend IdP proof is missing or incomplete.",
-        "removal_criteria": (
-            "Provide accepted live auth proof with provider metadata plus allowed and denied coverage for every "
-            "canonical protected action."
-        ),
-    }
-    if receipt["status"] != "parsed":
-        return _required_live_blocker(config=config, receipt=receipt, **base)
-    payload = _receipt_validation_payload(receipt)
-    allowed = _string_set(payload.get("allowed_actions") or payload.get("allowed_coverage"))
-    denied = _string_set(payload.get("denied_actions") or payload.get("denied_coverage"))
-    missing_allowed = sorted(REQUIRED_AUTH_ACTIONS - allowed)
-    missing_denied = sorted(REQUIRED_AUTH_ACTIONS - denied)
-    errors = _common_live_receipt_errors(payload, proof_key="auth", config=config)
-    if not _provider_metadata_is_meaningful(payload):
-        errors.append("missing_provider_metadata")
-    if not _role_mapping_is_meaningful(payload.get("role_mapping")) and not _role_mapping_is_meaningful(
-        payload.get("role_mappings")
-    ):
-        errors.append("missing_role_mapping")
-    if missing_allowed:
-        errors.append("missing_allowed_actions")
-    if missing_denied:
-        errors.append("missing_denied_actions")
-    accepted = not errors
-    if accepted:
-        return _item(
-            item_id=base["item_id"],
-            surface=base["surface"],
-            required_for_final=base["required_for_final"],
-            artifact_refs=base["artifact_refs"],
-            status="passed",
-            execution_mode="live_proof",
-            live_proof_accepted=True,
-            residual_risk="Accepted live auth proof is present for required protected action coverage.",
-            removal_criteria="Keep the accepted live auth receipt attached to the release evidence bundle.",
-            details=_receipt_details(receipt, config=config),
-        )
-    return _item(
-        **base,
-        status="release_blocked",
-        execution_mode="live_proof",
-        live_proof_accepted=False,
-        details=_receipt_details(
-            {
-                **receipt,
-                "acceptance_errors": {
-                    "errors": errors,
-                    "accepted": payload.get("accepted") is True,
-                    "missing_allowed_actions": missing_allowed,
-                    "missing_denied_actions": missing_denied,
-                },
-            },
-            config=config,
-        ),
+    return _readiness_live_proofs._auth_live_item(
+        config,
+        receipt,
+        common_live_receipt_errors=_common_live_receipt_errors,
+        provider_metadata_is_meaningful=_provider_metadata_is_meaningful,
+        role_mapping_is_meaningful=_role_mapping_is_meaningful,
+        required_live_blocker=_required_live_blocker,
+        receipt_validation_payload=_receipt_validation_payload,
+        receipt_details=_receipt_details,
     )
 
 
@@ -723,6 +622,22 @@ def _surface_live_item(
     missing_risk: str,
     removal: str,
 ) -> dict[str, Any]:
+    if proof_key in PROOF_SPECIFIC_KEYS:
+        return _readiness_live_proofs._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings=dependency_bindings,
+            scheduler_binding=scheduler_binding,
+            item_id=item_id,
+            surface=surface,
+            missing_risk=missing_risk,
+            removal=removal,
+            surface_live_receipt_errors=_surface_live_receipt_errors,
+            required_live_blocker=_required_live_blocker,
+            receipt_validation_payload=_receipt_validation_payload,
+            receipt_details=_receipt_details,
+        )
     base = {
         "item_id": item_id,
         "surface": surface,
@@ -774,18 +689,16 @@ def _required_live_blocker(
     residual_risk: str,
     removal_criteria: str,
 ) -> dict[str, Any]:
-    execution_mode = "live_proof" if receipt["status"] in {"invalid", "too_large"} else "not_executed"
-    return _item(
+    return _readiness_live_proofs._required_live_blocker(
+        config=config,
+        receipt=receipt,
         item_id=item_id,
         surface=surface,
-        status="release_blocked",
-        execution_mode=execution_mode,
         required_for_final=required_for_final,
-        live_proof_accepted=False,
         artifact_refs=artifact_refs,
         residual_risk=residual_risk,
         removal_criteria=removal_criteria,
-        details=_receipt_details(receipt, config=config),
+        receipt_details=_receipt_details,
     )
 
 
@@ -957,28 +870,23 @@ def _surface_live_receipt_errors(
     dependency_bindings: Mapping[str, Mapping[str, Any]],
     scheduler_binding: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
-    errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
-    if proof_key == "alert":
-        if not _alert_sink_metadata_is_meaningful(payload):
-            errors.append("missing_sink_metadata")
-        if not _alert_delivery_metadata_is_meaningful(payload):
-            errors.append("missing_delivery_metadata")
-        if payload.get("delivered") is not True and str(payload.get("status", "")) != "delivered":
-            errors.append("delivery_not_confirmed")
-    elif proof_key == "rollback":
-        if not _has_meaningful_value(payload.get("preconditions")):
-            errors.append("missing_preconditions")
-        if not _rollback_command_metadata_is_meaningful(payload):
-            errors.append("missing_command_or_drill_metadata")
-        if not _rollback_result_is_meaningful(payload):
-            errors.append("rollback_not_executed")
-    elif proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
+    errors = _readiness_live_proofs._surface_live_receipt_errors(
+        payload,
+        proof_key=proof_key,
+        config=config,
+        dependency_bindings=dependency_bindings,
+        scheduler_binding=scheduler_binding,
+        common_live_receipt_errors=_common_live_receipt_errors,
+        alert_sink_metadata_is_meaningful=_alert_sink_metadata_is_meaningful,
+        alert_delivery_metadata_is_meaningful=_alert_delivery_metadata_is_meaningful,
+        rollback_command_metadata_is_meaningful=_rollback_command_metadata_is_meaningful,
+        rollback_result_is_meaningful=_rollback_result_is_meaningful,
+        target_env_config_metadata_is_meaningful=_target_env_config_metadata_is_meaningful,
+    )
+    if proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
         errors.extend(_dependency_receipt_errors(payload, proof_key=proof_key, dependency_bindings=dependency_bindings))
     elif proof_key == "scheduler":
         errors.extend(_scheduler_receipt_errors(payload, scheduler_binding=scheduler_binding))
-    elif proof_key == "target_env":
-        if not _target_env_config_metadata_is_meaningful(payload):
-            errors.append("missing_target_environment_config_metadata")
     return errors
 
 
@@ -988,211 +896,19 @@ def _common_live_receipt_errors(
     proof_key: str,
     config: ProductionReadinessConfig,
 ) -> list[str]:
-    contract = PROOF_CONTRACTS[proof_key]
-    errors: list[str] = []
-    if payload.get("accepted") is not True:
-        errors.append("accepted_not_true")
-    status = payload.get("status")
-    if not isinstance(status, str) or not status.strip():
-        errors.append("missing_status")
-    elif status not in contract["allowed_statuses"]:
-        errors.append("status_not_allowed")
-    if payload.get("schema") != LIVE_PROOF_SCHEMA:
-        errors.append("schema_mismatch")
-    if payload.get("proof_type", payload.get("receipt_type")) != contract["proof_type"]:
-        errors.append("proof_type_mismatch")
-    if payload.get("surface") != contract["surface"]:
-        errors.append("surface_mismatch")
-    if payload.get("run_id") != config.run_id:
-        errors.append("run_id_mismatch")
-    target_environment = payload.get("target_environment")
-    if not _non_empty_string(target_environment) and not _has_meaningful_value(target_environment):
-        errors.append("missing_target_environment")
-    elif _target_environment_name(target_environment) != EXPECTED_TARGET_ENVIRONMENT:
-        errors.append("target_environment_mismatch")
-    if not _is_live_proof_mode(payload):
-        errors.append("execution_mode_not_live_proof")
-    if not _has_artifact_or_evidence_refs(payload):
-        errors.append("missing_artifact_or_evidence_refs")
-    return errors
-
-
-def _is_live_proof_mode(payload: Mapping[str, Any]) -> bool:
-    values = {
-        str(payload.get("execution_mode", "")),
-        str(payload.get("proof_mode", "")),
-        str(payload.get("mode", "")),
-    }
-    return bool(values & {"live_proof", "live_execution", "live"})
-
-
-def _has_artifact_or_evidence_refs(payload: Mapping[str, Any]) -> bool:
-    for key in ("artifact_refs", "evidence_refs", "artifacts", "evidence"):
-        if _has_meaningful_ref(payload.get(key)):
-            return True
-    return False
-
-
-def _non_empty_string(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _has_meaningful_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return True
-    if isinstance(value, Mapping):
-        return any(str(key).strip() and _has_meaningful_value(nested) for key, nested in value.items())
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return any(_has_meaningful_value(item) for item in value)
-    return True
-
-
-def _has_meaningful_ref(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, Mapping):
-        ref_keys = (
-            "id",
-            "ref",
-            "path",
-            "uri",
-            "url",
-            "checksum",
-            "digest",
-            "receipt_id",
-            "artifact_ref",
-            "artifact_path",
-            "artifact_uri",
-            "summary_path",
-            "summary_ref",
-            "summary_checksum",
-        )
-        return any(_has_meaningful_value(value.get(key)) for key in ref_keys) or any(
-            _has_meaningful_ref(nested) for nested in value.values()
-        )
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return any(_has_meaningful_ref(item) for item in value)
-    return False
-
-
-def _target_environment_name(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, Mapping):
-        for key in ("name", "environment", "id"):
-            nested = value.get(key)
-            if isinstance(nested, str) and nested.strip():
-                return nested.strip()
-    return ""
-
-
-def _string_set(value: Any) -> set[str]:
-    if isinstance(value, str):
-        return {item.strip() for item in value.split(",") if item.strip()}
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        values = set()
-        for item in value:
-            if isinstance(item, str) and item.strip():
-                values.add(item.strip())
-        return values
-    return set()
-
-
-def _provider_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    provider = _first_meaningful_mapping(payload, ("provider", "provider_metadata", "idp_metadata"))
-    if provider is not None and _has_any_key_value(
-        provider,
-        (
-            "issuer",
-            "issuer_url",
-            "provider_id",
-            "provider",
-            "provider_name",
-            "idp",
-            "idp_id",
-            "tenant_id",
-            "subject",
-            "client_id",
-        ),
-    ):
-        return True
-    return _has_any_key_value(
+    return _readiness_live_proofs._common_live_receipt_errors(
         payload,
-        ("issuer", "issuer_url", "provider_id", "provider_name", "idp_id", "tenant_id", "subject", "client_id"),
+        proof_key=proof_key,
+        config=config,
+        proof_contracts=PROOF_CONTRACTS,
+        live_proof_schema=LIVE_PROOF_SCHEMA,
+        expected_target_environment=EXPECTED_TARGET_ENVIRONMENT,
+        non_empty_string=_non_empty_string,
+        has_meaningful_value=_has_meaningful_value,
+        target_environment_name=_target_environment_name,
+        is_live_proof_mode=_is_live_proof_mode,
+        has_artifact_or_evidence_refs=_has_artifact_or_evidence_refs,
     )
-
-
-def _role_mapping_is_meaningful(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    for role, mapped in value.items():
-        if not _non_empty_string(role):
-            continue
-        if _string_set(mapped):
-            return True
-        if isinstance(mapped, Mapping) and any(
-            _string_set(mapped.get(key)) for key in ("actions", "roles", "permissions", "allowed_actions")
-        ):
-            return True
-    return False
-
-
-def _alert_sink_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    sink = _first_meaningful_mapping(payload, ("sink_metadata", "sink"))
-    if sink is not None and _has_any_key_value(sink, ("sink_id", "id", "name", "sink_name", "url", "uri", "channel")):
-        return True
-    return _has_any_key_value(payload, ("sink_id", "sink_name", "sink_url", "sink", "channel"))
-
-
-def _alert_delivery_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    delivery = _first_meaningful_mapping(payload, ("delivery_metadata", "delivery_result", "delivery"))
-    if delivery is None:
-        return False
-    has_id = _has_any_key_value(delivery, ("delivery_id", "message_id", "id", "receipt_id"))
-    has_timestamp = _has_any_key_value(delivery, ("delivered_at", "timestamp", "time", "completed_at"))
-    has_result = _has_any_key_value(delivery, ("result", "status", "delivery_status", "outcome"))
-    return has_id and has_timestamp and has_result
-
-
-def _rollback_command_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    command = _first_meaningful_mapping(payload, ("command_metadata", "drill_metadata", "command"))
-    if command is not None and (
-        _has_any_key_value(command, ("command", "command_id", "drill_id", "id", "runbook", "rollback_id"))
-        or _non_empty_string(command.get("argv"))
-    ):
-        return True
-    return _has_any_key_value(payload, ("command", "command_id", "drill_id", "rollback_id"))
-
-
-def _rollback_result_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    if payload.get("executed") is True:
-        return True
-    result = _value_from(payload, ("execution_result", "result", "rollback_result", "outcome"))
-    if _non_empty_string(result):
-        return str(result).strip().lower() in {"passed", "executed", "success", "succeeded"}
-    status = payload.get("status")
-    return isinstance(status, str) and status.strip().lower() == "executed"
-
-
-def _target_env_config_metadata_is_meaningful(payload: Mapping[str, Any]) -> bool:
-    config_metadata = _first_meaningful_mapping(payload, ("config_metadata", "environment_metadata"))
-    if config_metadata is None:
-        return False
-    has_metadata = _has_meaningful_value(config_metadata)
-    has_identifier = _has_any_key_value(
-        payload,
-        ("config_receipt_id", "config_id", "environment_id", "environment_name", "target_config_id"),
-    ) or _has_any_key_value(
-        config_metadata,
-        ("config_receipt_id", "config_id", "environment_id", "environment_name", "name", "id", "cluster"),
-    )
-    return has_metadata and has_identifier
 
 
 def _dependency_receipt_errors(
@@ -1514,29 +1230,6 @@ def _scheduler_binding_summary_errors(
         if values and any(value != summary_value for value in values):
             errors.append(f"{source}_summary_{error_suffix}")
     return errors
-
-
-def _first_meaningful_mapping(payload: Mapping[str, Any], keys: Sequence[str]) -> Mapping[str, Any] | None:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, Mapping) and _has_meaningful_value(value):
-            return value
-    return None
-
-
-def _has_any_key_value(mapping: Mapping[str, Any], keys: Sequence[str]) -> bool:
-    return any(_has_meaningful_value(mapping.get(key)) for key in keys)
-
-
-def _value_from(payload: Mapping[str, Any], keys: Sequence[str], *, fallback: Mapping[str, Any] | None = None) -> Any:
-    for key in keys:
-        if _has_meaningful_value(payload.get(key)):
-            return payload.get(key)
-    if fallback is not None:
-        for key in keys:
-            if _has_meaningful_value(fallback.get(key)):
-                return fallback.get(key)
-    return None
 
 
 def _issue_matches(value: Any, expected: int) -> bool:

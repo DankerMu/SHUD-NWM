@@ -13,6 +13,7 @@ from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
     readiness_dependency_summaries,
     readiness_item_contracts,
+    readiness_live_proofs,
     readiness_scheduler_evidence,
     readiness_shared_artifacts,
     readiness_validation,
@@ -678,6 +679,195 @@ def test_live_proof_loader_owner_facade_parity_and_raw_payload_boundary(tmp_path
     assert "raw_payload" not in rendered_artifact
     assert raw_path not in rendered_artifact
     assert "token=secret" not in rendered_artifact
+
+
+def test_live_receipt_validator_owner_facade_aliases_and_outputs_match(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+
+    assert readiness_validation.PROOF_CONTRACTS is readiness_live_proofs.PROOF_CONTRACTS
+    assert readiness_validation.REQUIRED_AUTH_ACTIONS is readiness_live_proofs.REQUIRED_AUTH_ACTIONS
+    assert readiness_validation.EXPECTED_TARGET_ENVIRONMENT == readiness_live_proofs.EXPECTED_TARGET_ENVIRONMENT
+    assert readiness_validation.PROOF_SPECIFIC_KEYS is readiness_live_proofs.PROOF_SPECIFIC_KEYS
+    for name in (
+        "_is_live_proof_mode",
+        "_has_artifact_or_evidence_refs",
+        "_non_empty_string",
+        "_has_meaningful_value",
+        "_has_meaningful_ref",
+        "_target_environment_name",
+        "_string_set",
+        "_provider_metadata_is_meaningful",
+        "_role_mapping_is_meaningful",
+        "_alert_sink_metadata_is_meaningful",
+        "_alert_delivery_metadata_is_meaningful",
+        "_rollback_command_metadata_is_meaningful",
+        "_rollback_result_is_meaningful",
+        "_target_env_config_metadata_is_meaningful",
+        "_first_meaningful_mapping",
+        "_has_any_key_value",
+        "_value_from",
+    ):
+        assert getattr(readiness_validation, name) is getattr(readiness_live_proofs, name)
+
+    auth_receipt = readiness_shared_artifacts._load_proof(
+        "auth",
+        _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
+        None,
+        config=config,
+    )
+    assert readiness_validation._auth_live_item(config, auth_receipt) == readiness_live_proofs._auth_live_item(
+        config, auth_receipt
+    )
+    auth_payload = readiness_shared_artifacts._receipt_validation_payload(auth_receipt)
+    assert readiness_validation._common_live_receipt_errors(auth_payload, proof_key="auth", config=config) == (
+        readiness_live_proofs._common_live_receipt_errors(auth_payload, proof_key="auth", config=config)
+    )
+
+    surface_kwargs = {
+        "alert": {
+            "item_id": "live-alert-sink",
+            "surface": "live_alert_sink_delivery",
+            "missing_risk": "Live alert sink delivery has not been proven.",
+            "removal": "Provide an accepted alert sink receipt.",
+        },
+        "rollback": {
+            "item_id": "live-rollback-drill",
+            "surface": "live_rollback_execution",
+            "missing_risk": "Live rollback execution has not been proven.",
+            "removal": "Provide an accepted rollback drill receipt.",
+        },
+        "target_env": {
+            "item_id": "live-target-environment-config",
+            "surface": "target_environment_config_proof",
+            "missing_risk": "Real target-environment configuration receipt has not been accepted.",
+            "removal": "Provide an accepted target-environment configuration receipt.",
+        },
+    }
+    for proof_key, kwargs in surface_kwargs.items():
+        receipt = readiness_shared_artifacts._load_proof(proof_key, _bound_proof(proof_key), None, config=config)
+        assert readiness_validation._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings={},
+            **kwargs,
+        ) == readiness_live_proofs._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings={},
+            **kwargs,
+        )
+        payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+        assert readiness_validation._surface_live_receipt_errors(
+            payload,
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings={},
+        ) == readiness_live_proofs._surface_live_receipt_errors(
+            payload,
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings={},
+        )
+
+
+def test_live_receipt_validator_facade_honors_old_monkeypatch_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    auth_receipt = readiness_shared_artifacts._load_proof(
+        "auth",
+        _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
+        None,
+        config=config,
+    )
+    alert_receipt = readiness_shared_artifacts._load_proof("alert", _bound_proof("alert"), None, config=config)
+
+    monkeypatch.setattr(readiness_validation, "_provider_metadata_is_meaningful", lambda _payload: False)
+    auth_item = readiness_validation._auth_live_item(config, auth_receipt)
+
+    assert auth_item["status"] == "release_blocked"
+    assert "missing_provider_metadata" in auth_item["details"]["acceptance_errors"]["errors"]
+
+    monkeypatch.setattr(
+        readiness_validation,
+        "_common_live_receipt_errors",
+        lambda _payload, *, proof_key, config: ["patched_common_live_error"],
+    )
+    alert_item = readiness_validation._surface_live_item(
+        config,
+        alert_receipt,
+        proof_key="alert",
+        dependency_bindings={},
+        item_id="live-alert-sink",
+        surface="live_alert_sink_delivery",
+        missing_risk="Live alert sink delivery has not been proven.",
+        removal="Provide an accepted alert sink receipt.",
+    )
+
+    assert alert_item["status"] == "release_blocked"
+    assert "patched_common_live_error" in alert_item["details"]["acceptance_errors"]["errors"]
+
+
+def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    original_auth_live_item = readiness_live_proofs._auth_live_item
+    original_surface_live_item = readiness_live_proofs._surface_live_item
+    delegated: list[str] = []
+
+    def recording_auth_live_item(*args: object, **kwargs: object) -> dict[str, object]:
+        delegated.append("auth")
+        return original_auth_live_item(*args, **kwargs)
+
+    def recording_surface_live_item(*args: object, **kwargs: object) -> dict[str, object]:
+        proof_key = str(kwargs["proof_key"])
+        delegated.append(proof_key)
+        assert proof_key in {"alert", "rollback", "target_env"}
+        return original_surface_live_item(*args, **kwargs)
+
+    monkeypatch.setattr(readiness_live_proofs, "_auth_live_item", recording_auth_live_item)
+    monkeypatch.setattr(readiness_live_proofs, "_surface_live_item", recording_surface_live_item)
+
+    proof_json = {
+        "auth": _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
+        "alert": _bound_proof("alert"),
+        "rollback": _bound_proof("rollback"),
+        "slurm": _bound_proof("slurm"),
+        "object_store": _bound_proof("object_store"),
+        "source": _bound_proof("source"),
+        "e2e": _bound_proof("e2e"),
+        "mvt": _bound_proof("mvt"),
+        "target_env": _bound_proof("target_env"),
+    }
+    receipts = {
+        proof_key: readiness_shared_artifacts._load_proof(
+            proof_key,
+            proof_json.get(proof_key),
+            None,
+            config=config,
+        )
+        for proof_key in readiness_shared_artifacts.PROOF_ENV
+    }
+
+    items = readiness_validation._live_proof_items(config, receipts, {}, ())
+
+    assert {item["surface"] for item in items} >= {
+        "live_backend_auth",
+        "live_alert_sink_delivery",
+        "live_rollback_execution",
+        "live_slurm_dependency_proof",
+        "live_object_store_dependency_proof",
+        "live_source_weather_dependency_proof",
+        "live_e2e_dependency_proof",
+        "live_mvt_performance_proof",
+        "target_environment_config_proof",
+    }
+    assert delegated == ["auth", "alert", "rollback", "target_env"]
 
 
 def test_live_proof_loader_ambiguity_missing_and_preflight_status(tmp_path: Path) -> None:
