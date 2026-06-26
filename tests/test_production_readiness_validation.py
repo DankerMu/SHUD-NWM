@@ -9,11 +9,13 @@ import pytest
 
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
-from services.production_closure import readiness_validation, slurm_validation
+from services.production_closure import readiness_item_contracts, readiness_validation, slurm_validation
 from services.production_closure.readiness_validation import (
     ALLOWED_STATUS_EXECUTION_MODES,
+    EXECUTED_MODES,
     EXECUTION_MODE_VALUES,
     MAX_SCHEDULER_EVIDENCE_FILES,
+    STATUS_VALUES,
     ProductionReadinessConfig,
     ProductionReadinessValidationError,
     validate_readiness,
@@ -92,6 +94,7 @@ def _blockers(root: Path, run_id: str = "m19") -> list[dict[str, object]]:
 
 def _base_item(status: str, execution_mode: str) -> dict[str, object]:
     return {
+        "item_id": "unit-readiness-item",
         "surface": "unit",
         "status": status,
         "execution_mode": execution_mode,
@@ -101,7 +104,19 @@ def _base_item(status: str, execution_mode: str) -> dict[str, object]:
         "residual_risk": "unit residual risk",
         "removal_criteria": "unit removal criteria",
         "exclusions": [],
+        "owner": "unit-owner",
+        "action": "unit-action",
     }
+
+
+def _assert_contract_error(
+    validator: object,
+    item: dict[str, object],
+    expected_error_code: str,
+) -> None:
+    with pytest.raises(ProductionReadinessValidationError) as error:
+        validator(item)
+    assert error.value.error_code == expected_error_code
 
 
 def _bound_proof(proof_key: str, *, run_id: str = "m19", **extra: object) -> str:
@@ -417,25 +432,75 @@ def _readiness_cli_args(root: Path, proofs: dict[str, str]) -> list[str]:
     return args
 
 
+def test_status_execution_mode_truth_table_facade_reexports_owner_contract_objects() -> None:
+    assert STATUS_VALUES is readiness_item_contracts.STATUS_VALUES
+    assert EXECUTION_MODE_VALUES is readiness_item_contracts.EXECUTION_MODE_VALUES
+    assert EXECUTED_MODES is readiness_item_contracts.EXECUTED_MODES
+    assert ALLOWED_STATUS_EXECUTION_MODES is readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES
+    assert ProductionReadinessValidationError is readiness_item_contracts.ProductionReadinessValidationError
+    assert validate_readiness_item is readiness_item_contracts.validate_readiness_item
+    assert readiness_validation.STATUS_VALUES is readiness_item_contracts.STATUS_VALUES
+    assert readiness_validation.EXECUTION_MODE_VALUES is readiness_item_contracts.EXECUTION_MODE_VALUES
+    assert readiness_validation.EXECUTED_MODES is readiness_item_contracts.EXECUTED_MODES
+    assert (
+        readiness_validation.ALLOWED_STATUS_EXECUTION_MODES
+        is readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES
+    )
+    assert (
+        readiness_validation.ProductionReadinessValidationError
+        is readiness_item_contracts.ProductionReadinessValidationError
+    )
+    assert readiness_validation.validate_readiness_item is readiness_item_contracts.validate_readiness_item
+
+
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
-    for status, modes in ALLOWED_STATUS_EXECUTION_MODES.items():
-        for mode in modes:
-            validate_readiness_item(_base_item(status, mode))
+    validators = (
+        readiness_item_contracts.validate_readiness_item,
+        readiness_validation.validate_readiness_item,
+    )
+    for validator in validators:
+        for status, modes in readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES.items():
+            for mode in modes:
+                validator(_base_item(status, mode))
 
-    for status in ALLOWED_STATUS_EXECUTION_MODES:
-        forbidden = EXECUTION_MODE_VALUES - ALLOWED_STATUS_EXECUTION_MODES[status]
-        for mode in forbidden:
-            with pytest.raises(ProductionReadinessValidationError):
-                validate_readiness_item(_base_item(status, mode))
+        for status in readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES:
+            forbidden = (
+                readiness_item_contracts.EXECUTION_MODE_VALUES
+                - readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES[status]
+            )
+            for mode in forbidden:
+                _assert_contract_error(
+                    validator,
+                    _base_item(status, mode),
+                    "PRODUCTION_READINESS_STATUS_MODE_INVALID",
+                )
 
-    with pytest.raises(ProductionReadinessValidationError):
-        validate_readiness_item(_base_item("not-a-status", "deterministic"))
-    with pytest.raises(ProductionReadinessValidationError):
-        validate_readiness_item(_base_item("passed", "not-a-mode"))
-    missing = _base_item("passed", "deterministic")
-    missing.pop("removal_criteria")
-    with pytest.raises(ProductionReadinessValidationError):
-        validate_readiness_item(missing)
+        _assert_contract_error(
+            validator,
+            _base_item("not-a-status", "deterministic"),
+            "PRODUCTION_READINESS_STATUS_INVALID",
+        )
+        _assert_contract_error(
+            validator,
+            _base_item("passed", "not-a-mode"),
+            "PRODUCTION_READINESS_EXECUTION_MODE_INVALID",
+        )
+        for field in ("item_id", "owner", "action", "removal_criteria"):
+            missing = _base_item("passed", "deterministic")
+            missing.pop(field)
+            _assert_contract_error(
+                validator,
+                missing,
+                "PRODUCTION_READINESS_ITEM_FIELD_MISSING",
+            )
+        missing_context = _base_item("release_blocked", "not_executed")
+        missing_context["required_for_final"] = True
+        missing_context["residual_risk"] = ""
+        _assert_contract_error(
+            validator,
+            missing_context,
+            "PRODUCTION_READINESS_BLOCKER_CONTEXT_MISSING",
+        )
 
 
 def test_readiness_schema_validation_item_is_emitted_for_invalid_item_contract(
@@ -443,8 +508,9 @@ def test_readiness_schema_validation_item_is_emitted_for_invalid_item_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "artifacts"
-    invalid_item = _base_item("passed", "deterministic")
-    invalid_item.pop("removal_criteria")
+    invalid_item = _base_item("release_blocked", "not_executed")
+    invalid_item["required_for_final"] = True
+    invalid_item.pop("item_id")
     monkeypatch.setattr(readiness_validation, "_deterministic_items", lambda config: [invalid_item])
 
     validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
@@ -455,8 +521,10 @@ def test_readiness_schema_validation_item_is_emitted_for_invalid_item_contract(
     assert validation_item["execution_mode"] == "deterministic"
     assert validation_item["required_for_final"] is False
     assert validation_item["artifact_refs"] == ["readiness_items.json"]
-    assert "removal_criteria" in validation_item["residual_risk"]
-    assert any(blocker["surface"] == "readiness_schema_validation" for blocker in _blockers(root))
+    assert "item_id" in validation_item["residual_risk"]
+    blockers = _blockers(root)
+    assert any(blocker["surface"] == "readiness_schema_validation" for blocker in blockers)
+    assert all(blocker["surface"] != "unit" for blocker in blockers)
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 

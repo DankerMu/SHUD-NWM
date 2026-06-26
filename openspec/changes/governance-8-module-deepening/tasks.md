@@ -1611,12 +1611,16 @@
 
 ## 4. Readiness Validation Lane Deepening
 
-- [ ] 4.1 Readiness item contract extraction.
+- [x] 4.1 Readiness item contract extraction.
   - Module/Scope: shared readiness item schema, status/execution-mode truth table, required fields, release-blocker context rules, invalid item namespaces.
   - Dependencies: None.
   - Out of Scope: proof loading, dependency summaries, final aggregation.
   - Focused Verification: `uv run pytest -q tests/test_production_readiness_validation.py -k "status_execution_mode_truth_table or readiness_schema_validation_item"`.
   - Inventory/Evidence Update: update `docs/governance/READINESS_VALIDATION_LANE_INVENTORY.md` row `Readiness item validation`.
+  - Selected Risk Packs: public validator entry, legacy compatibility/facade re-exports, schema/field names, release-blocker context safety, error namespace stability, documentation/inventory notes.
+  - Invariant Matrix: owner module `services.production_closure.readiness_item_contracts`; stable facade `services.production_closure.readiness_validation`; retained facade imports/re-exports include `validate_readiness_item`, `STATUS_VALUES`, `EXECUTION_MODE_VALUES`, `EXECUTED_MODES`, `ALLOWED_STATUS_EXECUTION_MODES`, and `ProductionReadinessValidationError`; `validate_readiness(config)` keeps proof loading, dependency summaries, artifact writes, `_final_ready`, release blocker aggregation, and final summary composition in the existing validator boundary; every readiness item contract requires `item_id`, `surface`, `status`, `execution_mode`, `required_for_final`, `live_proof_accepted`, `artifact_refs`, `residual_risk`, `removal_criteria`, `exclusions`, `owner`, and `action`; `release_blocked` items required for final readiness must carry non-empty residual risk and removal criteria; validation errors preserve `PRODUCTION_READINESS_STATUS_INVALID`, `PRODUCTION_READINESS_EXECUTION_MODE_INVALID`, `PRODUCTION_READINESS_STATUS_MODE_INVALID`, `PRODUCTION_READINESS_ITEM_FIELD_MISSING`, and `PRODUCTION_READINESS_BLOCKER_CONTEXT_MISSING`.
+  - Regression Rows: owner direct truth-table tests and facade parity tests prove the same allowed status/execution-mode pairs; invalid status, invalid execution mode, invalid pair, missing required field, and missing release-blocker context assert exact `error_code`; invalid produced items still create `schema-validation-{index}` on surface `readiness_schema_validation` with `failed`/`deterministic`, artifact ref `readiness_items.json`, and release blocker presence; a blocker-eligible item missing `item_id`, `owner`, or `action` is rejected by the item contract before release-blocker aggregation can raise `KeyError`; inventory row records the owner module, retained facade surface, removal condition, and focused verification command.
+  - Verification Floor: focused pytest command above; `uv run ruff check services/production_closure/readiness_validation.py services/production_closure/readiness_item_contracts.py tests/test_production_readiness_validation.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
 - [ ] 4.2 Shared artifact writers extraction.
   - Module/Scope: preflight artifact, environment artifact, evidence writer, safe writes, path rendering, redaction, bounded payloads.
   - Dependencies: 4.1.
