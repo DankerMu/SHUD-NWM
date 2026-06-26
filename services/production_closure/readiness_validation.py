@@ -20,39 +20,15 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
 )
+from services.production_closure import readiness_item_contracts as _readiness_item_contracts
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-STATUS_VALUES = frozenset({"passed", "failed", "blocked", "not_executed", "release_blocked"})
-EXECUTION_MODE_VALUES = frozenset(
-    {
-        "deterministic",
-        "policy_simulated",
-        "backend_route_executed",
-        "dry_run_sink",
-        "simulated_drill",
-        "live_proof",
-        "not_executed",
-    }
-)
-EXECUTED_MODES = EXECUTION_MODE_VALUES - {"not_executed"}
-ALLOWED_STATUS_EXECUTION_MODES: Mapping[str, frozenset[str]] = {
-    "passed": frozenset(
-        {
-            "deterministic",
-            "policy_simulated",
-            "backend_route_executed",
-            "dry_run_sink",
-            "simulated_drill",
-            "live_proof",
-        }
-    ),
-    "failed": frozenset(EXECUTED_MODES),
-    "blocked": frozenset({"not_executed"}),
-    "not_executed": frozenset({"not_executed"}),
-    "release_blocked": frozenset(
-        {"not_executed", "policy_simulated", "dry_run_sink", "simulated_drill", "live_proof"}
-    ),
-}
+STATUS_VALUES = _readiness_item_contracts.STATUS_VALUES
+EXECUTION_MODE_VALUES = _readiness_item_contracts.EXECUTION_MODE_VALUES
+EXECUTED_MODES = _readiness_item_contracts.EXECUTED_MODES
+ALLOWED_STATUS_EXECUTION_MODES = _readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES
+ProductionReadinessValidationError = _readiness_item_contracts.ProductionReadinessValidationError
+validate_readiness_item = _readiness_item_contracts.validate_readiness_item
 
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
@@ -377,13 +353,6 @@ REQUIRED_AUTH_ACTIONS = frozenset(
 )
 
 
-class ProductionReadinessValidationError(RuntimeError):
-    def __init__(self, error_code: str, message: str) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
-
-
 @dataclass(frozen=True)
 class BoundedPayloadResult:
     payload: Any
@@ -649,8 +618,7 @@ def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
         )
     )
     items.extend(_exclusion_items(config))
-    validation = _validate_items(items)
-    items.extend(validation)
+    items = _validate_items(items)
     writer.write_json(
         config.lane_dir / "readiness_items.json",
         {"schema": "nhms.production_readiness.items.v1", "items": items},
@@ -702,47 +670,6 @@ def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
     }
     writer.write_json(config.lane_dir / "summary.json", summary)
     return summary
-
-
-def validate_readiness_item(item: Mapping[str, Any]) -> None:
-    status = str(item.get("status", ""))
-    execution_mode = str(item.get("execution_mode", ""))
-    if status not in STATUS_VALUES:
-        raise ProductionReadinessValidationError(
-            "PRODUCTION_READINESS_STATUS_INVALID",
-            f"Readiness status is not supported: {status!r}.",
-        )
-    if execution_mode not in EXECUTION_MODE_VALUES:
-        raise ProductionReadinessValidationError(
-            "PRODUCTION_READINESS_EXECUTION_MODE_INVALID",
-            f"Readiness execution_mode is not supported: {execution_mode!r}.",
-        )
-    if execution_mode not in ALLOWED_STATUS_EXECUTION_MODES[status]:
-        raise ProductionReadinessValidationError(
-            "PRODUCTION_READINESS_STATUS_MODE_INVALID",
-            f"Readiness status/execution_mode pair is not allowed: {status}/{execution_mode}.",
-        )
-    required_fields = (
-        "surface",
-        "required_for_final",
-        "live_proof_accepted",
-        "artifact_refs",
-        "residual_risk",
-        "removal_criteria",
-        "exclusions",
-    )
-    missing = [field for field in required_fields if field not in item]
-    if missing:
-        raise ProductionReadinessValidationError(
-            "PRODUCTION_READINESS_ITEM_FIELD_MISSING",
-            f"Readiness item is missing required fields: {', '.join(missing)}.",
-        )
-    if status == "release_blocked" and item.get("required_for_final") is True:
-        if not str(item.get("residual_risk", "")).strip() or not str(item.get("removal_criteria", "")).strip():
-            raise ProductionReadinessValidationError(
-                "PRODUCTION_READINESS_BLOCKER_CONTEXT_MISSING",
-                "Release-blocked readiness items require residual_risk and removal_criteria.",
-            )
 
 
 def _deterministic_items(config: ProductionReadinessConfig) -> list[dict[str, Any]]:
@@ -1474,13 +1401,13 @@ def _exclusion_items(config: ProductionReadinessConfig) -> list[dict[str, Any]]:
     ]
 
 
-def _validate_items(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    validation_failures = []
+def _validate_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    validated_items = []
     for index, item in enumerate(items):
         try:
             validate_readiness_item(item)
         except ProductionReadinessValidationError as error:
-            validation_failures.append(
+            validated_items.append(
                 _item(
                     item_id=f"schema-validation-{index}",
                     surface="readiness_schema_validation",
@@ -1493,7 +1420,9 @@ def _validate_items(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     removal_criteria="Fix the readiness producer item contract before release review.",
                 )
             )
-    return validation_failures
+        else:
+            validated_items.append(item)
+    return validated_items
 
 
 def _release_blockers(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
