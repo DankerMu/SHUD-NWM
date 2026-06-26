@@ -50,7 +50,7 @@ rg -n "DEPENDENCY_SUMMARY_CONTRACTS|PROOF_CONTRACTS|ALLOWED_STATUS_EXECUTION_MOD
 rg -n "dependency|scheduler|live_receipt|proof|exclusion|final|redact|path|bounded|execution_mode|status" tests/test_production_readiness_validation.py
 ```
 
-## Non-Targets
+## Readiness Closeout Non-Targets
 
 - No #672 two-node E2E lane rows. This page does not map
   `two_node_e2e_evidence.py` lanes such as Docker preflight, readonly DB,
@@ -215,6 +215,35 @@ scheduler/dependency files, and writes outside the current readiness lane.
 and also records any required final item that is not accepted. Scoped
 exclusions remain visible in summary artifacts but are not failures and do not
 satisfy live proof requirements.
+
+## Readiness Group Closeout Evidence
+
+Governance-8 issue #755 closes readiness validation tasks 4.1 through 4.11.
+The table below is the implementation evidence map for the readiness group; it
+ties each OpenSpec task to its GitHub issue and implementation PR.
+
+| Task | Issue | PR | Closeout evidence |
+|---|---|---|---|
+| 4.1 Readiness item contract extraction | #745 | #804 | Item contract owner module, required-field/status-mode validation, invalid item replacement, and facade identity coverage. |
+| 4.2 Shared artifact writer/preflight/env extraction | #746 | #805 | Shared artifact writer, preflight/environment payload, redaction, bounded payload, no-clobber, and safe-write coverage. |
+| 4.3 Shared live-proof loader and receipts artifact extraction | #747 | #806 | Proof env/file loading, bounded no-follow reads, receipt artifact redaction, raw/public payload split, and write-order coverage. |
+| 4.4 Dependency summary reader extraction | #748 | #807 | Dependency summary owner module, safe summary discovery/read, issue/schema/status/run-id contracts, and deterministic review-only semantics. |
+| 4.5 Scheduler evidence reader extraction | #749 | #808 | Scheduler evidence owner module, root/file discovery, bounded reads, schema/status/count/identity validation, bindings, and dry-run proof coverage. |
+| 4.6 Proof-specific live validators extraction | #750 | #809 | Auth, alert, rollback, and target-environment proof-specific owner module plus fail-closed surface helper and facade compatibility coverage. |
+| 4.7 Dependency live-proof binder extraction | #751 | #810 | Dependency live-proof binder owner module, alias/provenance binding, consumed-summary matching, and facade monkeypatch compatibility coverage. |
+| 4.8 Scheduler live-proof binder extraction | #752 | #811 | Scheduler live-proof binder owner module, producer binding, live-eligible status/mode checks, optional final count, and final-ready coverage. |
+| 4.9 Scoped exclusion extraction | #753 | #812 | Scoped exclusion owner module, exact product exclusion items, public exclusion artifacts, non-blocker semantics, and no live-count contribution. |
+| 4.10 Readiness final aggregation extraction | #754 | #813 | Final aggregation owner module, release-blocker/summary payload shape, final-ready semantics, counts, artifact refs, and facade coverage. |
+| 4.11 Readiness group verification and evidence closeout | #755 | #814 | Final group verification and this issue/PR mapping. |
+
+## Non-Targets
+
+- No readiness runtime behavior changes, live service mutation, production
+  deploy changes, DB/schema/role changes, Slurm scheduling changes, API route
+  changes, frontend/display changes, or live proof requirement relaxation.
+- No compatibility symbol removal and no caller migration in this closeout.
+- No scheduler, chain, two-node, API-bootstrap, or frontend group evidence
+  changes in this slice.
 
 ## Guard Hook Seed
 
