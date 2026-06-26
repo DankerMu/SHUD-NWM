@@ -8,7 +8,8 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from apps.api import route_registry
+from apps.api import main as api_main
+from apps.api import route_registry, startup_wiring
 from apps.api.main import create_app
 from apps.api.runtime_mode import RuntimeModeError, ServiceRole, display_boundary_blockers, load_runtime_config
 
@@ -211,6 +212,62 @@ def test_route_registry_owner_preserves_role_aware_slurm_inclusion(tmp_path: Pat
     assert "/api/v1/runtime/config" in _route_paths(compute_app, "/api/v1/runtime")
     assert not _route_paths(display_app, "/api/v1/slurm")
     assert "/api/v1/slurm/health" in _route_paths(compute_app, "/api/v1/slurm")
+
+
+def test_startup_wiring_owner_configures_state_and_display_only_warmer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    warmed_apps: list[FastAPI] = []
+    display_config = load_runtime_config(_display_env(tmp_path))
+    compute_config = load_runtime_config(_clean_env({"NHMS_SERVICE_ROLE": "compute_control"}))
+    display_app = FastAPI()
+    compute_app = FastAPI()
+
+    def fake_start_display_catalog_warmer(app: FastAPI) -> None:
+        warmed_apps.append(app)
+
+    monkeypatch.setattr(startup_wiring, "start_display_catalog_warmer", fake_start_display_catalog_warmer)
+
+    startup_wiring.configure_app_state(display_app, display_config)
+    startup_wiring.configure_app_state(compute_app, compute_config)
+    startup_wiring.start_display_cache_warmer_if_needed(display_app, display_config)
+    startup_wiring.start_display_cache_warmer_if_needed(compute_app, compute_config)
+
+    assert display_app.state.runtime_config is display_config
+    assert display_app.state.object_store_root == display_config.object_store_root
+    assert compute_app.state.runtime_config is compute_config
+    assert compute_app.state.object_store_root == compute_config.object_store_root
+    assert warmed_apps == [display_app]
+
+
+def test_static_route_facade_preserves_main_frontend_path_monkeypatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dist = tmp_path / "dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    index = dist / "index.html"
+    index.write_text("<html>patched app</html>", encoding="utf-8")
+    (assets / "app.js").write_text("console.log('patched')", encoding="utf-8")
+    app = FastAPI()
+
+    monkeypatch.setattr(api_main, "FRONTEND_DIST_DIR", dist)
+    monkeypatch.setattr(api_main, "FRONTEND_INDEX", index)
+
+    api_main._register_static_and_health_routes(app)
+
+    with TestClient(app) as client:
+        index_response = client.get("/dashboard")
+        static_response = client.get("/assets/app.js")
+
+    assert index_response.status_code == 200
+    assert "patched app" in index_response.text
+    assert index_response.headers["Cache-Control"] == "no-cache"
+    assert static_response.status_code == 200
+    assert static_response.text == "console.log('patched')"
+    assert static_response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
 
 
 @pytest.mark.parametrize(

@@ -44,11 +44,11 @@ The line-count evidence was:
 API owner-module evidence was updated on 2026-06-26 with:
 
 ```bash
-wc -l apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py
+wc -l apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py apps/api/startup_wiring.py
 uv run pytest -q tests/test_api.py tests/test_openapi_drift.py
 uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py
-uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py
-uv run ruff check apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py tests/test_api.py tests/test_openapi_drift.py tests/test_runtime_mode.py tests/test_role_boundary_static.py
+uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_monitoring_api.py
+uv run ruff check apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py apps/api/startup_wiring.py tests/test_api.py tests/test_openapi_drift.py tests/test_static_serving.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_monitoring_api.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 openspec validate --all --strict --no-interactive
 cd apps/frontend && corepack pnpm check:api-types
@@ -59,9 +59,10 @@ Current API ownership line-count evidence:
 
 | Path | Current lines |
 |---|---:|
-| `apps/api/main.py` | 401 |
+| `apps/api/main.py` | 334 |
 | `apps/api/openapi_patching.py` | 1679 |
 | `apps/api/route_registry.py` | 36 |
+| `apps/api/startup_wiring.py` | 100 |
 
 ## Non-Targets
 
@@ -89,7 +90,7 @@ Current API ownership line-count evidence:
 | `services/orchestrator/chain.py` | 6956 | P1 | `compute_control` orchestration chain facade and aggregation surface | Compatibility-facade freeze before extraction. Keep the chain entrypoint stable while stage, manifest, reservation, retry, tile-publisher, worker, and persistence ownership is mapped. | #670, #671 | Retain current aggregation/facade behavior until #670 records owner modules and caller migration paths and #671 guards against new facade groups or ownership growth. Reduction is valid only behind stable entrypoints and focused behavior tests. | Current #668 verification is `wc -l` plus the structural audit row. #670/#671 own chain inventory, guard, and focused orchestration verification. |
 | `services/production_closure/two_node_e2e_evidence.py` | 9098 | P1 | `compute_control` production-closure evidence aggregator with display-readonly evidence consumers | Lane-decomposition plan. Keep the aggregator entrypoint stable while Docker security, readonly DB, API/browser, logs, producer identity, source artifact, and manual ops receipt lanes gain explicit contracts. | #672, #674 | Retain the aggregator until #672 defines lane contracts and #674 extracts governed lane implementation behind equivalent result/status/blocker semantics. No path-safety, redaction, current-run, alias, or final aggregation behavior is removed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #672/#674 own lane contract tests, equivalent-fixture checks, and production-closure verification. |
 | `services/production_closure/readiness_validation.py` | 3517 | P1 | `compute_control` production-closure readiness aggregator | Lane-decomposition plan. Keep readiness aggregation stable while dependency summary, scheduler evidence, live proof, exclusions, and final readiness ownership is mapped. | #673 | Retain current aggregation until #673 records lane owner modules, result shape, blocker namespaces, and focused verification. Reduction is valid only when final readiness semantics stay equivalent for existing receipts. | Current #668 verification is `wc -l` plus the structural audit row. #673 owns readiness lane inventory and focused validation coverage. |
-| `apps/api/main.py` | 401 | P2 | API bootstrap facade shared by `compute_control`, `display_readonly`, and `shared_contract`; OpenAPI patch owner is `apps/api/openapi_patching.py`; role-aware route registry owner is `apps/api/route_registry.py` | OpenAPI patch owner extracted in #756 and role-aware route registry extracted in #757. Keep `create_app()`, runtime config state, middleware, static/health/cache wiring, protected mutation guard, `runtime_config(request)`, `custom_openapi()`, `_custom_openapi_factory()`, and compatibility `_patch_*` imports stable while later static/startup/auth seams are extracted. | #686, #756, #757 | `apps/api/openapi_patching.py` owns runtime OpenAPI patch factory/order and runtime, pipeline, station-series, QHH latest-product, MVT, flood, met-stations, and layer metadata schema helpers. `apps/api/route_registry.py` owns business router ordering, runtime-router inclusion, and conditional Slurm router inclusion from `RuntimeConfig.slurm_routes_enabled`. Retain the `apps/api/main.py` facade and compatibility exports until a later recorded migration/removal decision with route inventory, role-boundary, OpenAPI drift, runtime-mode, and affected frontend type verification. No auth, request-body validation, route handler implementation, frontend UI, DB/schema, Slurm scheduling, scheduler, chain, or two-node behavior is removed by #757. | #756 verification: `uv run pytest -q tests/test_api.py tests/test_openapi_drift.py`; `cd apps/frontend && corepack pnpm check:api-types`. #757 verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py`; `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`; `uv run ruff check apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py tests/test_api.py tests/test_openapi_drift.py tests/test_runtime_mode.py tests/test_role_boundary_static.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`. |
+| `apps/api/main.py` | 334 | P2 | API bootstrap facade shared by `compute_control`, `display_readonly`, and `shared_contract`; OpenAPI patch owner is `apps/api/openapi_patching.py`; role-aware route registry owner is `apps/api/route_registry.py`; startup/static/cache owner is `apps/api/startup_wiring.py` | OpenAPI patch owner extracted in #756, role-aware route registry extracted in #757, and startup/static/cache wiring extracted in #758. Keep `create_app()`, middleware, protected mutation guard, route registry call, OpenAPI assignment, `custom_openapi()`, `_custom_openapi_factory()`, and compatibility `_patch_*` imports stable while later protected-mutation seams are extracted. | #686, #756, #757, #758 | `apps/api/openapi_patching.py` owns runtime OpenAPI patch factory/order and runtime, pipeline, station-series, QHH latest-product, MVT, flood, met-stations, and layer metadata schema helpers. `apps/api/route_registry.py` owns business router ordering, runtime-router inclusion, and conditional Slurm router inclusion from `RuntimeConfig.slurm_routes_enabled`. `apps/api/startup_wiring.py` owns app state configuration, runtime config route/router construction, health/static/SPA route mounting, cache-control static files, frontend dist paths, success-envelope helper, and display-readonly cache warmup dispatch. Retain the `apps/api/main.py` facade and compatibility exports until a later recorded migration/removal decision with route inventory, role-boundary, OpenAPI drift, runtime-mode, and affected frontend type verification. No auth, request-body validation, route registry role decision, OpenAPI patch internals, frontend UI, DB/schema, Slurm scheduling, scheduler, chain, or two-node behavior is removed by #758. | #756 verification: `uv run pytest -q tests/test_api.py tests/test_openapi_drift.py`; `cd apps/frontend && corepack pnpm check:api-types`. #757 verification: `uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py`; `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`. #758 verification: `uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_monitoring_api.py`; `uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py`; `uv run ruff check apps/api/main.py apps/api/openapi_patching.py apps/api/route_registry.py apps/api/startup_wiring.py tests/test_api.py tests/test_openapi_drift.py tests/test_static_serving.py tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_monitoring_api.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`. |
 | `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1499 | P2 | `display_readonly` frontend map surface | Scoped-context coverage and freeze before later extraction. Keep the display map surface stable while map ownership, live-vs-mocked evidence rules, and later extraction boundaries are recorded. | #687 | Retain current surface until #687 records frontend map ownership and any later extraction preserves map behavior, product identity display, and frontend verification. No UI behavior is changed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #687 owns focused frontend tests/build evidence for later map-surface work. |
 
 ## Per-File Notes
@@ -124,10 +125,11 @@ owns the lane inventory before any extraction is claimed.
 
 `apps/api/main.py` now retains the role-aware bootstrap facade while
 `apps/api/openapi_patching.py` owns runtime OpenAPI patch generation and
-`apps/api/route_registry.py` owns role-aware router inclusion. It remains P2
-because later API bootstrap work must still extract static/health/cache/startup
-and protected-mutation seams without changing runtime role boundaries or
-OpenAPI behavior.
+`apps/api/route_registry.py` owns role-aware router inclusion and
+`apps/api/startup_wiring.py` owns startup state, runtime config routing,
+static/health mounting, cache-control, and display cache warmup. It remains P2
+because later API bootstrap work must still retain or extract protected-mutation
+seams without changing runtime role boundaries or OpenAPI behavior.
 
 ### `apps/frontend/src/components/map/M11MapLibreSurface.tsx`
 
