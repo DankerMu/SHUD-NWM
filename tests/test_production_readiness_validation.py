@@ -59,6 +59,52 @@ DEPENDENCY_CONTRACTS = {
     "e2e": (150, "nhms.production_closure.e2e.v1"),
     "mvt": (151, "nhms.production_closure.scale.v1"),
 }
+EXPECTED_ALLOWED_STATUS_EXECUTION_MODES = {
+    "passed": frozenset(
+        {
+            "deterministic",
+            "policy_simulated",
+            "backend_route_executed",
+            "dry_run_sink",
+            "simulated_drill",
+            "live_proof",
+        }
+    ),
+    "failed": frozenset(
+        {
+            "deterministic",
+            "policy_simulated",
+            "backend_route_executed",
+            "dry_run_sink",
+            "simulated_drill",
+            "live_proof",
+        }
+    ),
+    "blocked": frozenset({"not_executed"}),
+    "not_executed": frozenset({"not_executed"}),
+    "release_blocked": frozenset(
+        {
+            "not_executed",
+            "policy_simulated",
+            "dry_run_sink",
+            "simulated_drill",
+            "live_proof",
+        }
+    ),
+}
+EXPECTED_EXECUTION_MODE_VALUES = frozenset().union(*EXPECTED_ALLOWED_STATUS_EXECUTION_MODES.values())
+EXPECTED_REQUIRED_READINESS_ITEM_FIELDS = (
+    "item_id",
+    "surface",
+    "required_for_final",
+    "live_proof_accepted",
+    "artifact_refs",
+    "residual_risk",
+    "removal_criteria",
+    "exclusions",
+    "owner",
+    "action",
+)
 
 
 class ReadyCanonicalReadinessProvider:
@@ -454,20 +500,22 @@ def test_status_execution_mode_truth_table_facade_reexports_owner_contract_objec
 
 
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
+    assert STATUS_VALUES == frozenset(EXPECTED_ALLOWED_STATUS_EXECUTION_MODES)
+    assert EXECUTION_MODE_VALUES == EXPECTED_EXECUTION_MODE_VALUES
+    assert EXECUTED_MODES == EXPECTED_EXECUTION_MODE_VALUES - {"not_executed"}
+    assert ALLOWED_STATUS_EXECUTION_MODES == EXPECTED_ALLOWED_STATUS_EXECUTION_MODES
+
     validators = (
         readiness_item_contracts.validate_readiness_item,
         readiness_validation.validate_readiness_item,
     )
     for validator in validators:
-        for status, modes in readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES.items():
+        for status, modes in EXPECTED_ALLOWED_STATUS_EXECUTION_MODES.items():
             for mode in modes:
                 validator(_base_item(status, mode))
 
-        for status in readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES:
-            forbidden = (
-                readiness_item_contracts.EXECUTION_MODE_VALUES
-                - readiness_item_contracts.ALLOWED_STATUS_EXECUTION_MODES[status]
-            )
+        for status, modes in EXPECTED_ALLOWED_STATUS_EXECUTION_MODES.items():
+            forbidden = EXPECTED_EXECUTION_MODE_VALUES - modes
             for mode in forbidden:
                 _assert_contract_error(
                     validator,
@@ -485,7 +533,7 @@ def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden
             _base_item("passed", "not-a-mode"),
             "PRODUCTION_READINESS_EXECUTION_MODE_INVALID",
         )
-        for field in ("item_id", "owner", "action", "removal_criteria"):
+        for field in EXPECTED_REQUIRED_READINESS_ITEM_FIELDS:
             missing = _base_item("passed", "deterministic")
             missing.pop(field)
             _assert_contract_error(
