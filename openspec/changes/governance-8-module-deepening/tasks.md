@@ -2062,12 +2062,56 @@
 
 ## 7. Completion And Evidence
 
-- [ ] 7.1 Update structural, compatibility, and lane inventories after each owner family completes.
+- [x] 7.1 Update structural, compatibility, and lane inventories after each owner family completes.
   - Module/Scope: documentation/evidence mapping only.
   - Dependencies: completion of each owner-family issue.
   - Out of Scope: delayed inventory batch updates that leave code and inventory out of sync.
   - Focused Verification: `git diff --check`; reviewer confirms every moved owner module has an inventory row.
   - Inventory/Evidence Update: inventory updates are same-PR requirements, not final-only cleanup.
+  - Fixture Level: expanded documentation/evidence fixture. Reason: this task
+    reconciles multiple governance inventories that act as source-of-truth
+    evidence for completed owner-family PRs, compatibility facades, and lane
+    decomposition.
+  - Risk Packs Selected: Inventory drift / stale governance evidence, because
+    stale inventory rows can hide owner/facade mismatches; compatibility and
+    lane authority preservation, because scheduler/chain/two-node/readiness
+    authority files remain the review target for future changes; completion
+    evidence integrity, because the task proves same-PR inventory updates rather
+    than deferred batch cleanup. Risk Packs Not Selected: runtime behavior,
+    DB/schema, Slurm scheduling, API route behavior, frontend UI behavior,
+    generated API types, production topology, station-MVT closure, and live
+    node-27 receipts, because this slice changes only docs/OpenSpec evidence.
+  - Invariant Matrix: Governing invariant: every completed Governance-8
+    owner-family movement or retention decision is represented in exactly one
+    current inventory authority, with closeout evidence tying task -> issue ->
+    PR and with non-targets preserving unchanged runtime/product boundaries.
+    Source-of-truth identity/contract: `docs/governance/*INVENTORY.md`
+    authority sections plus this OpenSpec task. Surfaces: Producers:
+    completed PR closeout rows for tasks 1.1-6.6; Validators/preflight:
+    markdownlint, OpenSpec validation, inventory-token assertion, and diff-check;
+    Storage/cache/query: none - docs-only evidence; Public routes/entrypoints:
+    none - no runtime entrypoint change; Frontend/downstream consumers: none -
+    docs-only evidence; Failure paths/stale state: stale line counts, missing
+    Governance-8 scope in readiness inventory, missing authority map for a
+    completed group, or a final-only inventory batch claim; Evidence/audit:
+    structural inventory sync table and refreshed readiness inventory scope.
+  - Boundary Surfaces: This slice may update governance inventory prose,
+    refreshed line-count evidence, authority maps, and this task checkbox only.
+    It must not change implementation files, tests, generated artifacts,
+    compatibility symbols, lane semantics, API/frontend behavior, DB/schema,
+    Slurm scheduling, production topology, station-MVT status, or display live
+    evidence.
+  - Regression Rows: structural inventory current line counts match the six
+    mandatory-governance facade files after completed groups; scheduler,
+    chain, two-node, readiness, API, and frontend groups each have a current
+    authority inventory or closeout table; readiness inventory scope names
+    Governance-8 issues #745-#755 instead of only #673; no deferred inventory
+    batch or final-only cleanup is claimed; OpenSpec single-change validation,
+    markdownlint, inventory-token assertion, and diff-check pass.
+  - Verification Floor: focused verification command above;
+    `openspec validate governance-8-module-deepening --strict --no-interactive`;
+    `npx --yes markdownlint-cli2 "docs/**/*.md"`; inventory-token assertion
+    over the six authority files; `git diff --check`.
 - [ ] 7.2 Re-run report-only entropy audit after all six groups complete.
   - Module/Scope: entropy/audit report and deltas.
   - Dependencies: 1.9, 2.11, 3.13, 4.11, 5.5, and 6.6.
