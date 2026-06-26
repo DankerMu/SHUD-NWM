@@ -234,7 +234,7 @@ ties each OpenSpec task to its GitHub issue and implementation PR.
 | 4.8 Scheduler live-proof binder extraction | #752 | #811 | Scheduler live-proof binder owner module, producer binding, live-eligible status/mode checks, optional final count, and final-ready coverage. |
 | 4.9 Scoped exclusion extraction | #753 | #812 | Scoped exclusion owner module, exact product exclusion items, public exclusion artifacts, non-blocker semantics, and no live-count contribution. |
 | 4.10 Readiness final aggregation extraction | #754 | #813 | Final aggregation owner module, release-blocker/summary payload shape, final-ready semantics, counts, artifact refs, and facade coverage. |
-| 4.11 Readiness group verification and evidence closeout | #755 | this closeout PR | Final group verification and this issue/PR mapping. |
+| 4.11 Readiness group verification and evidence closeout | #755 | #814 | Final group verification and this issue/PR mapping. |
 
 ## Non-Targets
 
