@@ -24,12 +24,26 @@ def test_geojson_static_file_is_served_as_json_not_index_html() -> None:
     assert body.startswith("{"), "expected GeoJSON, got non-JSON (likely index.html fallback)"
     assert '"FeatureCollection"' in body
     assert "<!doctype html" not in body.lower()
+    assert response.headers["Cache-Control"] == "no-cache"
 
 
 def test_spa_client_route_falls_back_to_index_html() -> None:
     response = client.get("/hydro-met")
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
+    assert response.headers["Cache-Control"] == "no-cache"
+
+
+def test_vite_asset_cache_control_is_immutable() -> None:
+    asset = next((path for path in (FRONTEND_DIST_DIR / "assets").rglob("*") if path.is_file()), None)
+    if asset is None:
+        pytest.skip("no frontend asset files present")
+    relative_asset = asset.relative_to(FRONTEND_DIST_DIR)
+
+    response = client.get(f"/{relative_asset.as_posix()}")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
 
 
 def test_unknown_api_path_is_404_not_index() -> None:

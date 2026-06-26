@@ -43,7 +43,13 @@ def runtime_config(request: Request) -> dict[str, Any]:
     return ok_response(request, config.public_dict())
 
 
-def register_static_and_health_routes(api: FastAPI) -> None:
+def register_static_and_health_routes(
+    api: FastAPI,
+    *,
+    frontend_dist_dir: Path = FRONTEND_DIST_DIR,
+    frontend_index: Path = FRONTEND_INDEX,
+    static_files_cls: type[CacheControlStaticFiles] = CacheControlStaticFiles,
+) -> None:
     @api.get("/health")
     async def health() -> dict[str, str]:
         return {
@@ -55,8 +61,8 @@ def register_static_and_health_routes(api: FastAPI) -> None:
     api.mount(
         "/assets",
         # Vite 产物文件名带内容 hash：内容不变 URL 不变 → 可永久缓存（immutable）。
-        CacheControlStaticFiles(
-            directory=FRONTEND_DIST_DIR / "assets",
+        static_files_cls(
+            directory=frontend_dist_dir / "assets",
             check_dir=False,
             cache_control="public, max-age=31536000, immutable",
         ),
@@ -71,9 +77,9 @@ def register_static_and_health_routes(api: FastAPI) -> None:
         # before falling back to index.html for SPA client routes. Reject path
         # traversal by confirming the resolved path stays inside the dist root.
         if full_path:
-            candidate = (FRONTEND_DIST_DIR / full_path).resolve()
+            candidate = (frontend_dist_dir / full_path).resolve()
             try:
-                candidate.relative_to(FRONTEND_DIST_DIR.resolve())
+                candidate.relative_to(frontend_dist_dir.resolve())
             except ValueError:
                 candidate = None
             if candidate is not None and candidate.is_file():
@@ -83,7 +89,7 @@ def register_static_and_health_routes(api: FastAPI) -> None:
         # index.html 绝不能被启发式缓存：旧 index 引用旧 hash bundle，会让用户在
         # 部署后长期跑旧前端（实测导致总览相机/河网修复"看不到"）。no-cache 仍允许
         # ETag/Last-Modified 条件请求 304，代价只是每次一个轻量 revalidate。
-        return FileResponse(FRONTEND_INDEX, headers={"Cache-Control": "no-cache"})
+        return FileResponse(frontend_index, headers={"Cache-Control": "no-cache"})
 
 
 def start_display_cache_warmer_if_needed(api: FastAPI, runtime_config: RuntimeConfig) -> None:

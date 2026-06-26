@@ -317,7 +317,12 @@ _patch_runtime_openapi = openapi_patching._patch_runtime_openapi
 
 
 def _register_static_and_health_routes(api: FastAPI) -> None:
-    startup_wiring.register_static_and_health_routes(api)
+    startup_wiring.register_static_and_health_routes(
+        api,
+        frontend_dist_dir=FRONTEND_DIST_DIR,
+        frontend_index=FRONTEND_INDEX,
+        static_files_cls=CacheControlStaticFiles,
+    )
 
 
 def _ok(request: Request, data: Any) -> dict[str, Any]:
