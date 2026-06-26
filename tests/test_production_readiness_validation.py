@@ -11,6 +11,7 @@ import pytest
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
+    readiness_dependency_live_proofs,
     readiness_dependency_summaries,
     readiness_item_contracts,
     readiness_live_proofs,
@@ -782,6 +783,159 @@ def test_live_receipt_validator_owner_facade_aliases_and_outputs_match(tmp_path:
         )
 
 
+def test_dependency_live_proof_owner_facade_exports_and_helper_outputs_match() -> None:
+    assert readiness_dependency_live_proofs.PROOF_CONTRACTS is readiness_live_proofs.PROOF_CONTRACTS
+    assert (
+        readiness_dependency_live_proofs.DEPENDENCY_SUMMARY_CONTRACTS
+        is readiness_dependency_summaries.DEPENDENCY_SUMMARY_CONTRACTS
+    )
+    assert readiness_validation.DEPENDENCY_PROOF_KEYS is readiness_dependency_live_proofs.DEPENDENCY_PROOF_KEYS
+    assert readiness_validation.DEPENDENCY_PROOF_KEYS == DEPENDENCY_PROOFS
+    assert (
+        readiness_validation.DEPENDENCY_BINDING_ALIAS_GROUPS
+        is readiness_dependency_live_proofs.DEPENDENCY_BINDING_ALIAS_GROUPS
+    )
+    assert readiness_validation._non_empty_string is readiness_dependency_live_proofs._non_empty_string
+    assert readiness_validation._has_meaningful_value is readiness_dependency_live_proofs._has_meaningful_value
+
+    for name in (
+        "_coalesced_binding_value",
+        "_dependency_producer_binding",
+        "_binding_values",
+        "_binding_canonical_value",
+        "_normalized_binding_value",
+        "_dependency_binding_alias_errors",
+        "_dependency_binding_consistency_errors",
+        "_dependency_binding_summary_errors",
+        "_issue_matches",
+        "_contains_placeholder_value",
+    ):
+        assert getattr(readiness_validation, name) is getattr(readiness_dependency_live_proofs, name)
+
+    payload = json.loads(_bound_proof("slurm"))
+    binding = readiness_dependency_live_proofs._dependency_producer_binding(payload)
+    summary_binding = {
+        "summary_run_id": "slurm-live-run",
+        "producer_artifact_ref": "slurm:summary.json",
+        "summary_checksum": "sha256:abc123",
+    }
+    assert readiness_validation._dependency_producer_binding(payload) == binding
+    assert readiness_validation._binding_values(binding, "producer_run_id") == (
+        readiness_dependency_live_proofs._binding_values(binding, "producer_run_id")
+    )
+    assert readiness_validation._binding_canonical_value(binding, "producer_run_id") == "slurm-live-run"
+    assert readiness_validation._coalesced_binding_value({}, binding, "producer_run_id") == "slurm-live-run"
+    assert readiness_validation._normalized_binding_value(" #147 ", field="producer_issue") == "147"
+    assert readiness_validation._dependency_binding_alias_errors(binding, source="top_level") == []
+    assert readiness_validation._dependency_binding_consistency_errors(binding, binding) == []
+    assert readiness_validation._dependency_binding_summary_errors(binding, summary_binding, source="top_level") == []
+    assert readiness_validation._issue_matches("#147", 147) is True
+    assert readiness_validation._contains_placeholder_value({"note": "placeholder"}) is True
+
+
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
+def test_dependency_live_proof_owner_direct_and_facade_outputs_match(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof(proof_key, _bound_proof(proof_key), None, config=config)
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+
+    assert readiness_validation._dependency_receipt_errors(
+        payload,
+        proof_key=proof_key,
+        dependency_bindings={},
+    ) == readiness_dependency_live_proofs._dependency_receipt_errors(
+        payload,
+        proof_key=proof_key,
+        dependency_bindings={},
+    )
+    assert readiness_validation._surface_live_item(
+        config,
+        receipt,
+        proof_key=proof_key,
+        dependency_bindings={},
+        **_live_surface_item_kwargs(proof_key),
+    ) == readiness_dependency_live_proofs._surface_live_item(
+        config,
+        receipt,
+        proof_key=proof_key,
+        dependency_bindings={},
+        **_live_surface_item_kwargs(proof_key),
+    )
+
+
+@pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
+def test_dependency_live_proof_owner_preserves_specific_contract_checks(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    sibling = "object_store" if proof_key != "object_store" else "slurm"
+    sibling_issue, sibling_schema = DEPENDENCY_CONTRACTS[sibling]
+    payload = json.loads(
+        _bound_proof(
+            proof_key,
+            surface=PROOF_SURFACES[sibling],
+            producer_issue=sibling_issue,
+            producer_schema=sibling_schema,
+        )
+    )
+    payload["provenance"]["producer_issue"] = sibling_issue
+    payload["provenance"]["producer_schema"] = sibling_schema
+    errors = readiness_dependency_live_proofs._surface_live_receipt_errors(
+        payload,
+        proof_key=proof_key,
+        config=config,
+        dependency_bindings={},
+    )
+
+    assert "surface_mismatch" in errors
+    assert "producer_issue_mismatch" in errors
+    assert "producer_schema_mismatch" in errors
+
+
+@pytest.mark.parametrize(
+    "proof_key",
+    ("auth", "alert", "rollback", "target_env", "scheduler", "unknown"),
+)
+def test_dependency_live_proof_owner_fails_closed_for_non_dependency_keys(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = {"status": "missing", "source": "not_configured"}
+    kwargs = {
+        "item_id": f"live-{proof_key}",
+        "surface": f"live_{proof_key}",
+        "missing_risk": f"Live {proof_key} proof has not been accepted.",
+        "removal": f"Provide an accepted {proof_key} proof receipt.",
+    }
+
+    with pytest.raises(ValueError, match=f"unsupported dependency proof key: {proof_key}"):
+        readiness_dependency_live_proofs._dependency_receipt_errors(
+            {},
+            proof_key=proof_key,
+            dependency_bindings={},
+        )
+    with pytest.raises(ValueError, match=f"unsupported dependency proof key: {proof_key}"):
+        readiness_dependency_live_proofs._surface_live_receipt_errors(
+            {},
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings={},
+        )
+    with pytest.raises(ValueError, match=f"unsupported dependency proof key: {proof_key}"):
+        readiness_dependency_live_proofs._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings={},
+            **kwargs,
+        )
+
+
 @pytest.mark.parametrize(
     "proof_key",
     ("auth", "scheduler", "slurm", "object_store", "source", "e2e", "mvt"),
@@ -971,6 +1125,37 @@ def test_live_receipt_validator_target_env_final_readiness_facade_uses_patched_h
     assert "missing_target_environment_config_metadata" in errors
 
 
+@pytest.mark.parametrize(
+    ("patched_name", "patched_value", "expected_error"),
+    [
+        ("_issue_matches", lambda _value, _expected: False, "producer_issue_mismatch"),
+        ("_contains_placeholder_value", lambda _value: True, "placeholder_provenance"),
+        ("_non_empty_string", lambda _value: False, "missing_producer_run_id"),
+        ("_has_meaningful_value", lambda _value: False, "missing_provenance"),
+    ],
+)
+def test_dependency_receipt_facade_honors_old_predicate_monkeypatch_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_name: str,
+    patched_value: Callable[..., bool],
+    expected_error: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    receipt = readiness_shared_artifacts._load_proof("slurm", _bound_proof("slurm"), None, config=config)
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+
+    monkeypatch.setattr(readiness_validation, patched_name, patched_value)
+    errors = readiness_validation._surface_live_receipt_errors(
+        payload,
+        proof_key="slurm",
+        config=config,
+        dependency_bindings={},
+    )
+
+    assert expected_error in errors
+
+
 def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -978,7 +1163,9 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
     config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
     original_auth_live_item = readiness_live_proofs._auth_live_item
     original_surface_live_item = readiness_live_proofs._surface_live_item
+    original_dependency_surface_live_item = readiness_dependency_live_proofs._surface_live_item
     delegated: list[str] = []
+    dependency_delegated: list[str] = []
 
     def recording_auth_live_item(*args: object, **kwargs: object) -> dict[str, object]:
         delegated.append("auth")
@@ -990,8 +1177,19 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
         assert proof_key in {"alert", "rollback", "target_env"}
         return original_surface_live_item(*args, **kwargs)
 
+    def recording_dependency_surface_live_item(*args: object, **kwargs: object) -> dict[str, object]:
+        proof_key = str(kwargs["proof_key"])
+        dependency_delegated.append(proof_key)
+        assert proof_key in DEPENDENCY_PROOFS
+        return original_dependency_surface_live_item(*args, **kwargs)
+
     monkeypatch.setattr(readiness_live_proofs, "_auth_live_item", recording_auth_live_item)
     monkeypatch.setattr(readiness_live_proofs, "_surface_live_item", recording_surface_live_item)
+    monkeypatch.setattr(
+        readiness_dependency_live_proofs,
+        "_surface_live_item",
+        recording_dependency_surface_live_item,
+    )
 
     proof_json = {
         "auth": _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
@@ -1028,6 +1226,7 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
         "target_environment_config_proof",
     }
     assert delegated == ["auth", "alert", "rollback", "target_env"]
+    assert dependency_delegated == ["slurm", "object_store", "source", "e2e", "mvt"]
 
 
 def test_live_proof_loader_ambiguity_missing_and_preflight_status(tmp_path: Path) -> None:
