@@ -1,0 +1,1679 @@
+from collections.abc import Callable
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
+
+from apps.api.routes.flood_alerts import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
+from apps.api.routes.pipeline import (
+    PIPELINE_JOB_STATUS_VALUES,
+    PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH,
+    PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+    PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH,
+)
+from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
+from services.tiles.mvt import (
+    DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+    MVT_MAX_TILE_COORDINATE,
+    MVT_MAX_ZOOM,
+    SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
+    SUPPORTED_HYDRO_MVT_VARIABLES,
+)
+
+OpenApiPatchSchema = Callable[[dict], None]
+
+
+def custom_openapi_factory(api: FastAPI, *, patch_schema: OpenApiPatchSchema | None = None) -> Any:
+    def custom_openapi() -> dict[str, Any]:
+        if api.openapi_schema:
+            return api.openapi_schema
+        schema = get_openapi(
+            title=api.title,
+            version=api.version,
+            description=api.description,
+            routes=api.routes,
+        )
+        if patch_schema is None:
+            patch_openapi_schema(schema)
+        else:
+            patch_schema(schema)
+        api.openapi_schema = schema
+        return api.openapi_schema
+
+    return custom_openapi
+
+
+def patch_openapi_schema(schema: dict) -> None:
+    _patch_mvt_tile_openapi(schema)
+    _patch_flood_duration_openapi(schema)
+    _patch_flood_product_quality_openapi(schema)
+    _patch_station_series_openapi(schema)
+    _patch_qhh_latest_product_openapi(schema)
+    _patch_met_stations_list_openapi(schema)
+    _patch_layer_metadata_openapi(schema)
+    _patch_pipeline_openapi(schema)
+    _patch_runtime_openapi(schema)
+
+
+def _patch_mvt_tile_openapi(schema: dict) -> None:
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+    _ensure_mvt_live_postgis_unavailable_response(schema)
+    for path in mvt_paths:
+        operation = schema.get("paths", {}).get(path, {}).get("get", {})
+        operation.setdefault("responses", {})["424"] = {
+            "$ref": "#/components/responses/MvtLivePostgisUnavailable"
+        }
+        operation["responses"]["4XX"] = {"$ref": "#/components/responses/Error"}
+        operation["responses"]["5XX"] = {"$ref": "#/components/responses/Error"}
+        for parameter in operation.get("parameters", []):
+            name = parameter.get("name")
+            if path == "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf" and name == "variable":
+                parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_HYDRO_MVT_VARIABLES)}
+            if (
+                path == "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf"
+                and name == "duration"
+            ):
+                parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)}
+            if name == "z":
+                parameter["description"] = "Web Mercator XYZ zoom level."
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_ZOOM
+            if name == "x":
+                parameter["description"] = TILE_X_DESCRIPTION
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+            if name == "y":
+                parameter["description"] = TILE_Y_DESCRIPTION
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+
+def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
+    responses = schema.setdefault("components", {}).setdefault("responses", {})
+    responses["MvtLivePostgisUnavailable"] = {
+        "description": "Live PostGIS MVT is unavailable for this canonical tile route.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["request_id", "status", "error"],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "status": {"type": "string", "enum": ["error"]},
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {"type": "string", "enum": ["MVT_LIVE_POSTGIS_UNAVAILABLE"]},
+                                "message": {"type": "string"},
+                                "details": {
+                                    "type": "object",
+                                    "nullable": True,
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
+def _patch_flood_duration_openapi(schema: dict) -> None:
+    duration_schema = {
+        "type": "string",
+        "default": DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+        "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
+    }
+    flood_map_duration = _operation_parameter(
+        schema,
+        "/api/v1/tiles/flood-return-period",
+        name="duration",
+        location="query",
+    )
+    if flood_map_duration is not None:
+        flood_map_duration["schema"] = dict(duration_schema)
+
+    valid_times_duration = _operation_parameter(
+        schema,
+        "/api/v1/layers/{layer_id}/valid-times",
+        name="duration",
+        location="query",
+    )
+    if valid_times_duration is not None:
+        valid_times_duration["schema"] = {
+            "type": "string",
+            "nullable": True,
+            "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
+        }
+
+
+def _patch_flood_product_quality_openapi(schema: dict) -> None:
+    schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+    schemas["FloodReturnPeriodQualityState"] = _flood_return_period_quality_state_schema()
+    schemas["FloodReturnPeriodProductQuality"] = _flood_return_period_product_quality_schema()
+    schemas["QhhLatestProductQuality"] = _qhh_latest_product_quality_schema()
+
+    hydro_run = schemas.get("HydroRun")
+    if isinstance(hydro_run, dict):
+        hydro_run.setdefault("properties", {})["product_quality"] = {
+            "type": "object",
+            "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
+            "additionalProperties": True,
+            "nullable": True,
+            "description": (
+                "Product readiness evidence keyed by product family, including flood_return_period readiness."
+            ),
+        }
+
+    collection = schemas.get("TileFeatureCollection")
+    if isinstance(collection, dict):
+        collection["description"] = "GeoJSON FeatureCollection for flood return-period map rendering."
+        collection.setdefault("properties", {})["product_quality"] = {
+            "type": "object",
+            "allOf": [{"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}],
+            "additionalProperties": True,
+            "nullable": True,
+            "description": "Flood return-period readiness evidence for the selected run.",
+        }
+
+
+def _patch_met_stations_list_openapi(schema: dict) -> None:
+    """Align the list-stations ``variables`` query schema with the static contract.
+
+    The route declares ``variables: list[str] | None`` so FastAPI binds repeated
+    params correctly, but it emits ``anyOf: [array, null]``. The published
+    contract advertises ``oneOf: [string, array]`` (repeat or comma-separate), so
+    we restore that documented form without touching the static spec / types.ts.
+    """
+    operation = schema.get("paths", {}).get("/api/v1/met/stations", {}).get("get")
+    if not operation:
+        return
+    for parameter in operation.get("parameters", []):
+        if parameter.get("name") != "variables":
+            continue
+        parameter["style"] = "form"
+        parameter["explode"] = True
+        parameter["schema"] = {
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ]
+        }
+
+
+def _patch_layer_metadata_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {}).setdefault("schemas", {})
+    components.pop("Layer", None)
+    components.pop("LayerMetadata", None)
+    components.pop("LayerValidTimes", None)
+    layer_list_response = components.pop("LayerListResponse", None)
+    layer_valid_times_response = components.pop("LayerValidTimesResponse", None)
+    api_success_envelope = components.pop("ApiSuccessEnvelope", None)
+
+    if api_success_envelope is not None:
+        components.setdefault("SuccessEnvelope", api_success_envelope)
+    components["Layer"] = _layer_schema()
+    components["LayerMetadata"] = _layer_metadata_schema()
+    components["LayerValidTimes"] = _layer_valid_times_schema()
+
+    if layer_list_response is not None:
+        layer_list_response = _success_response_schema(
+            {"type": "array", "items": {"$ref": "#/components/schemas/Layer"}}
+        )
+        _set_operation_response_schema(schema, "/api/v1/layers", layer_list_response)
+
+    if layer_valid_times_response is not None:
+        layer_valid_times_response = _success_response_schema({"$ref": "#/components/schemas/LayerValidTimes"})
+        _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
+
+
+def _patch_station_series_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["StationSeriesPoint"] = _station_series_point_schema()
+    schemas["StationSeriesStation"] = _station_series_station_schema()
+    schemas["StationSeriesMetadata"] = _station_series_metadata_schema()
+    schemas["StationSeries"] = _station_series_schema()
+    schemas["StationSeriesResponse"] = _station_series_response_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/met/stations/{station_id}/series", {}).get("get")
+    if not operation:
+        return
+    operation["summary"] = "Get station forcing time series"
+    operation["tags"] = ["met"]
+    operation["parameters"] = _station_series_parameters()
+    operation["responses"] = {
+        "200": {
+            "description": "Station time series",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/StationSeriesResponse"})
+                }
+            },
+        },
+        "4XX": _station_series_error_response(
+            "Station series client error",
+            {
+                "stationNotFound": _error_example("STATION_NOT_FOUND", "Station not found."),
+                "missingRequiredFilter": _error_example(
+                    "MISSING_REQUIRED_FILTER",
+                    "forcing_version_id or model_id, source_id, and cycle_time are required "
+                    "for station series queries.",
+                    details={
+                        "required_alternatives": [
+                            ["forcing_version_id"],
+                            ["model_id", "source_id", "cycle_time"],
+                        ]
+                    },
+                ),
+                "stationForcingFileNotFound": _error_example(
+                    "STATION_FORCING_FILE_NOT_FOUND",
+                    "Station forcing file not found.",
+                ),
+            },
+        ),
+        "5XX": _station_series_error_response(
+            "Station series server error",
+            {
+                "stationForcingFilenameMissing": _error_example(
+                    "STATION_FORCING_FILENAME_MISSING",
+                    "Station forcing filename is missing.",
+                ),
+                "stationForcingFileMalformed": _error_example(
+                    "STATION_FORCING_FILE_MALFORMED",
+                    "Station forcing file is malformed.",
+                ),
+            },
+        ),
+    }
+
+
+def _patch_qhh_latest_product_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["QhhLatestUnavailableReason"] = _qhh_latest_unavailable_reason_schema()
+    schemas["QhhLatestQualityNote"] = _qhh_latest_quality_note_schema()
+    schemas["QhhLatestStationVariableCoverage"] = _qhh_latest_station_variable_coverage_schema()
+    schemas["QhhLatestQueryIndex"] = _qhh_latest_query_index_schema()
+    schemas["FloodReturnPeriodQualityState"] = _flood_return_period_quality_state_schema()
+    schemas["FloodReturnPeriodProductQuality"] = _flood_return_period_product_quality_schema()
+    schemas["QhhLatestProductQuality"] = _qhh_latest_product_quality_schema()
+    schemas["QhhLatestAvailability"] = _qhh_latest_availability_schema()
+    schemas["QhhLatestQuality"] = _qhh_latest_quality_schema()
+    schemas["QhhLatestProduct"] = _qhh_latest_product_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/mvp/qhh/latest-product", {}).get("get")
+    if not operation:
+        return
+    operation["summary"] = "Get latest QHH display product"
+    operation["tags"] = ["runs"]
+    operation["parameters"] = [
+        {
+            "name": "source",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "enum": ["GFS", "IFS"]},
+            "description": "MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS.",
+        },
+        {
+            "name": "basin_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "description": (
+                "Target basin id for the latest display product. Defaults to basins_qhh when omitted, "
+                "preserving backward compatibility for /api/v1/mvp/qhh/latest-product and M22 cross-plane callers."
+            ),
+        },
+        {
+            "name": "run_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "description": (
+                "Strict QHH run identity. If supplied, source, cycle_time, and model_id must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
+        {
+            "name": "cycle_time",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+            "description": (
+                "Strict QHH cycle time. If supplied, source, run_id, and model_id must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
+        {
+            "name": "model_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "description": (
+                "Strict QHH model identity. If supplied, source, run_id, and cycle_time must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
+        {
+            "name": "identity_only",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "boolean", "default": False},
+            "description": (
+                "Lightweight resolver for popups: returns run identity + cycle + horizon "
+                "(+ recent cycles as available_issue_times) WITHOUT the expensive station/segment "
+                "coverage computation. cycle_time may be supplied alone to select a specific cycle."
+            ),
+        },
+    ]
+    operation["responses"] = {
+        "200": {
+            "description": "Latest QHH display product",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/QhhLatestProduct"})
+                }
+            },
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _patch_pipeline_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["JobStatusCounts"] = _job_status_counts_schema()
+    schemas["PipelineStatus"] = _pipeline_status_schema()
+    schemas["BasinProgress"] = _basin_progress_schema()
+    schemas["BasinResult"] = _basin_result_schema()
+    schemas["PipelineStage"] = _pipeline_stage_schema()
+    schemas["PipelineJob"] = _pipeline_job_schema()
+    schemas["PipelineJobPage"] = _pipeline_job_page_schema()
+    schemas["JobLogs"] = _job_logs_schema()
+    schemas["RetryRunResult"] = _retry_run_result_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+    responses["ControlPlaneManualActionRequired"] = _typed_error_response(
+        "Control-plane mutation is unavailable from a display_readonly API node; "
+        "the authorized actor must perform the action from the compute_control runbook on node 22.",
+        ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"],
+    )
+    responses["ControlPlaneQueueUnavailable"] = _typed_error_response(
+        "Queue depth is unavailable from a display_readonly API node; "
+        "the compute_control node exposes the live queue state.",
+        ["CONTROL_PLANE_QUEUE_UNAVAILABLE"],
+    )
+    responses["JobLogError"] = _typed_error_response(
+        "Pipeline job log retrieval failed using the canonical error envelope.",
+        [
+            "JOB_LOG_NOT_PUBLISHED",
+            "JOB_LOG_URI_UNSUPPORTED",
+            "JOB_LOG_ACCESS_DENIED",
+            "JOB_LOG_NOT_FOUND",
+        ],
+    )
+
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/pipeline/status",
+        "get",
+        operation_id="getPipelineStatus",
+        summary="Get pipeline status for a cycle",
+        tags=["pipeline"],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
+        data_schema={"$ref": "#/components/schemas/PipelineStatus"},
+        description="Pipeline status",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/pipeline/stages",
+        "get",
+        operation_id="listPipelineStages",
+        summary="List pipeline stages for a cycle",
+        tags=["pipeline"],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
+        data_schema={"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
+        description="Pipeline stage list",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/jobs",
+        "get",
+        operation_id="listPipelineJobs",
+        summary="List pipeline jobs",
+        tags=["pipeline"],
+        parameters=[
+            _source_query_parameter(required=False),
+            _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
+            {"name": "status", "in": "query", "required": False, "schema": {"type": "string"}},
+            _strict_model_id_query_parameter(required=False),
+            {"name": "stage", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "run_type", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "scenario", "in": "query", "required": False, "schema": {"type": "string"}},
+            {
+                "name": "sort_by",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["submitted_at", "duration_seconds"], "default": "submitted_at"},
+            },
+            {
+                "name": "sort_order",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+            },
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            {
+                "name": "offset",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "minimum": 0, "default": 0},
+            },
+        ],
+        data_schema={"$ref": "#/components/schemas/PipelineJobPage"},
+        description="Pipeline job list",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/jobs/{job_id}/logs",
+        "get",
+        operation_id="getPipelineJobLogs",
+        summary="Get pipeline job logs",
+        tags=["pipeline"],
+        parameters=[
+            {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}},
+            _source_query_parameter(required=False),
+            _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
+        data_schema={"$ref": "#/components/schemas/JobLogs"},
+        description="Pipeline job logs",
+        extra_responses={
+            "400": {"$ref": "#/components/responses/JobLogError"},
+            "403": {"$ref": "#/components/responses/JobLogError"},
+            "404": {"$ref": "#/components/responses/JobLogError"},
+        },
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/runs/{run_id}/retry",
+        "post",
+        operation_id="retryRun",
+        summary="Retry a failed or cancelled run",
+        tags=["runs"],
+        parameters=[
+            {"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}},
+            {
+                "name": "X-User-Role",
+                "in": "header",
+                "required": False,
+                "schema": {"type": "string", "enum": ["operator", "model_admin", "sys_admin"]},
+            },
+        ],
+        data_schema={"$ref": "#/components/schemas/RetryRunResult"},
+        description="Retry request accepted",
+        extra_responses={"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
+    )
+    # Cancel and queue/depth keep FastAPI's generated success schema; only the
+    # display-mode error responses are injected so the runtime spec matches the
+    # static contract for those control-plane status codes.
+    _inject_operation_responses(
+        schema,
+        "/api/v1/runs/{run_id}/cancel",
+        "post",
+        {"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
+    )
+    _inject_operation_responses(
+        schema,
+        "/api/v1/queue/depth",
+        "get",
+        {"503": {"$ref": "#/components/responses/ControlPlaneQueueUnavailable"}},
+    )
+
+
+def _patch_runtime_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["RuntimeConfig"] = _runtime_config_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/runtime/config", {}).get("get")
+    if not operation:
+        return
+    operation["operationId"] = "getRuntimeConfig"
+    operation["summary"] = "Get runtime service configuration"
+    operation["tags"] = ["runtime"]
+    operation["responses"] = {
+        "200": {
+            "description": "Runtime service configuration",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/RuntimeConfig"})
+                }
+            },
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _typed_error_response(description: str, codes: list[str]) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["request_id", "status", "error"],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "status": {"type": "string", "enum": ["error"]},
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {"type": "string", "enum": codes},
+                                "message": {"type": "string"},
+                                "details": {
+                                    "type": "object",
+                                    "nullable": True,
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
+def _inject_operation_responses(
+    schema: dict,
+    path: str,
+    method: str,
+    responses: dict[str, dict[str, Any]],
+) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get(method)
+    if not operation:
+        return
+    operation.setdefault("responses", {}).update(responses)
+
+
+def _patch_pipeline_operation(
+    schema: dict,
+    path: str,
+    method: str,
+    *,
+    operation_id: str,
+    summary: str,
+    tags: list[str],
+    parameters: list[dict[str, Any]],
+    data_schema: dict[str, Any],
+    description: str,
+    extra_responses: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get(method)
+    if not operation:
+        return
+    operation["operationId"] = operation_id
+    operation["summary"] = summary
+    operation["tags"] = tags
+    operation["parameters"] = parameters
+    operation["responses"] = {
+        "200": {
+            "description": description,
+            "content": {"application/json": {"schema": _success_response_schema(data_schema)}},
+        },
+        **(extra_responses or {}),
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _source_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "source", "in": "query", "required": required, "schema": {"type": "string"}}
+
+
+def _cycle_time_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "cycle_time",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "format": "date-time"},
+    }
+
+
+def _run_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "run_id",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "maxLength": PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH},
+    }
+
+
+def _model_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "model_id", "in": "query", "required": required, "schema": {"type": "string"}}
+
+
+def _strict_model_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "model_id",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "maxLength": PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH},
+    }
+
+
+def _station_series_parameters() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "station_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string"},
+        },
+        {
+            "name": "forcing_version_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "deprecated": True,
+            "description": (
+                "Deprecated compatibility parameter. The disk-only route ignores this value when "
+                "model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series."
+            ),
+        },
+        {
+            "name": "model_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "source_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "cycle_time",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "variables",
+            "in": "query",
+            "required": False,
+            "style": "form",
+            "explode": True,
+            "schema": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ]
+            },
+            "description": (
+                "Station forcing variables. Repeat the parameter or provide comma-separated values. "
+                "Public station-series variables are PRCP, TEMP, RH, wind, and Rn."
+            ),
+        },
+        {
+            "name": "from",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "to",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "limit",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "integer", "minimum": 1, "maximum": MAX_STATION_SERIES_LIMIT},
+        },
+    ]
+
+
+def _operation_parameter(schema: dict, path: str, *, name: str, location: str) -> dict | None:
+    operation = schema.get("paths", {}).get(path, {}).get("get", {})
+    for parameter in operation.get("parameters", []):
+        if parameter.get("name") == name and parameter.get("in") == location:
+            return parameter
+    return None
+
+
+def _success_response_schema(data_schema: dict) -> dict:
+    return {
+        "allOf": [
+            {"$ref": "#/components/schemas/SuccessEnvelope"},
+            {
+                "type": "object",
+                "required": ["data"],
+                "properties": {"data": data_schema},
+            },
+        ]
+    }
+
+
+def _station_series_error_response(description: str, examples: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                "examples": examples,
+            }
+        },
+    }
+
+
+def _error_example(code: str, message: str, *, details: Any | None = None) -> dict[str, Any]:
+    return {
+        "summary": code,
+        "value": {
+            "request_id": "req_01J0NHMS",
+            "status": "error",
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+            },
+        },
+    }
+
+
+def _set_operation_response_schema(schema: dict, path: str, response_schema: dict) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get("get")
+    if not operation:
+        return
+    response = operation.get("responses", {}).get("200", {})
+    content = response.get("content", {}).get("application/json", {})
+    content["schema"] = response_schema
+
+
+def _success_envelope_schema() -> dict:
+    return {
+        "type": "object",
+        "description": "Standard success envelope returned by API endpoints using the `_ok()` response pattern.",
+        "required": ["request_id", "status"],
+        "properties": {
+            "request_id": {"type": "string", "example": "req_01J0NHMS"},
+            "status": {"type": "string", "enum": ["ok"], "example": "ok"},
+        },
+    }
+
+
+def _error_response_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["request_id", "status", "error"],
+        "properties": {
+            "request_id": {"type": "string", "example": "req_01J0NHMS"},
+            "status": {"type": "string", "enum": ["error"], "example": "error"},
+            "error": {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                    "code": {"type": "string", "example": "NOT_FOUND"},
+                    "message": {"type": "string", "example": "Requested resource was not found."},
+                    "details": _error_details_schema(),
+                },
+            },
+        },
+    }
+
+
+def _error_details_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "object", "nullable": True, "additionalProperties": True},
+            {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
+            },
+        ]
+    }
+
+
+def _validation_error_detail_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+            "field": {"type": "string"},
+            "rejected_value": _json_value_schema(),
+            "reason": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _job_status_counts_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["succeeded", "failed", "running", "pending"],
+        "properties": {
+            "succeeded": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0},
+            "pending": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _pipeline_status_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["cycle_id", "source", "cycle_time", "current_state", "started_at", "updated_at", "job_counts"],
+        "properties": {
+            "cycle_id": {"type": "string"},
+            "source": {"type": "string", "nullable": True},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "current_state": {"type": "string"},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "updated_at": {"type": "string", "format": "date-time", "nullable": True},
+            "job_counts": {"$ref": "#/components/schemas/JobStatusCounts"},
+        },
+    }
+
+
+def _basin_progress_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["completed", "total", "failed"],
+        "properties": {
+            "completed": {"type": "integer", "minimum": 0},
+            "total": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _pipeline_stage_schema() -> dict:
+    stage_statuses = ["pending", "running", "succeeded", "partially_failed", "failed", "skipped"]
+    return {
+        "type": "object",
+        "required": [
+            "stage",
+            "display_status",
+            "duration_seconds",
+            "basin_progress",
+            "basin_results",
+            "basin_results_limit",
+            "basin_results_total",
+            "basin_results_returned",
+            "basin_results_truncated",
+        ],
+        "properties": {
+            "stage": {"type": "string"},
+            "display_status": {"type": "string", "enum": stage_statuses},
+            "status": {
+                "type": "string",
+                "enum": stage_statuses,
+                "description": "Backward-compatible alias of display_status.",
+            },
+            "duration_seconds": {"type": "integer", "nullable": True},
+            "basin_progress": {"$ref": "#/components/schemas/BasinProgress"},
+            "basin_results_limit": {"type": "integer", "minimum": 0, "maximum": PIPELINE_STAGE_BASIN_RESULTS_LIMIT},
+            "basin_results_total": {"type": "integer", "minimum": 0},
+            "basin_results_returned": {"type": "integer", "minimum": 0, "maximum": PIPELINE_STAGE_BASIN_RESULTS_LIMIT},
+            "basin_results_truncated": {"type": "boolean"},
+            "basin_results": {
+                "type": "array",
+                "maxItems": PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+                "items": {"$ref": "#/components/schemas/BasinResult"},
+            },
+        },
+    }
+
+
+def _basin_result_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "run_id",
+            "cycle_id",
+            "job_type",
+            "slurm_job_id",
+            "model_id",
+            "basin_id",
+            "status",
+            "stage",
+            "submitted_at",
+            "started_at",
+            "finished_at",
+            "duration_seconds",
+            "retry_count",
+            "error_code",
+            "error_message",
+            "log_uri",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "cycle_id": {"type": "string", "nullable": True},
+            "job_type": {"type": "string"},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "model_id": {"type": "string", "nullable": True},
+            "basin_id": {"type": "string", "nullable": True},
+            "status": {"type": "string", "enum": list(PIPELINE_JOB_STATUS_VALUES)},
+            "stage": {"type": "string", "nullable": True},
+            "submitted_at": {"type": "string", "format": "date-time", "nullable": True},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+            "duration_seconds": {"type": "integer", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "error_code": {"type": "string", "nullable": True},
+            "error_message": {"type": "string", "nullable": True},
+            "log_uri": {"type": "string", "nullable": True, "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+        },
+    }
+
+
+def _pipeline_job_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "run_id",
+            "cycle_id",
+            "run_type",
+            "scenario",
+            "job_type",
+            "slurm_job_id",
+            "model_id",
+            "status",
+            "stage",
+            "submitted_at",
+            "started_at",
+            "finished_at",
+            "exit_code",
+            "retry_count",
+            "error_code",
+            "error_message",
+            "log_uri",
+            "duration_seconds",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "cycle_id": {"type": "string", "nullable": True},
+            "run_type": {"type": "string", "nullable": True},
+            "scenario": {"type": "string", "nullable": True},
+            "job_type": {"type": "string"},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "model_id": {"type": "string", "nullable": True},
+            "status": {"type": "string", "enum": list(PIPELINE_JOB_STATUS_VALUES)},
+            "stage": {"type": "string", "nullable": True},
+            "submitted_at": {"type": "string", "format": "date-time", "nullable": True},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+            "exit_code": {"type": "integer", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "error_code": {"type": "string", "nullable": True},
+            "error_message": {"type": "string", "nullable": True},
+            "log_uri": {"type": "string", "nullable": True, "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+            "duration_seconds": {"type": "integer", "nullable": True},
+        },
+    }
+
+
+def _pipeline_job_page_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["items", "total", "limit", "offset"],
+        "properties": {
+            "items": {"type": "array", "items": {"$ref": "#/components/schemas/PipelineJob"}},
+            "total": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "offset": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _job_logs_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["job_id", "log_uri", "content"],
+        "properties": {
+            "job_id": {"type": "string"},
+            "log_uri": {"type": "string", "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+            "content": {"type": "string"},
+        },
+    }
+
+
+def _runtime_config_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "service_role",
+            "control_mutations_enabled",
+            "slurm_routes_enabled",
+            "queue_depth_mode",
+            "display_readonly",
+        ],
+        "properties": {
+            "service_role": {
+                "type": "string",
+                "enum": ["dev_monolith", "compute_control", "display_readonly", "slurm_gateway"],
+            },
+            "control_mutations_enabled": {"type": "boolean"},
+            "slurm_routes_enabled": {"type": "boolean"},
+            "queue_depth_mode": {
+                "type": "string",
+                "enum": ["slurm_gateway", "display_readonly_unavailable"],
+            },
+            "display_readonly": {"type": "boolean"},
+        },
+    }
+
+
+def _retry_run_result_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "pipeline_job_id",
+            "run_id",
+            "retry_count",
+            "status",
+            "slurm_job_id",
+            "execution_status",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "pipeline_job_id": {"type": "string", "description": "Alias of job_id for pipeline-control clients."},
+            "run_id": {"type": "string", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "status": {"type": "string", "enum": ["submitted"]},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "execution_status": {"type": "string", "enum": ["submitted"]},
+        },
+    }
+
+
+def _station_series_point_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["valid_time", "value", "quality_flag"],
+        "properties": {
+            "valid_time": {"type": "string", "format": "date-time"},
+            "value": {"type": "number"},
+            "quality_flag": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+        },
+    }
+
+
+def _json_value_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "string", "nullable": True},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "object", "additionalProperties": True},
+            {"type": "array", "items": {}},
+        ]
+    }
+
+
+def _station_series_station_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["station_id", "basin_version_id"],
+        "properties": {
+            "station_id": {"type": "string"},
+            "basin_version_id": {"type": "string"},
+            "station_name": {"type": "string", "nullable": True},
+            "name": {"type": "string", "nullable": True},
+            "longitude": {"type": "number", "nullable": True},
+            "latitude": {"type": "number", "nullable": True},
+            "elevation_m": {"type": "number", "nullable": True},
+            "elevation": {"type": "number", "nullable": True},
+            "station_role": {"type": "string", "nullable": True},
+            "active_flag": {"type": "boolean", "nullable": True},
+            "properties_json": {"type": "object", "nullable": True, "additionalProperties": True},
+            "created_at": {"type": "string", "format": "date-time", "nullable": True},
+        },
+    }
+
+
+def _station_series_metadata_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "limit",
+            "returned_points",
+            "requested_from",
+            "requested_to",
+            "returned_from",
+            "returned_to",
+            "truncated",
+        ],
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1},
+            "returned_points": {"type": "integer", "minimum": 0},
+            "requested_from": {"type": "string", "format": "date-time", "nullable": True},
+            "requested_to": {"type": "string", "format": "date-time", "nullable": True},
+            "returned_from": {"type": "string", "format": "date-time", "nullable": True},
+            "returned_to": {"type": "string", "format": "date-time", "nullable": True},
+            "truncated": {"type": "boolean"},
+        },
+    }
+
+
+def _station_series_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["variable", "unit", "native_resolution", "points", "truncated", "metadata"],
+        "properties": {
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn"]},
+            "unit": {"type": "string", "nullable": True},
+            "native_resolution": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "points": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/StationSeriesPoint"},
+            },
+            "truncated": {"type": "boolean"},
+            "metadata": {"$ref": "#/components/schemas/StationSeriesMetadata"},
+        },
+    }
+
+
+def _station_series_response_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["station_id", "station", "forcing_version_id", "source_id", "limit", "series"],
+        "properties": {
+            "station_id": {"type": "string"},
+            "station": {"$ref": "#/components/schemas/StationSeriesStation"},
+            "forcing_version_id": {"type": "string"},
+            "model_id": {"type": "string", "nullable": True},
+            "source_id": {"type": "string"},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "limit": {"type": "integer", "minimum": 1},
+            "requested_from": {"type": "string", "format": "date-time", "nullable": True},
+            "requested_to": {"type": "string", "format": "date-time", "nullable": True},
+            "series": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/StationSeries"},
+            },
+        },
+    }
+
+
+def _qhh_latest_unavailable_reason_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_quality_note_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "expected_horizon_hours": {"type": "integer", "nullable": True},
+            "available_horizon_hours": {"type": "integer", "nullable": True},
+            "available_end_time": {"type": "string", "format": "date-time", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_station_variable_coverage_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "variable",
+            "station_count",
+            "sample_count",
+            "unit_count",
+            "quality_flag_count",
+            "missing_unit_samples",
+            "missing_quality_flag_samples",
+            "valid_time_start",
+            "valid_time_end",
+        ],
+        "properties": {
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            "station_count": {"type": "integer", "minimum": 0},
+            "sample_count": {"type": "integer", "minimum": 0},
+            "unit_count": {"type": "integer", "minimum": 0},
+            "quality_flag_count": {"type": "integer", "minimum": 0},
+            "missing_unit_samples": {"type": "integer", "minimum": 0},
+            "missing_quality_flag_samples": {"type": "integer", "minimum": 0},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+        },
+    }
+
+
+def _qhh_latest_query_index_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["table", "index", "status", "columns"],
+        "properties": {
+            "table": {"type": "string"},
+            "index": {"type": "string"},
+            "status": {"type": "string"},
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "predicate": {"type": "string", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _flood_return_period_quality_state_schema() -> dict:
+    return {"type": "string", "enum": ["ready", "degraded", "unavailable"]}
+
+
+def _flood_return_period_product_quality_schema() -> dict:
+    non_negative_integer = {"type": "integer", "minimum": 0}
+    return {
+        "type": "object",
+        "required": [
+            "quality_state",
+            "quality_source",
+            "max_over_window",
+            "result_rows",
+            "return_period_rows",
+            "warning_rows",
+            "expected_result_rows",
+            "expected_max_result_rows",
+            "expected_timestep_result_rows",
+            "meaningful_result_rows",
+            "meaningful_max_result_rows",
+            "meaningful_timestep_result_rows",
+            "no_frequency_curve_rows",
+            "no_usable_frequency_curve_rows",
+            "warning_threshold_unavailable_rows",
+            "unavailable_products",
+            "residual_blockers",
+        ],
+        "properties": {
+            "quality_state": {"$ref": "#/components/schemas/FloodReturnPeriodQualityState"},
+            "quality_source": {
+                "type": "string",
+                "enum": ["explicit", "historical_backfill", "legacy_row_count"],
+                "description": (
+                    "Source of the run-level flood product quality. `legacy_row_count` is used only "
+                    "when current explicit quality columns are absent and the API falls back to "
+                    "pre-explicit row-count semantics."
+                ),
+            },
+            "max_over_window": {
+                "type": "boolean",
+                "nullable": True,
+                "description": (
+                    "True when counters are based on peak/max-over-window rows, false when timestep rows "
+                    "were used, or null when no result rows exist."
+                ),
+            },
+            "result_rows": dict(non_negative_integer),
+            "return_period_rows": dict(non_negative_integer),
+            "warning_rows": dict(non_negative_integer),
+            "expected_result_rows": dict(non_negative_integer),
+            "expected_max_result_rows": dict(non_negative_integer),
+            "expected_timestep_result_rows": dict(non_negative_integer),
+            "meaningful_result_rows": dict(non_negative_integer),
+            "meaningful_max_result_rows": dict(non_negative_integer),
+            "meaningful_timestep_result_rows": dict(non_negative_integer),
+            "no_frequency_curve_rows": dict(non_negative_integer),
+            "no_usable_frequency_curve_rows": dict(non_negative_integer),
+            "warning_threshold_unavailable_rows": dict(non_negative_integer),
+            "unavailable_products": {"type": "array", "items": {"type": "string"}},
+            "residual_blockers": {
+                "type": "array",
+                "items": {"type": "object", "additionalProperties": True},
+            },
+            "status": {
+                "type": "string",
+                "nullable": True,
+                "description": "Hydro run status when the quality object is attached to a route scoped to a run.",
+            },
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_product_quality_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["flood_return_period"],
+        "properties": {
+            "flood_return_period": {"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_availability_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "ready",
+            "unavailable_reasons",
+            "quality_flags",
+            "quality_notes",
+            "return_period_status",
+            "return_period_reasons",
+        ],
+        "properties": {
+            "ready": {"type": "boolean"},
+            "unavailable_reasons": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestUnavailableReason"},
+            },
+            "quality_flags": {"type": "array", "items": {"type": "string"}},
+            "quality_notes": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestQualityNote"},
+            },
+            "return_period_status": {
+                "type": "string",
+                "enum": ["ready", "unavailable"],
+                "description": (
+                    "Supplemental flood return-period availability for this run. Current explicit "
+                    "schemas derive it from `product_quality.flood_return_period.quality_state`: "
+                    "`ready` maps to ready, while `degraded` and `unavailable` map to unavailable. "
+                    "Only missing or pre-explicit quality schemas fall back to the legacy row-count "
+                    "signal (`flood_return_period_rows > 0`). Independent of `ready`: a run with "
+                    "streamflow output but no return-period baseline still returns with "
+                    "`return_period_status = unavailable`. Never part of the blocking "
+                    "`unavailable_reasons` set."
+                ),
+            },
+            "return_period_reasons": {
+                "type": "array",
+                "description": (
+                    "Populated only when `return_period_status = unavailable`; carries the reason "
+                    "code RETURN_PERIOD_RESULT_UNAVAILABLE. Supplemental, not blocking."
+                ),
+                "items": {"$ref": "#/components/schemas/QhhLatestUnavailableReason"},
+            },
+        },
+    }
+
+
+def _qhh_latest_quality_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "station_sample_count",
+            "river_sample_count",
+            "required_station_variables",
+            "station_variable_coverage",
+            "candidate_limit",
+            "search_limit",
+            "context_limit",
+            "query_indexes",
+        ],
+        "properties": {
+            "station_sample_count": {"type": "integer", "minimum": 0},
+            "river_sample_count": {"type": "integer", "minimum": 0},
+            "required_station_variables": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            },
+            "station_variable_coverage": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestStationVariableCoverage"},
+            },
+            "product_quality": {
+                "type": "object",
+                "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
+                "nullable": True,
+                "description": (
+                    "Supplemental per-product quality details. `flood_return_period` carries explicit "
+                    "flood run quality when available and never blocks q_down display readiness."
+                ),
+            },
+            "candidate_limit": {"type": "integer", "minimum": 1},
+            "search_limit": {"type": "integer", "minimum": 1},
+            "context_limit": {"type": "integer", "minimum": 1},
+            "query_indexes": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestQueryIndex"},
+            },
+        },
+    }
+
+
+def _qhh_latest_product_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "basin_id",
+            "model_id",
+            "basin_version_id",
+            "river_network_version_id",
+            "source_id",
+            "cycle_time",
+            "run_id",
+            "forcing_version_id",
+            "station_count",
+            "expected_station_count",
+            "segment_count",
+            "expected_segment_count",
+            "status",
+            "run_status",
+            "valid_time_start",
+            "valid_time_end",
+            "river_valid_time_start",
+            "river_valid_time_end",
+            "forcing_valid_time_start",
+            "forcing_valid_time_end",
+            "available_horizon_hours",
+            "expected_horizon_hours",
+            "shorter_horizon",
+            "availability",
+            "quality",
+        ],
+        "properties": {
+            "basin_id": {"type": "string"},
+            "model_id": {"type": "string"},
+            "basin_version_id": {"type": "string"},
+            "river_network_version_id": {"type": "string"},
+            "available_issue_times": {
+                "type": "array",
+                "items": {"type": "string", "format": "date-time"},
+                "description": (
+                    "Recent forecast cycles (newest first) for the issue-time selector. "
+                    "Only populated by the identity_only resolver."
+                ),
+            },
+            "source_id": {"type": "string", "enum": ["GFS", "IFS"]},
+            "cycle_time": {"type": "string", "format": "date-time"},
+            "run_id": {"type": "string"},
+            "forcing_version_id": {"type": "string"},
+            "station_count": {"type": "integer", "minimum": 0},
+            "expected_station_count": {"type": "integer", "minimum": 0, "nullable": True},
+            "segment_count": {"type": "integer", "minimum": 0},
+            "expected_segment_count": {"type": "integer", "minimum": 0, "nullable": True},
+            "status": {"type": "string", "enum": ["ready", "unavailable"]},
+            "run_status": {"type": "string"},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "river_valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "river_valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "forcing_valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "forcing_valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "available_horizon_hours": {"type": "integer", "nullable": True},
+            "expected_horizon_hours": {"type": "integer"},
+            "shorter_horizon": {"type": "boolean"},
+            "availability": {"$ref": "#/components/schemas/QhhLatestAvailability"},
+            "quality": {"$ref": "#/components/schemas/QhhLatestQuality"},
+        },
+    }
+
+
+def _layer_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["layer_id", "layer_name", "layer_type", "variables"],
+        "properties": {
+            "layer_id": {"type": "string"},
+            "layer_name": {"type": "string"},
+            "layer_type": {"type": "string"},
+            "variables": {"type": "array", "items": {"type": "string"}},
+            "metadata": {
+                "type": "object",
+                "nullable": True,
+                "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
+            },
+        },
+    }
+
+
+def _layer_valid_times_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["valid_times", "items", "limit", "observed_count", "truncated"],
+        "properties": {
+            "valid_times": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "items": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "limit": {"type": "integer"},
+            "observed_count": {"type": "integer"},
+            "truncated": {"type": "boolean"},
+        },
+    }
+
+
+def _nullable(schema: dict) -> dict:
+    return {**schema, "nullable": True}
+
+
+def _layer_metadata_schema() -> dict:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    number_array = {"type": "array", "items": {"type": "number"}}
+    return {
+        "type": "object",
+        "required": ["layer_id", "tile_format", "fallback_available", "release_blocking"],
+        "properties": {
+            "layer_id": {"type": "string"},
+            "tile_format": {"type": "string", "enum": ["mvt", "geojson_compatibility"]},
+            "url_template": _nullable({"type": "string"}),
+            "tile_url_template": _nullable({"type": "string"}),
+            "required_placeholders": string_array,
+            "maplibre_source_layer": _nullable({"type": "string"}),
+            "source_layer": _nullable({"type": "string"}),
+            "property_schema_version": _nullable({"type": "string"}),
+            "schema_version": _nullable({"type": "string"}),
+            "encoder_version": _nullable({"type": "string"}),
+            "property_schema": _nullable({"type": "object", "additionalProperties": True}),
+            "min_zoom": _nullable({"type": "integer"}),
+            "max_zoom": _nullable({"type": "integer"}),
+            "bounds_crs": _nullable({"type": "string"}),
+            "bounds": _nullable(number_array),
+            "wgs84_bounds": _nullable(number_array),
+            "valid_times": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "valid_time_limit": {"type": "integer"},
+            "valid_time_observed_count": {"type": "integer"},
+            "valid_times_truncated": {"type": "boolean"},
+            "source_refs": _nullable(
+                {
+                    "type": "object",
+                    "description": (
+                        "Concrete source identity used to resolve non-XYZ route placeholders, including "
+                        "run_id, basin_version_id, river_network_version_id, and bounded source_version/run "
+                        "revision when advertised by required_placeholders."
+                    ),
+                    "additionalProperties": True,
+                }
+            ),
+            "cache_layer_id": _nullable({"type": "string"}),
+            "route_variable": _nullable({"type": "string"}),
+            "legacy_layer_ids": string_array,
+            "alias_of": _nullable({"type": "string"}),
+            "alias_semantic": _nullable({"type": "string"}),
+            "canonical_route_layer_id": _nullable({"type": "string"}),
+            "cache_etag": _nullable({"type": "string"}),
+            "cache_version": _nullable({"type": "string"}),
+            "fallback_available": {"type": "boolean"},
+            "fallback_endpoint": _nullable({"type": "string"}),
+            "release_blocking": {"type": "boolean"},
+            "production_mvt_readiness_claimed": _nullable({"type": "boolean"}),
+        },
+    }

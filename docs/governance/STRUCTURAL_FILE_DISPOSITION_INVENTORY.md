@@ -1,12 +1,13 @@
 # Structural File Disposition Inventory
 
-Snapshot date: 2026-06-23
+Snapshot date: 2026-06-26
 
-Scope: Governance-7 issue #668 current oversized source-file dispositions.
-This inventory is evidence-only. It records the current disposition for the
-mandatory-governance source files called out by the structural entropy budget;
-it does not move code, remove compatibility surfaces, enable a hard gate, or
-write a baseline.
+Scope: Governance-7 issue #668 current oversized source-file dispositions plus
+Governance-8 owner-module updates as follow-up extractions land. This inventory
+is evidence-only. It records the current disposition for the
+mandatory-governance source files called out by the structural entropy budget
+and the owner modules introduced to reduce those facades; it does not remove
+compatibility surfaces, enable a hard gate, or write a baseline.
 
 ## Authority
 
@@ -40,6 +41,26 @@ The line-count evidence was:
 | `apps/api/main.py` | 2069 |
 | `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1499 |
 
+API owner-module evidence was updated on 2026-06-26 with:
+
+```bash
+wc -l apps/api/main.py apps/api/openapi_patching.py
+uv run pytest -q tests/test_api.py tests/test_openapi_drift.py
+uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py
+uv run ruff check apps/api/main.py apps/api/openapi_patching.py tests/test_api.py tests/test_openapi_drift.py
+openspec validate governance-8-module-deepening --strict --no-interactive
+openspec validate --all --strict --no-interactive
+cd apps/frontend && corepack pnpm check:api-types
+git diff --check
+```
+
+Current API ownership line-count evidence:
+
+| Path | Current lines |
+|---|---:|
+| `apps/api/main.py` | 420 |
+| `apps/api/openapi_patching.py` | 1679 |
+
 ## Non-Targets
 
 - No code movement or source-file extraction in #668.
@@ -66,7 +87,7 @@ The line-count evidence was:
 | `services/orchestrator/chain.py` | 6956 | P1 | `compute_control` orchestration chain facade and aggregation surface | Compatibility-facade freeze before extraction. Keep the chain entrypoint stable while stage, manifest, reservation, retry, tile-publisher, worker, and persistence ownership is mapped. | #670, #671 | Retain current aggregation/facade behavior until #670 records owner modules and caller migration paths and #671 guards against new facade groups or ownership growth. Reduction is valid only behind stable entrypoints and focused behavior tests. | Current #668 verification is `wc -l` plus the structural audit row. #670/#671 own chain inventory, guard, and focused orchestration verification. |
 | `services/production_closure/two_node_e2e_evidence.py` | 9098 | P1 | `compute_control` production-closure evidence aggregator with display-readonly evidence consumers | Lane-decomposition plan. Keep the aggregator entrypoint stable while Docker security, readonly DB, API/browser, logs, producer identity, source artifact, and manual ops receipt lanes gain explicit contracts. | #672, #674 | Retain the aggregator until #672 defines lane contracts and #674 extracts governed lane implementation behind equivalent result/status/blocker semantics. No path-safety, redaction, current-run, alias, or final aggregation behavior is removed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #672/#674 own lane contract tests, equivalent-fixture checks, and production-closure verification. |
 | `services/production_closure/readiness_validation.py` | 3517 | P1 | `compute_control` production-closure readiness aggregator | Lane-decomposition plan. Keep readiness aggregation stable while dependency summary, scheduler evidence, live proof, exclusions, and final readiness ownership is mapped. | #673 | Retain current aggregation until #673 records lane owner modules, result shape, blocker namespaces, and focused verification. Reduction is valid only when final readiness semantics stay equivalent for existing receipts. | Current #668 verification is `wc -l` plus the structural audit row. #673 owns readiness lane inventory and focused validation coverage. |
-| `apps/api/main.py` | 2069 | P2 | API bootstrap shared by `compute_control`, `display_readonly`, and `shared_contract` route/OpenAPI governance | Scoped-context coverage and freeze before later extraction. Keep application construction and role-specific route registration stable while API bootstrap/routing boundaries are documented. | #686 | Retain current app bootstrap shape until #686 records the scoped API ownership boundary and any later extraction/mount split has route inventory, role-boundary, OpenAPI drift, and runtime-mode verification. No route or compatibility behavior is removed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #686 owns scoped API context and focused API/bootstrap checks. |
+| `apps/api/main.py` | 420 | P2 | API bootstrap facade shared by `compute_control`, `display_readonly`, and `shared_contract`; OpenAPI patch owner is `apps/api/openapi_patching.py` | OpenAPI patch owner extracted in #756. Keep `create_app()`, route inclusion, middleware, static/health/cache wiring, protected mutation guard, `custom_openapi()`, `_custom_openapi_factory()`, and compatibility `_patch_*` imports stable while later API route-registry/static/auth seams are extracted. | #686, #756 | `apps/api/openapi_patching.py` owns runtime OpenAPI patch factory/order and runtime, pipeline, station-series, QHH latest-product, MVT, flood, met-stations, and layer metadata schema helpers. Retain the `apps/api/main.py` facade and compatibility exports until a later recorded migration/removal decision with route inventory, role-boundary, OpenAPI drift, runtime-mode, and affected frontend type verification. No route registration, auth, request-body validation, frontend UI, DB/schema, Slurm, scheduler, chain, or two-node behavior is removed by #756. | #756 verification: `uv run pytest -q tests/test_api.py tests/test_openapi_drift.py`; `uv run pytest -q tests/test_runtime_mode.py tests/test_role_boundary_static.py tests/test_api.py`; `uv run ruff check apps/api/main.py apps/api/openapi_patching.py tests/test_api.py tests/test_openapi_drift.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`; `cd apps/frontend && corepack pnpm check:api-types`. |
 | `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1499 | P2 | `display_readonly` frontend map surface | Scoped-context coverage and freeze before later extraction. Keep the display map surface stable while map ownership, live-vs-mocked evidence rules, and later extraction boundaries are recorded. | #687 | Retain current surface until #687 records frontend map ownership and any later extraction preserves map behavior, product identity display, and frontend verification. No UI behavior is changed by #668. | Current #668 verification is `wc -l` plus the structural audit row. #687 owns focused frontend tests/build evidence for later map-surface work. |
 
 ## Per-File Notes
@@ -99,10 +120,11 @@ owns the lane inventory before any extraction is claimed.
 
 ### `apps/api/main.py`
 
-`apps/api/main.py` is above the hard budget but is currently governed as a
-role-aware bootstrap surface. It is P2 because #668 only freezes the current
-disposition and #686 owns scoped API context before later extraction or route
-registration changes.
+`apps/api/main.py` now retains the role-aware bootstrap facade while
+`apps/api/openapi_patching.py` owns runtime OpenAPI patch generation. It remains
+P2 because later API bootstrap work must still extract route-registry,
+static/health/cache/startup, and protected-mutation seams without changing
+runtime role boundaries or OpenAPI behavior.
 
 ### `apps/frontend/src/components/map/M11MapLibreSurface.tsx`
 
