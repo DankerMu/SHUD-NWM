@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Map, {
   NavigationControl,
-  Popup,
   ScaleControl,
   type MapLayerMouseEvent,
   type MapRef,
 } from 'react-map-gl/maplibre'
-import type { ReactNode } from 'react'
 import type { FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
@@ -40,6 +38,12 @@ import {
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
 import {
+  M11MapPopupSlotPrimitive,
+  m11SelectionDataAttributes,
+  resolveM11SelectedSegmentMapState,
+  type M11MapPopupSlot,
+} from '@/components/map/m11MapSelection'
+import {
   M11MapStatusOverlays,
   m11MapSourceErrorResetKey,
   m11MapStyles,
@@ -56,17 +60,6 @@ import {
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryState } from '@/lib/m11/queryState'
-
-/**
- * 地图 popup slot（M26-4）：popup 内容（河段 / 代站组件）与经纬度锚点由页面经 props 传入，
- * react-map-gl `<Popup>` 必须在 `<Map>` 内渲染，故由本组件挂载、页面只给数据。
- */
-export interface M11MapPopupSlot {
-  longitude: number
-  latitude: number
-  content: ReactNode
-  onClose?: () => void
-}
 
 export {
   buildBasinFeatureCollection,
@@ -86,6 +79,7 @@ export {
 } from '@/components/map/m11MapBuilders'
 export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo } from '@/components/map/m11MapRuntime'
+export type { M11MapPopupSlot } from '@/components/map/m11MapSelection'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
@@ -172,11 +166,12 @@ export function M11MapLibreSurface({
     () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
     [selectedSegmentGeometry, selectedSegmentId],
   )
-  const selectedSegmentMapState = selectedSegmentId
-    ? selectedSegmentFeatureCollection.features.length > 0 || renderableOverlay || basinRiverFeatureCollection.features.length > 0
-      ? 'selected-layer'
-      : 'unavailable'
-    : 'idle'
+  const selectedSegmentMapState = resolveM11SelectedSegmentMapState({
+    selectedSegmentId,
+    hasSelectedSegmentGeometry: selectedSegmentFeatureCollection.features.length > 0,
+    hasRenderableOverlay: Boolean(renderableOverlay),
+    hasBasinRiverFeatures: basinRiverFeatureCollection.features.length > 0,
+  })
   const unavailableReason = useMemo(
     () =>
       overlayUnavailableReason ??
@@ -250,10 +245,7 @@ export function M11MapLibreSurface({
       data-basin-river-skipped-count={basinRiverFeatureCollection.skippedCount}
       data-basin-river-coordinate-count={basinRiverFeatureCollection.coordinateCount}
       data-basin-river-serialized-bytes={basinRiverFeatureCollection.serializedBytes}
-      data-selected-segment-id={selectedSegmentId ?? ''}
-      data-segment-highlight-hook={selectedSegmentMapState}
-      data-selected-segment-map-state={selectedSegmentMapState}
-      data-selected-station-id={selectedStationId ?? ''}
+      {...m11SelectionDataAttributes({ selectedSegmentId, selectedSegmentMapState, selectedStationId })}
       data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
@@ -301,18 +293,7 @@ export function M11MapLibreSurface({
         {showStationLayer && stationFeatureCollection ? (
           <M11StationClusterPrimitive collection={stationFeatureCollection} selectedStationId={selectedStationId} />
         ) : null}
-        {/* popup anchor 不指定 → maplibre 按可用空间自动选边，高弹窗在视口边缘不被裁切。 */}
-        {popup ? (
-          <Popup
-            longitude={popup.longitude}
-            latitude={popup.latitude}
-            closeOnClick={false}
-            onClose={popup.onClose}
-            maxWidth="none"
-          >
-            {popup.content}
-          </Popup>
-        ) : null}
+        <M11MapPopupSlotPrimitive popup={popup} />
       </Map>
 
       {hoveredRiverSegmentId ? (
