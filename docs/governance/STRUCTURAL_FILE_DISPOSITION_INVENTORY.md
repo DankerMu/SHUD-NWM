@@ -107,7 +107,7 @@ each OpenSpec task to its GitHub issue and implementation PR.
 | 5.2 API role-aware route registry extraction | #757 | #816 | `apps/api/route_registry.py` owns business router ordering, runtime-router inclusion, and conditional Slurm router inclusion from `RuntimeConfig.slurm_routes_enabled`, with display-readonly Slurm exclusion and slurm-gateway reserved-role coverage. |
 | 5.3 API static/health/cache/startup wiring extraction | #758 | #817 | `apps/api/startup_wiring.py` owns app-state setup, runtime-config route construction, health/static/SPA mounting, cache-control static files, frontend dist paths, success-envelope helper, and display-readonly cache warmup dispatch. |
 | 5.4 API protected mutation seam retention and tests | #759 | #818 | `apps/api/main.py` remains the retained protected-mutation seam for pre-body authorization, bounded active/lifecycle body classification, request-id/error-envelope production, no-downstream-write ordering, and display-readonly fail-closed behavior. |
-| 5.5 API group verification and evidence closeout | #760 | this closeout PR | Final API group verification, this task-to-issue-to-PR map, and the closeout non-target boundary below. |
+| 5.5 API group verification and evidence closeout | #760 | #819 | Final API group verification, this task-to-issue-to-PR map, and the closeout non-target boundary below. |
 
 ## API Bootstrap Closeout Non-Targets
 
