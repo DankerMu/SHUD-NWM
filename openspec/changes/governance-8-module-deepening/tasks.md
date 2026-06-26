@@ -2220,9 +2220,50 @@
     claimed.
   - Verification Floor: focused verification command above plus the recorded
     `corepack pnpm` fallback commands for the local pnpm-wrapper policy block.
-- [ ] 7.4 Produce final implementation evidence map.
+- [x] 7.4 Produce final implementation evidence map.
   - Module/Scope: final evidence document/comment for Governance-8.
   - Dependencies: 7.3.
   - Out of Scope: claiming station-MVT closure, production topology change, Slurm behavior change, or display-readonly expansion.
   - Focused Verification: reviewer checks every issue from this change has a PR, focused verification, inventory update, and explicit remaining non-goal if any.
   - Inventory/Evidence Update: record the final Governance-8 task-to-issue-to-PR mapping.
+  - Fixture Level: expanded documentation/evidence fixture. Reason: this task
+    is the final evidence map for the entire Governance-8 change and must be
+    reviewable without inferring issue/PR coverage from scattered PR comments.
+  - Risk Packs Selected: Evidence completeness, because every task must map to
+    an issue and PR; inventory authority traceability, because each group must
+    point to the owning inventory/closeout evidence; non-goal preservation,
+    because the final map must not imply station-MVT closure, production
+    topology change, Slurm behavior change, or display-readonly expansion.
+    Risk Packs Not Selected: runtime behavior, DB/schema, API route behavior,
+    frontend UI behavior, generated API type change, Slurm scheduling behavior,
+    station-MVT implementation, production deployment, and live node-27
+    receipts, because this slice changes only docs/OpenSpec evidence.
+  - Invariant Matrix: Governing invariant: every Governance-8 subtask from 1.1
+    through 7.4 has a concrete issue/PR mapping, an evidence authority, and an
+    explicit non-goal boundary where applicable, with no new runtime claim.
+    Source-of-truth identity/contract:
+    `docs/governance/GOVERNANCE_8_FINAL_EVIDENCE_MAP.md` and the active
+    OpenSpec task list. Surfaces: Producers: merged PRs #771-#828 and the
+    current #770 PR; Validators/preflight: final evidence-map token assertion,
+    markdownlint, OpenSpec validation, and diff-check; Storage/cache/query:
+    none - docs-only evidence; Public routes/entrypoints: no route changes;
+    Frontend/downstream consumers: no UI/code changes; Failure paths/stale
+    state: missing issue/PR pair, stale PR number, omitted non-goal, or
+    duplicate/contradictory evidence authority; Evidence/audit: final task map,
+    final verification summary, and review checklist.
+  - Boundary Surfaces: This slice may add the final Governance-8 evidence map
+    and update this task checkbox only. It must not change implementation
+    files, detector logic, generated artifacts, `.entropy-baseline/latest.json`,
+    compatibility symbols, lane semantics, API/frontend behavior, DB/schema,
+    Slurm scheduling, production topology, station-MVT status, or display live
+    evidence.
+  - Regression Rows: tasks 1.1-7.4 have issue/PR rows; group inventories remain
+    the detailed authority; final local verification results are summarized;
+    explicit remaining non-goals include station-MVT, production topology,
+    Slurm behavior, display-readonly expansion, API/generated type/DB/frontend
+    behavior, entropy hard gate, and compatibility export removal; markdownlint,
+    OpenSpec validation, final evidence-map assertion, and diff-check pass.
+  - Verification Floor: focused verification above;
+    `openspec validate governance-8-module-deepening --strict --no-interactive`;
+    `npx --yes markdownlint-cli2 "docs/**/*.md"`; final evidence-map assertion
+    over task/issue/PR tokens and non-goal tokens; `git diff --check`.
