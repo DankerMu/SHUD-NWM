@@ -299,3 +299,30 @@ Verification:
   >/tmp/nwm-entropy-768.json` passed.
 - `uv run pytest -q tests/test_entropy_audit_script.py` passed.
 - `git diff -- .entropy-baseline/latest.json --exit-code` passed.
+
+## Governance-8 Final Local Verification Gate
+
+This 2026-06-26 UTC update records the #769 local final verification gate after
+Governance-8 inventory synchronization and report-only entropy delta recording.
+It is evidence/worklog only; it does not replace future node-27 live receipt
+requirements for runtime behavior changes.
+
+| Surface / group | Issue / PR authority | Command | Result |
+|---|---|---|---|
+| Global lint | #769 | `uv run ruff check .` | PASS, all checks passed |
+| Global OpenSpec | #769 | `openspec validate --all --strict --no-interactive` | PASS, 184 items |
+| Global diff hygiene | #769 | `git diff --check` | PASS |
+| Frontend wrapper command | #769 | `cd apps/frontend && pnpm test` | BLOCKED before Vitest by local `ERR_PNPM_IGNORED_BUILDS` for `esbuild@0.25.12`; no tests executed |
+| Frontend wrapper command | #769 | `cd apps/frontend && pnpm build` | BLOCKED before Vite by local `ERR_PNPM_IGNORED_BUILDS` for `esbuild@0.25.12`; no build executed |
+| Frontend map/API type successor gate | #766 / PR #825 | `cd apps/frontend && corepack pnpm test` | PASS, 34 files / 616 tests |
+| Frontend map/API type successor gate | #766 / PR #825 | `cd apps/frontend && corepack pnpm build` | PASS, Vite build completed |
+| Scheduler group | #720 / PR #779 | `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py` | PASS, 641 tests |
+| Chain group | #731 / PR #790 | `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py` | PASS, 239 tests, 7 skipped |
+| Two-node and readiness groups | #744 / PR #803; #755 / PR #814 | `uv run pytest -q tests/test_two_node_e2e_evidence.py tests/test_production_readiness_validation.py` | PASS, 1181 tests, 2 skipped |
+| API bootstrap group | #760 / PR #819 | `uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_monitoring_api.py tests/test_openapi_drift.py` | PASS, 240 tests |
+
+The local `pnpm` wrapper failure is a workstation dependency-approval boundary,
+not a frontend test/build regression. The equivalent project command via
+`corepack pnpm` executed Vitest and Vite successfully. No baseline, generated
+API type, runtime source, DB/schema, Slurm, production topology, station-MVT, or
+live display evidence was changed by this verification slice.
