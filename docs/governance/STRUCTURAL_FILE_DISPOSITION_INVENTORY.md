@@ -150,6 +150,33 @@ each OpenSpec task to its GitHub issue and implementation PR.
   behavior change, two-node deployment behavior change, or display-readonly
   capability expansion.
 
+## Frontend Map Surface Closeout Evidence
+
+Governance-8 issue #766 closes frontend map surface tasks 6.1 through 6.6. The
+table below is the implementation evidence map for the frontend group; it ties
+each OpenSpec task to its GitHub issue and implementation PR.
+
+| Task | Issue | PR | Closeout evidence |
+|---|---|---|---|
+| 6.1 M11 pure map builder extraction | #761 | #820 | `m11MapBuilders.ts` owns registered overlay construction, vector source keys, GeoJSON feature collections, filters, label anchors, geometry budgets, unavailable reasons, and national-river filtering while the surface keeps legacy helper re-exports. |
+| 6.2 M11 MapLibre primitive extraction | #762 | #821 | `m11MapPrimitives.tsx` owns source/layer IDs, paint/layout, promote IDs, marker/primitive JSX, selected/hovered filters, and GeoJSON-backed station rendering while the surface keeps composition. |
+| 6.3 M11 interaction dispatch extraction | #763 | #822 | `m11MapInteractions.ts` owns interactive layer ordering, hover/click dispatch, rendered-feature fallback, station cluster expansion, cursor state, feature property extraction, and overlay interaction payload shape. |
+| 6.4 M11 camera and map-error helper extraction | #764 | #823 | `m11MapRuntime.tsx` owns Tianditu style identity, camera initialization, fit/fly de-dupe, source-error reset, glyph warning downgrade, and loading/unavailable status overlays. |
+| 6.5 M11 popup and selection boundary stabilization | #765 | #824 | `m11MapSelection.tsx` owns `M11MapPopupSlot`, MapLibre popup slot mounting, selected segment map-state resolution, and selected station/segment data attributes while `OverviewPage` retains popup state. |
+| 6.6 Frontend group verification and evidence closeout | #766 | #825 | Final frontend group verification, this task-to-issue-to-PR map, and the closeout non-target boundary below. |
+
+## Frontend Map Surface Closeout Non-Targets
+
+- No station-MVT backend endpoint completion or station-MVT live evidence claim.
+- No new map product behavior, public API behavior change, generated frontend
+  type change, DB/schema migration, Slurm behavior change, or production
+  topology change.
+- No visual redesign, route authority change, popup product data-fetch change,
+  hydrology series API change, or station-series API behavior change.
+- No compatibility export removal from `M11MapLibreSurface.tsx`; retained
+  facade imports remain valid for pages/tests while owner modules carry the
+  extracted behavior.
+
 ## Per-File Notes
 
 ### `services/orchestrator/scheduler.py`

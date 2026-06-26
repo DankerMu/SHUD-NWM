@@ -2022,12 +2022,43 @@
     dragged placement across identity changes; disabling station overlay clears station popup without changing basin route
     state; station overlay remains clustered GeoJSON-backed and no station-MVT backend closure is claimed.
   - Verification Floor: focused verification commands above; `cd apps/frontend && pnpm build`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `openspec validate --all --strict --no-interactive`; `git diff --check`.
-- [ ] 6.6 Frontend group verification and evidence closeout.
+- [x] 6.6 Frontend group verification and evidence closeout.
   - Module/Scope: integration gate for frontend map group.
   - Dependencies: 6.1-6.5.
   - Out of Scope: station-MVT backend closure, new map product behavior, visual redesign.
   - Focused Verification: `cd apps/frontend && pnpm test`; `cd apps/frontend && pnpm build`; when generated API types are affected, `cd apps/frontend && pnpm check:api-types`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final frontend issue/PR mapping in implementation evidence.
+  - Fixture Level: expanded frontend map group closeout. This slice records the completed owner-family map for tasks
+    6.1-6.5, runs the frontend group verification gate, and does not move runtime code beyond evidence/documentation.
+  - Repair Intensity: medium, because the implementation families are already complete and this PR only closes the
+    group-level evidence chain, but the final inventory must accurately bind every owner module, issue, PR, retained
+    facade surface, and non-target.
+  - Risk Pack Selection: Selected: Public API / CLI / script entry (`M11MapLibreSurface`, `M11MapSurface`, helper
+    exports, camera/popup types, and page imports remain compatible); Legacy compatibility / examples (the closeout map
+    documents retained facade imports and owner modules); Documentation / migration notes (structural inventory becomes
+    the final frontend group evidence map); Release / packaging / dependency compatibility (full frontend test/build and
+    API type drift checks run). Domain Selected: Published NHMS artifacts / display identity for station-MVT non-closure
+    and display-readonly evidence boundaries. Not Selected: runtime behavior packs, because this slice does not change
+    map logic, generated API types, backend station-MVT, hydrology/station-series APIs, visual design, DB/schema, Slurm,
+    or production topology.
+  - Invariant Matrix: Governing invariant: the closeout evidence must prove the frontend map group completed as five
+    focused owner families behind a stable facade. Source-of-truth identity/contract: structural inventory task-to-
+    issue-to-PR map for 6.1-6.6 plus the checked OpenSpec task. Surfaces: Producers: PRs #820-#824, owner modules
+    `m11MapBuilders.ts`, `m11MapPrimitives.tsx`, `m11MapInteractions.ts`, `m11MapRuntime.tsx`, and
+    `m11MapSelection.tsx`; Validators/preflight: full frontend test, build, API type drift check, OpenSpec validation,
+    markdownlint, entropy audit, and diff-check; Public entrypoints: retained `M11MapLibreSurface` facade and legacy
+    exports; Failure paths/stale state: incomplete issue/PR mapping, missing owner evidence, stale station-MVT closure
+    claim, or unverified generated API type drift.
+  - Boundary Surfaces: This slice may update inventory/evidence and task checkboxes only. It must not change frontend
+    runtime behavior, add map product behavior, close station-MVT backend work, alter generated API types, redesign
+    visuals, or move remaining popup/product code.
+  - Regression Rows: every frontend map owner module introduced by #761-#765 appears in the structural inventory with
+    line counts and retained facade boundary; the issue/PR map records tasks 6.1-6.6 with merge evidence; closeout
+    non-targets state no station-MVT backend closure, no generated API type change, no visual redesign, and no API
+    behavior change; full frontend test/build and API type drift check pass; OpenSpec single-change and diff-check pass.
+  - Verification Floor: focused verification command above; `openspec validate --all --strict --no-interactive`;
+    `uv run pytest -q tests/test_entropy_audit_script.py`; `npx --yes markdownlint-cli2 "docs/**/*.md"`;
+    `git diff --check`.
 
 ## 7. Completion And Evidence
 
