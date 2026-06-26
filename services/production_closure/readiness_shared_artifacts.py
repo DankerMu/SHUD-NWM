@@ -15,6 +15,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    write_bytes_no_follow_exclusive,
 )
 from services.production_closure import readiness_item_contracts as _readiness_item_contracts
 
@@ -123,8 +124,16 @@ class EvidenceWriter:
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
         try:
-            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
+            if self.force or safe_path in self._created_paths:
+                atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
+            else:
+                write_bytes_no_follow_exclusive(safe_path, content, containment_root=self.lane_dir)
             self._created_paths.add(safe_path)
+        except FileExistsError as error:
+            raise ProductionReadinessValidationError(
+                "PRODUCTION_READINESS_EVIDENCE_EXISTS",
+                f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
+            ) from error
         except SafeFilesystemError as error:
             error_code = (
                 "PRODUCTION_READINESS_EVIDENCE_WRITE_FAILED"
@@ -247,7 +256,14 @@ def _bounded_payload(value: Any) -> BoundedPayloadResult:
             depth_truncated = True
             return "[truncated:max-depth]"
         if isinstance(current, Mapping):
-            return {bounded_key(key): walk(nested, depth + 1) for key, nested in current.items()}
+            bounded: dict[str, Any] = {}
+            for key, nested in current.items():
+                if nodes >= MAX_JSON_NODES:
+                    node_truncated = True
+                    bounded["[truncated:max-nodes]"] = "[truncated:max-nodes]"
+                    break
+                bounded[bounded_key(key)] = walk(nested, depth + 1)
+            return bounded
         if isinstance(current, list):
             return [walk(item, depth + 1) for item in current[:MAX_JSON_NODES]]
         if isinstance(current, tuple):
@@ -283,7 +299,13 @@ def _bounded_redacted_payload(value: Any, *, config: Any) -> Any:
         if depth > MAX_JSON_DEPTH:
             return "[truncated:max-depth]"
         if isinstance(current, Mapping):
-            return {redacted_key(key): walk(nested, depth + 1) for key, nested in current.items()}
+            bounded: dict[str, Any] = {}
+            for key, nested in current.items():
+                if nodes >= MAX_JSON_NODES:
+                    bounded["[truncated:max-nodes]"] = "[truncated:max-nodes]"
+                    break
+                bounded[redacted_key(key)] = walk(nested, depth + 1)
+            return bounded
         if isinstance(current, list):
             return [walk(item, depth + 1) for item in current[:MAX_JSON_NODES]]
         if isinstance(current, tuple):

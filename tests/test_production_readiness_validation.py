@@ -531,6 +531,14 @@ def test_shared_artifact_facade_reexports_owner_helpers_and_outputs_match(
     assert readiness_validation.PATH_TOKEN_RE is readiness_shared_artifacts.PATH_TOKEN_RE
     assert readiness_validation.DEPENDENCY_ROOT_ENV is readiness_shared_artifacts.DEPENDENCY_ROOT_ENV
     assert readiness_validation.PROOF_FILE_ENV is readiness_shared_artifacts.PROOF_FILE_ENV
+    assert (
+        readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV
+        is readiness_shared_artifacts.SCHEDULER_EVIDENCE_ROOT_ENV
+    )
+    assert (
+        readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV
+        is readiness_shared_artifacts.SCHEDULER_EVIDENCE_FILE_ENV
+    )
 
     config = ProductionReadinessConfig.from_env(
         evidence_root=tmp_path / "artifacts",
@@ -666,6 +674,50 @@ def test_shared_artifact_safe_writer_guards_no_clobber_force_symlink_containment
             lane / "too-large.json", {"blob": "x" * 80}
         )
     assert payload_error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_PAYLOAD_TOO_LARGE"
+
+
+def test_shared_artifact_safe_writer_rejects_non_force_create_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = (tmp_path / "artifacts").resolve()
+    lane = root / "m19" / "readiness"
+    writer = readiness_shared_artifacts.EvidenceWriter(root, lane)
+    writer.prepare()
+    output = lane / "race.json"
+    original_create = readiness_shared_artifacts.write_bytes_no_follow_exclusive
+
+    def create_target_before_exclusive_write(path: Path, content: bytes, **kwargs: object) -> Path:
+        path.write_text('{"status": "competing-writer"}\n', encoding="utf-8")
+        return original_create(path, content, **kwargs)
+
+    monkeypatch.setattr(
+        readiness_shared_artifacts,
+        "write_bytes_no_follow_exclusive",
+        create_target_before_exclusive_write,
+    )
+
+    with pytest.raises(ProductionReadinessValidationError) as error:
+        writer.write_json(output, {"status": "current-writer"})
+
+    assert error.value.error_code == "PRODUCTION_READINESS_EVIDENCE_EXISTS"
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "competing-writer"}
+
+
+def test_shared_artifact_bounded_payload_caps_wide_mapping_output(tmp_path: Path) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    wide_payload = {f"key-{index}": index for index in range(readiness_shared_artifacts.MAX_JSON_NODES + 25)}
+
+    bounded = readiness_shared_artifacts._bounded_payload(wide_payload)
+    redacted = readiness_shared_artifacts._bounded_redacted_payload(wide_payload, config=config)
+
+    assert isinstance(bounded.payload, dict)
+    assert len(bounded.payload) <= readiness_shared_artifacts.MAX_JSON_NODES
+    assert bounded.node_truncated is True
+    assert list(bounded.payload.values()).count("[truncated:max-nodes]") == 1
+    assert isinstance(redacted, dict)
+    assert len(redacted) <= readiness_shared_artifacts.MAX_JSON_NODES
+    assert list(redacted.values()).count("[truncated:max-nodes]") == 1
 
 
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
@@ -1985,6 +2037,16 @@ def test_shared_artifact_environment_artifact_uses_allowlist_and_redacts_env_val
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@db.internal:55432/nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_READINESS_AUTH_PROOF_FILE", str(private_proof_path))
+    dependency_roots = {
+        name: tmp_path / "private" / f"{name}-evidence"
+        for name in readiness_validation.DEPENDENCY_ROOT_ENV
+    }
+    for name, private_root in dependency_roots.items():
+        monkeypatch.setenv(readiness_validation.DEPENDENCY_ROOT_ENV[name], str(private_root))
+    scheduler_root = tmp_path / "private" / "scheduler-root"
+    scheduler_file = scheduler_root / "pass.json"
+    monkeypatch.setenv(readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV, str(scheduler_root))
+    monkeypatch.setenv(readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV, str(scheduler_file))
     monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "do-not-capture")
 
     validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19"))
@@ -1994,12 +2056,20 @@ def test_shared_artifact_environment_artifact_uses_allowlist_and_redacts_env_val
     assert artifact["schema"] == "nhms.production_readiness.environment.v1"
     assert artifact["run_id"] == "m19"
     assert set(artifact["env"]).issubset(allowed_keys)
+    for name in readiness_validation.DEPENDENCY_ROOT_ENV:
+        assert readiness_validation.DEPENDENCY_ROOT_ENV[name] in artifact["env"]
+    assert readiness_validation.SCHEDULER_EVIDENCE_ROOT_ENV in artifact["env"]
+    assert readiness_validation.SCHEDULER_EVIDENCE_FILE_ENV in artifact["env"]
     assert "UNRELATED_SECRET_TOKEN" not in artifact["env"]
     assert "do-not-capture" not in rendered
     assert "token=secret" not in rendered
     assert "super-secret" not in rendered
     assert "password" not in rendered
     assert str(private_proof_path) not in rendered
+    for private_root in dependency_roots.values():
+        assert str(private_root) not in rendered
+    assert str(scheduler_root) not in rendered
+    assert str(scheduler_file) not in rendered
     assert "[redacted" in rendered
 
 
