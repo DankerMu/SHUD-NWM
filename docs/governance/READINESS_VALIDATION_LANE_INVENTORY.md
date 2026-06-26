@@ -1,11 +1,13 @@
 # Readiness Validation Lane Inventory
 
-Snapshot date: 2026-06-24
+Snapshot date: 2026-06-26
 
 Scope: Governance-7 issue #673 inventory for
-`services/production_closure/readiness_validation.py`. This page records the
-readiness validation lanes and shared artifact surfaces that future extraction
-work can use without making new product decisions.
+`services/production_closure/readiness_validation.py`, Governance-8 owner-family
+fixtures #745 through #754, and Governance-8 issue #755 readiness group
+closeout evidence. This page records the readiness validation lanes and shared
+artifact surfaces that future extraction work can use without making new
+product decisions.
 
 This inventory is documentation-only. It does not move code, add runtime
 behavior, add tests, change proof acceptance semantics, inventory #672
