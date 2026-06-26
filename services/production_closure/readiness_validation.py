@@ -27,6 +27,9 @@ from services.production_closure import (
     readiness_scheduler_evidence as _readiness_scheduler_evidence,
 )
 from services.production_closure import (
+    readiness_scheduler_live_proof as _readiness_scheduler_live_proof,
+)
+from services.production_closure import (
     readiness_shared_artifacts as _readiness_shared_artifacts,
 )
 
@@ -124,35 +127,10 @@ _target_env_config_metadata_is_meaningful = _readiness_live_proofs._target_env_c
 _first_meaningful_mapping = _readiness_live_proofs._first_meaningful_mapping
 _has_any_key_value = _readiness_live_proofs._has_any_key_value
 _value_from = _readiness_live_proofs._value_from
-SCHEDULER_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
-    "producer_schema": ("producer_schema", "scheduler_schema"),
-    "producer_run_id": ("producer_run_id", "scheduler_pass_id", "pass_id"),
-    "producer_artifact_ref": (
-        "producer_artifact_ref",
-        "producer_artifact_path",
-        "producer_artifact_uri",
-        "scheduler_artifact_ref",
-        "scheduler_artifact_path",
-        "artifact_ref",
-        "artifact_path",
-        "artifact_uri",
-    ),
-    "producer_checksum_or_receipt_id": (
-        "scheduler_checksum",
-        "producer_checksum",
-        "summary_checksum",
-        "checksum",
-        "digest",
-        "producer_receipt_id",
-        "receipt_id",
-    ),
-}
-SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES = {
-    "producer_schema": "producer_schema_alias_mismatch",
-    "producer_run_id": "producer_run_id_alias_mismatch",
-    "producer_artifact_ref": "producer_artifact_ref_alias_mismatch",
-    "producer_checksum_or_receipt_id": "producer_checksum_or_receipt_id_alias_mismatch",
-}
+SCHEDULER_BINDING_ALIAS_GROUPS = _readiness_scheduler_live_proof.SCHEDULER_BINDING_ALIAS_GROUPS
+SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES = (
+    _readiness_scheduler_live_proof.SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES
+)
 @dataclass(frozen=True)
 class ProductionReadinessConfig:
     evidence_root: Path
@@ -643,46 +621,23 @@ def _surface_live_item(
             receipt_validation_payload=_receipt_validation_payload,
             receipt_details=_receipt_details,
         )
-    if proof_key != "scheduler":
-        raise ValueError(f"unsupported facade surface proof key: {proof_key}")
-    base = {
-        "item_id": item_id,
-        "surface": surface,
-        "required_for_final": True,
-        "artifact_refs": ["live_proof_receipts.json"],
-        "residual_risk": missing_risk,
-        "removal_criteria": removal,
-    }
-    if receipt["status"] != "parsed":
-        return _required_live_blocker(config=config, receipt=receipt, **base)
-    payload = _receipt_validation_payload(receipt)
-    errors = _surface_live_receipt_errors(
-        payload,
-        proof_key=proof_key,
-        config=config,
-        dependency_bindings=dependency_bindings,
-        scheduler_binding=scheduler_binding,
-    )
-    if not errors:
-        return _item(
-            item_id=base["item_id"],
-            surface=base["surface"],
-            required_for_final=base["required_for_final"],
-            artifact_refs=base["artifact_refs"],
-            status="passed",
-            execution_mode="live_proof",
-            live_proof_accepted=True,
-            residual_risk=f"Accepted live proof is present for {surface}.",
-            removal_criteria="Keep the accepted live proof receipt attached to the release evidence bundle.",
-            details=_receipt_details(receipt, config=config),
+    if proof_key == "scheduler":
+        return _readiness_scheduler_live_proof._surface_live_item(
+            config,
+            receipt,
+            proof_key=proof_key,
+            dependency_bindings=dependency_bindings,
+            scheduler_binding=scheduler_binding,
+            item_id=item_id,
+            surface=surface,
+            missing_risk=missing_risk,
+            removal=removal,
+            surface_live_receipt_errors=_surface_live_receipt_errors,
+            required_live_blocker=_required_live_blocker,
+            receipt_validation_payload=_receipt_validation_payload,
+            receipt_details=_receipt_details,
         )
-    return _item(
-        **base,
-        status="release_blocked",
-        execution_mode="live_proof",
-        live_proof_accepted=False,
-        details=_receipt_details({**receipt, "acceptance_errors": {"errors": errors}}, config=config),
-    )
+    raise ValueError(f"unsupported facade surface proof key: {proof_key}")
 
 
 def _required_live_blocker(
@@ -1016,9 +971,15 @@ def _surface_live_receipt_errors(
             dependency_receipt_errors=_dependency_receipt_errors,
         )
     if proof_key == "scheduler":
-        errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
-        errors.extend(_scheduler_receipt_errors(payload, scheduler_binding=scheduler_binding))
-        return errors
+        return _readiness_scheduler_live_proof._surface_live_receipt_errors(
+            payload,
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings=dependency_bindings,
+            scheduler_binding=scheduler_binding,
+            common_live_receipt_errors=_common_live_receipt_errors,
+            scheduler_receipt_errors=_scheduler_receipt_errors,
+        )
     if proof_key not in SURFACE_PROOF_KEYS:
         raise ValueError(f"unsupported facade surface proof key: {proof_key}")
     return _readiness_live_proofs._surface_live_receipt_errors(
@@ -1103,75 +1064,14 @@ def _scheduler_receipt_errors(
     *,
     scheduler_binding: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    errors: list[str] = []
-    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), Mapping) else {}
-    top_level_binding = _scheduler_producer_binding(payload)
-    provenance_binding = _scheduler_producer_binding(provenance)
-    binding_values = {
-        field: _coalesced_scheduler_binding_value(top_level_binding, provenance_binding, field)
-        for field in SCHEDULER_BINDING_ALIAS_GROUPS
-    }
-    errors.extend(_scheduler_binding_alias_errors(top_level_binding, source="top_level"))
-    errors.extend(_scheduler_binding_alias_errors(provenance_binding, source="provenance"))
-    errors.extend(_scheduler_binding_consistency_errors(top_level_binding, provenance_binding))
-
-    producer_schema = binding_values["producer_schema"]
-    if producer_schema != SCHEDULER_EVIDENCE_SCHEMA:
-        errors.append("producer_schema_mismatch")
-
-    producer_run_id = binding_values["producer_run_id"]
-    if not _non_empty_string(producer_run_id):
-        errors.append("missing_producer_run_id")
-
-    artifact_ref = binding_values["producer_artifact_ref"]
-    if not _non_empty_string(artifact_ref):
-        errors.append("missing_producer_artifact_ref")
-
-    checksum_or_receipt = binding_values["producer_checksum_or_receipt_id"]
-    if not _non_empty_string(checksum_or_receipt):
-        errors.append("missing_producer_checksum_or_receipt_id")
-
-    if not _has_meaningful_value(provenance):
-        errors.append("missing_provenance")
-    elif _contains_placeholder_value(provenance):
-        errors.append("placeholder_provenance")
-
-    producer_run_matches = [
-        binding for binding in scheduler_binding if producer_run_id == binding.get("scheduler_pass_id")
-    ]
-    artifact_matches = [
-        binding for binding in producer_run_matches if artifact_ref == binding.get("scheduler_artifact_ref")
-    ]
-    matches = [
-        binding
-        for binding in artifact_matches
-        if checksum_or_receipt == binding.get("scheduler_checksum")
-    ]
-    if not scheduler_binding:
-        errors.append("missing_scheduler_evidence_binding")
-    elif not matches:
-        errors.append("scheduler_evidence_binding_not_found")
-        if not producer_run_matches:
-            errors.append("producer_run_id_mismatch")
-        elif not artifact_matches:
-            errors.append("producer_artifact_ref_mismatch")
-        else:
-            errors.append("producer_checksum_mismatch")
-    else:
-        if len(matches) > 1:
-            errors.append("ambiguous_scheduler_evidence_binding")
-        binding = matches[0]
-        if producer_schema != binding.get("scheduler_schema"):
-            errors.append("producer_schema_mismatch")
-        scheduler_mode = binding.get("scheduler_execution_mode")
-        if scheduler_mode not in SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES:
-            errors.append("scheduler_execution_mode_not_live_eligible")
-        scheduler_status = str(binding.get("scheduler_status") or "").strip().lower()
-        if scheduler_status not in SCHEDULER_LIVE_WORK_STATUSES:
-            errors.append("scheduler_status_not_live_eligible")
-        errors.extend(_scheduler_binding_summary_errors(top_level_binding, binding, source="top_level"))
-        errors.extend(_scheduler_binding_summary_errors(provenance_binding, binding, source="provenance"))
-    return errors
+    return _readiness_scheduler_live_proof._scheduler_receipt_errors(
+        payload,
+        scheduler_binding=scheduler_binding,
+        contains_placeholder_value=_facade_contains_placeholder_value,
+        non_empty_string=_non_empty_string,
+        has_meaningful_value=_has_meaningful_value,
+        normalized_binding_value=_normalized_binding_value,
+    )
 
 
 def _coalesced_scheduler_binding_value(
@@ -1179,64 +1079,46 @@ def _coalesced_scheduler_binding_value(
     provenance_binding: Mapping[str, Any],
     field: str,
 ) -> Any:
-    top_value = _scheduler_binding_canonical_value(top_level_binding, field)
-    if _has_meaningful_value(top_value):
-        return top_value
-    return _scheduler_binding_canonical_value(provenance_binding, field)
+    return _readiness_scheduler_live_proof._coalesced_scheduler_binding_value(
+        top_level_binding,
+        provenance_binding,
+        field,
+        has_meaningful_value=_has_meaningful_value,
+    )
 
 
 def _scheduler_producer_binding(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        field: {
-            key: _normalized_binding_value(payload.get(key), field=field)
-            for key in aliases
-            if _has_meaningful_value(payload.get(key))
-        }
-        for field, aliases in SCHEDULER_BINDING_ALIAS_GROUPS.items()
-    }
+    return _readiness_scheduler_live_proof._scheduler_producer_binding(
+        payload,
+        has_meaningful_value=_has_meaningful_value,
+        normalized_binding_value=_normalized_binding_value,
+    )
 
 
 def _scheduler_binding_values(receipt_binding: Mapping[str, Any], field: str) -> dict[str, Any]:
-    values = receipt_binding.get(field)
-    return values if isinstance(values, dict) else {}
+    return _readiness_scheduler_live_proof._scheduler_binding_values(receipt_binding, field)
 
 
 def _scheduler_binding_canonical_value(receipt_binding: Mapping[str, Any], field: str) -> Any:
-    values = _scheduler_binding_values(receipt_binding, field)
-    for alias in SCHEDULER_BINDING_ALIAS_GROUPS[field]:
-        value = values.get(alias)
-        if _has_meaningful_value(value):
-            return value
-    return None
+    return _readiness_scheduler_live_proof._scheduler_binding_canonical_value(
+        receipt_binding,
+        field,
+        has_meaningful_value=_has_meaningful_value,
+    )
 
 
 def _scheduler_binding_alias_errors(receipt_binding: Mapping[str, Any], *, source: str) -> list[str]:
-    errors: list[str] = []
-    for binding_field, suffix in SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES.items():
-        values = list(_scheduler_binding_values(receipt_binding, binding_field).values())
-        if values and any(value != values[0] for value in values[1:]):
-            errors.append(f"{source}_{suffix}")
-    return errors
+    return _readiness_scheduler_live_proof._scheduler_binding_alias_errors(receipt_binding, source=source)
 
 
 def _scheduler_binding_consistency_errors(
     top_level_binding: Mapping[str, Any],
     provenance_binding: Mapping[str, Any],
 ) -> list[str]:
-    errors: list[str] = []
-    for binding_field, error in (
-        ("producer_schema", "provenance_producer_schema_mismatch"),
-        ("producer_run_id", "provenance_producer_run_id_mismatch"),
-        ("producer_artifact_ref", "provenance_producer_artifact_ref_mismatch"),
-        ("producer_checksum_or_receipt_id", "provenance_producer_checksum_or_receipt_id_mismatch"),
-    ):
-        top_values = list(_scheduler_binding_values(top_level_binding, binding_field).values())
-        provenance_values = list(_scheduler_binding_values(provenance_binding, binding_field).values())
-        if top_values and provenance_values and any(
-            top_value != provenance_value for top_value in top_values for provenance_value in provenance_values
-        ):
-            errors.append(error)
-    return errors
+    return _readiness_scheduler_live_proof._scheduler_binding_consistency_errors(
+        top_level_binding,
+        provenance_binding,
+    )
 
 
 def _scheduler_binding_summary_errors(
@@ -1245,18 +1127,11 @@ def _scheduler_binding_summary_errors(
     *,
     source: str,
 ) -> list[str]:
-    errors: list[str] = []
-    for binding_field, summary_field, error_suffix in (
-        ("producer_schema", "scheduler_schema", "producer_schema_mismatch"),
-        ("producer_run_id", "scheduler_pass_id", "producer_run_id_mismatch"),
-        ("producer_artifact_ref", "scheduler_artifact_ref", "producer_artifact_ref_mismatch"),
-        ("producer_checksum_or_receipt_id", "scheduler_checksum", "producer_checksum_mismatch"),
-    ):
-        summary_value = summary_binding.get(summary_field)
-        values = list(_scheduler_binding_values(receipt_binding, binding_field).values())
-        if values and any(value != summary_value for value in values):
-            errors.append(f"{source}_summary_{error_suffix}")
-    return errors
+    return _readiness_scheduler_live_proof._scheduler_binding_summary_errors(
+        receipt_binding,
+        summary_binding,
+        source=source,
+    )
 
 
 def redact_readiness_public_error(value: object) -> str:

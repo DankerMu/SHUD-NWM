@@ -16,6 +16,7 @@ from services.production_closure import (
     readiness_item_contracts,
     readiness_live_proofs,
     readiness_scheduler_evidence,
+    readiness_scheduler_live_proof,
     readiness_shared_artifacts,
     readiness_validation,
     slurm_validation,
@@ -544,6 +545,25 @@ def _scheduler_proof_bound_to_evidence(
     return json.dumps(payload)
 
 
+def _scheduler_live_binding(
+    *,
+    producer_schema: str = SCHEDULER_SCHEMA,
+    producer_run_id: str = "scheduler_20260521120000_fixed",
+    producer_artifact_ref: str = "scheduler:scheduler_20260521120000_fixed.json",
+    checksum: str = "sha256:abc123",
+    execution_mode: str = "production_orchestration",
+    status: str = "submitted",
+) -> dict[str, object]:
+    return {
+        "scheduler_schema": producer_schema,
+        "scheduler_pass_id": producer_run_id,
+        "scheduler_artifact_ref": producer_artifact_ref,
+        "scheduler_checksum": checksum,
+        "scheduler_execution_mode": execution_mode,
+        "scheduler_status": status,
+    }
+
+
 def _readiness_cli_args(root: Path, proofs: dict[str, str]) -> list[str]:
     args = ["validate-readiness", "--evidence-root", str(root), "--run-id", "m19"]
     proof_options = {
@@ -886,6 +906,214 @@ def test_dependency_live_proof_owner_direct_and_facade_outputs_match(
     )
 
 
+def test_scheduler_live_proof_owner_facade_exports_and_scheduler_receipt_outputs_match(
+    tmp_path: Path,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    checksum = _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
+    receipt = readiness_shared_artifacts._load_proof(
+        "scheduler",
+        _scheduler_proof_bound_to_evidence(scheduler_path, checksum=checksum),
+        None,
+        config=config,
+    )
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+    scheduler_binding = (_scheduler_live_binding(checksum=checksum),)
+
+    assert readiness_scheduler_live_proof.PROOF_CONTRACTS is readiness_live_proofs.PROOF_CONTRACTS
+    assert (
+        readiness_validation.SCHEDULER_BINDING_ALIAS_GROUPS
+        is readiness_scheduler_live_proof.SCHEDULER_BINDING_ALIAS_GROUPS
+    )
+    assert (
+        readiness_validation.SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES
+        is readiness_scheduler_live_proof.SCHEDULER_BINDING_ALIAS_ERROR_SUFFIXES
+    )
+    assert (
+        readiness_scheduler_live_proof.SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES
+        is readiness_scheduler_evidence.SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES
+    )
+    assert (
+        readiness_scheduler_live_proof.SCHEDULER_LIVE_WORK_STATUSES
+        is readiness_scheduler_evidence.SCHEDULER_LIVE_WORK_STATUSES
+    )
+
+    owner_binding = readiness_scheduler_live_proof._scheduler_producer_binding(payload)
+    assert readiness_validation._scheduler_producer_binding(payload) == owner_binding
+    assert readiness_validation._scheduler_binding_values(owner_binding, "producer_run_id") == (
+        readiness_scheduler_live_proof._scheduler_binding_values(owner_binding, "producer_run_id")
+    )
+    assert (
+        readiness_validation._scheduler_binding_canonical_value(owner_binding, "producer_run_id")
+        == "scheduler_20260521120000_fixed"
+    )
+    assert (
+        readiness_validation._coalesced_scheduler_binding_value({}, owner_binding, "producer_run_id")
+        == "scheduler_20260521120000_fixed"
+    )
+    assert readiness_validation._scheduler_binding_alias_errors(owner_binding, source="top_level") == []
+    assert readiness_validation._scheduler_binding_consistency_errors(owner_binding, owner_binding) == []
+    assert (
+        readiness_validation._scheduler_binding_summary_errors(
+            owner_binding,
+            scheduler_binding[0],
+            source="top_level",
+        )
+        == []
+    )
+    assert readiness_validation._scheduler_receipt_errors(
+        payload,
+        scheduler_binding=scheduler_binding,
+    ) == readiness_scheduler_live_proof._scheduler_receipt_errors(
+        payload,
+        scheduler_binding=scheduler_binding,
+    ) == []
+    assert readiness_validation._surface_live_receipt_errors(
+        payload,
+        proof_key="scheduler",
+        config=config,
+        dependency_bindings={},
+        scheduler_binding=scheduler_binding,
+    ) == readiness_scheduler_live_proof._surface_live_receipt_errors(
+        payload,
+        proof_key="scheduler",
+        config=config,
+        dependency_bindings={},
+        scheduler_binding=scheduler_binding,
+    ) == []
+    assert readiness_validation._surface_live_item(
+        config,
+        receipt,
+        proof_key="scheduler",
+        dependency_bindings={},
+        scheduler_binding=scheduler_binding,
+        **_live_surface_item_kwargs("scheduler"),
+    ) == readiness_scheduler_live_proof._surface_live_item(
+        config,
+        receipt,
+        proof_key="scheduler",
+        dependency_bindings={},
+        scheduler_binding=scheduler_binding,
+        **_live_surface_item_kwargs("scheduler"),
+    )
+
+
+@pytest.mark.parametrize(
+    "proof_key",
+    [
+        "auth",
+        "alert",
+        "rollback",
+        "target_env",
+        "slurm",
+        "object_store",
+        "source",
+        "e2e",
+        "mvt",
+        "unknown",
+    ],
+)
+def test_scheduler_live_proof_owner_fails_closed_for_non_scheduler_proof_keys(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+
+    with pytest.raises(ValueError, match="unsupported scheduler proof key"):
+        readiness_scheduler_live_proof._surface_live_receipt_errors(
+            {},
+            proof_key=proof_key,
+            config=config,
+            dependency_bindings={},
+            scheduler_binding=(),
+        )
+    with pytest.raises(ValueError, match="unsupported scheduler proof key"):
+        readiness_scheduler_live_proof._surface_live_item(
+            config,
+            {"status": "missing"},
+            proof_key=proof_key,
+            dependency_bindings={},
+            scheduler_binding=(),
+            item_id="live-scheduler-evidence",
+            surface="live_scheduler_evidence_proof",
+            missing_risk="Live scheduler evidence receipt has not been accepted.",
+            removal="Provide an accepted scheduler proof receipt.",
+        )
+
+
+@pytest.mark.parametrize(
+    ("patched_name", "patched_value", "expected_error"),
+    [
+        ("_contains_placeholder_value", lambda _value: True, "placeholder_provenance"),
+        ("_non_empty_string", lambda _value: False, "missing_producer_run_id"),
+        ("_has_meaningful_value", lambda _value: False, "missing_provenance"),
+    ],
+)
+def test_scheduler_receipt_facade_honors_old_predicate_monkeypatch_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_name: str,
+    patched_value: Callable[..., bool],
+    expected_error: str,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    checksum = _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
+    receipt = readiness_shared_artifacts._load_proof(
+        "scheduler",
+        _scheduler_proof_bound_to_evidence(scheduler_path, checksum=checksum),
+        None,
+        config=config,
+    )
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+
+    monkeypatch.setattr(readiness_validation, patched_name, patched_value)
+    errors = readiness_validation._surface_live_receipt_errors(
+        payload,
+        proof_key="scheduler",
+        config=config,
+        dependency_bindings={},
+        scheduler_binding=(_scheduler_live_binding(checksum=checksum),),
+    )
+
+    assert expected_error in errors
+
+
+def test_scheduler_receipt_facade_honors_old_normalized_binding_monkeypatch_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionReadinessConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m19")
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    checksum = _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
+    receipt = readiness_shared_artifacts._load_proof(
+        "scheduler",
+        _scheduler_proof_bound_to_evidence(scheduler_path, checksum=checksum),
+        None,
+        config=config,
+    )
+    payload = readiness_shared_artifacts._receipt_validation_payload(receipt)
+    original_normalized_binding_value = readiness_validation._normalized_binding_value
+
+    def patched_normalized_binding_value(value: object, *, field: str) -> object:
+        normalized = original_normalized_binding_value(value, field=field)
+        if field == "producer_run_id":
+            return f"{normalized}-patched"
+        return normalized
+
+    monkeypatch.setattr(readiness_validation, "_normalized_binding_value", patched_normalized_binding_value)
+    errors = readiness_validation._surface_live_receipt_errors(
+        payload,
+        proof_key="scheduler",
+        config=config,
+        dependency_bindings={},
+        scheduler_binding=(_scheduler_live_binding(checksum=checksum),),
+    )
+
+    assert "producer_run_id_mismatch" in errors
+
+
 @pytest.mark.parametrize("proof_key", DEPENDENCY_PROOF_PARAMS)
 def test_dependency_live_proof_owner_preserves_specific_contract_checks(
     tmp_path: Path,
@@ -1184,8 +1412,10 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
     original_auth_live_item = readiness_live_proofs._auth_live_item
     original_surface_live_item = readiness_live_proofs._surface_live_item
     original_dependency_surface_live_item = readiness_dependency_live_proofs._surface_live_item
+    original_scheduler_surface_live_item = readiness_scheduler_live_proof._surface_live_item
     delegated: list[str] = []
     dependency_delegated: list[str] = []
+    scheduler_delegated: list[str] = []
 
     def recording_auth_live_item(*args: object, **kwargs: object) -> dict[str, object]:
         delegated.append("auth")
@@ -1203,6 +1433,12 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
         assert proof_key in DEPENDENCY_PROOFS
         return original_dependency_surface_live_item(*args, **kwargs)
 
+    def recording_scheduler_surface_live_item(*args: object, **kwargs: object) -> dict[str, object]:
+        proof_key = str(kwargs["proof_key"])
+        scheduler_delegated.append(proof_key)
+        assert proof_key == "scheduler"
+        return original_scheduler_surface_live_item(*args, **kwargs)
+
     monkeypatch.setattr(readiness_live_proofs, "_auth_live_item", recording_auth_live_item)
     monkeypatch.setattr(readiness_live_proofs, "_surface_live_item", recording_surface_live_item)
     monkeypatch.setattr(
@@ -1210,11 +1446,17 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
         "_surface_live_item",
         recording_dependency_surface_live_item,
     )
+    monkeypatch.setattr(
+        readiness_scheduler_live_proof,
+        "_surface_live_item",
+        recording_scheduler_surface_live_item,
+    )
 
     proof_json = {
         "auth": _auth_proof(allowed=_all_auth_actions(), denied=_all_auth_actions()),
         "alert": _bound_proof("alert"),
         "rollback": _bound_proof("rollback"),
+        "scheduler": _bound_proof("scheduler"),
         "slurm": _bound_proof("slurm"),
         "object_store": _bound_proof("object_store"),
         "source": _bound_proof("source"),
@@ -1238,6 +1480,7 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
         "live_backend_auth",
         "live_alert_sink_delivery",
         "live_rollback_execution",
+        "live_scheduler_evidence_proof",
         "live_slurm_dependency_proof",
         "live_object_store_dependency_proof",
         "live_source_weather_dependency_proof",
@@ -1247,6 +1490,7 @@ def test_live_receipt_items_delegate_only_proof_specific_builders_to_owner(
     }
     assert delegated == ["auth", "alert", "rollback", "target_env"]
     assert dependency_delegated == ["slurm", "object_store", "source", "e2e", "mvt"]
+    assert scheduler_delegated == ["scheduler"]
 
 
 def test_live_proof_loader_ambiguity_missing_and_preflight_status(tmp_path: Path) -> None:
@@ -3042,10 +3286,26 @@ def test_scheduler_dry_run_evidence_ingests_as_deterministic_non_final_review_ev
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("scheduler_status", "model_run_status"),
+    [
+        ("submitted", "submitted"),
+        ("completed", "completed"),
+        ("succeeded", "succeeded"),
+        ("passed", "passed"),
+    ],
+)
+def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(
+    tmp_path: Path,
+    scheduler_status: str,
+    model_run_status: str,
+) -> None:
     root = tmp_path / "artifacts"
     scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
-    _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
+    _write_scheduler_payload(
+        scheduler_path,
+        _live_scheduler_payload(status=scheduler_status, model_run_status=model_run_status),
+    )
 
     validate_readiness(
         ProductionReadinessConfig.from_env(
@@ -3060,10 +3320,12 @@ def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp
     live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
     assert scheduler_review["status"] == "passed"
     assert scheduler_review["live_proof_accepted"] is False
+    assert scheduler_review["details"]["scheduler_status"] == scheduler_status
     assert scheduler_review["details"]["submitted_count"] == 1
     assert live_item["status"] == "passed"
     assert live_item["execution_mode"] == "live_proof"
     assert live_item["live_proof_accepted"] is True
+    assert "acceptance_errors" not in live_item["details"]
     assert live_item["details"]["payload"]["producer_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
     assert _summary(root)["final_production_readiness_claimed"] is False
 
@@ -3734,8 +3996,12 @@ def _validate_scheduler_payload_with_matching_live_proof(
     return _summary(root), scheduler_item, live_item
 
 
-def _submitted_scheduler_payload() -> dict[str, object]:
-    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+def _live_scheduler_payload(
+    *,
+    status: str = "submitted",
+    model_run_status: str = "submitted",
+) -> dict[str, object]:
+    payload = _scheduler_evidence_payload(status=status, execution_mode="production_orchestration")
     payload["counts"]["candidate_count"] = 1
     payload["counts"]["skipped_candidate_count"] = 0
     payload["counts"]["submitted_count"] = 1
@@ -3743,11 +4009,15 @@ def _submitted_scheduler_payload() -> dict[str, object]:
     payload["model_run_evidence"] = [
         {
             **_candidate_for_model("model_a"),
-            "status": "submitted",
+            "status": model_run_status,
             "submitted": True,
         }
     ]
     return payload
+
+
+def _submitted_scheduler_payload() -> dict[str, object]:
+    return _live_scheduler_payload()
 
 
 def _submitted_scheduler_payload_with_pass_id(pass_id: str) -> dict[str, object]:
@@ -5495,6 +5765,89 @@ def test_all_live_receipts_accepted_claims_final_readiness(tmp_path: Path) -> No
     assert summary["status"] == "ready"
     assert summary["release_blockers"] == []
     assert summary["accepted_live_proof_count"] == summary["required_live_proof_count"] == 9
+
+
+def test_all_live_receipts_except_configured_scheduler_keeps_final_count_blocked(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    object_store_root = tmp_path / "object-store"
+    source_root = tmp_path / "source"
+    e2e_root = tmp_path / "e2e"
+    mvt_root = tmp_path / "mvt"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_payload(scheduler_path, _live_scheduler_payload())
+    proofs = _all_live_proofs()
+    proofs |= {
+        "slurm_proof": _dependency_proof_bound_to_summary("slurm", slurm_root),
+        "object_store_proof": _dependency_proof_bound_to_summary("object_store", object_store_root),
+        "source_proof": _dependency_proof_bound_to_summary("source", source_root),
+        "e2e_proof": _dependency_proof_bound_to_summary("e2e", e2e_root),
+        "mvt_proof": _dependency_proof_bound_to_summary("mvt", mvt_root),
+    }
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            object_store_evidence_root=object_store_root,
+            source_evidence_root=source_root,
+            e2e_evidence_root=e2e_root,
+            mvt_evidence_root=mvt_root,
+            scheduler_evidence_file=scheduler_path,
+            **proofs,
+        )
+    )
+
+    summary = _summary(root)
+    assert summary["final_production_readiness_claimed"] is False
+    assert summary["status"] == "release_blocked"
+    assert summary["required_live_proof_count"] == 10
+    assert summary["accepted_live_proof_count"] == 9
+    scheduler_blocker = next(
+        blocker for blocker in _blockers(root) if blocker["surface"] == "live_scheduler_evidence_proof"
+    )
+    assert scheduler_blocker["blocker_id"] == "m19-live-scheduler-evidence"
+
+
+def test_all_live_receipts_and_scheduler_proof_accepted_claims_final_readiness(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    object_store_root = tmp_path / "object-store"
+    source_root = tmp_path / "source"
+    e2e_root = tmp_path / "e2e"
+    mvt_root = tmp_path / "mvt"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_payload(scheduler_path, _live_scheduler_payload(status="passed", model_run_status="passed"))
+    proofs = _all_live_proofs()
+    proofs |= {
+        "slurm_proof": _dependency_proof_bound_to_summary("slurm", slurm_root),
+        "object_store_proof": _dependency_proof_bound_to_summary("object_store", object_store_root),
+        "source_proof": _dependency_proof_bound_to_summary("source", source_root),
+        "e2e_proof": _dependency_proof_bound_to_summary("e2e", e2e_root),
+        "mvt_proof": _dependency_proof_bound_to_summary("mvt", mvt_root),
+        "scheduler_proof": _scheduler_proof_bound_to_evidence(scheduler_path),
+    }
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            object_store_evidence_root=object_store_root,
+            source_evidence_root=source_root,
+            e2e_evidence_root=e2e_root,
+            mvt_evidence_root=mvt_root,
+            scheduler_evidence_file=scheduler_path,
+            **proofs,
+        )
+    )
+
+    summary = _summary(root)
+    assert summary["final_production_readiness_claimed"] is True
+    assert summary["status"] == "ready"
+    assert summary["release_blockers"] == []
+    assert summary["accepted_live_proof_count"] == summary["required_live_proof_count"] == 10
 
 
 def test_any_required_live_blocker_keeps_final_readiness_false_and_lists_blocker(tmp_path: Path) -> None:
