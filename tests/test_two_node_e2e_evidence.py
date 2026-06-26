@@ -354,6 +354,16 @@ def test_final_two_node_closeout_inventory_map_covers_tasks_3_1_to_3_13() -> Non
         assert verification
         assert inventory_update
 
+    closeout_verification = rows["3.13"][3]
+    for command in (
+        'uv run pytest -q tests/test_two_node_e2e_evidence.py -k "closeout or inventory"',
+        "uv run pytest -q tests/test_two_node_e2e_evidence.py",
+        "uv run ruff check services/production_closure tests/test_two_node_e2e_evidence.py",
+        "openspec validate governance-8-module-deepening --strict --no-interactive",
+        "git diff --check",
+    ):
+        assert command in closeout_verification
+
     assert "Snapshot date: 2026-06-26" in inventory_text
     assert "Closeout snapshot date: 2026-06-26." in inventory_text
     closeout_non_goals = (
