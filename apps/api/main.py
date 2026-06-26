@@ -10,20 +10,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
-from apps.api import openapi_patching
+from apps.api import openapi_patching, route_registry
 from apps.api.auth import audit_record, evaluate_request_action
 from apps.api.display_cache import start_display_catalog_warmer
 from apps.api.errors import error_response, register_error_handlers
-from apps.api.routes.best_available import router as best_available_router
-from apps.api.routes.data_sources import router as data_sources_router
-from apps.api.routes.flood_alerts import router as flood_alerts_router
-from apps.api.routes.forecast import router as forecast_router
-from apps.api.routes.hindcast import router as hindcast_router
-from apps.api.routes.models import router as models_router
-from apps.api.routes.pipeline import router as pipeline_router
-from apps.api.routes.state_snapshots import router as state_snapshots_router
 from apps.api.runtime_mode import RuntimeConfig, load_runtime_config
-from services.slurm_gateway.routes import router as slurm_router
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST_DIR = REPO_ROOT / "apps" / "frontend" / "dist"
@@ -302,17 +293,7 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
     # 首屏与全河段加载慢的主因之一（实测 842KB GeoJSON gzip 后 ~150KB）。
     api.add_middleware(GZipMiddleware, minimum_size=1024)
 
-    api.include_router(models_router)
-    api.include_router(forecast_router)
-    api.include_router(hindcast_router)
-    api.include_router(best_available_router)
-    api.include_router(data_sources_router)
-    api.include_router(state_snapshots_router)
-    api.include_router(pipeline_router)
-    api.include_router(flood_alerts_router)
-    api.include_router(runtime_router)
-    if runtime_config.slurm_routes_enabled:
-        api.include_router(slurm_router)
+    route_registry.register_role_aware_routes(api, runtime_config, runtime_router=runtime_router)
 
     _register_static_and_health_routes(api)
     api.openapi = _custom_openapi_factory(api)
