@@ -240,6 +240,11 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "database_url", database_url)
         object.__setattr__(self, "database_url_configured", bool(self.database_url_configured or database_url_raw))
         object.__setattr__(self, "scheduler_db_free_required", bool(self.scheduler_db_free_required))
+        object.__setattr__(
+            self,
+            "require_runtime_roots",
+            bool(self.require_runtime_roots or self.scheduler_db_free_required),
+        )
         allowed_roots = tuple(_scheduler._optional_config_path(root) for root in self.allowed_storage_roots if root)
         object.__setattr__(self, "allowed_storage_roots", allowed_roots)
         templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
@@ -457,7 +462,7 @@ def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any]
         return check, _db_free_blocker("db_free_selector_missing", env, "missing")
     if value == "":
         return check, _db_free_blocker("db_free_selector_blank", env, "blank")
-    if value in _DB_FREE_DB_BACKEND_VALUES:
+    if _db_free_selector_text_is_db_like(value):
         return check, _db_free_blocker("db_free_selector_db_backed", env, "db_backed")
     if value != "file":
         return check, _db_free_blocker("db_free_selector_non_file", env, "non_file")
@@ -474,7 +479,16 @@ def _db_free_selector_evidence_scalar(value: Any) -> Any:
         return "[invalid-uri]"
     if parsed.scheme:
         return _db_free_scheme_for_evidence(parsed.scheme)
+    if _db_free_selector_text_is_db_like(text):
+        return "[db-like]"
     return _evidence_scalar(text)
+
+
+def _db_free_selector_text_is_db_like(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    text = str(value).strip().lower()
+    return text in _DB_FREE_DB_BACKEND_VALUES or "postgres" in text or "psycopg" in text
 
 
 def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:

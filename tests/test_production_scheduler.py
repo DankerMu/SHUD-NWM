@@ -15393,6 +15393,16 @@ def test_legacy_scheduler_backend_uri_evidence_is_summarized(tmp_path: Path) -> 
     assert "postgresql" not in rendered.lower()
 
 
+def test_legacy_scheduler_db_like_backend_text_evidence_is_summarized(tmp_path: Path) -> None:
+    config = _config(tmp_path, scheduler_registry_backend="postgresql+psycopg")
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+    rendered = json.dumps(evidence, sort_keys=True)
+
+    assert evidence["scheduler_registry_backend"] == "[db-like]"
+    assert "postgresql" not in rendered.lower()
+    assert "psycopg" not in rendered.lower()
+
+
 def test_db_free_database_url_blocks_before_lock_or_factories(monkeypatch: Any, tmp_path: Path) -> None:
     _set_db_free_scheduler_env(monkeypatch, tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:supersecret@db.prod.example:55433/nhms")
@@ -15470,6 +15480,28 @@ def test_db_free_selector_uri_blocks_without_endpoint_leak(
     assert "55433" not in rendered
     assert "token" not in rendered
     assert "postgresql" not in rendered.lower()
+
+
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+def test_db_free_selector_db_like_text_blocks_without_dependency_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(selector_env, "postgresql+psycopg")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert selector_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    selector_check = result.evidence["db_free_runtime"]["checks"][selector_env]
+    assert selector_check["selected"] == "[db-like]"
+    assert selector_check["file_selected"] is False
+    assert "postgresql" not in rendered.lower()
+    assert "psycopg" not in rendered.lower()
 
 
 @pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
@@ -15795,6 +15827,25 @@ def test_db_free_injected_collaborators_still_block_unimplemented_file_providers
     assert result.evidence["candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_required_implies_strict_runtime_root_preflight(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_SCHEDULER_REQUIRE_ROOTS", raising=False)
+
+    config = ProductionSchedulerConfig()
+    runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    lock_preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert config.require_runtime_roots is True
+    assert runtime_preflight["required"] is True
+    assert runtime_preflight["status"] == "ready"
+    assert "service_role" in runtime_preflight["checks"]
+    assert lock_preflight["required"] is True
+    assert lock_preflight["status"] == "ready"
 
 
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(

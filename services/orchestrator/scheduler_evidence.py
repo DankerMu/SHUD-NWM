@@ -771,6 +771,9 @@ def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
         if scheme in _DB_FREE_DB_BACKEND_VALUES or "postgres" in scheme or "psycopg" in scheme:
             return "[db-like]"
         return "[uri]"
+    lower = text.lower()
+    if lower in _DB_FREE_DB_BACKEND_VALUES or "postgres" in lower or "psycopg" in lower:
+        return "[db-like]"
     return text
 
 
