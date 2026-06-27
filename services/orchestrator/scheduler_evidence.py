@@ -290,8 +290,8 @@ def reserve_pre_execution_evidence(
         "reserved_at": _format_utc(now),
         "status": "reserved",
         "candidate_count": candidate_count,
-        "artifact_path": str(artifact_path),
-        "final_evidence_artifact": str(evidence_dir / final_artifact_name),
+        "artifact_path": artifact_path_evidence(context.config, artifact_path),
+        "final_evidence_artifact": artifact_path_evidence(context.config, evidence_dir / final_artifact_name),
         "proof": "scheduler_evidence_directory_write_before_production_mutation",
     }
     try:
@@ -345,7 +345,7 @@ def write_evidence(
     payload = context.evidence_safe(dict(evidence))
     if not isinstance(payload, dict):
         payload = {}
-    payload["artifact_path"] = str(artifact_path)
+    payload["artifact_path"] = artifact_path_evidence(context.config, artifact_path)
     payload_to_write, serialized = _serialized_evidence_within_limit(
         context,
         payload,
@@ -359,8 +359,14 @@ def write_evidence(
     if isinstance(evidence, dict):
         evidence.clear()
         evidence.update(payload_to_write)
-        evidence.setdefault("artifact_path", str(artifact_path))
+        evidence.setdefault("artifact_path", artifact_path_evidence(context.config, artifact_path))
     return artifact_path
+
+
+def artifact_path_evidence(config: SchedulerEvidenceConfig, artifact_path: Path) -> str:
+    if bool(getattr(config, "scheduler_db_free_required", False)):
+        return "[local-path]"
+    return str(artifact_path)
 
 
 def validate_evidence_artifact_name(artifact_name: str, *, artifact_path: Path) -> None:

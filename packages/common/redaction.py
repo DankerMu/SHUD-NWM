@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 REDACTION_MARKER = "[redacted]"
+BOOLEAN_CONFIGURED_FIELD_ALLOWLIST = frozenset({"database_url_configured"})
 
 SENSITIVE_KEY_RE = re.compile(
     r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
@@ -171,7 +172,7 @@ def is_sensitive_key(key: str) -> bool:
 def _should_redact_mapping_value(key: str, value: Any) -> bool:
     if AUTH_NAMESPACE_KEY_RE.fullmatch(key) and isinstance(value, Mapping):
         return False
-    if key.lower().endswith("_configured") and isinstance(value, bool):
+    if key.lower() in BOOLEAN_CONFIGURED_FIELD_ALLOWLIST and isinstance(value, bool):
         return False
     if key.lower() == "password_present" and isinstance(value, bool):
         return False

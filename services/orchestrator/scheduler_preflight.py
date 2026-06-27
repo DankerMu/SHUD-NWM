@@ -533,7 +533,10 @@ def _storage_root_check(
     field_name: str,
     value: Path | str | None,
     allowed_roots: Sequence[Path],
+    *,
+    evidence_safe_paths: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    evidence_path = "[local-path]" if evidence_safe_paths else None
     if value in (None, ""):
         return (
             {
@@ -549,12 +552,29 @@ def _storage_root_check(
             },
         )
     path = Path(value).expanduser()
-    resolved = path.resolve()
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        check = {
+            "configured": True,
+            "path": evidence_path or str(path),
+            "contained": False,
+            "compute_node_visible": False,
+        }
+        return (
+            check,
+            {
+                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_UNSAFE_PATH",
+                "field": field_name,
+                "path": evidence_path or str(path),
+                "message": f"Slurm {field_name} must be a safe compute-node visible directory.",
+            },
+        )
     visible = path.exists() and path.is_dir()
     contained = _path_is_under_any(resolved, allowed_roots)
     check = {
         "configured": True,
-        "path": str(resolved),
+        "path": evidence_path or str(resolved),
         "contained": contained,
         "compute_node_visible": visible,
     }
@@ -564,7 +584,7 @@ def _storage_root_check(
             {
                 "code": f"SLURM_PREFLIGHT_{field_name.upper()}_OUT_OF_ROOT",
                 "field": field_name,
-                "path": str(resolved),
+                "path": evidence_path or str(resolved),
                 "message": f"Slurm {field_name} must stay under configured project or production roots.",
             },
         )
@@ -574,7 +594,7 @@ def _storage_root_check(
             {
                 "code": f"SLURM_PREFLIGHT_{field_name.upper()}_NOT_VISIBLE",
                 "field": field_name,
-                "path": str(resolved),
+                "path": evidence_path or str(resolved),
                 "message": f"Slurm {field_name} must exist as a compute-node visible directory.",
             },
         )

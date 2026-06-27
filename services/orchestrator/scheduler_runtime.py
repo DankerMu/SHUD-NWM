@@ -222,6 +222,24 @@ def _write_new_regular_file(*args, **kwargs):
     return getattr(_scheduler, "_write_new_regular_file")(*args, **kwargs)
 
 
+def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = redact_payload(dict(value))
+    if not getattr(config, "db_free_required", False):
+        return evidence
+    return _db_free_mask_lock_paths(evidence)
+
+
+def _db_free_mask_lock_paths(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): "[local-path]" if str(key) == "lock_path" else _db_free_mask_lock_paths(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_db_free_mask_lock_paths(item) for item in value]
+    return value
+
+
 def run_once(self) -> SchedulerPassResult:
     self._source_readiness_context_cache.clear()
     started_at = _now(self.config)
@@ -233,12 +251,15 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": "preflight_blocked",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": {
-                    "acquired": False,
-                    "contention": False,
-                    "lock_path": str(self.config.lock_path),
-                    "reason": "scheduler_root_preflight_blocked",
-                },
+                "lock": _db_free_lock_evidence(
+                    self.config,
+                    {
+                        "acquired": False,
+                        "contention": False,
+                        "lock_path": str(self.config.lock_path),
+                        "reason": "scheduler_root_preflight_blocked",
+                    },
+                ),
                 "root_preflight": root_preflight,
                 "counts": _empty_counts(),
                 "candidates": [],
@@ -267,13 +288,16 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": "preflight_blocked",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": {
-                    "acquired": False,
-                    "contention": False,
-                    "lock_path": str(self.config.lock_path),
-                    "lock_type": "file" if self.config.db_free_required else None,
-                    "reason": "db_free_runtime_preflight_blocked",
-                },
+                "lock": _db_free_lock_evidence(
+                    self.config,
+                    {
+                        "acquired": False,
+                        "contention": False,
+                        "lock_path": str(self.config.lock_path),
+                        "lock_type": "file" if self.config.db_free_required else None,
+                        "reason": "db_free_runtime_preflight_blocked",
+                    },
+                ),
                 "root_preflight": root_preflight,
                 "db_free_runtime": db_free_preflight,
                 "counts": _empty_counts(),
@@ -298,13 +322,14 @@ def run_once(self) -> SchedulerPassResult:
         )
     lock = self._build_scheduler_lease()
     lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
+    lock_evidence = _db_free_lock_evidence(self.config, lock_result)
     if not lock_result["acquired"]:
         evidence = self._base_evidence(pass_id, started_at)
         evidence.update(
             {
                 "status": "lock_contended",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "counts": _empty_counts(),
                 "candidates": [],
                 "blocked_candidates": [],
@@ -336,7 +361,7 @@ def run_once(self) -> SchedulerPassResult:
                 {
                     "status": "preflight_blocked",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_result,
+                    "lock": lock_evidence,
                     "root_preflight": root_preflight,
                     "counts": _empty_counts(),
                     "candidates": [],
@@ -372,7 +397,7 @@ def run_once(self) -> SchedulerPassResult:
                 {
                     "status": "preflight_blocked",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_result,
+                    "lock": lock_evidence,
                     "root_preflight": root_preflight,
                     "db_free_runtime": {
                         **db_free_preflight,
@@ -450,7 +475,7 @@ def run_once(self) -> SchedulerPassResult:
                 {
                     "status": "lease_lost",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_result,
+                    "lock": lock_evidence,
                     "counts": _empty_counts(),
                     "candidates": [],
                     "blocked_candidates": [],
@@ -642,7 +667,7 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": pass_status,
                 "finished_at": _format_utc(finished_at),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "model_discovery": model_evidence,
                 "source_cycles": source_cycle_evidence,
                 "candidates": [candidate.to_dict() for candidate in candidates],
@@ -723,7 +748,7 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": "resource_limit_blocked",
                 "finished_at": _format_utc(finished_at),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "limit": {"reason": error.reason, **error.details},
                 "counts": _empty_counts(),
                 "candidates": [],

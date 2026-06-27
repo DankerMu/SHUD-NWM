@@ -15141,6 +15141,17 @@ _DB_FREE_PATH_ENV_KEYS = (
     "NHMS_SCHEDULER_JOURNAL_ROOT",
     "NHMS_SCHEDULER_STATE_INDEX",
 )
+_DB_FREE_FILE_PATH_ENV_KEYS = tuple(
+    key for key in _DB_FREE_PATH_ENV_KEYS if key != "NHMS_SCHEDULER_JOURNAL_ROOT"
+)
+_DB_FREE_SELECTOR_RUNTIME_CONFIG_FIELDS = {
+    "NHMS_SCHEDULER_STATE_BACKEND": "scheduler_state_backend",
+    "NHMS_SCHEDULER_LOCK_BACKEND": "scheduler_lock_backend",
+    "NHMS_SCHEDULER_REGISTRY_BACKEND": "scheduler_registry_backend",
+    "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND": "scheduler_canonical_readiness_backend",
+    "NHMS_SCHEDULER_JOURNAL_BACKEND": "scheduler_journal_backend",
+    "NHMS_SCHEDULER_STATE_INDEX_BACKEND": "scheduler_state_index_backend",
+}
 
 
 def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, Path], dict[str, Path]]:
@@ -15483,6 +15494,29 @@ def test_db_free_selector_uri_blocks_without_endpoint_leak(
 
 
 @pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+def test_db_free_selector_file_uri_uses_uri_evidence_not_file_backend(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(selector_env, "file:///private/unsafe-secret-token/backend")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    selector_check = result.evidence["db_free_runtime"]["checks"][selector_env]
+    assert selector_check["selected"] == "[uri]"
+    assert selector_check["file_selected"] is False
+    runtime_field = _DB_FREE_SELECTOR_RUNTIME_CONFIG_FIELDS[selector_env]
+    assert result.evidence["runtime_config"][runtime_field] == "[uri]"
+    assert "unsafe-secret-token" not in rendered
+    assert "file:///private" not in rendered
+
+
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
 def test_db_free_selector_db_like_text_blocks_without_dependency_leak(
     monkeypatch: Any,
     tmp_path: Path,
@@ -15697,15 +15731,52 @@ def test_db_free_required_local_path_blocks_without_raw_path_leak(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
+@pytest.mark.parametrize("path_env", _DB_FREE_FILE_PATH_ENV_KEYS)
+def test_db_free_required_file_path_must_be_readable_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    target = paths[path_env]
+    original_mode = target.stat().st_mode
+    target.chmod(0)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    try:
+        result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    finally:
+        target.chmod(original_mode)
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    blocker = next(
+        blocker
+        for blocker in result.evidence["db_free_runtime"]["blockers"]
+        if blocker["field"] == path_env
+    )
+    assert blocker["code"] == "db_free_required_path_not_readable"
+    assert blocker["path"] == "[local-path]"
+    assert result.evidence["db_free_runtime"]["checks"][path_env]["path"] == "[local-path]"
+    assert str(target) not in rendered
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+
+
 @pytest.mark.parametrize(
     "object_uri",
     [
         "s3://user:pass@nhms-prod/scheduler/registry.json?token=secret#frag",
+        "s3://nhms-prod:badport/scheduler/registry.json",
+        "s3:///scheduler/registry.json",
         "s3://nhms-prod/scheduler/../secret.json",
+        "s3://nhms-prod/scheduler/%2e%2e/secret.json",
+        "s3://nhms-prod/scheduler/reg\u0001istry.json",
         "s3://other-prod/scheduler/registry.json",
         "s3://nhms-prod/other/registry.json",
         "published://user:pass@manifests/scheduler.json",
         "published://manifests/../secret.json",
+        "published://manifests/%2e%2e/secret.json",
+        "published://manifests/path%2fsecret.json",
         "published://private/scheduler.json",
     ],
 )
@@ -15732,6 +15803,8 @@ def test_db_free_object_uri_misconfig_blocks_without_raw_uri_leak(
     assert "token=secret" not in rendered
     assert "secret.json" not in rendered
     assert "other-prod" not in rendered
+    assert "badport" not in rendered
+    assert "nhms-prod" not in rendered
 
 
 def test_db_free_object_uri_blocks_malformed_object_store_prefix_without_crash(
@@ -15774,13 +15847,17 @@ def test_db_free_safe_object_uri_paths_pass_runtime_preflight(
         check = preflight["checks"][key]
         assert check["path"] == "[object-uri]"
         assert check["supported_object_uri"] is True
+        assert check.get("bucket") in (None, "[object-bucket]")
+        assert check.get("namespace") == "[object-prefix]"
+    rendered = json.dumps(preflight, sort_keys=True)
+    assert "nhms-prod" not in rendered
 
 
 def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_providers(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "true")
 
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
@@ -15829,11 +15906,14 @@ def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_pro
         staticmethod(lambda: pytest.fail("DB-free file-provider blocker must not construct state manager")),
     )
 
-    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    config = ProductionSchedulerConfig()
+    result = ProductionScheduler.from_env(config).run_once()
     rendered = json.dumps(result.evidence, sort_keys=True)
 
     assert result.status == "preflight_blocked"
     assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["lock_path"] == "[local-path]"
+    assert result.evidence["lock"]["lease"]["lock_path"] == "[local-path]"
     assert result.evidence["db_free_runtime"]["status"] == "ready"
     assert result.evidence["db_free_runtime"]["provider_blocker"]["code"] == "db_free_file_providers_not_implemented"
     assert result.evidence["counts"]["submitted_count"] == 0
@@ -15847,6 +15927,8 @@ def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_pro
     assert "postgres" not in rendered.lower()
     assert "psycopg" not in rendered.lower()
     assert "advisory" not in rendered.lower()
+    assert "db-free-local-root" not in rendered
+    assert str(config.lock_path) not in rendered
 
 
 def test_db_free_injected_collaborators_still_block_unimplemented_file_providers(
@@ -15895,14 +15977,25 @@ def test_db_free_required_implies_strict_runtime_root_preflight(
     assert lock_preflight["status"] == "ready"
 
 
+@pytest.mark.parametrize(
+    ("root_env", "check_field"),
+    [
+        ("OBJECT_STORE_ROOT", "object_store_root"),
+        ("NHMS_PUBLISHED_ARTIFACT_ROOT", "published_artifact_root"),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", "runtime_root"),
+        ("NHMS_SCHEDULER_TEMP_ROOT", "temp_root"),
+    ],
+)
 def test_db_free_runtime_root_preflight_masks_local_paths_when_blocked(
     monkeypatch: Any,
     tmp_path: Path,
+    root_env: str,
+    check_field: str,
 ) -> None:
     roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
-    outside_root = tmp_path / "outside-root-boundary"
+    outside_root = tmp_path / f"outside-{check_field}-secret-token"
     outside_root.mkdir()
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(outside_root))
+    monkeypatch.setenv(root_env, str(outside_root))
 
     config = ProductionSchedulerConfig()
     runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
@@ -15913,11 +16006,11 @@ def test_db_free_runtime_root_preflight_masks_local_paths_when_blocked(
     )
 
     assert runtime_preflight["status"] == "blocked"
-    assert runtime_preflight["checks"]["object_store_root"]["path"] == "[local-path]"
+    assert runtime_preflight["checks"][check_field]["path"] == "[local-path]"
     blocker = next(
         blocker
         for blocker in runtime_preflight["blockers"]
-        if blocker["field"] == "object_store_root"
+        if blocker["field"] == check_field
     )
     assert blocker["path"] == "[local-path]"
     assert runtime_preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == [
@@ -15925,45 +16018,66 @@ def test_db_free_runtime_root_preflight_masks_local_paths_when_blocked(
         for _root in runtime_preflight["allowed_roots"]
     ]
     assert set(runtime_preflight["allowed_roots"]) == {"[local-path]"}
-    assert resolved_roots["object_store_root"]["path"] == "[local-path]"
-    assert "outside-root-boundary" not in rendered
+    for item in resolved_roots.values():
+        if item["configured"]:
+            assert item["path"] == "[local-path]"
+    for root in roots.values():
+        assert str(root) not in rendered
+    assert f"outside-{check_field}-secret-token" not in rendered
     assert str(outside_root) not in rendered
-    assert str(roots["workspace_root"]) not in rendered
 
 
+@pytest.mark.parametrize(
+    ("root_env", "check_field"),
+    [
+        ("WORKSPACE_ROOT", "workspace_root"),
+        ("OBJECT_STORE_ROOT", "object_store_root"),
+        ("NHMS_PUBLISHED_ARTIFACT_ROOT", "published_artifact_root"),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", "runtime_root"),
+        ("NHMS_SCHEDULER_TEMP_ROOT", "temp_root"),
+        ("NHMS_SCHEDULER_LOCK_ROOT", "lock_root"),
+        ("NHMS_SCHEDULER_EVIDENCE_ROOT", "evidence_root"),
+    ],
+)
 def test_db_free_runtime_root_preflight_blocks_raw_traversal_inside_allowed_root(
     monkeypatch: Any,
     tmp_path: Path,
+    root_env: str,
+    check_field: str,
 ) -> None:
     roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
-    resolved_root = roots["object_store_root"] / "safe-root"
+    resolved_root = roots["workspace_root"] / f"safe-{check_field}"
     resolved_root.mkdir()
-    raw_root = roots["object_store_root"] / "nested" / ".." / "safe-root"
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(raw_root))
+    raw_root = roots["workspace_root"] / "nested" / ".." / f"safe-{check_field}"
+    monkeypatch.setenv(root_env, str(raw_root))
+    if root_env == "WORKSPACE_ROOT":
+        monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(raw_root / "locks"))
+        monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(raw_root / "evidence"))
 
     config = ProductionSchedulerConfig()
     runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
     rendered = json.dumps(runtime_preflight, sort_keys=True)
 
     assert runtime_preflight["status"] == "blocked"
-    object_store_check = runtime_preflight["checks"]["object_store_root"]
-    assert object_store_check["path"] == "[local-path]"
+    root_check = runtime_preflight["checks"][check_field]
+    assert root_check["path"] == "[local-path]"
     blocker = next(
         blocker
         for blocker in runtime_preflight["blockers"]
-        if blocker["field"] == "object_store_root"
+        if blocker["field"] == check_field
     )
     assert blocker["reason"] == "unsafe_path"
     assert blocker["path"] == "[local-path]"
     assert ".." not in rendered
     assert str(raw_root) not in rendered
+    assert f"safe-{check_field}" not in rendered
 
 
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     config = ProductionSchedulerConfig()
     held_lock = FileSchedulerLease(Path(config.lock_path), ttl_seconds=60, workspace_root=Path(config.workspace_root))
     acquired = held_lock.acquire(pass_id="already-running", started_at=_dt("2026-05-21T12:00:00Z"))
@@ -15976,9 +16090,63 @@ def test_db_free_file_lock_contention_is_bounded_and_no_submit(
 
     assert result.status == "lock_contended"
     assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["lock_path"] == "[local-path]"
+    assert result.evidence["lock"]["existing_lock"]["lock_path"] == "[local-path]"
     assert result.evidence["lock"]["contention"] is True
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+    assert "db-free-local-root" not in rendered
+    assert str(config.lock_path) not in rendered
+
+
+def test_db_free_slurm_preflight_masks_storage_root_paths(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    outside_root = tmp_path / "outside-slurm-secret-token"
+    outside_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(outside_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+
+    config = ProductionSchedulerConfig()
+    preflight = scheduler_module._slurm_preflight(config)
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["checks"]["storage_roots"]["object_store_root"]["path"] == "[local-path]"
+    blocker = next(
+        blocker
+        for blocker in preflight["blockers"]
+        if blocker["field"] == "object_store_root"
+    )
+    assert blocker["path"] == "[local-path]"
+    assert set(preflight["checks"]["allowed_roots"]) == {"[local-path]"}
+    assert "outside-slurm-secret-token" not in rendered
+    assert str(outside_root) not in rendered
+    for root in roots.values():
+        assert str(root) not in rendered
+
+
+def test_db_free_slurm_storage_root_check_masks_symlink_loop_path(tmp_path: Path) -> None:
+    loop = tmp_path / "slurm-secret-token-loop"
+    loop.symlink_to(loop)
+
+    check, blocker = scheduler_module._storage_root_check(
+        "object_store_root",
+        loop,
+        (tmp_path,),
+        evidence_safe_paths=True,
+    )
+    rendered = json.dumps({"check": check, "blocker": blocker}, sort_keys=True)
+
+    assert check["path"] == "[local-path]"
+    assert blocker is not None
+    assert blocker["code"] == "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_UNSAFE_PATH"
+    assert blocker["path"] == "[local-path]"
+    assert "slurm-secret-token-loop" not in rendered
+    assert str(loop) not in rendered
 
 
 # --- Issue #257 / M23-6: scheduler SHUD executable pre-submit preflight -------

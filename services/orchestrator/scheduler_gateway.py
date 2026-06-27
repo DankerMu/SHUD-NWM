@@ -18,8 +18,9 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
 
     blockers: list[dict[str, Any]] = []
     checks: dict[str, Any] = {}
+    db_free_required = bool(getattr(config, "db_free_required", False))
 
-    if getattr(config, "db_free_required", False):
+    if db_free_required:
         checks["database"] = {
             "configured": bool(getattr(config, "database_url_configured", False)),
             "required": False,
@@ -46,12 +47,21 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
     allowed_roots = _scheduler._preflight_allowed_roots(config)
     root_checks: dict[str, Any] = {}
     for field_name, value in roots.items():
-        root_check, blocker = _scheduler._storage_root_check(field_name, value, allowed_roots)
+        root_check, blocker = _scheduler._storage_root_check(
+            field_name,
+            value,
+            allowed_roots,
+            evidence_safe_paths=db_free_required,
+        )
         root_checks[field_name] = root_check
         if blocker is not None:
             blockers.append(blocker)
     checks["storage_roots"] = root_checks
-    checks["allowed_roots"] = [str(root) for root in allowed_roots]
+    checks["allowed_roots"] = (
+        ["[local-path]" for _root in allowed_roots]
+        if db_free_required
+        else [str(root) for root in allowed_roots]
+    )
 
     template_check, template_blockers = _scheduler._slurm_template_allowlist_check(config)
     checks["templates"] = template_check

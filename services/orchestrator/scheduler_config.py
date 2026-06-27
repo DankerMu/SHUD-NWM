@@ -561,7 +561,8 @@ def _db_free_selector_evidence_scalar(value: Any) -> Any:
     except ValueError:
         return "[invalid-uri]"
     if parsed.scheme:
-        return _db_free_scheme_for_evidence(parsed.scheme)
+        scheme = _db_free_scheme_for_evidence(parsed.scheme)
+        return scheme if scheme == "[db-like]" else "[uri]"
     if _db_free_selector_text_is_db_like(text):
         return "[db-like]"
     return _evidence_scalar(text)
@@ -695,7 +696,24 @@ def _db_free_path_check(
         return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
     if path.is_symlink() or not path.is_file():
         return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
+    if not _db_free_file_is_readable(path):
+        return check, _db_free_blocker(
+            "db_free_required_path_not_readable",
+            env,
+            "not_readable",
+            path=str(resolved),
+        )
     return check, None
+
+
+def _db_free_file_is_readable(path: Path) -> bool:
+    try:
+        path_stat = path.lstat()
+    except OSError:
+        return False
+    if path_stat.st_mode & 0o444 == 0:
+        return False
+    return os.access(path, os.R_OK)
 
 
 def _db_free_local_path_component_reason(path: Path) -> str | None:
@@ -797,8 +815,8 @@ def _db_free_s3_uri_boundary(raw_uri: str, parsed: Any) -> dict[str, Any]:
         raise ValueError("object_uri_not_allowlisted")
     return {
         "object_boundary": "s3",
-        "bucket": bucket,
-        "namespace": key.split("/", maxsplit=1)[0],
+        "bucket": "[object-bucket]",
+        "namespace": "[object-prefix]",
     }
 
 
@@ -810,7 +828,7 @@ def _db_free_published_uri_boundary(parsed: Any) -> dict[str, Any]:
         raise ValueError("object_uri_not_allowlisted")
     return {
         "object_boundary": "published",
-        "namespace": prefix,
+        "namespace": "[object-prefix]",
     }
 
 
