@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import json
+import os
+import stat
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+    verify_directory_no_follow,
+)
+from packages.common.source_identity import normalize_source_id
+from packages.common.storage import validate_object_path
+from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+
+NFS_RAW_MANIFEST_ENABLED_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ENABLED"
+NFS_RAW_MANIFEST_REQUIRED_ENV = "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"
+NFS_RAW_MANIFEST_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
+NFS_RAW_MANIFEST_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+NFS_RAW_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+NFS_RAW_MANIFEST_READY_SOURCE = "node27_nfs_raw_manifest"
+
+__all__ = (
+    "NFS_RAW_MANIFEST_ENABLED_ENV",
+    "NFS_RAW_MANIFEST_PREFIX_ENV",
+    "NFS_RAW_MANIFEST_READY_SOURCE",
+    "NFS_RAW_MANIFEST_REQUIRED_ENV",
+    "NFS_RAW_MANIFEST_ROOT_ENV",
+    "forecast_cycle_from_raw_manifest_readiness",
+    "nfs_raw_manifest_readiness",
+    "nfs_raw_manifest_readiness_from_env",
+)
+
+
+def nfs_raw_manifest_readiness_from_env(source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
+    enabled = _env_flag(NFS_RAW_MANIFEST_ENABLED_ENV)
+    required = _env_flag(NFS_RAW_MANIFEST_REQUIRED_ENV)
+    if not enabled and not required:
+        return None
+    root = os.getenv(NFS_RAW_MANIFEST_ROOT_ENV) or os.getenv("OBJECT_STORE_ROOT")
+    prefix = os.getenv(NFS_RAW_MANIFEST_PREFIX_ENV) or os.getenv("OBJECT_STORE_PREFIX") or "s3://nhms"
+    if root in (None, ""):
+        return {
+            "status": "missing",
+            "required": required,
+            "reason": "object_store_root_missing",
+            "source": NFS_RAW_MANIFEST_READY_SOURCE,
+            "source_id": normalize_source_id(source_id),
+            "cycle_id": cycle_id_for(source_id, cycle_time),
+            "cycle_time": _format_time(cycle_time),
+            "env": NFS_RAW_MANIFEST_ROOT_ENV,
+        }
+    return nfs_raw_manifest_readiness(
+        source_id=source_id,
+        cycle_time=cycle_time,
+        object_store_root=root,
+        object_store_prefix=prefix,
+        required=required,
+    )
+
+
+def nfs_raw_manifest_readiness(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    object_store_root: str | Path,
+    object_store_prefix: str = "s3://nhms",
+    required: bool = False,
+    max_manifest_bytes: int = NFS_RAW_MANIFEST_MAX_BYTES,
+) -> dict[str, Any]:
+    source_id = normalize_source_id(source_id)
+    cycle_time = parse_cycle_time(cycle_time)
+    compact_cycle = format_cycle_time(cycle_time)
+    root = _absolute_path(object_store_root)
+    root_evidence = {
+        "required": required,
+        "source": NFS_RAW_MANIFEST_READY_SOURCE,
+        "source_id": source_id,
+        "cycle_id": cycle_id_for(source_id, cycle_time),
+        "cycle_time": _format_time(cycle_time),
+        "object_store_root": str(root),
+    }
+    try:
+        verified_root = verify_directory_no_follow(root)
+    except FileNotFoundError:
+        return {**root_evidence, "status": "missing", "reason": "object_store_root_missing"}
+    except (OSError, SafeFilesystemError) as error:
+        return {
+            **root_evidence,
+            "status": "invalid",
+            "reason": "object_store_root_unreadable",
+            "error": str(error),
+        }
+
+    manifest_keys = _candidate_manifest_keys(source_id, compact_cycle)
+    manifest_path: Path | None = None
+    manifest_key: str | None = None
+    for key in manifest_keys:
+        path = verified_root / key
+        try:
+            stat_no_follow(path, containment_root=verified_root)
+        except FileNotFoundError:
+            continue
+        except (OSError, SafeFilesystemError) as error:
+            return {
+                **root_evidence,
+                "status": "invalid",
+                "reason": "manifest_unreadable",
+                "manifest_key": key,
+                "manifest_path": str(path),
+                "error": str(error),
+            }
+        manifest_path = path
+        manifest_key = key
+        break
+    if manifest_path is None or manifest_key is None:
+        return {
+            **root_evidence,
+            "status": "missing",
+            "reason": "manifest_not_found",
+            "manifest_keys": manifest_keys,
+        }
+
+    payload, payload_error = _read_manifest_payload(
+        manifest_path,
+        root=verified_root,
+        max_manifest_bytes=max_manifest_bytes,
+    )
+    if payload_error is not None:
+        return {
+            **root_evidence,
+            **payload_error,
+            "status": "invalid",
+            "manifest_key": manifest_key,
+            "manifest_path": str(manifest_path),
+        }
+
+    validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
+    if validation_error is not None:
+        return {
+            **root_evidence,
+            **validation_error,
+            "status": "invalid",
+            "manifest_key": manifest_key,
+            "manifest_path": str(manifest_path),
+        }
+
+    entries = payload.get("entries")
+    if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
+        return {
+            **root_evidence,
+            "status": "invalid",
+            "reason": "manifest_entries_missing",
+            "manifest_key": manifest_key,
+            "manifest_path": str(manifest_path),
+        }
+    local_keys, entry_error = _entry_local_keys(entries)
+    if entry_error is not None:
+        return {
+            **root_evidence,
+            **entry_error,
+            "status": "invalid",
+            "manifest_key": manifest_key,
+            "manifest_path": str(manifest_path),
+            "entry_count": len(entries),
+        }
+    file_evidence, file_error = _verify_entry_files(verified_root, local_keys)
+    if file_error is not None:
+        return {
+            **root_evidence,
+            **file_evidence,
+            **file_error,
+            "status": "invalid",
+            "manifest_key": manifest_key,
+            "manifest_path": str(manifest_path),
+            "entry_count": len(entries),
+        }
+
+    manifest_uri = str(payload.get("manifest_uri") or "").strip()
+    if not manifest_uri:
+        manifest_uri = _manifest_uri_for_key(manifest_key, object_store_prefix)
+    return {
+        **root_evidence,
+        **file_evidence,
+        "status": "ready",
+        "reason": None,
+        "manifest_uri": manifest_uri,
+        "manifest_key": manifest_key,
+        "manifest_path": str(manifest_path),
+        "entry_count": len(entries),
+        "metadata": _bounded_manifest_metadata(payload.get("metadata")),
+    }
+
+
+def forecast_cycle_from_raw_manifest_readiness(
+    readiness: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    source_id = normalize_source_id(source_id)
+    parsed_cycle_time = parse_cycle_time(cycle_time)
+    return {
+        "cycle_id": cycle_id_for(source_id, parsed_cycle_time),
+        "source_id": source_id,
+        "cycle_time": parsed_cycle_time,
+        "issue_time": parsed_cycle_time,
+        "status": "raw_complete",
+        "manifest_uri": str(readiness["manifest_uri"]),
+        "retry_count": 0,
+        "error_code": None,
+        "error_message": None,
+        "created_at": None,
+        "source_cycle_truth": NFS_RAW_MANIFEST_READY_SOURCE,
+    }
+
+
+def _read_manifest_payload(
+    path: Path,
+    *,
+    root: Path,
+    max_manifest_bytes: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        content = read_bytes_limited_no_follow(path, max_bytes=max_manifest_bytes, containment_root=root)
+    except (OSError, SafeFilesystemError) as error:
+        return {}, {"reason": "manifest_unreadable", "error": str(error)}
+    if len(content) > max_manifest_bytes:
+        return {}, {"reason": "manifest_too_large", "max_bytes": max_manifest_bytes}
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return {}, {"reason": "manifest_invalid_json", "error": str(error)}
+    if not isinstance(payload, dict):
+        return {}, {"reason": "manifest_not_object"}
+    return payload, None
+
+
+def _validate_manifest_identity(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> dict[str, Any] | None:
+    try:
+        manifest_source = normalize_source_id(str(payload.get("source_id") or ""))
+    except ValueError as error:
+        return {"reason": "manifest_source_invalid", "error": str(error)}
+    if manifest_source.lower() != source_id.lower():
+        return {
+            "reason": "manifest_source_mismatch",
+            "manifest_source_id": manifest_source,
+            "expected_source_id": source_id,
+        }
+    try:
+        manifest_cycle_time = parse_cycle_time(str(payload.get("cycle_time") or ""))
+    except (TypeError, ValueError) as error:
+        return {"reason": "manifest_cycle_time_invalid", "error": str(error)}
+    if format_cycle_time(manifest_cycle_time) != format_cycle_time(cycle_time):
+        return {
+            "reason": "manifest_cycle_time_mismatch",
+            "manifest_cycle_time": _format_time(manifest_cycle_time),
+            "expected_cycle_time": _format_time(cycle_time),
+        }
+    manifest_uri = str(payload.get("manifest_uri") or "").strip()
+    if manifest_uri and not _manifest_uri_matches_source_cycle(
+        manifest_uri,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    ):
+        return {"reason": "manifest_uri_mismatch", "manifest_uri": manifest_uri}
+    return None
+
+
+def _entry_local_keys(entries: Sequence[Any]) -> tuple[list[str], dict[str, Any] | None]:
+    local_keys: list[str] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            return [], {"reason": "manifest_entry_not_object", "entry_index": index}
+        local_key = str(entry.get("local_key") or "").strip()
+        if not local_key:
+            return [], {"reason": "manifest_entry_local_key_missing", "entry_index": index}
+        validation = validate_object_path(local_key)
+        if not validation.valid:
+            return [], {
+                "reason": "manifest_entry_local_key_invalid",
+                "entry_index": index,
+                "local_key": local_key,
+                "error": validation.error,
+            }
+        local_keys.append(local_key)
+    return local_keys, None
+
+
+def _verify_entry_files(root: Path, local_keys: Sequence[str]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    unique_keys = sorted(set(local_keys))
+    missing: list[str] = []
+    empty: list[str] = []
+    total_bytes = 0
+    for local_key in unique_keys:
+        path = root / local_key
+        try:
+            stat_result = stat_no_follow(path, containment_root=root)
+        except FileNotFoundError:
+            missing.append(local_key)
+            continue
+        except (OSError, SafeFilesystemError) as error:
+            return (
+                {"physical_file_count": len(unique_keys), "checked_file_count": len(unique_keys)},
+                {"reason": "raw_file_unreadable", "local_key": local_key, "error": str(error)},
+            )
+        if not stat.S_ISREG(stat_result.st_mode):
+            return (
+                {"physical_file_count": len(unique_keys), "checked_file_count": len(unique_keys)},
+                {"reason": "raw_file_not_regular", "local_key": local_key},
+            )
+        if stat_result.st_size <= 0:
+            empty.append(local_key)
+        total_bytes += int(stat_result.st_size)
+    evidence = {
+        "physical_file_count": len(unique_keys),
+        "checked_file_count": len(unique_keys),
+        "total_bytes": total_bytes,
+    }
+    if missing:
+        return (
+            {**evidence, "missing_file_count": len(missing), "missing_file_samples": missing[:5]},
+            {"reason": "raw_files_missing"},
+        )
+    if empty:
+        return (
+            {**evidence, "empty_file_count": len(empty), "empty_file_samples": empty[:5]},
+            {"reason": "raw_files_empty"},
+        )
+    return evidence, None
+
+
+def _candidate_manifest_keys(source_id: str, compact_cycle: str) -> list[str]:
+    source_names: list[str] = []
+    for value in (source_id, source_id.lower(), source_id.upper()):
+        if value not in source_names:
+            source_names.append(value)
+    return [f"raw/{source}/{compact_cycle}/manifest.json" for source in source_names]
+
+
+def _manifest_uri_for_key(key: str, object_store_prefix: str) -> str:
+    prefix = object_store_prefix.strip().rstrip("/")
+    if not prefix:
+        return key
+    return f"{prefix}/{key}"
+
+
+def _manifest_uri_matches_source_cycle(manifest_uri: str, *, source_id: str, cycle_time: datetime) -> bool:
+    value = manifest_uri.strip()
+    if not value:
+        return False
+    parsed = urlparse(value)
+    if parsed.scheme:
+        if parsed.scheme != "s3" or not parsed.netloc or parsed.params or parsed.query or parsed.fragment:
+            return False
+        key = unquote(parsed.path).strip("/")
+        return _manifest_key_suffix_matches_source_cycle(key, source_id=source_id, cycle_time=cycle_time)
+    if parsed.netloc:
+        return False
+    key = unquote(value).strip("/")
+    parts = key.split("/")
+    return len(parts) == 4 and _manifest_key_suffix_matches_source_cycle(
+        key,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
+
+
+def _manifest_key_suffix_matches_source_cycle(key: str, *, source_id: str, cycle_time: datetime) -> bool:
+    parts = key.split("/")
+    if len(parts) < 4 or any(part in {"", ".", ".."} for part in parts):
+        return False
+    raw, source, cycle, filename = parts[-4:]
+    return (
+        raw == "raw"
+        and source.lower() == normalize_source_id(source_id).lower()
+        and cycle == format_cycle_time(cycle_time)
+        and filename == "manifest.json"
+    )
+
+
+def _bounded_manifest_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    allowed_keys = (
+        "first_forecast_hour",
+        "last_forecast_hour",
+        "max_lead_hours",
+        "physical_file_count",
+        "physical_file_layout",
+        "total_file_count",
+        "variable_count",
+    )
+    return {key: value[key] for key in allowed_keys if key in value}
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _absolute_path(path: str | Path) -> Path:
+    root = Path(path).expanduser()
+    return root if root.is_absolute() else Path.cwd() / root
+
+
+def _format_time(value: datetime) -> str:
+    return parse_cycle_time(value).isoformat().replace("+00:00", "Z")

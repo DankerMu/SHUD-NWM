@@ -3,29 +3,34 @@
 The verified current deployment has node-27 hosting active PostgreSQL `:55432`,
 cron-driven ingest, display API, frontend, and public `https://test.nwm.ac.cn`.
 Node-22 hosts Slurm Gateway, SHUD/forcing compute capability, and shared NFS
-artifact production. It should not be an active NHMS DB writer, but the current
-runtime still includes a historical node-22 PostgreSQL `:55433` dependency in
-the scheduler path.
+artifact production. It also remains the production scheduler/control point for
+Slurm/SHUD cycles.
 
-Moving downloads to node-27 changes the right control-plane boundary. If
-download writes node-27 DB while downstream scheduler state remains in node-22
-DB, the system keeps two competing state sources. Therefore this change treats
-download migration and node-22 DB retirement as one governed migration.
+Moving downloads to node-27 changes the source acquisition boundary, not the
+scheduler boundary. Node-27 now writes raw GFS/IFS bundles and manifests to the
+shared NFS object-store. Node-22 scheduler must treat those NFS manifests as the
+download handoff and start downstream stages only after the raw files are
+present and valid.
 
 ## Goals
 
 - Run GFS/IFS discovery and download on node-27 using a data-plane writer role.
 - Keep display runtime read-only and separate from download/ingest writer env.
 - Make raw source-cycle status and manifest identity live in node-27 DB.
-- Remove business `DATABASE_URL` from node-22 Slurm/SHUD compute jobs.
-- Retire node-22 historical PostgreSQL only after node-27 proves end-to-end
-  download -> compute handoff -> ingest -> display for live cycles.
+- Write raw bundles and manifests to the shared NFS object-store so node-22 can
+  consume them without copying or polling node-27 internals.
+- Keep node-22 scheduler active, but gate production cycles on NFS raw manifest
+  readiness and restart from `convert` when canonical outputs are absent.
+- Prevent node-22 from falling back to `download_source_cycle` when the required
+  node-27 NFS manifest is missing or invalid.
 
 ## Non-Goals
 
 - No frontend feature work.
 - No expansion of display API mutation authority.
-- No immediate deletion of historical node-22 DB data before archival.
+- No immediate migration of the scheduler/control plane to node-27.
+- No immediate deletion of historical node-22 DB data before archival or a
+  separately designed scheduler-state replacement.
 - No return-period quality fix; degraded return-period products remain separate.
 
 ## Decisions
@@ -35,42 +40,51 @@ download migration and node-22 DB retirement as one governed migration.
    It belongs beside node-27 ingest, not beside display_readonly and not inside
    node-22 historical DB state.
 
-2. **Node-22 becomes DB-free compute.** Slurm jobs may receive artifact identity,
-   object-store paths, and receipt paths. They must not receive active business
-   DB credentials. Any step that needs DB mutation either runs on node-27 or
-   writes an object-store receipt for node-27 to apply.
+2. **NFS manifest is the handoff contract.** Node-27 writes raw files and
+   `raw/<source>/<cycle>/manifest.json` to the shared NFS object-store. Node-22
+   validates that manifest, its source/cycle identity, URI suffix, entry list,
+   and referenced local files before treating the source cycle as raw-ready.
 
-3. **Retirement is gated by live cycles.** The historical node-22 PostgreSQL
-   process is stopped only after the node-27 path has advanced at least two
-   production cycles covering GFS and IFS evidence, and after an archive/dump is
-   recorded.
+3. **Scheduler remains on node-22.** When NFS raw is ready but canonical product
+   rows are absent, the scheduler builds a downstream restart candidate at
+   `convert` and disables fresh download for that cycle. Missing required NFS
+   raw evidence blocks the candidate instead of submitting node-22 download.
 
-4. **Rollback keeps topology truth intact.** A temporary rollback may re-enable
-   the previous 22 path while the new path is fixed, but docs and guardrails
-   must still mark node-22 DB as historical and sunset-bound rather than current
-   target architecture.
+4. **DB retirement remains a later cleanup.** Node-22 local PostgreSQL `:55433`
+   is historical and sunset-bound, but stopping it is not part of this slice.
+   That retirement needs its own replacement for scheduler locks/job state,
+   archive evidence, and live observation window.
+
+5. **Rollback keeps topology truth intact.** A temporary rollback may disable
+   the node-22 NFS gate while the new path is fixed, but docs and guardrails
+   must still mark node-27 as the download owner and node-22 download as a
+   deprecated emergency fallback.
 
 ## Migration Plan
 
 1. Capture current live evidence and freeze active dependency facts.
 2. Add node-27 download preflight and bounded runner.
-3. Promote node-27 download to production source-cycle ownership.
-4. Convert node-22 compute jobs to DB-free artifact producers.
-5. Move orchestration state to node-27 and submit compute through node-22
-   Slurm Gateway.
-6. Archive and stop node-22 historical PostgreSQL; add guardrails and receipts.
+3. Add the node-22 scheduler NFS raw manifest bridge and required gate.
+4. Promote node-27 download to production source-cycle ownership.
+5. Observe live GFS/IFS cycles that use node-27 raw and node-22 downstream
+   compute from the shared NFS handoff.
+6. Plan any node-22 DB retirement or scheduler-state reduction as a separate
+   governed change after the handoff is stable.
 
 ## Risks
 
 - Node-27 may lack GRIB dependencies or network behavior matching node-22.
 - Download load could interfere with display/API without bounded scheduling.
 - Existing 22 scheduler jobs may still be running during cutover.
+- If the NFS raw manifest gate is enabled before node-27 cron is stable, 22 will
+  correctly block rather than silently perform node-22 downloads.
 - Pre-contract run packages may still need explicit transitional mirror handling.
 
 ## Rollback
 
-Rollback is phase-bounded. Before Phase 5, node-22 PG remains available as an
-emergency fallback. After Phase 5, rollback requires restoring the archived DB
-only as a time-limited emergency path and recording the blocker that prevented
-node-27 ownership from holding.
-
+Rollback is phase-bounded. Before production gate enablement, disable the
+node-27 download cron/wrapper and keep the previous node-22 download path. After
+the required NFS gate is enabled, rollback must explicitly turn off
+`NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` and record why node-27 download did
+not hold. Node-22 PostgreSQL remains available until a later retirement change
+replaces its scheduler-state responsibilities.

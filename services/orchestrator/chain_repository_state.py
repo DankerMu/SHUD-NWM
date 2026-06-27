@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping
 
-from services.orchestrator import chain_source_cycle
+from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
@@ -21,6 +21,29 @@ _pipeline_job_truth_sort_key = chain_source_cycle._pipeline_job_truth_sort_key
 _source_cycle_download_repair_state = chain_source_cycle._source_cycle_download_repair_state
 _source_cycle_repair_evidence = chain_source_cycle._source_cycle_repair_evidence
 _successful_sibling_task_count = chain_source_cycle._successful_sibling_task_count
+
+
+def _forecast_cycle_has_ready_raw_manifest(
+    forecast_cycle: Mapping[str, Any] | None,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> bool:
+    if not isinstance(forecast_cycle, Mapping):
+        return False
+    status = str(forecast_cycle.get("status") or "")
+    if status not in chain_source_cycle.RAW_MANIFEST_READY_CYCLE_STATUSES:
+        return False
+    return (
+        chain_source_cycle._source_cycle_raw_manifest_binding(
+            forecast_cycle,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        )
+        is not None
+    )
 
 
 def candidate_state(
@@ -220,7 +243,26 @@ def candidate_state(
         """,
         (cycle_id, source_id, cycle_time, cycle_id),
     )
-    if hydro_run is None and not jobs and forcing_version is None and forecast_cycle is None:
+    nfs_raw_manifest = source_cycle_raw_manifest.nfs_raw_manifest_readiness_from_env(source_id, cycle_time)
+    if isinstance(nfs_raw_manifest, Mapping) and nfs_raw_manifest.get("status") == "ready":
+        if not _forecast_cycle_has_ready_raw_manifest(
+            forecast_cycle,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        ):
+            forecast_cycle = source_cycle_raw_manifest.forecast_cycle_from_raw_manifest_readiness(
+                nfs_raw_manifest,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+    if (
+        hydro_run is None
+        and not jobs
+        and forcing_version is None
+        and forecast_cycle is None
+        and nfs_raw_manifest is None
+    ):
         return None
     source_cycle_download_state = _source_cycle_download_repair_state(
         jobs,
@@ -303,6 +345,7 @@ def candidate_state(
         "output_uri": hydro_run.get("output_uri") if hydro_run else None,
         "forcing_version": forcing_version,
         "forecast_cycle": forecast_cycle,
+        "nfs_raw_manifest": dict(nfs_raw_manifest) if isinstance(nfs_raw_manifest, Mapping) else None,
         "pipeline_jobs": jobs,
         "pipeline_events": events,
         "pipeline_status": pipeline_status,

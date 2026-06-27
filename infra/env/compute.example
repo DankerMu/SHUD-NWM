@@ -65,6 +65,13 @@ NHMS_SCHEDULER_CYCLE_LAG_HOURS=6
 NHMS_SCHEDULER_LOOKBACK_HOURS=168
 NHMS_SCHEDULER_BACKFILL_ENABLED=true
 NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=8
+# Node-27 download -> node-22 scheduler handoff. Keep the scheduler on node-22,
+# but require raw manifests written by node-27 to the shared NFS object-store
+# before starting downstream stages. When enabled, missing/invalid raw manifests
+# block production candidates instead of falling back to node-22 downloads.
+NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true
+NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store
+NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

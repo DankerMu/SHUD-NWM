@@ -50,40 +50,60 @@
 - [ ] 3.1 Promote node-27 download into cron/autopipeline source-cycle ownership.
   Evidence floor: bounded production pass selects allowed UTC `00,12` cycles,
   handles already-complete cycles idempotently, and records per-source status.
-- [ ] 3.2 Disable node-22 production `download_source_cycle` stage after node-27
-  ownership is live.
-  Evidence floor: node-22 no longer submits download jobs for production cycles;
-  27 produces GFS/IFS raw manifest evidence for a new cycle.
 
-## 4. Node-22 DB-Free Compute
+## 4. Node-22 NFS Raw Manifest Scheduler Bridge
 
-- [ ] 4.1 Remove business `DATABASE_URL` inheritance from node-22 Slurm job
-  templates and compute env.
-  Evidence floor: rendered sbatch text and live Slurm process env contain no
-  business `DATABASE_URL`; required artifact inputs are explicit.
-- [ ] 4.2 Move DB-mutating post-compute steps to node-27 or receipt apply.
-  Evidence floor: parse/publish/status writes happen on node-27, or node-22
-  writes object-store receipts that node-27 applies idempotently.
-
-## 5. Node-27 Orchestration Of Node-22 Slurm
-
-- [ ] 5.1 Make node-27 hold pipeline job state and submit compute through
-  node-22 Slurm Gateway.
-  Evidence floor: with node-22 scheduler stopped, node-27 can submit, observe,
-  and ingest a compute job via node-22 gateway using shared NFS artifacts.
-- [ ] 5.2 Record live GFS and IFS end-to-end receipts.
+- [x] 4.1 Add node-22 scheduler support for node-27 NFS raw manifest readiness.
+  Evidence floor: scheduler can materialize source-cycle readiness from
+  `raw/<source>/<cycle>/manifest.json` on shared NFS even when the local
+  node-22 repository has no matching `met.forecast_cycle` row.
+  Evidence: `services/orchestrator/source_cycle_raw_manifest.py` and
+  `services/orchestrator/chain_repository_state.py` validate NFS manifest
+  source/cycle identity, URI suffix, entry list, and physical raw files before
+  creating raw-ready candidate state.
+- [x] 4.2 Skip node-22 production download when node-27 raw is ready.
+  Evidence floor: with raw-ready NFS manifest evidence and absent canonical
+  rows, scheduler submits a downstream restart from `convert` with fresh
+  ingestion disabled.
+  Evidence: `services/orchestrator/scheduler_candidates.py` maps raw-ready NFS
+  evidence to `restart_stage=convert`, `fresh_ingestion.required=false`, and
+  `raw_manifest_reuse.source=node27_nfs_raw_manifest`.
+- [x] 4.3 Block node-22 fallback download when required NFS raw is missing.
+  Evidence floor: when `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true`, missing
+  or invalid NFS raw evidence blocks the candidate instead of submitting
+  `download_source_cycle`.
+  Evidence: focused tests cover ready GFS, ready uppercase IFS storage, missing
+  raw files, synthetic candidate state without DB rows, restart-from-convert,
+  and required-manifest blocking. Verification passed:
+  `uv run pytest -q tests/test_source_cycle_raw_manifest.py tests/test_chain_repository_nfs_raw_manifest.py tests/test_production_scheduler.py::test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert tests/test_production_scheduler.py::test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback`
+  plus adjacent scheduler regression coverage (9 passed total), and focused
+  `ruff check`.
+- [ ] 4.4 Enable the NFS raw-manifest gate on node-22 production scheduler.
+  Evidence floor: node-22 runtime env sets
+  `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` and points
+  `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` at the shared NFS object-store.
+- [ ] 4.5 Record live GFS and IFS end-to-end receipts through the NFS handoff.
   Evidence floor: public latest-product advances for both sources from
-  node-27-downloaded raw cycles through node-22 compute artifacts and node-27
-  display readiness.
+  node-27-downloaded raw cycles after node-22 scheduler observes the NFS raw
+  manifest and starts downstream stages without submitting node-22 download.
+
+## 5. Later Node-22 Scheduler-State Reduction
+
+- [ ] 5.1 Design the replacement for node-22 scheduler DB responsibilities.
+  Evidence floor: separate change documents lock state, candidate state, job
+  state, retry semantics, rollback, and live verification before removing
+  node-22 scheduler DB dependencies.
 
 ## 6. Retire Node-22 Historical PostgreSQL
 
 - [ ] 6.1 Archive/dump node-22 `:55433` and record checksum/path without secrets.
   Evidence floor: archive receipt is stored outside gitignored volatile paths
   or referenced by stable operator evidence.
-- [ ] 6.2 Stop node-22 historical PostgreSQL and remove active compute env DB use.
+- [ ] 6.2 Stop node-22 historical PostgreSQL only after scheduler-state
+  responsibilities are replaced.
   Evidence floor: `ss -ltnp` shows no `:55433`, compute services remain healthy,
-  and two post-retirement cycles complete through node-27.
+  and post-retirement cycles complete through node-27 download, node-22
+  NFS-gated scheduling, downstream compute, node-27 ingest, and public display.
 - [ ] 6.3 Add/update topology guardrails and docs.
   Evidence floor: static guard fails on active node-22 `:55433`/business
   `DATABASE_URL` writer assumptions, while allowing historical archived context;

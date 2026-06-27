@@ -1,11 +1,10 @@
 ## Why
 
 Production is already node-27-centric for active DB, ingest, display API, and
-public frontend, but node-22 still runs a historical PostgreSQL instance and the
-current scheduler path still uses that local DB for source-cycle/job state. The
-next planned change is moving GFS/IFS download to node-27. That migration should
-also remove the remaining active dependency on node-22 DB state instead of
-creating a second split-brain state path.
+public frontend. The next planned change is moving GFS/IFS download to node-27,
+while keeping the production scheduler on node-22. The scheduler must therefore
+learn raw source-cycle readiness from shared NFS manifests produced by node-27,
+not from a node-22-local download or a separate node-22 source-cycle truth.
 
 ## What Changes
 
@@ -13,32 +12,33 @@ creating a second split-brain state path.
   download, separate from display_readonly runtime config.
 - Make node-27 the production owner for source-cycle DB writes and raw manifest
   persistence.
-- Convert node-22 Slurm/SHUD work into DB-free artifact/receipt production.
-- Route orchestration state through node-27 while keeping node-22 as the Slurm
-  execution oracle.
-- Retire the node-22 historical PostgreSQL `:55433` after live observation
-  proves the node-27 path.
+- Keep the production scheduler on node-22, but make it detect completed
+  node-27 downloads through shared NFS raw manifests.
+- When NFS raw is ready and canonical products are absent, start the cycle from
+  `convert` instead of submitting node-22 `download_source_cycle`.
+- Keep node-22 DB retirement as a later, separately gated cleanup; this change
+  does not move orchestration to node-27.
 
 ## Capabilities
 
 ### New Capabilities
 
 - `node27-download-orchestration`: node-27 bounded source download, preflight,
-  evidence, and production ownership for GFS/IFS raw source cycles.
+  evidence, and NFS raw-manifest handoff for GFS/IFS raw source cycles.
 
 ### Modified Capabilities
 
-- `production-topology-contract`: node-22 historical PostgreSQL retirement and
-  DB-free compute boundary after node-27 owns downloads and orchestration state.
+- `production-topology-contract`: node-22 scheduler remains the control point
+  and consumes node-27-produced NFS raw manifests before starting downstream
+  compute stages.
 
 ## Impact
 
 - `workers/data_adapters/*_adapter.py` and `workers/data_adapters/cli.py`
 - New or updated node-27 download scripts/wrappers under `scripts/`
 - `infra/env/node27-*.example`, node-27 cron/runbook material
-- `services/orchestrator/*` scheduler/chain source-cycle and Slurm submission
+- `services/orchestrator/*` scheduler/chain source-cycle readiness and restart
   boundaries
-- `infra/sbatch/*.sbatch` templates and Slurm Gateway request payload contracts
+- `infra/sbatch/*.sbatch` remains the downstream compute execution substrate
 - `docs/runbooks/current-production-ops.md`,
   `docs/governance/ROLE_BOUNDARY.md`, topology guardrails, and live receipts
-

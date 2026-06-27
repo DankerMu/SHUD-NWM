@@ -8,6 +8,10 @@ from typing import Any, Protocol
 
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
+from services.orchestrator.chain_source_cycle import (
+    RAW_MANIFEST_READY_CYCLE_STATUSES,
+    _raw_manifest_uri_matches_source_cycle,
+)
 from services.orchestrator.scheduler_state import (
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
@@ -446,18 +450,34 @@ def build_candidates(
                             }
                         )
                     continue
+            nfs_raw_manifest_gate = _nfs_raw_manifest_gate(raw_candidate_state)
+            if (
+                nfs_raw_manifest_gate is not None
+                and bool(nfs_raw_manifest_gate.get("required"))
+                and nfs_raw_manifest_gate.get("status") != "ready"
+            ):
+                blocked.append(
+                    _blocked_candidate(
+                        candidate,
+                        _nfs_raw_manifest_block_reason(nfs_raw_manifest_gate),
+                        state_evidence={"nfs_raw_manifest": nfs_raw_manifest_gate},
+                    )
+                )
+                continue
+            raw_manifest_restart = _source_raw_manifest_restart_evidence(candidate, raw_candidate_state)
+            if raw_manifest_restart is not None and state_decision is None:
+                candidate = _candidate_with_state_evidence(candidate, raw_manifest_restart)
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)
             if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
                 if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
                     state_evidence = {}
                     if state_decision is not None and state_decision.action == "retry":
                         state_evidence.update(state_decision.evidence)
-                    state_evidence.update(
-                        {
-                            "canonical_readiness": canonical_readiness,
-                            "fresh_ingestion": {"required": True, "mode": "full_chain"},
-                        }
-                    )
+                    state_evidence["canonical_readiness"] = canonical_readiness
+                    if raw_manifest_restart is not None and state_decision is None:
+                        state_evidence.update(raw_manifest_restart)
+                    else:
+                        state_evidence["fresh_ingestion"] = {"required": True, "mode": "full_chain"}
                     candidate = _candidate_with_state_evidence(
                         candidate,
                         state_evidence,
@@ -848,6 +868,63 @@ def _candidate_is_fresh_full_chain(candidate: SchedulerCandidateLike) -> bool:
     if not isinstance(marker, Mapping):
         return False
     return bool(marker.get("required")) and str(marker.get("mode") or "") == "full_chain"
+
+
+def _nfs_raw_manifest_gate(raw_state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(raw_state, Mapping):
+        return None
+    evidence = raw_state.get("nfs_raw_manifest")
+    if not isinstance(evidence, Mapping):
+        return None
+    return _evidence_safe(dict(evidence))
+
+
+def _nfs_raw_manifest_block_reason(evidence: Mapping[str, Any]) -> str:
+    reason = str(evidence.get("reason") or evidence.get("status") or "unavailable")
+    return reason if reason.startswith("nfs_raw_manifest_") else f"nfs_raw_manifest_{reason}"
+
+
+def _source_raw_manifest_restart_evidence(
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(raw_state, Mapping):
+        return None
+    nfs_evidence = _nfs_raw_manifest_gate(raw_state)
+    manifest_uri = None
+    source = "forecast_cycle"
+    payload: dict[str, Any] = {}
+    if nfs_evidence is not None and nfs_evidence.get("status") == "ready":
+        manifest_uri = nfs_evidence.get("manifest_uri")
+        source = str(nfs_evidence.get("source") or "nfs_raw_manifest")
+        payload["nfs_raw_manifest"] = nfs_evidence
+    if manifest_uri in (None, ""):
+        forecast_cycle = raw_state.get("forecast_cycle")
+        if not isinstance(forecast_cycle, Mapping):
+            return None
+        status = str(forecast_cycle.get("status") or "")
+        manifest_uri = forecast_cycle.get("manifest_uri")
+        if status not in RAW_MANIFEST_READY_CYCLE_STATUSES or manifest_uri in (None, ""):
+            return None
+        if not _raw_manifest_uri_matches_source_cycle(
+            str(manifest_uri),
+            source_id=candidate.source_id,
+            cycle_time=candidate.cycle_time_utc,
+        ):
+            return None
+        payload["forecast_cycle"] = _evidence_safe(dict(forecast_cycle))
+    return {
+        **payload,
+        "restart_stage": "convert",
+        "restart_from_stage": "convert",
+        "restart_reason": "raw_manifest_ready_without_canonical",
+        "fresh_ingestion": {"required": False, "mode": "reuse_raw_then_convert"},
+        "raw_manifest_reuse": {
+            "status": "ready",
+            "source": source,
+            "manifest_uri": str(manifest_uri),
+        },
+    }
 
 
 def _blocked_candidate(

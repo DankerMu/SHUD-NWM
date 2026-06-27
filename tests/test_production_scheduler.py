@@ -1952,6 +1952,110 @@ def test_fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forc
     assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
 
 
+def test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    active_repository = FakeCandidateStateRepository(
+        {
+            "forecast_cycle": {
+                "cycle_id": "gfs_2026052106",
+                "source_id": "gfs",
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "raw_complete",
+                "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+            },
+            "nfs_raw_manifest": {
+                "status": "ready",
+                "required": True,
+                "source": "node27_nfs_raw_manifest",
+                "source_id": "gfs",
+                "cycle_id": "gfs_2026052106",
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+                "entry_count": 4,
+                "physical_file_count": 2,
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["blocked_candidates"] == []
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["restart_stage"] == "convert"
+    state_evidence = submitted_basin["state_evidence"]
+    assert state_evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+    assert state_evidence["raw_manifest_reuse"]["source"] == "node27_nfs_raw_manifest"
+    assert state_evidence["nfs_raw_manifest"]["status"] == "ready"
+    assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
+
+
+def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    active_repository = FakeCandidateStateRepository(
+        {
+            "nfs_raw_manifest": {
+                "status": "missing",
+                "required": True,
+                "reason": "manifest_not_found",
+                "source": "node27_nfs_raw_manifest",
+                "source_id": "gfs",
+                "cycle_id": "gfs_2026052106",
+                "cycle_time": "2026-05-21T06:00:00Z",
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert len(result.evidence["blocked_candidates"]) == 1
+    assert orchestrator.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_manifest_not_found"
+    assert blocked["state_evidence"]["nfs_raw_manifest"]["required"] is True
+    assert "fresh_ingestion" not in blocked["state_evidence"]
+
+
 def test_fresh_cycle_manual_retry_preserves_retry_state_and_runs_full_chain(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
