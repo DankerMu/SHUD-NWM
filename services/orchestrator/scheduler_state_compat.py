@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, MutableMapping
 from contextlib import contextmanager
 from functools import wraps
@@ -187,21 +188,34 @@ def install_scheduler_state_compat(
             return None if value is wrapper else value
         return None if value is original else value
 
+    def compat_target_modules(name: str) -> tuple[ModuleType, ...]:
+        targets: list[ModuleType] = []
+        for module_name, module in sys.modules.items():
+            if not module_name.startswith("services.orchestrator.scheduler_state"):
+                continue
+            if isinstance(module, ModuleType) and hasattr(module, name):
+                targets.append(module)
+        if owner_module not in targets and hasattr(owner_module, name):
+            targets.append(owner_module)
+        return tuple(targets)
+
     @contextmanager
     def compat_bindings() -> Any:
         with lock:
-            previous: dict[str, Any] = {}
+            previous: dict[tuple[ModuleType, str], Any] = {}
             for name, original in originals.items():
                 override = compat_override(name, original)
                 if override is None:
                     continue
-                previous[name] = getattr(owner_module, name)
-                setattr(owner_module, name, override)
+                for module in compat_target_modules(name):
+                    key = (module, name)
+                    previous[key] = getattr(module, name)
+                    setattr(module, name, override)
             try:
                 yield
             finally:
-                for name, value in previous.items():
-                    setattr(owner_module, name, value)
+                for (module, name), value in previous.items():
+                    setattr(module, name, value)
 
     def compat_wrapper(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(original)

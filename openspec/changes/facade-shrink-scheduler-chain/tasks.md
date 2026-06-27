@@ -240,6 +240,40 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.15 Extract scheduler state decision/runtime owner slices.
+  - Module/Scope: move candidate-state types, row normalization, identity
+    filtering, evidence construction, manual-retry truth selection, failure and
+    downstream retry evidence, and decision entrypoints from
+    `services/orchestrator/scheduler_state.py` to focused
+    `scheduler_state_*` owner modules.
+  - Stable Facade: keep all legacy `services.orchestrator.scheduler_state`
+    names importable, and extend scheduler-state monkeypatch compatibility so
+    overrides applied through `services.orchestrator.scheduler` reach the
+    actual owner modules.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `scheduler_state.py` and its owners, each kept below 1000 lines.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "candidate_state_decision_scheduler_monkeypatch or owner_module_matches_scheduler_facade or bounded_evidence_owner_module_matches_scheduler_facade or evidence or mutation_proof or slurm_status_sync or cancellation or runtime_config"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler_state.py services/orchestrator/scheduler_state_*.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
+- [x] 1.16 Extract final scheduler facade/core/runtime owner slices.
+  - Module/Scope: move `ProductionScheduler` to `scheduler_core.py` and the
+    remaining candidate-runtime and compatibility tail helpers to
+    `scheduler_candidate_runtime.py` and `scheduler_compat_runtime.py`.
+  - Stable Facade: keep `services.orchestrator.scheduler.ProductionScheduler`
+    import-compatible with legacy `__module__`, and inject moved private helper
+    and `_SCHEDULER_*` compatibility names back into the scheduler facade.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `scheduler.py` and the new scheduler owner modules, each kept below 1000
+    lines.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "candidate_state_decision_scheduler_monkeypatch or owner_module_matches_scheduler_facade or bounded_evidence_owner_module_matches_scheduler_facade or evidence or mutation_proof or slurm_status_sync or cancellation or runtime_config"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_core.py services/orchestrator/scheduler_candidate_runtime.py services/orchestrator/scheduler_compat_runtime.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
@@ -466,5 +500,22 @@
   - Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py -k "manifest or assembly or production_status or warm_start"`;
     `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
     `uv run ruff check services/orchestrator/chain_manifests.py services/orchestrator/chain_manifest_contracts.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
+- [x] 2.14 Extract final chain facade/orchestrator compatibility owner slices.
+  - Module/Scope: move the `ForecastOrchestrator` method surface to
+    `chain_forecast_orchestrator_cycle.py` and
+    `chain_forecast_orchestrator_runtime.py`, and move chain compatibility
+    inventory/check installation to `chain_compat_static.py` and
+    `chain_compat_runtime.py`.
+  - Stable Facade: keep `services.orchestrator.chain.ForecastOrchestrator`,
+    `AnalysisOrchestrator`, `PsycopgOrchestratorRepository`, and legacy
+    `_CHAIN_*` compatibility names available through the chain facade.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and the new chain owner modules, each kept below 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py -k "manifest or assembly or production_status or warm_start"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_compat_static.py services/orchestrator/chain_compat_runtime.py services/orchestrator/chain_forecast_orchestrator_cycle.py services/orchestrator/chain_forecast_orchestrator_runtime.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
