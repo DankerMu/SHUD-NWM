@@ -805,7 +805,13 @@ def run_once(self) -> SchedulerPassResult:
             }
         else:
             evidence["backfill"] = {"enabled": False}
-        evidence["retention"] = self._run_retention(started_at)
+        retention_force_reason = (
+            "evidence_preflight_blocked" if evidence_reservation.get("status") == "blocked" else None
+        )
+        evidence["retention"] = self._run_retention(
+            started_at,
+            force_dry_run_reason=retention_force_reason,
+        )
         try:
             artifact_path = self._write_evidence(pass_id, evidence)
         except (OSError, SchedulerEvidenceWriteError) as error:
@@ -1009,20 +1015,28 @@ def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
     return default_sacct_querier()
 
 
-def _run_retention(self, started_at: datetime) -> dict[str, Any]:
+def _run_retention(
+    self,
+    started_at: datetime,
+    *,
+    force_dry_run_reason: str | None = None,
+) -> dict[str, Any]:
     """Run forecast-data retention cleanup; never break the scheduling pass.
 
     Scheduler ``dry_run`` is the master switch: when the pass runs in
     dry-run (planning-only, no side effects), retention is forced into
     dry-run too, regardless of NHMS_RETENTION_DRY_RUN. This preserves the
     "dry_run => no side effects" contract so a planning pass never deletes
-    aged artifacts even when the env enables real deletion.
+    aged artifacts even when the env enables real deletion. Evidence
+    preflight failures use the same boundary because they claim no production
+    mutation has happened yet.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
         return {"status": "disabled", "enabled": False}
     forced_dry_run = False
-    if self.config.dry_run and not retention_config.dry_run:
+    force_dry_run = self.config.dry_run or force_dry_run_reason is not None
+    if force_dry_run and not retention_config.dry_run:
         retention_config = replace(retention_config, dry_run=True)
         forced_dry_run = True
     try:
@@ -1038,6 +1052,7 @@ def _run_retention(self, started_at: datetime) -> dict[str, Any]:
     payload["status"] = "completed"
     if forced_dry_run:
         payload["forced_dry_run_by_scheduler"] = True
+        payload["forced_dry_run_reason"] = force_dry_run_reason or "scheduler_dry_run"
     return payload
 
 

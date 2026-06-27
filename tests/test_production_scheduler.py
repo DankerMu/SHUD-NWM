@@ -6282,6 +6282,46 @@ def test_db_free_evidence_reservation_generic_oserror_masks_error_path(
     assert "secret-token" not in rendered
 
 
+def test_db_free_evidence_reservation_guard_error_masks_error_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    from services.orchestrator import scheduler_evidence
+
+    started_at = _dt("2026-06-27T16:00:00Z")
+    config = ProductionSchedulerConfig(dry_run=False, now=started_at)
+    sensitive_path = tmp_path / "db-free-local-root" / "secret-token" / "evidence"
+
+    def _raise_sensitive_guard_error(
+        _path: Path,
+        _workspace_root: Path,
+        field_name: str,
+    ) -> None:
+        raise ValueError(f"{field_name} escaped via {sensitive_path}")
+
+    context = _scheduler_evidence_test_context(config, require_under_workspace=_raise_sensitive_guard_error)
+    pass_id = "scheduler_2026062716_abcdef123456"
+
+    blocked = scheduler_evidence.reserve_pre_execution_evidence(
+        context,
+        pass_id,
+        started_at,
+        1,
+        now=started_at,
+    )
+    rendered = json.dumps(blocked, sort_keys=True)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "evidence_write_failed"
+    assert blocked["artifact_path"] == "[local-path]"
+    assert blocked["error_type"] == "ValueError"
+    assert "error" not in blocked
+    assert str(sensitive_path) not in rendered
+    assert "db-free-local-root" not in rendered
+    assert "secret-token" not in rendered
+
+
 def test_db_free_prelock_evidence_write_failure_masks_artifact_path(
     monkeypatch: Any,
     tmp_path: Path,
@@ -6525,6 +6565,56 @@ def test_pre_execution_existing_regular_artifact_blocks_before_forcing_and_submi
         assert evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
         assert evidence["model_run_evidence"][0]["submitted"] is False
         assert evidence["model_run_evidence"][0]["mutation_occurred"] is False
+
+
+def test_pre_execution_evidence_block_forces_retention_dry_run_before_deletion(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "bbbbccccdddd"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    object_store_root = tmp_path / "object-store"
+    old_cycle = format_cycle_time(now - timedelta(days=30))
+    expired_file = object_store_root / "raw" / "gfs" / old_cycle / "gfs.f000.nc"
+    expired_file.parent.mkdir(parents=True)
+    expired_file.write_text("expired\n", encoding="utf-8")
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False, object_store_root=object_store_root),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.parent.mkdir(parents=True)
+    reservation_path.write_text("existing reservation\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert expired_file.parent.exists()
+    assert forcing_producer.calls == []
+    assert orchestrator.calls == []
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "preflight_blocked"
+        assert evidence["execution_boundary"] == "evidence_preflight_blocked"
+        assert evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+        assert evidence["evidence_pre_execution"]["status"] == "blocked"
+        assert evidence["retention"]["status"] == "completed"
+        assert evidence["retention"]["dry_run"] is True
+        assert evidence["retention"]["forced_dry_run_by_scheduler"] is True
+        assert evidence["retention"]["forced_dry_run_reason"] == "evidence_preflight_blocked"
+        assert evidence["retention"]["planned"]
+        assert evidence["retention"]["deleted"] == []
 
 
 def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target(
@@ -15187,6 +15277,7 @@ def _scheduler_evidence_test_context(
     config: ProductionSchedulerConfig,
     *,
     max_evidence_bytes: int = scheduler_module.MAX_EVIDENCE_BYTES,
+    require_under_workspace: Any | None = None,
     write_new_regular_file: Any | None = None,
 ) -> Any:
     from services.orchestrator import scheduler_evidence
@@ -15194,7 +15285,7 @@ def _scheduler_evidence_test_context(
     return scheduler_evidence.SchedulerEvidenceWriteContext(
         config=config,
         require_safe_directory_final_component=scheduler_module._require_safe_directory_final_component,
-        require_under_workspace=scheduler_module._require_under_workspace,
+        require_under_workspace=require_under_workspace or scheduler_module._require_under_workspace,
         max_evidence_bytes=max_evidence_bytes,
         bounded_evidence_payload=scheduler_evidence.bounded_evidence_payload,
         write_new_regular_file=write_new_regular_file or scheduler_evidence.write_new_regular_file,

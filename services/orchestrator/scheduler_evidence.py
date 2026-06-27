@@ -328,7 +328,7 @@ def reserve_pre_execution_evidence(
             error.reason,
             error.details,
         )
-    except OSError as error:
+    except (OSError, RuntimeError, ValueError) as error:
         details = (
             {"error_type": type(error).__name__}
             if bool(getattr(context.config, "scheduler_db_free_required", False))

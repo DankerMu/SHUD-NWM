@@ -151,10 +151,19 @@ class ProductionScheduler:
 
         return scheduler_runtime._restart_reconcile_sacct_query(self)
 
-    def _run_retention(self, started_at: _scheduler.datetime) -> dict[str, _scheduler.Any]:
+    def _run_retention(
+        self,
+        started_at: _scheduler.datetime,
+        *,
+        force_dry_run_reason: str | None = None,
+    ) -> dict[str, _scheduler.Any]:
         from services.orchestrator import scheduler_runtime
 
-        return scheduler_runtime._run_retention(self, started_at)
+        return scheduler_runtime._run_retention(
+            self,
+            started_at,
+            force_dry_run_reason=force_dry_run_reason,
+        )
 
     def _write_prelock_blocked_evidence(
         self, pass_id: str, evidence: dict[str, _scheduler.Any], root_preflight: _scheduler.Mapping[str, _scheduler.Any]
