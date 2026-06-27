@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
 from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from services.orchestrator.production_contract import production_contract_matrix
 from services.orchestrator.scheduler_lease import UnsafeSchedulerLockError, _open_lock_parent_directory
@@ -34,12 +35,15 @@ _REQUIRED_BOUNDED_EVIDENCE_FIELDS = frozenset(
         "readiness",
         "resolved_runtime_roots",
         "runtime_config",
+        "db_free_runtime",
         "root_preflight",
         "evidence_pre_execution",
         "execution_write_proof",
         "slurm_status_sync_proof",
         "slurm_cancellation_proof",
+        "restart_reconcile_proof",
         "no_mutation_proof",
+        "retention",
     )
 )
 _SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS = (
@@ -61,6 +65,7 @@ _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "readiness_interpretation",
     "execution_mode",
 )
+_DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 
 
 class SchedulerEvidenceWriteError(OSError):
@@ -92,6 +97,18 @@ class SchedulerEvidenceConfig(Protocol):
     interval_seconds: float
     max_cycles_per_source: int
     retry_limit: int
+    database_url_configured: bool
+    scheduler_db_free_required: bool
+    scheduler_state_backend: str | None
+    scheduler_lock_backend: str | None
+    scheduler_registry_backend: str | None
+    scheduler_canonical_readiness_backend: str | None
+    scheduler_journal_backend: str | None
+    scheduler_state_index_backend: str | None
+    scheduler_registry_manifest: Path | str | None
+    scheduler_canonical_readiness_index: Path | str | None
+    scheduler_journal_root: Path | str | None
+    scheduler_state_index: Path | str | None
 
 
 class SchedulerCandidateLike(Protocol):
@@ -143,6 +160,7 @@ class ReservationBlockedPayloadCallback(Protocol):
     def __call__(
         self,
         *,
+        config: SchedulerEvidenceConfig,
         pass_id: str,
         artifact_path: Path,
         reason: str,
@@ -164,7 +182,7 @@ class SchedulerEvidenceWriteContext:
     write_new_regular_file: WriteNewRegularFileCallback | None = None
     require_evidence_artifact_available: RequireEvidenceArtifactAvailableCallback | None = None
     reservation_blocked_payload: ReservationBlockedPayloadCallback | None = None
-    evidence_write_error_payload: Callable[[OSError], dict[str, Any]] | None = None
+    evidence_write_error_payload: Callable[..., dict[str, Any]] | None = None
 
 
 def base_evidence(
@@ -242,6 +260,14 @@ def write_prelock_blocked_evidence(
 ) -> Path | None:
     checks = root_preflight.get("checks")
     evidence_check = checks.get("evidence_root") if isinstance(checks, Mapping) else None
+    blockers = root_preflight.get("blockers")
+    evidence_root_blocked = (
+        any(isinstance(blocker, Mapping) and blocker.get("field") == "evidence_root" for blocker in blockers)
+        if isinstance(blockers, list)
+        else False
+    )
+    if evidence_root_blocked:
+        return None
     if not isinstance(evidence_check, Mapping) or evidence_check.get("writable") is not True:
         return None
     try:
@@ -249,10 +275,10 @@ def write_prelock_blocked_evidence(
             return write_evidence_callback(pass_id, evidence)
         return write_evidence(context, pass_id, evidence)
     except SchedulerEvidenceWriteError as error:
-        evidence["evidence_write_error"] = {"reason": error.reason, **error.details}
+        evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
-    except OSError as error:
-        evidence["evidence_write_error"] = {"reason": "evidence_write_failed", "error": str(error)}
+    except (OSError, RuntimeError, ValueError) as error:
+        evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
 
 
@@ -276,8 +302,8 @@ def reserve_pre_execution_evidence(
         "reserved_at": _format_utc(now),
         "status": "reserved",
         "candidate_count": candidate_count,
-        "artifact_path": str(artifact_path),
-        "final_evidence_artifact": str(evidence_dir / final_artifact_name),
+        "artifact_path": artifact_path_evidence(context.config, artifact_path),
+        "final_evidence_artifact": artifact_path_evidence(context.config, evidence_dir / final_artifact_name),
         "proof": "scheduler_evidence_directory_write_before_production_mutation",
     }
     try:
@@ -305,13 +331,18 @@ def reserve_pre_execution_evidence(
             error.reason,
             error.details,
         )
-    except OSError as error:
+    except (OSError, RuntimeError, ValueError) as error:
+        details = (
+            {"error_type": type(error).__name__}
+            if bool(getattr(context.config, "scheduler_db_free_required", False))
+            else {"error": str(error)}
+        )
         return _call_reservation_blocked_payload(
             context,
             pass_id,
             artifact_path,
             "evidence_write_failed",
-            {"error": str(error)},
+            details,
         )
     return payload
 
@@ -331,7 +362,7 @@ def write_evidence(
     payload = context.evidence_safe(dict(evidence))
     if not isinstance(payload, dict):
         payload = {}
-    payload["artifact_path"] = str(artifact_path)
+    payload["artifact_path"] = artifact_path_evidence(context.config, artifact_path)
     payload_to_write, serialized = _serialized_evidence_within_limit(
         context,
         payload,
@@ -345,8 +376,14 @@ def write_evidence(
     if isinstance(evidence, dict):
         evidence.clear()
         evidence.update(payload_to_write)
-        evidence.setdefault("artifact_path", str(artifact_path))
+        evidence.setdefault("artifact_path", artifact_path_evidence(context.config, artifact_path))
     return artifact_path
+
+
+def artifact_path_evidence(config: SchedulerEvidenceConfig, artifact_path: Path) -> str:
+    if bool(getattr(config, "scheduler_db_free_required", False)):
+        return "[local-path]"
+    return str(artifact_path)
 
 
 def validate_evidence_artifact_name(artifact_name: str, *, artifact_path: Path) -> None:
@@ -451,6 +488,7 @@ def _call_reservation_blocked_payload(
 ) -> dict[str, Any]:
     if context.reservation_blocked_payload is not None:
         return context.reservation_blocked_payload(
+            config=context.config,
             pass_id=pass_id,
             artifact_path=artifact_path,
             reason=reason,
@@ -458,12 +496,22 @@ def _call_reservation_blocked_payload(
             evidence_safe=context.evidence_safe,
         )
     return evidence_reservation_blocked_payload(
+        config=context.config,
         pass_id=pass_id,
         artifact_path=artifact_path,
         reason=reason,
         details=details,
         evidence_safe=context.evidence_safe,
     )
+
+
+def _call_evidence_write_error_payload(context: SchedulerEvidenceWriteContext, error: OSError) -> dict[str, Any]:
+    if context.evidence_write_error_payload is not None:
+        try:
+            return context.evidence_write_error_payload(error, context.config)
+        except TypeError:
+            return context.evidence_write_error_payload(error)
+    return evidence_write_error_payload(error, context.config)
 
 
 def candidate_evidence_write_blocked_evidence(
@@ -588,6 +636,7 @@ from services.orchestrator.scheduler_evidence_proofs import (  # noqa: E402, F40
     pipeline_status_write_proof_value,
     positive_count,
     proof_mutation_value,
+    restart_reconcile_proof,
     scheduler_execution_boundary_from_cancellation,
     scheduler_mutation_proof,
     scheduler_pass_status_from_cancellation,
@@ -608,6 +657,7 @@ from services.orchestrator.scheduler_evidence_proofs import (  # noqa: E402, F40
 
 def evidence_reservation_blocked_payload(
     *,
+    config: SchedulerEvidenceConfig,
     pass_id: str,
     artifact_path: Path,
     reason: str,
@@ -618,65 +668,86 @@ def evidence_reservation_blocked_payload(
         "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
         "pass_id": pass_id,
         "status": "blocked",
-        "artifact_path": str(artifact_path),
+        "artifact_path": artifact_path_evidence(config, artifact_path),
         "reason": reason,
         "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
         "message": "Scheduler evidence write proof failed before production mutation.",
     }
-    payload.update(dict(details or {}))
+    safe_details = dict(details or {})
+    if "artifact_path" in safe_details:
+        safe_details["artifact_path"] = artifact_path_evidence(config, artifact_path)
+    payload.update(safe_details)
     return evidence_safe(payload)
 
 
-def evidence_write_error_payload(error: OSError) -> dict[str, Any]:
+def evidence_write_error_payload(
+    error: OSError,
+    config: SchedulerEvidenceConfig | None = None,
+) -> dict[str, Any]:
     if isinstance(error, SchedulerEvidenceWriteError):
-        return {"reason": error.reason, **error.details}
+        details = dict(error.details)
+        artifact_path = details.get("artifact_path")
+        if config is not None and artifact_path not in (None, ""):
+            details["artifact_path"] = artifact_path_evidence(config, Path(str(artifact_path)))
+        return {"reason": error.reason, **details}
+    if config is not None and bool(getattr(config, "scheduler_db_free_required", False)):
+        return {"reason": "evidence_write_failed", "error_type": type(error).__name__}
     return {"reason": "evidence_write_failed", "error": str(error)}
 
 
 def scheduler_resolved_runtime_roots(config: SchedulerEvidenceConfig) -> dict[str, Any]:
+    evidence_safe_paths = bool(getattr(config, "scheduler_db_free_required", False))
     return {
         "workspace_root": root_evidence_item(
             config.workspace_root,
             env="WORKSPACE_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "object_store_root": root_evidence_item(
             config.object_store_root,
             env="OBJECT_STORE_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "published_artifact_root": root_evidence_item(
             config.published_artifact_root,
             env="NHMS_PUBLISHED_ARTIFACT_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "lock_root": root_evidence_item(
             Path(config.lock_path).parent,
             env="NHMS_SCHEDULER_LOCK_ROOT",
             fallback="WORKSPACE_ROOT/scheduler",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "lock_path": root_evidence_item(
             config.lock_path,
             env="NHMS_SCHEDULER_LOCK_ROOT",
             fallback="WORKSPACE_ROOT/scheduler/production-scheduler.lock",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "evidence_root": root_evidence_item(
             config.evidence_dir,
             env="NHMS_SCHEDULER_EVIDENCE_ROOT",
             fallback="WORKSPACE_ROOT/scheduler/evidence",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "runtime_root": root_evidence_item(
             config.runtime_root,
             env="NHMS_SCHEDULER_RUNTIME_ROOT|NHMS_RUNTIME_ROOT|RUN_WORKSPACE_ROOT|SHUD_RUNTIME_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "temp_root": root_evidence_item(
             config.temp_root,
             env="NHMS_SCHEDULER_TEMP_ROOT|NHMS_TEMP_ROOT|TMPDIR",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
     }
 
@@ -687,8 +758,14 @@ def root_evidence_item(
     env: str,
     required: bool,
     fallback: str | None = None,
+    evidence_safe_paths: bool = False,
 ) -> dict[str, Any]:
-    path = None if value in (None, "") else str(Path(value).expanduser().resolve(strict=False))
+    if value in (None, ""):
+        path = None
+    elif evidence_safe_paths:
+        path = "[local-path]"
+    else:
+        path = str(Path(value).expanduser().resolve(strict=False))
     payload = {
         "path": path,
         "configured": path is not None,
@@ -701,9 +778,30 @@ def root_evidence_item(
 
 
 def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[str, Any]:
-    return {
+    db_free_required = bool(getattr(config, "scheduler_db_free_required", False))
+    payload = {
         "service_role": config.service_role,
         "require_runtime_roots": config.require_runtime_roots,
+        "database_url_configured": bool(getattr(config, "database_url_configured", False)),
+        "scheduler_db_free_required": db_free_required,
+        "scheduler_state_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_state_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_lock_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_lock_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_registry_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_registry_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_canonical_readiness_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_canonical_readiness_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_journal_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_journal_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_state_index_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_state_index_backend", None), db_free_required=db_free_required
+        ),
         "dry_run": config.dry_run,
         "continuous": config.continuous,
         "interval_seconds": config.interval_seconds,
@@ -716,6 +814,35 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
         "max_cycles_per_source": config.max_cycles_per_source,
         "retry_limit": config.retry_limit,
     }
+    db_free_evidence = getattr(config, "db_free_runtime_evidence", None)
+    if callable(db_free_evidence):
+        payload["db_free_runtime"] = db_free_evidence()
+    return payload
+
+
+def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
+    if value in (None, ""):
+        return value
+    text = str(value).strip()
+    if db_free_required and text == "file":
+        return "file"
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        if db_free_required:
+            return "[invalid-uri]"
+        return "[invalid-uri]" if ":" in text else text
+    if parsed.scheme:
+        scheme = parsed.scheme.lower()
+        if scheme in _DB_FREE_DB_BACKEND_VALUES or "postgres" in scheme or "psycopg" in scheme:
+            return "[db-like]"
+        return "[uri]"
+    lower = text.lower()
+    if lower in _DB_FREE_DB_BACKEND_VALUES or "postgres" in lower or "psycopg" in lower:
+        return "[db-like]"
+    if db_free_required:
+        return "[non-file]"
+    return text
 
 
 def open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:
@@ -847,6 +974,7 @@ __all__ = [
     "proof_mutation_value",
     "require_evidence_artifact_available",
     "reserve_pre_execution_evidence",
+    "restart_reconcile_proof",
     "root_evidence_item",
     "scheduler_execution_boundary_from_cancellation",
     "scheduler_mutation_proof",

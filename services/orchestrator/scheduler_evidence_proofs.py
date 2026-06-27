@@ -382,7 +382,9 @@ def scheduler_mutation_proof(
     execution_write_proof: Mapping[str, Any],
     slurm_status_sync_proof: Mapping[str, Any],
     slurm_cancellation_proof: Mapping[str, Any],
+    restart_reconcile_proof: Mapping[str, Any] | None = None,
 ) -> dict[str, bool | str]:
+    restart_reconcile_proof = restart_reconcile_proof or {}
     execution_slurm_submit = _scheduler_evidence.slurm_submit_proof_value(execution_write_proof)
     hydro_result_table_write = _scheduler_evidence.named_proof_value(
         execution_write_proof,
@@ -396,15 +398,18 @@ def scheduler_mutation_proof(
     )
     sync_mutation = _scheduler_evidence.proof_mutation_value(slurm_status_sync_proof)
     cancellation_mutation = _scheduler_evidence.proof_mutation_value(slurm_cancellation_proof)
+    restart_reconcile_mutation = _scheduler_evidence.proof_mutation_value(restart_reconcile_proof)
     pipeline_status_write = _scheduler_evidence.merge_proof_values(
         _scheduler_evidence.pipeline_status_write_proof_value(execution_write_proof),
         sync_mutation,
         _scheduler_evidence.pipeline_status_write_proof_value(slurm_cancellation_proof),
+        _scheduler_evidence.pipeline_status_write_proof_value(restart_reconcile_proof),
     )
     pipeline_event_write = _scheduler_evidence.merge_proof_values(
         _scheduler_evidence.pipeline_event_write_proof_value(execution_write_proof),
         sync_mutation,
         _scheduler_evidence.pipeline_event_write_proof_value(slurm_cancellation_proof),
+        _scheduler_evidence.pipeline_event_write_proof_value(restart_reconcile_proof),
     )
     return {
         "slurm_submit_called": execution_slurm_submit,
@@ -414,7 +419,91 @@ def scheduler_mutation_proof(
         "pipeline_event_writes": pipeline_event_write,
         "slurm_status_sync_writes": sync_mutation,
         "slurm_cancellation_writes": cancellation_mutation,
+        "restart_reconcile_writes": restart_reconcile_mutation,
     }
+
+
+def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(restart_reconcile_evidence, Mapping):
+        return {
+            "status": "not_required",
+            "mutation_occurred": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
+            "pipeline_status_writes_proven_absent": True,
+            "pipeline_event_writes_proven_absent": True,
+        }
+    reserved_unbound = restart_reconcile_evidence.get("reserved_unbound")
+    inflight = restart_reconcile_evidence.get("inflight")
+    reserved_outcomes = (
+        list(reserved_unbound.get("outcomes") or []) if isinstance(reserved_unbound, Mapping) else []
+    )
+    inflight_outcomes = list(inflight.get("outcomes") or []) if isinstance(inflight, Mapping) else []
+    bind_count = sum(
+        1
+        for outcome in reserved_outcomes
+        if isinstance(outcome, Mapping) and str(outcome.get("action") or "") == "bound"
+    )
+    reserved_status_update_count = sum(
+        1
+        for outcome in reserved_outcomes
+        if isinstance(outcome, Mapping) and str(outcome.get("action") or "") == "reservation_lost"
+    )
+    inflight_status_update_count = sum(
+        1
+        for outcome in inflight_outcomes
+        if isinstance(outcome, Mapping)
+        and str(outcome.get("action") or "") in {"terminal", "still_running", "unverified"}
+    )
+    pipeline_status_write_count = bind_count + reserved_status_update_count + inflight_status_update_count
+    mutation_occurred = pipeline_status_write_count > 0
+    error_fields = [
+        field_name
+        for field_name in ("reserved_unbound_error", "inflight_error")
+        if restart_reconcile_evidence.get(field_name) not in (None, "")
+    ]
+    unknown_after_attempt = (
+        not mutation_occurred
+        and (
+            str(restart_reconcile_evidence.get("status") or "") == "error"
+            or bool(error_fields)
+        )
+    )
+    mutation_value: bool | str = (
+        _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else mutation_occurred
+    )
+    pipeline_status_writes: bool | str = (
+        _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else mutation_occurred
+    )
+    pipeline_event_writes: bool | str = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else False
+    proof: dict[str, Any] = {
+        "status": (
+            "mutated"
+            if mutation_occurred
+            else _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+            if unknown_after_attempt
+            else str(restart_reconcile_evidence.get("status") or "completed")
+        ),
+        "mutation_occurred": mutation_value,
+        "bind_reservation_count": bind_count,
+        "update_job_status_count": reserved_status_update_count + inflight_status_update_count,
+        "reserved_unbound_mutation_count": bind_count + reserved_status_update_count,
+        "inflight_mutation_count": inflight_status_update_count,
+        "pipeline_status_writes": pipeline_status_writes,
+        "pipeline_event_writes": pipeline_event_writes,
+        "pipeline_status_write_count": pipeline_status_write_count,
+        "pipeline_event_write_count": 0,
+        "pipeline_status_writes_proven_absent": not mutation_occurred and not unknown_after_attempt,
+        "pipeline_event_writes_proven_absent": not unknown_after_attempt,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if unknown_after_attempt:
+        proof["mutation_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        proof["pipeline_status_write_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        proof["pipeline_event_write_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+    if error_fields:
+        proof["error_fields"] = error_fields
+    return proof
 
 
 def proof_mutation_value(proof: Mapping[str, Any]) -> bool | str:
@@ -564,6 +653,7 @@ __all__ = [
     "positive_count",
     "proof_mutation_value",
     "scheduler_execution_boundary_from_cancellation",
+    "restart_reconcile_proof",
     "scheduler_mutation_proof",
     "scheduler_pass_status_from_cancellation",
     "slurm_cancellation_blocked_count",

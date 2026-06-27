@@ -222,14 +222,14 @@ def _make_scheduler(tmp_path: Path):
 
 def test_scheduler_retention_exception_does_not_break_pass(monkeypatch, tmp_path: Path) -> None:
     """[HIGH] retention failure must never abort scheduling: caught, reported as error."""
-    import services.orchestrator.scheduler as scheduler_mod
+    import services.orchestrator.scheduler_runtime as scheduler_runtime
 
     monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
 
     def boom(*args, **kwargs):
         raise RuntimeError("retention exploded")
 
-    monkeypatch.setattr(scheduler_mod, "run_retention", boom)
+    monkeypatch.setattr(scheduler_runtime, "run_retention", boom)
     scheduler = _make_scheduler(tmp_path)
 
     # (a) must not raise upward

@@ -69,7 +69,9 @@ def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> 
         for key, nested in value.items():
             key_text = str(key)
             field_path = f"{path}.{key_text}"
-            if secret_manifest_key_reason(key_text) is not None:
+            if secret_manifest_key_reason(key_text) is not None and not (
+                key_text.lower().endswith("_configured") and isinstance(nested, bool)
+            ):
                 continue
             redacted[key_text] = _redact_secret_manifest_for_evidence(nested, field_path)
         return redacted

@@ -32,6 +32,20 @@ def test_redact_payload_treats_authorization_header_keys_as_sensitive(payload: d
     assert REDACTION_MARKER in body
 
 
+def test_redact_payload_only_preserves_allowlisted_configured_booleans() -> None:
+    redacted = redact_payload(
+        {
+            "database_url_configured": True,
+            "api_key_configured": True,
+            "password_configured": False,
+        }
+    )
+
+    assert redacted["database_url_configured"] is True
+    assert redacted["api_key_configured"] == REDACTION_MARKER
+    assert redacted["password_configured"] == REDACTION_MARKER
+
+
 def test_redact_payload_preserves_structured_auth_namespace() -> None:
     redacted = redact_payload(
         {

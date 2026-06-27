@@ -1,24 +1,63 @@
 ## 1. Runtime Guard And File Lock
 
-- [ ] 1.1 Add canonical DB-free scheduler backend env parsing.
+- [x] 1.1 Add canonical DB-free scheduler backend env parsing.
   Evidence floor: scheduler config parses the canonical env matrix from
   `design.md`: state, lock, registry, canonical readiness, journal, state
   index, all required paths, and `NHMS_SCHEDULER_DB_FREE_REQUIRED`.
-- [ ] 1.2 Fail closed on DB-free mixed backend or scheduler `DATABASE_URL`.
+  Test rows:
+  - Input: `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, every scheduler backend
+    selector set to `file`, required manifest/index/journal paths configured
+    safely, and no `DATABASE_URL`.
+    Expected: config exposes DB-free mode, backend names, and configured path
+    fields without raw secrets.
+  - Input: DB-free required is absent/false and legacy postgres config is used.
+    Expected: legacy config remains valid where existing postgres-mode tests
+    expect it.
+- [x] 1.2 Fail closed on DB-free mixed backend or scheduler `DATABASE_URL`.
   Evidence floor: DB-free preflight blocks before lock acquisition/submission
   when `DATABASE_URL` is present, any selector is unset/non-file/postgres-like,
   or a required file path is missing/unsafe; evidence records the exact field.
-- [ ] 1.3 Move DB-free scheduler locking to `FileSchedulerLease`.
-  Evidence floor: focused tests and a node-22 bounded pass show
-  `lock_type=file`; concurrent passes cannot both mutate and contention
-  evidence is bounded.
-- [ ] 1.4 Add DB-free scheduler evidence fields and factory guardrails.
+  Test rows:
+  - Input: DB-free env plus scheduler `DATABASE_URL`.
+    Expected: pre-lock blocker `database_url_forbidden`; no lock acquisition,
+    no model discovery, no DB-backed factory, no Slurm submission.
+  - Input: each selector one at a time unset, blank, `postgres`, `psycopg`, or
+    another non-file value.
+    Expected: pre-lock blocker names the exact selector field; no mutation.
+  - Input: each required manifest/index/journal path missing, blank, outside
+    allowed workspace/object boundary, or unsafe.
+    Expected: pre-lock blocker names the exact path field; evidence remains
+    bounded and redacted.
+- [x] 1.3 Move DB-free scheduler locking to `FileSchedulerLease`.
+  Evidence floor: focused local tests show `lock_type=file`; concurrent passes
+  cannot both mutate and contention evidence is bounded. Node-22 bounded pass
+  proof remains part of deployment task 6.4 and post-stop task 7.4.
+  Test rows:
+  - Input: valid DB-free config.
+    Expected: `_build_scheduler_lease()` returns/uses `FileSchedulerLease` and
+    lock evidence has `lock_type=file`.
+  - Input: two DB-free scheduler passes compete for the same file lock.
+    Expected: at most one acquires mutation rights; the contended pass records
+    bounded file-lock contention and submits nothing.
+- [x] 1.4 Add DB-free scheduler evidence fields and factory guardrails.
   Evidence floor: evidence records backend names and configured manifest/index
   paths; tests fail if DB-free factories call `PsycopgModelRegistryStore`,
   `PsycopgMetStore`, `PsycopgOrchestratorRepository`,
   `PsycopgStateSnapshotRepository`, DB-backed `_retry_service_from_env`,
   SQLAlchemy `PipelineStore`, DB-backed `ForcingProducer.from_env`, or
   equivalent PostgreSQL paths.
+  Test rows:
+  - Input: valid DB-free config with every listed DB-backed factory monkeypatch
+    set to raise.
+    Expected: DB-free construction/preflight still succeeds or returns the
+    intended file-mode blocker without invoking any patched DB-backed factory.
+  - Input: DB-free pass evidence.
+    Expected: evidence includes `database_url_configured=false`, selected
+    backend names, canonical DB-free field names, redacted configured paths,
+    and no PostgreSQL host/port/advisory-lock/psycopg dependency.
+  - Input: non-DB-free legacy mode.
+    Expected: existing postgres-backed registry/repository/readiness/reconcile
+    reachability remains available where current tests intentionally cover it.
 
 ## 2. File Model Registry And Canonical Readiness
 
@@ -115,7 +154,7 @@
 
 ## 6. DB-Free Runtime Integration And Deployment Compatibility
 
-- [ ] 6.1 Update DB-free Slurm preflight policy.
+- [x] 6.1 Update DB-free Slurm preflight policy.
   Evidence floor: with DB-free mode and Slurm enabled, missing `DATABASE_URL`
   does not produce `SLURM_PREFLIGHT_DATABASE_URL_MISSING`; non-DB root,
   manifest, secret, and template safety checks still run.

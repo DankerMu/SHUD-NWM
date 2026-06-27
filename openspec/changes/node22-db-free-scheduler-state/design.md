@@ -181,6 +181,155 @@ model_id + source_id + valid_time -> state_uri + checksum + usable_flag
 The scheduler may not fall back to latest usable state when strict successor
 checkpoint lookup fails.
 
+## Issue #831 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- Production scheduler config and env matrix parsing.
+- Fail-closed pre-lock and pre-submission behavior.
+- File-lock concurrency and bounded contention evidence.
+- Scheduler evidence schema fields proving no PostgreSQL dependency.
+- Shared scheduler factory reachability across registry, readiness, repository,
+  retry, state, forcing, and reconcile construction.
+- Node-22 no-DB production configuration.
+
+Must preserve:
+
+- Non-DB-free legacy scheduler mode may still use `DATABASE_URL`, postgres lock,
+  and DB-backed factories where existing tests intend that behavior.
+- Existing workspace/object-store/runtime/temp/evidence root preflight remains
+  strict and still blocks unsafe roots before mutation.
+- Slurm submission remains gated behind root, lock, evidence, SHUD, template,
+  gateway, allowed-root, and env checks.
+- `services.orchestrator.scheduler` compatibility facade import and monkeypatch
+  paths remain stable; new ownership stays in scheduler owner modules.
+- Evidence remains credential-safe and never records raw database URLs or
+  secrets.
+
+Must add/change:
+
+- `NHMS_SCHEDULER_DB_FREE_REQUIRED=true` enables the explicit DB-free runtime
+  guard.
+- DB-free mode requires every canonical scheduler backend selector to be
+  `file` and every required manifest/index/journal path to be configured and
+  safe.
+- DB-free mode rejects scheduler `DATABASE_URL` before acquiring a scheduler
+  lease, discovering models, building factories, or submitting Slurm jobs.
+- DB-free mode always constructs `FileSchedulerLease` and records
+  `lock_type=file`.
+- DB-free scheduler evidence records selected backend names and redacted
+  configured manifest/index/journal paths.
+
+Risk packs considered for #831:
+
+- Public API / CLI / script entry: selected - `plan-production` and
+  `ProductionScheduler.from_env()` are active scheduler entrypoints.
+- Config / project setup: selected - canonical env matrix controls the runtime
+  mode.
+- File IO / path safety / overwrite: selected - file lock, evidence dir,
+  manifest/index paths, and journal root are filesystem/object boundaries.
+- Schema / columns / units / field names: selected - scheduler evidence gains
+  named backend/path fields.
+- Auth / permissions / secrets: selected - `DATABASE_URL` rejection and evidence
+  redaction are required.
+- Concurrency / shared state / ordering: selected - two DB-free passes must not
+  both mutate.
+- Resource limits / large input / discovery: selected - preflight evidence and
+  configured path evidence stay bounded; registry/readiness content parsing is
+  deferred.
+- Legacy compatibility / examples: selected - postgres-backed legacy mode
+  remains reachable outside DB-free mode.
+- Error handling / rollback / partial outputs: selected - DB-free blockers are
+  stable pre-lock/pre-mutation blockers.
+- Release / packaging / dependency compatibility: not selected - no package or
+  dependency change in #831.
+- Documentation / migration notes: selected - OpenSpec evidence defines the
+  operator-facing DB-free contract for later deployment issues.
+- Geospatial / CRS / basin geometry: not selected - #831 does not inspect model
+  geometry.
+- Hydro-met time series / forcing windows: not selected - no canonical product
+  selection change in #831.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver runtime
+  behavior changes in #831.
+- PostGIS / TimescaleDB domain behavior: not selected - #831 avoids DB
+  mutation/schema behavior rather than changing it.
+- Slurm production lifecycle / mock-vs-real parity: selected - DB-free
+  submission gating must still work with Slurm enabled.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider discovery or download behavior changes in #831.
+- Run manifest / QC provenance: not selected - model run manifest generation is
+  unchanged.
+- Published NHMS artifacts / display identity: not selected - display published
+  artifacts are outside #831.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `services/orchestrator/scheduler_config.py`,
+  `scheduler_runtime_roots.py`, `scheduler_preflight.py`.
+- Public entrypoints: `services/orchestrator/cli.py` `plan-production`,
+  `ProductionScheduler.from_env()`, and `ProductionScheduler.run_once()`.
+- Read surfaces: env vars, manifest/index path config, root preflight helpers,
+  and scheduler evidence reads.
+- Write/delete/overwrite surfaces: scheduler lock file and scheduler evidence
+  files only; DB-free mode must not write DB rows in #831.
+- Producer/consumer evidence boundaries: `_base_evidence()`,
+  `_scheduler_runtime_config_evidence()`, and lock evidence.
+- Stale-state/idempotency boundaries: concurrent file lock contention and
+  pre-lock DB-free blockers.
+- Unchanged downstream consumers: existing postgres-mode scheduler tests,
+  Slurm preflight tests, and scheduler compatibility inventory guards.
+
+Invariant Matrix:
+
+- Governing invariant: when `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, the
+  scheduler either proves an all-file runtime before mutation or stops with a
+  credential-safe blocker before any DB-backed factory, lock, or Slurm
+  submission is reachable.
+- Source-of-truth identity/contract: the canonical DB-free runtime env matrix
+  plus `ProductionSchedulerConfig.database_url` and
+  `ProductionSchedulerConfig.scheduler_lock_backend`.
+- Producers: `ProductionSchedulerConfig` parses `DATABASE_URL`,
+  `NHMS_SCHEDULER_STATE_BACKEND`, `NHMS_SCHEDULER_LOCK_BACKEND`,
+  `NHMS_SCHEDULER_REGISTRY_BACKEND`,
+  `NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND`,
+  `NHMS_SCHEDULER_JOURNAL_BACKEND`,
+  `NHMS_SCHEDULER_STATE_INDEX_BACKEND`, and required path keys.
+- Validators/preflight: DB-free runtime preflight in scheduler config/runtime,
+  root/path safety helpers, `_slurm_preflight()`, and
+  `_scheduler_lock_evidence_root_preflight()`.
+- Storage/cache/query: no DB-backed registry/readiness/orchestrator/state/retry
+  store or reconcile `PipelineStore` may be constructed in DB-free mode; file
+  registry/journal/state implementations are later issue scope.
+- Public routes/entrypoints: `ProductionScheduler.from_env()` and
+  `ProductionScheduler.run_once()` stop before model discovery or lock when
+  DB-free config is unsafe.
+- Frontend/downstream consumers: none - scheduler evidence is the downstream
+  consumer for #831.
+- Failure paths/rollback/stale state: `DATABASE_URL` present, blank/unset or
+  postgres-like selectors, unsafe/missing paths, and lock contention all produce
+  bounded evidence without mutation.
+- Evidence/audit/readiness: pass evidence records `database_url_configured`,
+  selected backend names, configured path field names, `lock_type=file`, and
+  redacted blocker fields.
+- Regression rows:
+  - All selectors `file`, required paths safe, no `DATABASE_URL` -> config
+    parses, file lease is used, and evidence records all DB-free backend names.
+  - `DATABASE_URL` present in DB-free mode -> pre-lock
+    `database_url_forbidden` blocker, no lease acquisition, no DB factory.
+  - Any selector unset, blank, `postgres`, `psycopg`, or non-file in DB-free
+    mode -> blocker names the exact field, no lease acquisition, no DB factory.
+  - Required manifest/index/journal path missing or unsafe -> blocker names the
+    exact path field before mutation.
+  - Two DB-free passes on the same lock -> at most one acquires the file lock;
+    the other records bounded contention.
+  - DB-backed factory monkeypatches raise in DB-free mode -> tests still pass
+    because those paths are unreachable.
+  - Non-DB-free postgres mode -> existing postgres lock/backend tests still
+    pass.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains

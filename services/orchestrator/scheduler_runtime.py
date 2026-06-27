@@ -118,6 +118,10 @@ def _require_evidence_artifact_available(*args, **kwargs):
     return getattr(_scheduler, "_require_evidence_artifact_available")(*args, **kwargs)
 
 
+def _restart_reconcile_proof(*args, **kwargs):
+    return getattr(_scheduler, "_restart_reconcile_proof")(*args, **kwargs)
+
+
 def _require_safe_directory_final_component(*args, **kwargs):
     return getattr(_scheduler, "_require_safe_directory_final_component")(*args, **kwargs)
 
@@ -222,23 +226,122 @@ def _write_new_regular_file(*args, **kwargs):
     return getattr(_scheduler, "_write_new_regular_file")(*args, **kwargs)
 
 
+def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, Any]:
+    if not getattr(config, "db_free_required", False):
+        return redact_payload(dict(value))
+    return _db_free_safe_lock_result(value)
+
+
+def _db_free_safe_lock_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for key in ("acquired", "contention"):
+        if key in value:
+            evidence[key] = bool(value.get(key))
+    if "lock_path" in value:
+        evidence["lock_path"] = "[local-path]"
+    if "lock_type" in value:
+        evidence["lock_type"] = _db_free_safe_lock_code(value.get("lock_type"))
+    if "reason" in value:
+        evidence["reason"] = _db_free_safe_lock_code(value.get("reason"))
+    if "error_type" in value:
+        evidence["error_type"] = _db_free_safe_lock_code(value.get("error_type"))
+    if "existing_lock" in value:
+        evidence["existing_lock"] = _db_free_safe_lock_payload(value.get("existing_lock"))
+    if "lease" in value:
+        evidence["lease"] = _db_free_safe_lock_payload(value.get("lease"))
+    return evidence
+
+
+def _db_free_safe_lock_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {"raw": None if value is None else "[lock-payload]"}
+    if value.get("raw") is None:
+        payload: dict[str, Any] = {"raw": None}
+        for key in ("size_bytes", "max_bytes"):
+            item = value.get(key)
+            if isinstance(item, int) and not isinstance(item, bool):
+                payload[key] = item
+        if set(value).issubset(payload.keys()):
+            return payload
+    scheduler_owned = (
+        value.get("owner") == _scheduler.LOCK_OWNER
+        and value.get("schema_version") == _scheduler.LOCK_SCHEMA_VERSION
+    )
+    if not scheduler_owned:
+        return {"raw": "[lock-payload]"}
+    payload = {
+        "owner": _scheduler.LOCK_OWNER,
+        "schema_version": _scheduler.LOCK_SCHEMA_VERSION,
+    }
+    for key in ("pass_id", "heartbeat_at", "started_at"):
+        if key in value:
+            payload[key] = _db_free_safe_lock_code(value.get(key))
+    for key in ("pid", "heartbeat_seq"):
+        item = value.get(key)
+        if isinstance(item, int) and not isinstance(item, bool):
+            payload[key] = item
+    if "lock_path" in value:
+        payload["lock_path"] = "[local-path]"
+    return payload
+
+
+def _db_free_safe_lock_code(value: Any) -> str:
+    text = "" if value is None else str(value)
+    lower = text.lower()
+    if (
+        "/" in text
+        or "\\" in text
+        or "postgres" in lower
+        or "psycopg" in lower
+        or any(
+            word in lower
+            for word in (
+                "token",
+                "password",
+                "passwd",
+                "pwd",
+                "secret",
+                "credential",
+                "api_key",
+                "apikey",
+                "access_key",
+                "accesskey",
+                "session_key",
+                "signature",
+            )
+        )
+    ):
+        return "[lock-payload]"
+    if 0 < len(text) <= 256 and all(character.isalnum() or character in "._:-" for character in text):
+        return text
+    return "[lock-payload]"
+
+
 def run_once(self) -> SchedulerPassResult:
     self._source_readiness_context_cache.clear()
     started_at = _now(self.config)
     pass_id = f"scheduler_{format_cycle_time(started_at)}_{_scheduler.uuid4().hex[:12]}"
-    root_preflight = _scheduler_lock_evidence_root_preflight(self.config)
+    db_free_required = bool(getattr(self.config, "db_free_required", False))
+    root_preflight = (
+        _scheduler_runtime_root_preflight(self.config)
+        if db_free_required
+        else _scheduler_lock_evidence_root_preflight(self.config)
+    )
     if root_preflight["status"] == "blocked":
+        lock_payload = {
+            "acquired": False,
+            "contention": False,
+            "lock_path": str(self.config.lock_path),
+            "reason": "scheduler_root_preflight_blocked",
+        }
+        if db_free_required:
+            lock_payload["lock_type"] = "file"
         evidence = self._base_evidence(pass_id, started_at)
         evidence.update(
             {
                 "status": "preflight_blocked",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": {
-                    "acquired": False,
-                    "contention": False,
-                    "lock_path": str(self.config.lock_path),
-                    "reason": "scheduler_root_preflight_blocked",
-                },
+                "lock": _db_free_lock_evidence(self.config, lock_payload),
                 "root_preflight": root_preflight,
                 "counts": _empty_counts(),
                 "candidates": [],
@@ -260,22 +363,66 @@ def run_once(self) -> SchedulerPassResult:
             evidence=evidence,
             artifact_path=artifact_path,
         )
+    db_free_preflight = self.config.db_free_runtime_preflight()
+    if db_free_preflight["status"] == "blocked":
+        evidence = self._base_evidence(pass_id, started_at)
+        evidence.update(
+            {
+                "status": "preflight_blocked",
+                "finished_at": _format_utc(_now(self.config)),
+                "lock": _db_free_lock_evidence(
+                    self.config,
+                    {
+                        "acquired": False,
+                        "contention": False,
+                        "lock_path": str(self.config.lock_path),
+                        "lock_type": "file" if self.config.db_free_required else None,
+                        "reason": "db_free_runtime_preflight_blocked",
+                    },
+                ),
+                "root_preflight": root_preflight,
+                "db_free_runtime": db_free_preflight,
+                "counts": _empty_counts(),
+                "candidates": [],
+                "blocked_candidates": [],
+                "skipped_candidates": [],
+                "duplicate_exclusions": list(self.config.source_exclusions),
+                "model_discovery": _empty_model_discovery(),
+                "source_cycles": [],
+                "model_run_evidence": [],
+                "slurm_cancellation_evidence": [],
+                "no_mutation_proof": _no_mutation_proof(),
+                "execution_boundary": "db_free_runtime_preflight_blocked",
+            }
+        )
+        artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
+        return SchedulerPassResult(
+            pass_id=pass_id,
+            status="preflight_blocked",
+            evidence=evidence,
+            artifact_path=artifact_path,
+        )
     lock = self._build_scheduler_lease()
     lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
+    lock_evidence = _db_free_lock_evidence(self.config, lock_result)
     if not lock_result["acquired"]:
         evidence = self._base_evidence(pass_id, started_at)
         evidence.update(
             {
                 "status": "lock_contended",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "counts": _empty_counts(),
                 "candidates": [],
                 "blocked_candidates": [],
                 "model_discovery": _empty_model_discovery(),
                 "source_cycles": [],
+                "no_mutation_proof": _no_mutation_proof(),
+                "execution_boundary": "scheduler_lock_contended",
             }
         )
+        if self.config.db_free_required:
+            evidence["db_free_runtime"] = db_free_preflight
         artifact_path = self._write_evidence(pass_id, evidence)
         status = _evidence_status(evidence, "lock_contended")
         return SchedulerPassResult(
@@ -288,15 +435,16 @@ def run_once(self) -> SchedulerPassResult:
     heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
     heartbeat.start()
     try:
-        root_preflight = _scheduler_runtime_root_preflight(self.config)
-        if root_preflight["status"] == "blocked":
+        if not db_free_required:
+            root_preflight = _scheduler_runtime_root_preflight(self.config)
+        if not db_free_required and root_preflight["status"] == "blocked":
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
                 {
                     "status": "preflight_blocked",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_result,
+                    "lock": lock_evidence,
                     "root_preflight": root_preflight,
                     "counts": _empty_counts(),
                     "candidates": [],
@@ -324,7 +472,43 @@ def run_once(self) -> SchedulerPassResult:
         # in-flight statuses from accounting. Comment-reconcile finds back a
         # crashed cohort's slurm_job_id so we never re-submit an already
         # in-flight cohort.
+        db_free_file_provider_blocker = getattr(self, "_db_free_file_provider_blocker", None)
+        if self.config.db_free_required and db_free_file_provider_blocker is not None:
+            finished_at = _now(self.config)
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "preflight_blocked",
+                    "finished_at": _format_utc(finished_at),
+                    "lock": lock_evidence,
+                    "root_preflight": root_preflight,
+                    "db_free_runtime": {
+                        **db_free_preflight,
+                        "provider_blocker": redact_payload(dict(db_free_file_provider_blocker)),
+                    },
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "skipped_candidates": [],
+                    "duplicate_exclusions": list(self.config.source_exclusions),
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "model_run_evidence": [],
+                    "slurm_cancellation_evidence": [],
+                    "no_mutation_proof": _no_mutation_proof(),
+                    "execution_boundary": "db_free_file_provider_blocked",
+                }
+            )
+            artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "preflight_blocked")
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status=status,
+                evidence=evidence,
+                artifact_path=artifact_path,
+            )
         restart_reconcile_evidence = self._run_restart_reconcile()
+        restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
         models, model_evidence = self._discover_models()
         cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
         (
@@ -375,7 +559,7 @@ def run_once(self) -> SchedulerPassResult:
                 {
                     "status": "lease_lost",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_result,
+                    "lock": lock_evidence,
                     "counts": _empty_counts(),
                     "candidates": [],
                     "blocked_candidates": [],
@@ -398,11 +582,12 @@ def run_once(self) -> SchedulerPassResult:
                 artifact_path=artifact_path,
             )
         if not self.config.dry_run and mutation_candidate_count:
-            evidence_reservation = self._reserve_pre_execution_evidence(
-                pass_id,
-                started_at,
-                mutation_candidate_count,
-            )
+            if evidence_reservation["status"] == "not_required":
+                evidence_reservation = self._reserve_pre_execution_evidence(
+                    pass_id,
+                    started_at,
+                    mutation_candidate_count,
+                )
             if evidence_reservation["status"] == "blocked":
                 execution_evidence = [
                     _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
@@ -539,6 +724,7 @@ def run_once(self) -> SchedulerPassResult:
                 execution_write_proof=execution_write_proof,
                 slurm_status_sync_proof=slurm_status_sync_proof,
                 slurm_cancellation_proof=slurm_cancellation_proof,
+                restart_reconcile_proof=restart_reconcile_proof,
             )
             no_mutation_proof = {
                 "adapter_download_called": False,
@@ -551,8 +737,38 @@ def run_once(self) -> SchedulerPassResult:
                 "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
                 "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
             }
+            if scheduler_mutation_proof.get("restart_reconcile_writes") is not False:
+                no_mutation_proof["restart_reconcile_writes"] = scheduler_mutation_proof["restart_reconcile_writes"]
             failed_count = _scheduler_failed_count_from_execution(execution_evidence)
             partial_count = _scheduler_partial_count_from_execution(execution_evidence)
+        elif restart_reconcile_proof.get("mutation_occurred") is True:
+            no_mutation_proof = {
+                **_no_mutation_proof(),
+                "pipeline_status_writes": True,
+                "pipeline_event_writes": restart_reconcile_proof.get("pipeline_event_writes") is True,
+                "restart_reconcile_writes": True,
+            }
+            if execution_boundary == "planning_only":
+                execution_boundary = "restart_reconcile"
+            if pass_status == "planned":
+                pass_status = "restart_reconciled"
+        elif restart_reconcile_proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+            no_mutation_proof = {
+                **_no_mutation_proof(),
+                "pipeline_status_writes": restart_reconcile_proof.get(
+                    "pipeline_status_writes",
+                    UNKNOWN_AFTER_ATTEMPT,
+                ),
+                "pipeline_event_writes": restart_reconcile_proof.get(
+                    "pipeline_event_writes",
+                    UNKNOWN_AFTER_ATTEMPT,
+                ),
+                "restart_reconcile_writes": UNKNOWN_AFTER_ATTEMPT,
+            }
+            if execution_boundary == "planning_only":
+                execution_boundary = "restart_reconcile"
+            if pass_status == "planned":
+                pass_status = "restart_reconcile_unknown"
         finished_at = _now(self.config)
         evidence = self._base_evidence(pass_id, started_at)
         evidence["operator_filters"].update(model_evidence["operator_filters"])
@@ -567,7 +783,7 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": pass_status,
                 "finished_at": _format_utc(finished_at),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "model_discovery": model_evidence,
                 "source_cycles": source_cycle_evidence,
                 "candidates": [candidate.to_dict() for candidate in candidates],
@@ -606,6 +822,7 @@ def run_once(self) -> SchedulerPassResult:
         )
         if restart_reconcile_evidence is not None:
             evidence["restart_reconcile"] = restart_reconcile_evidence
+            evidence["restart_reconcile_proof"] = restart_reconcile_proof
         overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
         if overlap_receipt is not None:
             # M24 §3A Evidence Floor: archive the overlapping-submit receipt
@@ -614,7 +831,7 @@ def run_once(self) -> SchedulerPassResult:
             evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
         if slurm_preflight_evidence is not None:
             evidence["slurm_preflight"] = slurm_preflight_evidence
-        if not self.config.dry_run and mutation_candidate_count and evidence_reservation["status"] != "not_required":
+        if evidence_reservation["status"] != "not_required":
             evidence["evidence_pre_execution"] = evidence_reservation
         if root_preflight["status"] != "not_required":
             evidence["root_preflight"] = root_preflight
@@ -626,13 +843,19 @@ def run_once(self) -> SchedulerPassResult:
             }
         else:
             evidence["backfill"] = {"enabled": False}
-        evidence["retention"] = self._run_retention(started_at)
+        retention_force_reason = (
+            "evidence_preflight_blocked" if evidence_reservation.get("status") == "blocked" else None
+        )
+        evidence["retention"] = self._run_retention(
+            started_at,
+            force_dry_run_reason=retention_force_reason,
+        )
         try:
             artifact_path = self._write_evidence(pass_id, evidence)
-        except (OSError, SchedulerEvidenceWriteError) as error:
+        except (OSError, RuntimeError, ValueError, SchedulerEvidenceWriteError) as error:
             if evidence_reservation.get("status") != "blocked":
                 raise
-            evidence["evidence_write_error"] = _evidence_write_error_payload(error)
+            evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)
             artifact_path = None
         status = _evidence_status(evidence, pass_status)
         return SchedulerPassResult(
@@ -648,7 +871,7 @@ def run_once(self) -> SchedulerPassResult:
             {
                 "status": "resource_limit_blocked",
                 "finished_at": _format_utc(finished_at),
-                "lock": lock_result,
+                "lock": lock_evidence,
                 "limit": {"reason": error.reason, **error.details},
                 "counts": _empty_counts(),
                 "candidates": [],
@@ -830,20 +1053,28 @@ def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
     return default_sacct_querier()
 
 
-def _run_retention(self, started_at: datetime) -> dict[str, Any]:
+def _run_retention(
+    self,
+    started_at: datetime,
+    *,
+    force_dry_run_reason: str | None = None,
+) -> dict[str, Any]:
     """Run forecast-data retention cleanup; never break the scheduling pass.
 
     Scheduler ``dry_run`` is the master switch: when the pass runs in
     dry-run (planning-only, no side effects), retention is forced into
     dry-run too, regardless of NHMS_RETENTION_DRY_RUN. This preserves the
     "dry_run => no side effects" contract so a planning pass never deletes
-    aged artifacts even when the env enables real deletion.
+    aged artifacts even when the env enables real deletion. Evidence
+    preflight failures use the same boundary because they claim no production
+    mutation has happened yet.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
         return {"status": "disabled", "enabled": False}
     forced_dry_run = False
-    if self.config.dry_run and not retention_config.dry_run:
+    force_dry_run = self.config.dry_run or force_dry_run_reason is not None
+    if force_dry_run and not retention_config.dry_run:
         retention_config = replace(retention_config, dry_run=True)
         forced_dry_run = True
     try:
@@ -859,6 +1090,7 @@ def _run_retention(self, started_at: datetime) -> dict[str, Any]:
     payload["status"] = "completed"
     if forced_dry_run:
         payload["forced_dry_run_by_scheduler"] = True
+        payload["forced_dry_run_reason"] = force_dry_run_reason or "scheduler_dry_run"
     return payload
 
 
@@ -914,8 +1146,9 @@ def _scheduler_evidence_write_context(self) -> _scheduler_evidence_module.Schedu
                 artifact_path=artifact_path,
             )
         ),
-        reservation_blocked_payload=lambda pass_id, artifact_path, reason, details, evidence_safe: (
+        reservation_blocked_payload=lambda config, pass_id, artifact_path, reason, details, evidence_safe: (
             _evidence_reservation_blocked_payload(
+                config=config,
                 pass_id=pass_id,
                 artifact_path=artifact_path,
                 reason=reason,
