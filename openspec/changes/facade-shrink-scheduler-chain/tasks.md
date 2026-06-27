@@ -79,3 +79,23 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_repository.py services/orchestrator/chain_repository_state.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.5 Extract forecast execution/submission/template owner slices.
+  - Module/Scope: move `ForecastOrchestrator` run-chain, retry, submit/poll,
+    poll-timeout, terminal-status, submission-failure, duplicate-skip, stage
+    manifest, and template-render method bodies from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_forecast_execution.py`,
+    `services/orchestrator/chain_forecast_submission.py`, and
+    `services/orchestrator/chain_forecast_templates.py`.
+  - Stable Facade: keep legacy `ForecastOrchestrator` private methods on
+    `services.orchestrator.chain`, lazily forwarding to owner modules so
+    existing imports and monkeypatch paths remain anchored at the facade.
+  - Inventory/Evidence Update: refresh structural line-count inventory for the
+    new forecast owner modules, each kept below 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "stage_execution or submit_and_wait or poll_until_terminal or partial_array or template_export or submission_failed or duplicate_submission or pipeline_logs or retry"`;
+    `uv run pytest -q tests/test_pipeline_logs_artifacts.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_execution.py services/orchestrator/chain_forecast_submission.py services/orchestrator/chain_forecast_templates.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
