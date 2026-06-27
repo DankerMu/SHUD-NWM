@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 raw source-data retention daily
+
+[Timer]
+OnCalendar=*-*-* 03:35:00 UTC
+Persistent=true
+Unit=nhms-node27-raw-retention.service
+
+[Install]
+WantedBy=timers.target

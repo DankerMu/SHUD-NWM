@@ -881,9 +881,9 @@ def test_manifest_export_quote_breakout_is_shell_quoted_before_sbatch(monkeypatc
         SubmitJobRequest(
             run_id="run_001",
             model_id="model_001",
-            job_type="download_source_cycle",
+            job_type="convert_canonical",
             manifest={
-                **_production_manifest(tmp_path, "download_source_cycle"),
+                **_production_manifest(tmp_path, "convert_canonical"),
                 "object_store_prefix": 'prod" PYTHONPATH=/tmp/evil #',
                 "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
@@ -910,9 +910,9 @@ def test_submit_job_rejects_secret_quote_breakout_before_sbatch(monkeypatch, tmp
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "object_store_prefix": 'prod" SECRET_TOKEN=supersecret #',
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -984,9 +984,9 @@ def test_resource_profile_directive_values_reject_injection_before_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
             )
@@ -1343,12 +1343,12 @@ def test_non_array_template_contract_rejects_swapped_allowlisted_template_before
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "slurm_job_type_templates": {
                         **DEFAULT_JOB_TYPE_TEMPLATES,
-                        "download_source_cycle": "convert_canonical.sbatch",
+                        "convert_canonical": "publish_tiles.sbatch",
                     },
                 },
             )
@@ -1380,12 +1380,12 @@ def test_submit_job_rejects_secret_template_mapping_before_contract_or_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "slurm_job_type_templates": {
                         **DEFAULT_JOB_TYPE_TEMPLATES,
-                        "download_source_cycle": secret_template,
+                        "convert_canonical": secret_template,
                     },
                 },
             )
@@ -1541,7 +1541,7 @@ def test_render_template_rejects_secret_direct_job_type_before_template_lookup(
     with pytest.raises(ManifestValidationError) as exc_info:
         gateway.render_template(
             secret_job_type,
-            _production_manifest(tmp_path, "download_source_cycle"),
+            _production_manifest(tmp_path, "convert_canonical"),
         )
 
     details = json.dumps(exc_info.value.details)
@@ -1560,33 +1560,33 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
     monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(venv_bin))
     gateway = _production_gateway(tmp_path)
     manifest = {
-        **_production_manifest(tmp_path, "download_source_cycle"),
+        **_production_manifest(tmp_path, "convert_canonical"),
         "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
     }
 
-    rendered = gateway.render_template("download_source_cycle", manifest)
+    rendered = gateway.render_template("convert_canonical", manifest)
 
     assert f"export PATH={shlex.quote(str(venv_bin.resolve()))}:$PATH" in rendered
     assert "export NHMS_PROFILE=prod/gfs_00" in rendered
     assert "export NHMS_RUN_LABEL=prod_gfs_00" in rendered
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
-            "download_source_cycle",
+            "convert_canonical",
             {**manifest, "slurm_env": {"AWS_SECRET_ACCESS_KEY": "supersecret"}},
         )
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
-            "download_source_cycle",
+            "convert_canonical",
             {**manifest, "slurm_env": {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"}},
         )
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
-            "download_source_cycle",
+            "convert_canonical",
             {**manifest, "slurm_env": {"OBJECT_STORE_PREFIX": "s3://bucket/prod?X-Amz-Signature=supersecret"}},
         )
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
-            "download_source_cycle",
+            "convert_canonical",
             {**manifest, "slurm_env": {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"}},
         )
 
@@ -1599,7 +1599,7 @@ def test_standalone_gateway_injects_grib_runtime_env_for_download_tools(
     monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", root)
     gateway = _production_gateway(tmp_path)
 
-    rendered = gateway.render_template("download_source_cycle", _production_manifest(tmp_path, "download_source_cycle"))
+    rendered = gateway.render_template("convert_canonical", _production_manifest(tmp_path, "convert_canonical"))
 
     quoted = shlex.quote(root)
     assert f"export PATH={quoted}/bin:$PATH" in rendered
@@ -1748,9 +1748,9 @@ def test_submit_job_rejects_secret_slurm_env_before_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "slurm_env": slurm_env,
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -1830,9 +1830,9 @@ def test_submit_job_rejects_reserved_slurm_env_before_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     "slurm_env": {reserved_key: "override"},
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -1904,9 +1904,9 @@ def test_submit_job_rejects_secret_manifest_fields_before_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     **manifest_update,
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -1949,9 +1949,9 @@ def test_submit_job_rejects_secret_manifest_keys_without_raw_error_or_sbatch(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     **manifest_update,
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -1982,9 +1982,9 @@ def test_submit_job_rejects_secret_unsafe_manifest_key_before_unsafe_field_echo(
             SubmitJobRequest(
                 run_id="run_001",
                 model_id="model_001",
-                job_type="download_source_cycle",
+                job_type="convert_canonical",
                 manifest={
-                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **_production_manifest(tmp_path, "convert_canonical"),
                     raw_key: "notify",
                     "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
                 },
@@ -2015,9 +2015,9 @@ def test_submit_job_allows_safe_nested_metadata_keys_and_values(
         SubmitJobRequest(
             run_id="run_001",
             model_id="model_001",
-            job_type="download_source_cycle",
+            job_type="convert_canonical",
             manifest={
-                **_production_manifest(tmp_path, "download_source_cycle"),
+                **_production_manifest(tmp_path, "convert_canonical"),
                 "metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
                 "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
@@ -2872,8 +2872,8 @@ def test_exclude_nodes_override_reaches_profile_and_sbatch(tmp_path: Path) -> No
 
     profile = gateway.resolve_resource_profile("any_model")
     rendered = gateway.render_template(
-        "download_source_cycle",
-        _production_manifest(tmp_path, "download_source_cycle"),
+        "convert_canonical",
+        _production_manifest(tmp_path, "convert_canonical"),
     )
 
     assert profile["exclude_nodes"] == "cn24,cn25"

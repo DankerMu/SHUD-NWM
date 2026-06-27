@@ -1,0 +1,15 @@
+# Node-27 raw source-data retention.
+#
+# Copy to /home/nwm/NWM/infra/env/node27-raw-retention.env on node-27, set mode
+# 0600, and install infra/systemd/nhms-node27-raw-retention.{service,timer} as
+# user units for nwm.
+
+NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+NODE27_RAW_RETENTION_LOG_ROOT=/home/nwm/node27-raw-retention-logs
+NODE27_RAW_RETENTION_LOCK_PATH=/tmp/node27-raw-retention.lock
+NODE27_RAW_RETENTION_SOURCES=GFS,IFS
+NODE27_RAW_RETENTION_DAYS=14
+
+# Default the script to dry-run unless this is explicitly false. The production
+# timer may set this to false after a reviewed dry-run receipt proves the plan.
+NODE27_RAW_RETENTION_DRY_RUN=true

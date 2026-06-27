@@ -477,11 +477,16 @@ def build_candidates(
                     if raw_manifest_restart is not None and state_decision is None:
                         state_evidence.update(raw_manifest_restart)
                     else:
-                        state_evidence["fresh_ingestion"] = {"required": True, "mode": "full_chain"}
-                    candidate = _candidate_with_state_evidence(
-                        candidate,
-                        state_evidence,
-                    )
+                        state_evidence.update(_production_raw_manifest_missing_evidence(raw_candidate_state))
+                        blocked.append(
+                            _blocked_candidate(
+                                candidate,
+                                "nfs_raw_manifest_required",
+                                state_evidence=state_evidence,
+                            )
+                        )
+                        continue
+                    candidate = _candidate_with_state_evidence(candidate, state_evidence)
                 else:
                     state_evidence = {"canonical_readiness": canonical_readiness}
                     if state_decision is not None:
@@ -882,6 +887,21 @@ def _nfs_raw_manifest_gate(raw_state: Mapping[str, Any] | None) -> dict[str, Any
 def _nfs_raw_manifest_block_reason(evidence: Mapping[str, Any]) -> str:
     reason = str(evidence.get("reason") or evidence.get("status") or "unavailable")
     return reason if reason.startswith("nfs_raw_manifest_") else f"nfs_raw_manifest_{reason}"
+
+
+def _production_raw_manifest_missing_evidence(raw_state: Mapping[str, Any] | None) -> dict[str, Any]:
+    evidence = _nfs_raw_manifest_gate(raw_state)
+    if evidence is not None:
+        return {"nfs_raw_manifest": evidence}
+    return {
+        "nfs_raw_manifest": {
+            "status": "missing",
+            "ready": False,
+            "required": True,
+            "source": "node27_nfs_raw_manifest",
+            "reason": "production_download_retired",
+        }
+    }
 
 
 def _source_raw_manifest_restart_evidence(

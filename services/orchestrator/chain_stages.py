@@ -3,7 +3,6 @@ from __future__ import annotations
 from services.orchestrator.chain_types import StageDefinition
 
 LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("download_gfs", "download", "download_source_cycle.sbatch", "raw_complete", "failed_download"),
     StageDefinition("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert"),
     StageDefinition("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing"),
     StageDefinition("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run"),
@@ -11,14 +10,6 @@ LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
 )
 
 M3_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition(
-        "download",
-        "download_source_cycle",
-        "download_source_cycle.sbatch",
-        "raw_complete",
-        "failed_download",
-        is_array=False,
-    ),
     StageDefinition(
         "convert",
         "convert_canonical",

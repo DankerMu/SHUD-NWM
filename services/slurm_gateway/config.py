@@ -14,7 +14,6 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_JOB_TYPE_TEMPLATES = {
-    "download_source_cycle": "download_source_cycle.sbatch",
     "convert_canonical": "convert_canonical.sbatch",
     "produce_forcing_array": "produce_forcing_array.sbatch",
     "run_shud_forecast_array": "run_shud_forecast_array.sbatch",

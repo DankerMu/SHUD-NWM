@@ -22,7 +22,6 @@ INFRA_SBATCH_TEMPLATES = (
     "parse_output_array.sbatch",
     "compute_frequency_array.sbatch",
     "publish_tiles.sbatch",
-    "download_source_cycle.sbatch",
     "convert_canonical.sbatch",
     "hindcast.sbatch",
 )

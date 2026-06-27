@@ -242,7 +242,6 @@ class _FakeParser:
             '--task-id "${SLURM_ARRAY_TASK_ID:-0}"',
         ),
         ("publish_tiles", 'nhms-pipeline publish-tiles --cycle-id "$NHMS_CYCLE_ID"'),
-        ("download_source_cycle", 'nhms-gfs download --cycle-time "$NHMS_CYCLE_TIME"'),
         (
             "convert_canonical",
             'nhms-canonical convert --source-id "${NHMS_SOURCE_ID:-GFS}" --cycle-time "$NHMS_CYCLE_TIME"',
@@ -792,18 +791,12 @@ def test_different_task_ids_invoke_worker_with_different_contexts(monkeypatch, t
 def test_non_array_templates_use_existing_cli_args(tmp_path):
     gateway = _gateway(tmp_path)
 
-    download = gateway.render_template(
-        "download_source_cycle",
-        _render_manifest(tmp_path, "download_source_cycle"),
-        str(tmp_path / "manifest_index.json"),
-    )
     convert = gateway.render_template(
         "convert_canonical",
         _render_manifest(tmp_path, "convert_canonical"),
         str(tmp_path / "manifest_index.json"),
     )
 
-    assert 'nhms-gfs download --cycle-time "$NHMS_CYCLE_TIME"' in download
     assert 'nhms-canonical convert --source-id "${NHMS_SOURCE_ID:-GFS}" --cycle-time "$NHMS_CYCLE_TIME"' in convert
 
 

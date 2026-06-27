@@ -3,17 +3,17 @@
 ## Purpose
 TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
 ## Requirements
-### Requirement: Seven-stage lazy submit orchestration
+### Requirement: Six-stage lazy submit orchestration
 
 The orchestrator SHALL submit stages one at a time, polling sacct for completion before deciding whether to submit the next stage. Stages are NOT submitted upfront.
 
-#### Scenario: All seven stages are submitted lazily in sequence
+#### Scenario: All six stages are submitted lazily in sequence
 
 - **WHEN** the orchestrator triggers a forecast cycle
-- **THEN** stage 1 (`download_source_cycle`) MUST be submitted first
+- **THEN** stage 1 (`convert_canonical`) MUST be submitted first, using raw source data already produced by node-27 and staged into the compute-visible object store
 - **THEN** the orchestrator MUST poll sacct until stage 1 reaches a terminal state
-- **THEN** if stage 1 succeeds, stage 2 (`convert_canonical`) MUST be submitted
-- **THEN** this pattern MUST repeat for all 7 stages in order: `download_source_cycle` → `convert_canonical` → `produce_forcing_array` → `run_shud_forecast_array` → `parse_output_array` → `compute_frequency_array` → `publish_tiles`
+- **THEN** if stage 1 succeeds, stage 2 (`produce_forcing_array`) MUST be submitted
+- **THEN** this pattern MUST repeat for all 6 stages in order: `convert_canonical` → `produce_forcing_array` → `run_shud_forecast_array` → `parse_output_array` → `compute_frequency_array` → `publish_tiles`
 - **THEN** each stage's `pipeline_job` record MUST be created at the time of submission, not upfront
 
 #### Scenario: Orchestrator polls sacct for stage completion
@@ -40,7 +40,7 @@ Each orchestration instance SHALL manage one (source, cycle_time) combination. T
 
 - **WHEN** the orchestrator receives a trigger for `(source="GFS", cycle_time="2026050700")`
 - **THEN** it MUST create one orchestration context for that specific (source, cycle_time) pair
-- **THEN** all 7 stages MUST be associated with this single orchestration context
+- **THEN** all 6 stages MUST be associated with this single orchestration context
 - **THEN** the context MUST include: `source`, `cycle_time`, `basins` (list), and `current_stage` (the last completed or active stage)
 
 #### Scenario: Multiple cycles orchestrated simultaneously
@@ -66,7 +66,7 @@ Each stage's pipeline_job record SHALL be created at the time of submission (laz
 
 - **WHEN** the orchestrator submits stage N to Slurm
 - **THEN** a new `ops.pipeline_job` record MUST be created for that stage at submission time
-- **THEN** each record MUST include: `slurm_job_id`, `job_type` (one of the 7 upstream stage names), `status`
+- **THEN** each record MUST include: `slurm_job_id`, `job_type` (one of the 6 upstream stage names), `status`
 - **THEN** `submitted_at` MUST be set to the current UTC timestamp
 
 #### Scenario: Stage status is updated from sacct polling
@@ -97,13 +97,12 @@ If any stage fails entirely (all tasks fail), the orchestrator SHALL NOT submit 
 #### Scenario: Failure state mapping per stage
 
 - **WHEN** a stage fails, the cycle status MUST be set according to:
-  - stage 1 (`download_source_cycle`) fails → `failed_download`
-  - stage 2 (`convert_canonical`) fails → `failed_convert`
-  - stage 3 (`produce_forcing_array`) fails → `failed_forcing`
-  - stage 4 (`run_shud_forecast_array`) fails → `failed_run`
-  - stage 5 (`parse_output_array`) fails → `failed_parse`
-  - stage 6 (`compute_frequency_array`) fails → `failed_parse` (frequency is a parse sub-step)
-  - stage 7 (`publish_tiles`) fails → `failed_publish`
+  - stage 1 (`convert_canonical`) fails → `failed_convert`
+  - stage 2 (`produce_forcing_array`) fails → `failed_forcing`
+  - stage 3 (`run_shud_forecast_array`) fails → `failed_run`
+  - stage 4 (`parse_output_array`) fails → `failed_parse`
+  - stage 5 (`compute_frequency_array`) fails → `failed_parse` (frequency is a parse sub-step)
+  - stage 6 (`publish_tiles`) fails → `failed_publish`
 
 #### Scenario: Failure event includes diagnostic detail
 
@@ -140,7 +139,7 @@ The orchestrator SHALL persist its orchestration state such that after a crash o
 #### Scenario: No stages submitted yet on restart
 
 - **WHEN** the orchestrator restarts and finds no `pipeline_job` records for a cycle that was triggered but never started
-- **THEN** it MUST begin the lazy submit sequence from stage 1 (`download_source_cycle`)
+- **THEN** it MUST begin the lazy submit sequence from stage 1 (`convert_canonical`)
 
 ---
 
@@ -160,4 +159,3 @@ Multiple cycles SHALL be orchestrated simultaneously without interference.
 - **WHEN** cycles for `(GFS, 2026050700)` and `(ERA5, 2026-05-06)` are both active
 - **THEN** each MUST be orchestrated with independent submission sequences
 - **THEN** stage tracking MUST distinguish cycles by `source` and `cycle_time`
-

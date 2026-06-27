@@ -19,7 +19,6 @@
 
 | `job_type` | 模板 | 说明 |
 |---|---|---|
-| `download_source_cycle` | `infra/sbatch/download_source_cycle.sbatch` | 下载并校验 GFS/IFS 原始资料。 |
 | `convert_canonical` | `infra/sbatch/convert_canonical.sbatch` | 转换为 canonical meteorological product。 |
 | `produce_forcing_array` | `infra/sbatch/produce_forcing_array.sbatch` | 对每个流域/模型生成 forcing package。 |
 | `run_shud_analysis` | `infra/sbatch/run_shud_analysis.sbatch` | 运行 analysis。 |
@@ -42,8 +41,7 @@ manifest_index: manifests/run_index.txt
 ## 4. 依赖关系
 
 ```text
-download
-  → canonical_convert
+canonical_convert
   → forcing_array
   → shud_forecast_array
   → parse_array
@@ -54,7 +52,6 @@ download
 示例提交顺序：
 
 ```text
-download_source_cycle       -> infra/sbatch/download_source_cycle.sbatch
 convert_canonical           -> infra/sbatch/convert_canonical.sbatch
 produce_forcing_array       -> infra/sbatch/produce_forcing_array.sbatch
 run_shud_forecast_array     -> infra/sbatch/run_shud_forecast_array.sbatch

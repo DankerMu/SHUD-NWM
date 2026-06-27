@@ -1655,14 +1655,6 @@ def test_chain_stage_catalog_preserves_static_snapshots_and_legacy_identity() ->
     assert chain_stages.STAGES is chain_stages.M3_STAGES
 
     m3_stage_snapshot = [
-        (
-            "download",
-            "download_source_cycle",
-            "download_source_cycle.sbatch",
-            "raw_complete",
-            "failed_download",
-            False,
-        ),
         ("convert", "convert_canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert", False),
         (
             "forcing",
@@ -1700,7 +1692,6 @@ def test_chain_stage_catalog_preserves_static_snapshots_and_legacy_identity() ->
         "ANALYSIS_STAGES": _stage_catalog_snapshot(chain_stages.ANALYSIS_STAGES),
     } == {
         "LEGACY_FORECAST_STAGES": [
-            ("download_gfs", "download", "download_source_cycle.sbatch", "raw_complete", "failed_download", False),
             ("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert", False),
             ("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing", False),
             ("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run", False),

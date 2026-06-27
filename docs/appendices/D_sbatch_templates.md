@@ -61,7 +61,6 @@ nhms-parse shud-output --manifest-index "$MANIFEST_INDEX" --task-id "$TASK_ID"
 ## 3. 提交依赖示例
 
 ```text
-download_source_cycle       -> infra/sbatch/download_source_cycle.sbatch
 convert_canonical           -> infra/sbatch/convert_canonical.sbatch
 produce_forcing_array       -> infra/sbatch/produce_forcing_array.sbatch
 run_shud_forecast_array     -> infra/sbatch/run_shud_forecast_array.sbatch

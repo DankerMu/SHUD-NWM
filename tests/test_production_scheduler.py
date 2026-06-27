@@ -1905,14 +1905,14 @@ def _fresh_zero_row_readiness_provider(
     )
 
 
-def test_fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forcing(
+def test_fresh_cycle_with_zero_canonical_blocks_without_node27_raw_manifest(
     tmp_path: Path,
 ) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    # A forcing producer that would raise if ever invoked: fresh full-chain
-    # candidates must skip in-process forcing (the Slurm chain produces it).
+    # A forcing producer that would raise if ever invoked: without node-27 raw,
+    # production must block before any in-process or Slurm work.
     forcing_producer = FakeForcingProducer(error=RuntimeError("in-process forcing must be skipped for fresh ingestion"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -1936,21 +1936,21 @@ def test_fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forc
 
     result = scheduler.run_once()
 
-    assert result.status == "submitted"
-    # In-process forcing is skipped entirely for fresh full-chain ingestion.
+    assert result.status == "planned"
     assert forcing_producer.calls == []
-    # The full chain runs once through the orchestrator (download -> ... -> publish).
-    assert len(orchestrator.calls) == 1
-    assert result.evidence["counts"]["submitted_count"] == 1
-    assert result.evidence["blocked_candidates"] == []
-    candidate = result.evidence["candidates"][0]
-    fresh_marker = candidate["state_evidence"]["fresh_ingestion"]
-    assert fresh_marker["required"] is True
-    assert fresh_marker["mode"] == "full_chain"
-    # No restart_stage: the chain starts at download (restart_stage=None).
-    submitted_basin = orchestrator.calls[0]["basins"][0]
-    assert "restart_stage" not in submitted_basin
-    assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+    assert orchestrator.calls == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert len(result.evidence["blocked_candidates"]) == 1
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_required"
+    assert blocked["state_evidence"]["nfs_raw_manifest"] == {
+        "status": "missing",
+        "ready": False,
+        "required": True,
+        "source": "node27_nfs_raw_manifest",
+        "reason": "production_download_retired",
+    }
+    assert "fresh_ingestion" not in blocked["state_evidence"]
 
 
 def test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert(tmp_path: Path) -> None:

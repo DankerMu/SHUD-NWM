@@ -106,25 +106,53 @@
   Latest status: the 2026-06-27 node-22 scheduler pass exited successfully but
   produced `candidate_count=0`, so it did not yet satisfy the end-to-end
   handoff evidence floor.
+- [x] 4.7 Retire the active node-22 production download stage and Slurm job
+  mapping.
+  Evidence floor: active forecast stages and gateway defaults no longer expose
+  `download_source_cycle`; fresh zero-canonical cycles without node-27 raw are
+  blocked instead of converted into full-chain download submissions.
+  Evidence: `services/orchestrator/chain_stages.py` starts production forecast
+  orchestration at `convert`, `services/slurm_gateway/config.py` no longer maps
+  `download_source_cycle`, `infra/sbatch/download_source_cycle.sbatch` is
+  removed, and focused tests assert missing node-27 raw blocks scheduling.
 
-## 5. Later Node-22 Scheduler-State Reduction
+## 5. Node-27 Raw NFS Retention
 
-- [ ] 5.1 Design the replacement for node-22 scheduler DB responsibilities.
+- [x] 5.1 Add an independent raw NFS retention runner for node-27-owned source
+  bundles.
+  Evidence floor: runner only targets
+  `<object-store-root>/raw/<source>/<YYYYMMDDHH>`, defaults to dry-run,
+  rejects unsafe roots, skips symlinks/non-cycle names, writes JSON evidence,
+  and supports explicit execute mode.
+  Evidence: `scripts/node27_raw_retention.py`,
+  `scripts/node27_raw_retention_once.sh`,
+  `infra/env/node27-raw-retention.example`, and focused tests.
+- [ ] 5.2 Install and run the node-27 raw retention systemd timer.
+  Evidence floor: node-27 has `nhms-node27-raw-retention.timer` enabled for
+  user `nwm`, a live summary JSON exists under the retention log root, and the
+  first live run records planned/deleted/skipped/failed counts.
+
+## 6. Later Node-22 Scheduler-State Reduction
+
+- [ ] 6.1 Design the replacement for node-22 scheduler DB responsibilities.
   Evidence floor: separate change documents lock state, candidate state, job
   state, retry semantics, rollback, and live verification before removing
   node-22 scheduler DB dependencies.
+  Latest status: 2026-06-27 live evidence shows node-22 scheduler still reads
+  `DATABASE_URL` pointing at `:55433`, uses `NHMS_SCHEDULER_LOCK_BACKEND=postgres`,
+  and opens live PostgreSQL sessions during scheduler passes.
 
-## 6. Retire Node-22 Historical PostgreSQL
+## 7. Retire Node-22 Historical PostgreSQL
 
-- [ ] 6.1 Archive/dump node-22 `:55433` and record checksum/path without secrets.
+- [ ] 7.1 Archive/dump node-22 `:55433` and record checksum/path without secrets.
   Evidence floor: archive receipt is stored outside gitignored volatile paths
   or referenced by stable operator evidence.
-- [ ] 6.2 Stop node-22 historical PostgreSQL only after scheduler-state
+- [ ] 7.2 Stop node-22 historical PostgreSQL only after scheduler-state
   responsibilities are replaced.
   Evidence floor: `ss -ltnp` shows no `:55433`, compute services remain healthy,
   and post-retirement cycles complete through node-27 download, node-22
   NFS-gated scheduling, downstream compute, node-27 ingest, and public display.
-- [ ] 6.3 Add/update topology guardrails and docs.
+- [ ] 7.3 Add/update topology guardrails and docs.
   Evidence floor: static guard fails on active node-22 `:55433`/business
   `DATABASE_URL` writer assumptions, while allowing historical archived context;
   OpenSpec, ruff, focused tests, docs lint, and live receipts pass.
