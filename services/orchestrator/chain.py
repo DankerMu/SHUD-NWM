@@ -34,6 +34,7 @@ from services.artifacts import ArtifactLogError, published_log_relative_path, pu
 from services.orchestrator import (
     chain_analysis,
     chain_array_accounting,
+    chain_forecast_control,
     chain_forecast_cycle,
     chain_forecast_trigger,
     chain_manifests,
@@ -96,7 +97,7 @@ from workers.canonical_converter.converter import (
     evaluate_canonical_readiness,  # noqa: F401
     expected_converter_version,  # noqa: F401
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: F401
 
 ANALYSIS_SCENARIO_ID = chain_manifests.ANALYSIS_SCENARIO_ID
 DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = chain_manifests.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
@@ -1462,222 +1463,13 @@ class ForecastOrchestrator:
         cycle_time: str | datetime,
         basins: Sequence[Mapping[str, Any] | ModelContext],
     ) -> PipelineResult:
-        _validate_safe_id("source", source)
-        source = normalize_source_id(source)
-        parsed_cycle_time = parse_cycle_time(cycle_time)
-        cycle_id = cycle_id_for(source, parsed_cycle_time)
-        _validate_safe_id("cycle_id", cycle_id)
-
-        normalized_basins = self._normalize_cycle_basins(basins, source, parsed_cycle_time)
-        if not normalized_basins:
-            raise OrchestratorError("EMPTY_BASIN_LIST", "orchestrate_cycle requires at least one basin.")
-        self._apply_cohort_warm_start(normalized_basins, source, parsed_cycle_time)
-        self._validate_cycle_basin_identities(normalized_basins, source, parsed_cycle_time, cycle_id)
-        context_run_id = _cycle_orchestration_run_id(source, parsed_cycle_time, normalized_basins)
-        if _active_orchestration_conflicts(
-            self.repository,
-            source_id=source,
-            cycle_time=parsed_cycle_time,
-            cycle_id=cycle_id,
-            run_id=context_run_id,
-            basins=normalized_basins,
-        ):
-            raise OrchestratorError(
-                "PIPELINE_ALREADY_ACTIVE",
-                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
-                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
-            )
-        if _in_memory_active_cycle_conflicts(cycle_id, self._active_cycles, normalized_basins):
-            raise OrchestratorError(
-                "PIPELINE_ALREADY_ACTIVE",
-                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
-                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
-            )
-
-        self._active_cycles.add(cycle_id)
-        try:
-            self.repository.ensure_forecast_cycle(source_id=source, cycle_time=parsed_cycle_time)
-            context = CycleOrchestrationContext(
-                source_id=source,
-                cycle_time=parsed_cycle_time,
-                cycle_id=cycle_id,
-                run_id=context_run_id,
-                all_basins=normalized_basins,
-                active_basins=list(normalized_basins),
-                restart_stage=_restart_stage_from_basins(normalized_basins),
-                retry_attempt=_retry_attempt_from_basins(normalized_basins),
-            )
-            return self._run_cycle_chain(context)
-        finally:
-            self._active_cycles.discard(cycle_id)
+        return chain_forecast_control.orchestrate_cycle(self, source, cycle_time, basins)
 
     def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
-        updates: list[dict[str, Any]] = []
-        deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
-        for job in self._query_pipeline_jobs_by_cycle(cycle_id):
-            if str(job.get("status")) in TERMINAL_JOB_STATUSES or not job.get("slurm_job_id"):
-                continue
-            gateway_job = _coerce_mapping(self.slurm_client.get_job_status(str(job["slurm_job_id"])))
-            new_status = _status_from_gateway_job(gateway_job)
-            if new_status == str(job.get("status")):
-                continue
-            publication = (
-                self._display_log_publication_for_pipeline_job(job) if new_status in TERMINAL_JOB_STATUSES else None
-            )
-            publication_attempt = (
-                self._try_publish_log_for_advertise(str(job["slurm_job_id"]), publication)
-                if publication is not None
-                else None
-            )
-            log_uri = publication_attempt.advertised_uri if publication_attempt is not None else None
-            previous_status, record = self.repository.update_pipeline_job_status(
-                str(job["job_id"]),
-                new_status,
-                started_at=_parse_gateway_time(gateway_job.get("started_at")),
-                finished_at=_parse_gateway_time(gateway_job.get("finished_at")),
-                exit_code=gateway_job.get("exit_code"),
-                error_code=gateway_job.get("error_code"),
-                error_message=gateway_job.get("error_message"),
-                log_uri=str(log_uri) if log_uri else None,
-            )
-            if str(record.get("status")) != new_status:
-                continue
-            details = _safe_pipeline_event_details(
-                {
-                    "cycle_id": cycle_id,
-                    "slurm_job_id": job.get("slurm_job_id"),
-                    "exit_code": gateway_job.get("exit_code"),
-                    "error_code": gateway_job.get("error_code"),
-                    "slurm": {
-                        "job_id": job.get("slurm_job_id"),
-                        "state": gateway_job.get("state") or gateway_job.get("status"),
-                        "exit_code": gateway_job.get("exit_code"),
-                        "log_uri": log_uri,
-                        "accounting": _slurm_accounting_from_payload(gateway_job),
-                        "resource_metrics": _resource_metrics_from_payload(gateway_job),
-                    },
-                }
-            )
-            self.repository.insert_pipeline_event(
-                entity_type="pipeline_job",
-                entity_id=str(job["job_id"]),
-                event_type="status_change",
-                status_from=previous_status or str(job.get("status")),
-                status_to=new_status,
-                message=_stage_status_message(str(job.get("stage") or job.get("job_type")), new_status, gateway_job),
-                details=details,
-            )
-            updates.append(record)
-            if (
-                deferred_publish_attempt is None
-                and publication_attempt is not None
-                and publication_attempt.error is not None
-            ):
-                deferred_publish_attempt = publication_attempt
-        self._raise_publish_error_after_durable_update(deferred_publish_attempt)
-        return updates
+        return chain_forecast_control.sync_cycle_statuses(self, cycle_id)
 
     def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str = "operator_requested") -> list[dict[str, Any]]:
-        cancelled: list[dict[str, Any]] = []
-        cancel_job = getattr(self.slurm_client, "cancel_job", None)
-        if not callable(cancel_job):
-            raise SlurmClientError(
-                "SLURM_CANCEL_UNSUPPORTED",
-                "Slurm Gateway client does not expose a cancel contract.",
-                {"cycle_id": cycle_id},
-            )
-        for job in self._query_pipeline_jobs_by_cycle(cycle_id):
-            status = str(job.get("status") or "")
-            slurm_job_id = job.get("slurm_job_id")
-            if status in TERMINAL_JOB_STATUSES or not slurm_job_id:
-                continue
-            try:
-                cancelled_payload = _coerce_mapping(cancel_job(str(slurm_job_id)))
-            except SlurmClientError as error:
-                details = dict(error.details or {})
-                response = details.get("response")
-                response_mapping = response if isinstance(response, Mapping) else {}
-                error_mapping = response_mapping.get("error") if isinstance(response_mapping, Mapping) else None
-                gateway_details = dict(error_mapping.get("details") or {}) if isinstance(error_mapping, Mapping) else {}
-                if error.error_code == "JOB_ALREADY_TERMINAL":
-                    details_payload = _safe_pipeline_event_details(
-                        {
-                            "cycle_id": cycle_id,
-                            "stage": job.get("stage"),
-                            "job_type": job.get("job_type"),
-                            "reason": reason,
-                            "replacement_submitted": False,
-                            "error_code": error.error_code,
-                            "gateway_status": gateway_details.get("status"),
-                            "gateway_details": gateway_details,
-                            "slurm": {
-                                "job_id": slurm_job_id,
-                                "state": gateway_details.get("status"),
-                                "log_uri": job.get("log_uri"),
-                                "cancellation_proven": False,
-                            },
-                        }
-                    )
-                    self.repository.insert_pipeline_event(
-                        entity_type="pipeline_job",
-                        entity_id=str(job["job_id"]),
-                        event_type="slurm_cancellation_gap",
-                        status_from=status,
-                        status_to="blocked",
-                        message=(
-                            f"Slurm job {slurm_job_id} was already terminal at the gateway; "
-                            "pipeline state was not rewritten to cancelled."
-                        ),
-                        details=details_payload,
-                    )
-                    cancelled.append(
-                        {
-                            **dict(job),
-                            "status": status,
-                            "error_code": error.error_code,
-                            "cancellation_proven": False,
-                            "replacement_submitted": False,
-                        }
-                    )
-                    continue
-                raise
-            previous_status, record = self.repository.update_pipeline_job_status(
-                str(job["job_id"]),
-                "cancelled",
-                finished_at=_parse_gateway_time(cancelled_payload.get("finished_at")) or _utcnow(),
-                exit_code=cancelled_payload.get("exit_code"),
-                error_code=cancelled_payload.get("error_code"),
-                error_message=cancelled_payload.get("error_message"),
-                log_uri=job.get("log_uri"),
-            )
-            details = _safe_pipeline_event_details(
-                {
-                    "cycle_id": cycle_id,
-                    "stage": job.get("stage"),
-                    "job_type": job.get("job_type"),
-                    "reason": reason,
-                    "replacement_submitted": False,
-                    "slurm": {
-                        "job_id": slurm_job_id,
-                        "state": cancelled_payload.get("status", "cancelled"),
-                        "exit_code": cancelled_payload.get("exit_code"),
-                        "error_code": cancelled_payload.get("error_code"),
-                        "error_message": cancelled_payload.get("error_message"),
-                        "log_uri": job.get("log_uri") or cancelled_payload.get("log_uri"),
-                    },
-                }
-            )
-            self.repository.insert_pipeline_event(
-                entity_type="pipeline_job",
-                entity_id=str(job["job_id"]),
-                event_type="cancel",
-                status_from=previous_status or status,
-                status_to="cancelled",
-                message=f"Cancelled Slurm job {slurm_job_id}; no replacement submitted in this pass.",
-                details=details,
-            )
-            cancelled.append(record)
-        return cancelled
+        return chain_forecast_control.cancel_active_cycle_jobs(self, cycle_id, reason=reason)
 
     def _log_uri_for_pipeline_job(self, job: Mapping[str, Any]) -> str | None:
         return chain_workspace.log_uri_for_pipeline_job(

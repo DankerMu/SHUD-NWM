@@ -228,3 +228,20 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_trigger.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.10 Extract chain forecast control owner slice.
+  - Module/Scope: move cycle orchestration entrypoint, Slurm status sync, and
+    active cycle cancellation bodies from `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_forecast_control.py`.
+  - Stable Facade: keep public `ForecastOrchestrator.orchestrate_cycle`,
+    `sync_cycle_statuses`, and `cancel_active_cycle_jobs` methods on
+    `services.orchestrator.chain`, forwarding through the owner module while
+    preserving old monkeypatch paths for private chain helper functions.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and `chain_forecast_control.py`, with the owner under 1000
+    lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "orchestrate_cycle or sync_cycle_statuses or cancel_active_cycle_jobs or cancel or status"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_control.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
