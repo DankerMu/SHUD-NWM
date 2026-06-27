@@ -203,6 +203,43 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.13 Extract scheduler state compatibility installer.
+  - Module/Scope: move scheduler-state monkeypatch wrapper installation,
+    wrapper-set drift checks, and state re-export parity checks from
+    `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_state_compat.py`.
+  - Stable Facade: keep legacy `_SCHEDULER_STATE_COMPAT_*` names and old
+    scheduler private state helper monkeypatch paths available through
+    `services.orchestrator.scheduler`.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_state_compat.py` as the state compatibility installer
+    owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "candidate_state_decision_scheduler_monkeypatch or owner_module_matches_scheduler_facade or bounded_evidence_owner_module_matches_scheduler_facade"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_state_compat.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
+- [x] 1.14 Extract scheduler evidence payload/proof owner slice.
+  - Module/Scope: move scheduler evidence JSON serialization, bounded payload
+    fitting, retained-field compaction, execution/write proof calculation,
+    Slurm status-sync proof calculation, cancellation proof calculation, and
+    mutation/no-mutation proof helpers from
+    `services/orchestrator/scheduler_evidence.py` to
+    `services/orchestrator/scheduler_evidence_payload.py` and
+    `services/orchestrator/scheduler_evidence_proofs.py`.
+  - Stable Facade: keep the old `services.orchestrator.scheduler_evidence`
+    API and the existing `services.orchestrator.scheduler` evidence helper
+    forwarders import-compatible; payload fitting still resolves the
+    `scheduler_evidence.bounded_evidence_payload` callback path lazily.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record payload/proof owner modules in scheduler compatibility coverage.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "evidence or mutation_proof or slurm_status_sync or cancellation or runtime_config"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler_evidence.py services/orchestrator/scheduler_evidence_payload.py services/orchestrator/scheduler_evidence_proofs.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
@@ -411,5 +448,23 @@
     `uv run pytest -q tests/test_ifs_forecast_integration.py tests/test_source_identity.py tests/test_orchestration_chain.py tests/test_production_scheduler.py -k "scenario or http_slurm_gateway_client or package or require_forecast_warm_start or SlurmClientError"`;
     `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_config.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
+- [x] 2.13 Extract chain manifest contract helper owner slice.
+  - Module/Scope: move manifest contract, quality-state, residual-blocker,
+    payload serialization, URI, project-name, basin identity, nested mapping,
+    optional integer, checkpoint, gateway-time, and UTC formatting helpers from
+    `services/orchestrator/chain_manifests.py` to
+    `services/orchestrator/chain_manifest_contracts.py`.
+  - Stable Facade: keep legacy helper imports available through
+    `services.orchestrator.chain_manifests`, with `services.orchestrator.chain`
+    continuing to alias and forward through `chain_manifests`.
+  - Inventory/Evidence Update: refresh chain compatibility and structural
+    line-count inventories for `chain_manifests.py` and
+    `chain_manifest_contracts.py`, with both files under 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py -k "manifest or assembly or production_status or warm_start"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain_manifests.py services/orchestrator/chain_manifest_contracts.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.

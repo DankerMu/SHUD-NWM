@@ -1,0 +1,577 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from services.orchestrator import scheduler_evidence as _scheduler_evidence
+
+
+def _serialize_evidence_json(payload: Any, *, compact: bool = False) -> str:
+    if compact:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return json.dumps(payload, indent=_scheduler_evidence._EVIDENCE_JSON_INDENT, sort_keys=True)
+
+
+def _serialize_evidence_json_if_within_limit(
+    payload: Any,
+    *,
+    max_evidence_bytes: int,
+    compact: bool = False,
+) -> str | None:
+    if compact:
+        encoder = json.JSONEncoder(separators=(",", ":"), sort_keys=True)
+    else:
+        encoder = json.JSONEncoder(indent=_scheduler_evidence._EVIDENCE_JSON_INDENT, sort_keys=True)
+    chunks: list[str] = []
+    serialized_bytes = 0
+    for chunk in encoder.iterencode(payload):
+        serialized_bytes += len(chunk.encode("utf-8"))
+        if serialized_bytes > max_evidence_bytes:
+            return None
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def _payload_fits(payload: Mapping[str, Any], *, max_evidence_bytes: int, compact: bool = False) -> bool:
+    return (
+        _serialize_evidence_json_if_within_limit(
+            payload,
+            max_evidence_bytes=max_evidence_bytes,
+            compact=compact,
+        )
+        is not None
+    )
+
+
+def _serialized_evidence_within_limit(
+    context: Any,
+    payload: dict[str, Any],
+    *,
+    artifact_path: Path,
+) -> tuple[dict[str, Any], str]:
+    serialized = _serialize_evidence_json_if_within_limit(
+        payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if serialized is not None:
+        return payload, serialized
+
+    bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
+    bounded_payload = _fit_bounded_evidence_payload(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    serialized = _serialize_evidence_json_if_within_limit(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if serialized is not None:
+        return bounded_payload, serialized
+    serialized = _serialize_evidence_json_if_within_limit(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+        compact=True,
+    )
+    if serialized is not None:
+        return bounded_payload, serialized
+
+    raise _scheduler_evidence.SchedulerEvidenceWriteError(
+        "evidence_size_limit_exceeded",
+        {
+            "artifact_path": str(artifact_path),
+            "max_evidence_bytes": context.max_evidence_bytes,
+        },
+    )
+
+
+def _fit_bounded_evidence_payload(
+    payload: Mapping[str, Any],
+    *,
+    max_evidence_bytes: int,
+) -> dict[str, Any]:
+    bounded_payload = dict(payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    _compact_required_bounded_fields(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    for field_name in _scheduler_evidence._DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = {} if field_name == "model_discovery" else []
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name, compactor in (
+        ("counts", _compact_counts),
+        ("review_contract", _compact_review_contract),
+    ):
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = compactor(bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _scheduler_evidence._SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        if _is_required_bounded_field(bounded_payload, field_name):
+            continue
+        bounded_payload[field_name] = _compact_retained_bounded_field(field_name, bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    _drop_empty_optional_bounded_fields(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    _drop_not_required_optional_proofs(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    for field_name in _scheduler_evidence._OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        if _is_required_bounded_field(bounded_payload, field_name):
+            continue
+        bounded_payload[field_name] = _bounded_retained_field_summary(field_name, bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _scheduler_evidence._OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        if _is_required_bounded_field(bounded_payload, field_name):
+            continue
+        bounded_payload[field_name] = _minimal_bounded_retained_field_summary()
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _scheduler_evidence._DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload.pop(field_name)
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _scheduler_evidence._OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload.pop(field_name)
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    if "limit" in bounded_payload:
+        bounded_payload["limit"] = _compact_limit(bounded_payload["limit"])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    return bounded_payload
+
+
+def _compact_required_bounded_fields(payload: dict[str, Any]) -> None:
+    for field_name in _scheduler_evidence._REQUIRED_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in payload:
+            continue
+        if field_name == "counts":
+            payload[field_name] = _compact_counts(payload[field_name])
+        elif field_name not in {"schema_version", "pass_id", "status", "artifact_path", "limit"}:
+            payload[field_name] = _compact_required_bounded_field(field_name, payload[field_name])
+
+
+def _is_required_bounded_field(payload: Mapping[str, Any], field_name: str) -> bool:
+    return field_name in _scheduler_evidence._REQUIRED_BOUNDED_EVIDENCE_FIELDS and field_name in payload
+
+
+def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        return value
+    if field_name == "resolved_runtime_roots":
+        return _compact_resolved_runtime_roots(value)
+    if field_name == "runtime_config":
+        return _compact_mapping(
+            value,
+            (
+                "service_role",
+                "require_runtime_roots",
+                "dry_run",
+                "allowed_cycle_hours_utc",
+            ),
+        )
+    if field_name == "root_preflight":
+        return _compact_root_preflight(value)
+    if field_name == "evidence_pre_execution":
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "proof",
+                "candidate_count",
+            ),
+        )
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "protected_by_pre_execution_evidence",
+                "evidence_pre_execution_status",
+                "submitted_count",
+                "slurm_submit_called",
+                "slurm_submit_count",
+                "slurm_submit_proven_absent",
+                "sync_called",
+                "updated_job_count",
+                "cancellation_required",
+                "cancel_called",
+                "cancelled_job_count",
+                "mutation_occurred",
+            ),
+        )
+    if field_name == "no_mutation_proof":
+        return _compact_mapping(
+            value,
+            (
+                "adapter_download_called",
+                "slurm_submit_called",
+                "slurm_status_sync_called",
+                "slurm_cancellation_called",
+                "shud_runtime_called",
+                "hydro_result_table_writes",
+                "met_result_table_writes",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+            ),
+        )
+    if field_name == "readiness":
+        return _compact_mapping(
+            value,
+            (
+                "schema_version",
+                "interpretation",
+                "production_ready",
+                "final_production_readiness_claimed",
+                "can_claim_final_production_readiness",
+            ),
+        )
+    return _compact_retained_bounded_field(field_name, value)
+
+
+def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
+    for field_name in (
+        "finished_at",
+        "execution_mode",
+        "readiness_interpretation",
+        "model_discovery",
+        "source_cycles",
+        "candidates",
+        "blocked_candidates",
+        "skipped_candidates",
+        "duplicate_exclusions",
+    ):
+        if payload.get(field_name) in (None, "", [], {}):
+            payload.pop(field_name, None)
+
+
+def _drop_not_required_optional_proofs(payload: dict[str, Any]) -> None:
+    for field_name in (
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+    ):
+        if _is_required_bounded_field(payload, field_name):
+            continue
+        value = payload.get(field_name)
+        if not isinstance(value, Mapping):
+            continue
+        if (
+            value.get("status") == "not_required"
+            and value.get("protected_by_pre_execution_evidence") is not True
+            and value.get("mutation_occurred") is not True
+        ):
+            payload.pop(field_name, None)
+
+
+def _compact_counts(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    compact: dict[str, Any] = {}
+    for key, raw_value in value.items():
+        if raw_value not in (0, None, False, "", [], {}):
+            compact[str(key)] = raw_value
+    return compact or {"candidate_count": 0}
+
+
+def _compact_review_contract(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    compact = _compact_mapping(value, ("contract_id", "github_issue", "openspec_change", "scope"))
+    if _payload_fits(compact, max_evidence_bytes=160, compact=True):
+        return compact
+    return _compact_mapping(value, ("contract_id", "github_issue"))
+
+
+def _compact_limit(value: Any) -> Any:
+    return _compact_mapping(value, ("reason",))
+
+
+def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
+    if value is None:
+        return {}
+    if field_name == "resolved_runtime_roots":
+        return _compact_resolved_runtime_roots(value)
+    if field_name == "runtime_config":
+        return _compact_mapping(
+            value,
+            (
+                "service_role",
+                "require_runtime_roots",
+                "dry_run",
+                "allowed_cycle_hours_utc",
+            ),
+        )
+    if field_name == "root_preflight":
+        return _compact_root_preflight(value)
+    if field_name == "evidence_pre_execution":
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "proof",
+                "candidate_count",
+            ),
+        )
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "protected_by_pre_execution_evidence",
+                "evidence_pre_execution_status",
+                "submitted_count",
+                "slurm_submit_called",
+                "slurm_submit_count",
+                "slurm_submit_proven_absent",
+                "sync_called",
+                "updated_job_count",
+                "cancellation_required",
+                "cancel_called",
+                "cancelled_job_count",
+                "mutation_occurred",
+            ),
+        )
+    if field_name == "no_mutation_proof":
+        return _compact_mapping(
+            value,
+            (
+                "adapter_download_called",
+                "slurm_submit_called",
+                "slurm_status_sync_called",
+                "slurm_cancellation_called",
+                "shud_runtime_called",
+                "hydro_result_table_writes",
+                "met_result_table_writes",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+            ),
+        )
+    if field_name == "readiness":
+        compact = _compact_mapping(
+            value,
+            (
+                "schema_version",
+                "interpretation",
+                "production_ready",
+                "final_production_readiness_claimed",
+                "can_claim_final_production_readiness",
+            ),
+        )
+        return compact if compact else _bounded_retained_field_summary(field_name, value)
+    return _bounded_retained_field_summary(field_name, value)
+
+
+def _compact_mapping(value: Any, keys: Sequence[str]) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("", value)
+    return {key: value[key] for key in keys if key in value}
+
+
+def _compact_resolved_runtime_roots(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("resolved_runtime_roots", value)
+    compact_roots: dict[str, Any] = {}
+    root_names = ("workspace_root", "evidence_root")
+    for root_name in root_names:
+        if root_name not in value:
+            continue
+        root_value = value[root_name]
+        if isinstance(root_value, Mapping):
+            compact_roots[root_name] = _compact_mapping(root_value, ("path",))
+        else:
+            compact_roots[root_name] = root_value
+    return compact_roots
+
+
+def _compact_root_preflight(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("root_preflight", value)
+    compact: dict[str, Any] = _compact_mapping(value, ("status", "checked_at"))
+    checks = value.get("checks")
+    if isinstance(checks, Mapping):
+        compact_checks: dict[str, Any] = {}
+        allowed_roots_policy = checks.get("allowed_roots_policy")
+        if isinstance(allowed_roots_policy, Mapping):
+            compact_checks["allowed_roots_policy"] = _compact_mapping(
+                allowed_roots_policy,
+                ("non_empty", "allowed"),
+            )
+        evidence_root = checks.get("evidence_root")
+        if isinstance(evidence_root, Mapping):
+            compact_checks["evidence_root"] = _compact_mapping(evidence_root, ("writable", "safe"))
+        compact["checks"] = compact_checks
+    return compact
+
+
+def _bounded_retained_field_summary(field_name: str, value: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "status": "omitted",
+        "reason": _scheduler_evidence._RETAINED_FIELD_SUMMARY_REASON,
+    }
+    if isinstance(value, Mapping):
+        summary["omitted_key_count"] = len(value)
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        summary["omitted_item_count"] = len(value)
+    elif value is None:
+        summary["original_value"] = None
+    else:
+        summary["omitted_value_type"] = type(value).__name__
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        summary["proof_status"] = _mapping_status(value)
+    elif field_name in {"evidence_pre_execution", "root_preflight", "readiness"}:
+        summary["source_status"] = _mapping_status(value)
+    return summary
+
+
+def _minimal_bounded_retained_field_summary() -> dict[str, str]:
+    return {
+        "status": "omitted",
+        "reason": _scheduler_evidence._RETAINED_FIELD_SUMMARY_REASON,
+    }
+
+
+def _mapping_status(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        status = value.get("status")
+        if status not in (None, ""):
+            return str(status)
+    return None
+
+
+def _call_bounded_evidence_payload(
+    context: Any,
+    payload: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    if context.bounded_evidence_payload is not None:
+        return context.bounded_evidence_payload(
+            payload,
+            reason=reason,
+            max_evidence_bytes=context.max_evidence_bytes,
+        )
+    return _scheduler_evidence.bounded_evidence_payload(
+        payload,
+        reason=reason,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+
+
+def bounded_evidence_payload(
+    payload: Mapping[str, Any],
+    *,
+    reason: str,
+    max_evidence_bytes: int = _scheduler_evidence.MAX_EVIDENCE_BYTES,
+) -> dict[str, Any]:
+    bounded_payload = {
+        "schema_version": payload.get(
+            "schema_version",
+            _scheduler_evidence.SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        ),
+        "review_contract": payload.get(
+            "review_contract",
+            {
+                "contract_id": _scheduler_evidence.SCHEDULER_EVIDENCE_CONTRACT_ID,
+                "github_issue": _scheduler_evidence.SCHEDULER_EVIDENCE_GITHUB_ISSUE,
+                "openspec_change": _scheduler_evidence.SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
+                "scope": "scheduler_pass_evidence",
+            },
+        ),
+        "pass_id": payload.get("pass_id"),
+        "started_at": payload.get("started_at"),
+        "finished_at": payload.get("finished_at"),
+        "status": "resource_limit_blocked",
+        "execution_mode": payload.get("execution_mode"),
+        "readiness_interpretation": payload.get("readiness_interpretation", "non_final_scheduler_evidence"),
+        "readiness": payload.get(
+            "readiness",
+            {
+                "schema_version": "nhms.production_readiness.scheduler_input.v1",
+                "interpretation": "non_final_scheduler_evidence",
+                "live_receipts": [],
+                "production_ready": False,
+                "final_production_readiness_claimed": False,
+                "can_claim_final_production_readiness": False,
+            },
+        ),
+        "limit": {"reason": reason, "max_evidence_bytes": max_evidence_bytes},
+        "counts": payload.get("counts", _scheduler_evidence.empty_counts()),
+        "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
+        "runtime_config": payload.get("runtime_config"),
+        "root_preflight": payload.get("root_preflight"),
+        "evidence_pre_execution": payload.get("evidence_pre_execution"),
+        "candidates": [],
+        "blocked_candidates": [],
+        "skipped_candidates": [],
+        "duplicate_exclusions": payload.get("duplicate_exclusions", []),
+        "source_cycles": [],
+        "model_discovery": _scheduler_evidence.empty_model_discovery(),
+        "artifact_path": payload.get("artifact_path"),
+        "execution_boundary": payload.get("execution_boundary", "planning_only"),
+        "execution_write_proof": payload.get("execution_write_proof"),
+        "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
+        "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
+        "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
+    }
+    return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
+
+
+__all__ = [
+    "_bounded_retained_field_summary",
+    "_call_bounded_evidence_payload",
+    "_compact_counts",
+    "_compact_limit",
+    "_compact_mapping",
+    "_compact_required_bounded_field",
+    "_compact_required_bounded_fields",
+    "_compact_resolved_runtime_roots",
+    "_compact_retained_bounded_field",
+    "_compact_review_contract",
+    "_compact_root_preflight",
+    "_drop_empty_optional_bounded_fields",
+    "_drop_not_required_optional_proofs",
+    "_fit_bounded_evidence_payload",
+    "_is_required_bounded_field",
+    "_mapping_status",
+    "_minimal_bounded_retained_field_summary",
+    "_payload_fits",
+    "_serialized_evidence_within_limit",
+    "_serialize_evidence_json",
+    "_serialize_evidence_json_if_within_limit",
+    "bounded_evidence_payload",
+]
