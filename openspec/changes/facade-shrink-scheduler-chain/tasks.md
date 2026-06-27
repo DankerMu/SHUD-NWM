@@ -69,6 +69,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.5 Extract scheduler active model discovery owner slice.
+  - Module/Scope: move active model registry pagination, registered model
+    coercion, duplicate active-model exclusion, output-segment count coercion,
+    and discovery filter expression helper bodies from
+    `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_models.py`.
+  - Stable Facade: keep legacy scheduler private helper names importable from
+    `services.orchestrator.scheduler`, forwarding lazily to the owner module.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_models.py` as the active model discovery/coercion owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "coerce_registered_model or discover_models or active_model or model_limit or duplicate_active_model or filter"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_models.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
