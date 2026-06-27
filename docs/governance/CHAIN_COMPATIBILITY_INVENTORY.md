@@ -202,8 +202,12 @@ task to its GitHub issue and implementation PR.
   shrink slice.
 - `ForecastOrchestrator`, `AnalysisOrchestrator`, `OrchestratorConfig`,
   `OrchestratorRepository`, `PsycopgOrchestratorRepository`,
-  `SlurmGatewayClient`, and `HttpSlurmGatewayClient` remain chain-owned runtime
-  entrypoints or local glue unless a later extraction issue records a new owner.
+  `SlurmGatewayClient`, and `HttpSlurmGatewayClient` remain legacy chain import
+  paths or local glue unless a later extraction issue records a new owner. The
+  `facade-shrink-scheduler-chain` repository slice keeps
+  `PsycopgOrchestratorRepository.__module__` on `services.orchestrator.chain`
+  while moving implementation bodies to `services.orchestrator.chain_repository`
+  and candidate-state assembly to `services.orchestrator.chain_repository_state`.
 
 ## Governed Groups
 
@@ -241,6 +245,7 @@ Issue #721 uses this inventory as the expected owner map:
 | `chain-source-cycle-repair-facade` | `chain_source_cycle.*` aliases for source-cycle repair, retry provenance, repaired-stage evidence, sort keys, task identity, and bounded candidate-state helpers | New source-cycle helper aliases through `chain.py` require an inventory update with owner, retention reason, removal condition, and verification command. |
 | `chain-runtime-utility-facade` | `chain_runtime_utils.*` aliases for cycle IDs, restart status, time parsing, auto-trigger identity, templates, date ranges, and gateway response helpers | New runtime utility aliases through `chain.py` require an inventory update with owner, retention reason, removal condition, and verification command. |
 | `chain-analysis-forwarders` | `chain_analysis.*` wrappers for AnalysisOrchestrator context, manifest, stage status, event target, and best-available methods | New analysis wrappers require an inventory update with owner, retention reason, removal condition, and verification command. |
+| `chain-repository-owner` | `chain_repository.PsycopgOrchestratorRepository` with legacy chain import identity and candidate-state helper owner | New repository owner helpers require an inventory update with owner, retention reason, removal condition, and verification command. |
 
 Guard-hook metadata rows required by #721:
 
@@ -258,6 +263,7 @@ Guard-hook metadata rows required by #721:
 | `chain-source-cycle-repair-facade` | owner `services.orchestrator.chain_source_cycle`; retention reason: legacy source-cycle repair and candidate-state private helper imports; removal condition: callers use owner module paths or stable public orchestration APIs and focused source-cycle repair parity remains covered; caller migration path: import source-cycle helpers from `services.orchestrator.chain_source_cycle`; verification command: `uv run pytest -q tests/test_orchestration_chain.py -k "source_cycle or retry_provenance or candidate_state or repaired or repair"`. |
 | `chain-runtime-utility-facade` | owner `services.orchestrator.chain_runtime_utils`; retention reason: legacy chain runtime utility imports; removal condition: callers use owner module paths or stable public orchestration APIs and runtime utility parity remains covered; caller migration path: import runtime helpers from `services.orchestrator.chain_runtime_utils`; verification command: `uv run pytest -q tests/test_orchestration_chain.py -k "auto_trigger or template_export or date_range"`. |
 | `chain-analysis-forwarders` | owner `services.orchestrator.chain_analysis`; retention reason: legacy AnalysisOrchestrator method imports and monkeypatch paths; removal condition: callers use owner module paths or public analysis APIs and analysis parity remains covered; caller migration path: use `AnalysisOrchestrator` public APIs or `services.orchestrator.chain_analysis`; verification command: `uv run pytest -q tests/test_analysis_pipeline.py tests/test_orchestration_chain.py -k "analysis or manifest"`. |
+| `chain-repository-owner` | owner `services.orchestrator.chain_repository` and `services.orchestrator.chain_repository_state`; retention reason: legacy scheduler/test import identity for `PsycopgOrchestratorRepository`; removal condition: callers use repository owner paths or public orchestration APIs and repository parity remains covered; caller migration path: use `services.orchestrator.chain_repository.PsycopgOrchestratorRepository`; verification command: `uv run pytest -q tests/test_orchestration_chain.py -k "persistence_repository_compat or candidate_state"`. |
 
 Chain analysis method guard rows:
 

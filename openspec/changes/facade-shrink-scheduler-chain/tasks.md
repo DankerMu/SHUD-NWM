@@ -63,3 +63,19 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_analysis.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.4 Extract chain PostgreSQL repository owner slice.
+  - Module/Scope: move `PsycopgOrchestratorRepository` method bodies from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_repository.py`, with bounded candidate-state
+    assembly in `services/orchestrator/chain_repository_state.py`.
+  - Stable Facade: keep `services.orchestrator.chain.PsycopgOrchestratorRepository`
+    importable with legacy `__module__` identity for existing scheduler/tests.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record the repository body owner while retaining the legacy chain facade.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "persistence_repository_compat or candidate_state"`;
+    `uv run pytest -q tests/test_gateway_reconcile.py -k "reserve_pipeline_job_sql_absorbs_all_unique_conflicts"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_repository.py services/orchestrator/chain_repository_state.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
