@@ -99,3 +99,20 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_execution.py services/orchestrator/chain_forecast_submission.py services/orchestrator/chain_forecast_templates.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.6 Extract forecast state/run-context owner slice.
+  - Module/Scope: move `ForecastOrchestrator` run-context, forecast manifest,
+    warm-start selection, strict/prefilled state validation, exact-state lookup,
+    and state QC method bodies from `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_forecast_state.py`.
+  - Stable Facade: keep legacy forecast state private methods on
+    `services.orchestrator.chain`, lazily forwarding to the owner module while
+    preserving manifest helper identity and warm-start error semantics.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain_forecast_state.py`, kept below 1000 lines.
+  - Verification: `uv run pytest -q tests/test_warm_start_chaining.py tests/test_warm_start.py`;
+    `uv run pytest -q tests/test_orchestration_chain.py -k "chain_manifest_legacy_methods_delegate or warm_start or initial_state or prefilled or strict_forecast_state or build_run_context or manifest"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_state.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
