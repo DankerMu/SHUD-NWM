@@ -257,6 +257,14 @@ def write_prelock_blocked_evidence(
 ) -> Path | None:
     checks = root_preflight.get("checks")
     evidence_check = checks.get("evidence_root") if isinstance(checks, Mapping) else None
+    blockers = root_preflight.get("blockers")
+    evidence_root_blocked = (
+        any(isinstance(blocker, Mapping) and blocker.get("field") == "evidence_root" for blocker in blockers)
+        if isinstance(blockers, list)
+        else False
+    )
+    if evidence_root_blocked:
+        return None
     if not isinstance(evidence_check, Mapping) or evidence_check.get("writable") is not True:
         return None
     try:
@@ -266,7 +274,7 @@ def write_prelock_blocked_evidence(
     except SchedulerEvidenceWriteError as error:
         evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
-    except OSError as error:
+    except (OSError, RuntimeError, ValueError) as error:
         evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
 
@@ -321,12 +329,17 @@ def reserve_pre_execution_evidence(
             error.details,
         )
     except OSError as error:
+        details = (
+            {"error_type": type(error).__name__}
+            if bool(getattr(context.config, "scheduler_db_free_required", False))
+            else {"error": str(error)}
+        )
         return _call_reservation_blocked_payload(
             context,
             pass_id,
             artifact_path,
             "evidence_write_failed",
-            {"error": str(error)},
+            details,
         )
     return payload
 

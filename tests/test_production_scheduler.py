@@ -6238,6 +6238,50 @@ def test_db_free_evidence_reservation_blocker_masks_artifact_path(
     assert "db-free-local-root" not in rendered
 
 
+def test_db_free_evidence_reservation_generic_oserror_masks_error_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    from services.orchestrator import scheduler_evidence
+
+    started_at = _dt("2026-06-27T16:00:00Z")
+    config = ProductionSchedulerConfig(dry_run=False, now=started_at)
+    sensitive_path = tmp_path / "db-free-local-root" / "secret-token" / "evidence.json"
+
+    def _raise_sensitive_oserror(
+        _artifact_name: str,
+        _serialized: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        raise OSError(f"permission denied writing {sensitive_path} via {artifact_path} fd={dir_fd}")
+
+    context = _scheduler_evidence_test_context(config, write_new_regular_file=_raise_sensitive_oserror)
+    pass_id = "scheduler_2026062716_abcdef123456"
+    Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
+
+    blocked = scheduler_evidence.reserve_pre_execution_evidence(
+        context,
+        pass_id,
+        started_at,
+        1,
+        now=started_at,
+    )
+    rendered = json.dumps(blocked, sort_keys=True)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "evidence_write_failed"
+    assert blocked["artifact_path"] == "[local-path]"
+    assert blocked["error_type"] == "OSError"
+    assert "error" not in blocked
+    assert str(sensitive_path) not in rendered
+    assert str(config.evidence_dir) not in rendered
+    assert "db-free-local-root" not in rendered
+    assert "secret-token" not in rendered
+
+
 def test_db_free_prelock_evidence_write_failure_masks_artifact_path(
     monkeypatch: Any,
     tmp_path: Path,
@@ -6261,6 +6305,39 @@ def test_db_free_prelock_evidence_write_failure_masks_artifact_path(
     assert result.evidence["evidence_write_error"]["artifact_path"] == "[local-path]"
     assert str(evidence_dir) not in rendered
     assert "db-free-local-root" not in rendered
+
+
+def test_db_free_prelock_evidence_root_outside_workspace_skips_artifact_write(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    outside_evidence_root = tmp_path / "outside-evidence-secret-token"
+    outside_evidence_root.mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(outside_evidence_root))
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.artifact_path is None
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["reason"] == "scheduler_root_preflight_blocked"
+    assert result.evidence["root_preflight"]["status"] == "blocked"
+    blocker = next(
+        blocker
+        for blocker in result.evidence["root_preflight"]["blockers"]
+        if blocker["field"] == "evidence_root"
+    )
+    assert blocker["path"] == "[local-path]"
+    assert result.evidence["root_preflight"]["checks"]["evidence_root"]["path"] == "[local-path]"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert str(outside_evidence_root) not in rendered
+    assert "outside-evidence-secret-token" not in rendered
 
 
 def test_db_free_prelock_size_limit_failure_masks_artifact_path(
@@ -15110,6 +15187,7 @@ def _scheduler_evidence_test_context(
     config: ProductionSchedulerConfig,
     *,
     max_evidence_bytes: int = scheduler_module.MAX_EVIDENCE_BYTES,
+    write_new_regular_file: Any | None = None,
 ) -> Any:
     from services.orchestrator import scheduler_evidence
 
@@ -15119,7 +15197,7 @@ def _scheduler_evidence_test_context(
         require_under_workspace=scheduler_module._require_under_workspace,
         max_evidence_bytes=max_evidence_bytes,
         bounded_evidence_payload=scheduler_evidence.bounded_evidence_payload,
-        write_new_regular_file=scheduler_evidence.write_new_regular_file,
+        write_new_regular_file=write_new_regular_file or scheduler_evidence.write_new_regular_file,
         require_evidence_artifact_available=scheduler_evidence.require_evidence_artifact_available,
         reservation_blocked_payload=scheduler_evidence.evidence_reservation_blocked_payload,
     )
