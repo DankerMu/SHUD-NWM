@@ -119,6 +119,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.8 Extract scheduler type owner slice.
+  - Module/Scope: move `SchedulerPassResult`, `RegisteredSchedulerModel`,
+    `SchedulerCandidate`, and `_resource_profile_project_identity` from
+    `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_types.py`.
+  - Stable Facade: keep legacy scheduler type names importable from
+    `services.orchestrator.scheduler` by aliasing owner definitions and
+    preserving the legacy `__module__` value.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_types.py` as the scheduler type owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "coerce_registered_model or candidate_identity or production_identity_contract or resource_profile or SchedulerCandidate or RegisteredSchedulerModel"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_types.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
