@@ -46,3 +46,20 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_source_cycle.py services/orchestrator/chain_runtime_utils.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.3 Extract chain analysis method owner slice.
+  - Module/Scope: move `AnalysisOrchestrator` state lookup, context
+    construction, manifest construction, stage status hooks, pipeline event
+    target, and best-available helper bodies from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_analysis.py`.
+  - Stable Facade: keep the legacy `AnalysisOrchestrator` private methods on
+    `services.orchestrator.chain`, forwarding through the owner module while
+    preserving legacy monkeypatch behavior for analysis helper functions.
+  - Inventory/Evidence Update: add chain inventory coverage for the retained
+    `chain-analysis-forwarders` method group.
+  - Verification: `uv run pytest -q tests/test_analysis_pipeline.py tests/test_orchestration_chain.py -k "analysis or manifest"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_analysis.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
