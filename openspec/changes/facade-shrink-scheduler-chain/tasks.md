@@ -154,6 +154,23 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.10 Extract scheduler gateway/preflight orchestration owner slice.
+  - Module/Scope: move Slurm preflight orchestration, gateway backend
+    resolution, bounded gateway health probing, gateway availability checks,
+    and gateway constants from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_gateway.py`.
+  - Stable Facade: keep legacy scheduler private gateway/preflight names
+    importable and monkeypatch-compatible through
+    `services.orchestrator.scheduler`, forwarding lazily to the owner module.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_gateway.py` as the scheduler gateway/preflight
+    orchestration owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_cli_publish_qdown.py tests/test_run_qhh_continuous.py -k "slurm_gateway or slurm_preflight or grib_env or database_url or database_host"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_gateway.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
