@@ -16810,6 +16810,26 @@ def test_file_canonical_readiness_evidence_redacts_identity_paths(
     assert "private-bucket" not in rendered
     assert "/home/ghdc" not in rendered
 
+    unavailable = provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=(0,),
+        policy_identity={"source": "gfs", "policy_uri": "s3://private-bucket/raw/other-policy.json"},
+        source_object_identity=source_object_identity,
+        canonical_product_id=fixture["canonical_product_id"],
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+    unavailable_rendered = json.dumps(unavailable, sort_keys=True)
+
+    assert unavailable["ready"] is False
+    assert unavailable["reason"] == "canonical_readiness_index_identity_mismatch"
+    assert unavailable["policy_identity"]["policy_uri"] == "[object-uri]"
+    assert unavailable["source_object_identity"]["manifest_uri"] == "[object-uri]"
+    assert unavailable["source_object_identity"]["manifest_path"] == "[local-path]"
+    assert "private-bucket" not in unavailable_rendered
+    assert "/home/ghdc" not in unavailable_rendered
+
 
 def test_file_canonical_readiness_publisher_failure_keeps_previous_index(
     monkeypatch: Any,
@@ -17276,8 +17296,10 @@ def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_d
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["restart_stage"] == "convert"
     assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["status"] == "ready"
+    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["manifest_uri"] == "[object-uri]"
     assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
     assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
+    assert submitted_basin["state_evidence"]["raw_manifest_reuse"]["manifest_uri"] == "[object-uri]"
     assert submitted_basin["state_evidence"]["canonical_readiness"]["candidate_row_count"] == 0
     rendered_submission = json.dumps(
         {"calls": orchestrator.calls, "evidence": result.evidence},

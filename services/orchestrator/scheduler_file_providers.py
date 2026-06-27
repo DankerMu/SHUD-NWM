@@ -391,10 +391,12 @@ class FileRawHandoffCandidateRepository:
             "nfs_raw_manifest": _public_raw_manifest_evidence(readiness),
         }
         if isinstance(readiness, Mapping) and readiness.get("status") == "ready":
-            payload["forecast_cycle"] = source_cycle_raw_manifest.forecast_cycle_from_raw_manifest_readiness(
-                readiness,
-                source_id=source_id,
-                cycle_time=cycle_time,
+            payload["forecast_cycle"] = _sanitize_file_provider_evidence(
+                source_cycle_raw_manifest.forecast_cycle_from_raw_manifest_readiness(
+                    readiness,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
             )
         return payload
 
@@ -1098,8 +1100,8 @@ def _file_readiness_unavailable(
             "basin_id": basin_id,
             "expected_leads": list(forecast_hours),
             "accepted_horizon": _accepted_horizon_from_hours(forecast_hours),
-            "policy_identity": dict(policy_identity),
-            "source_object_identity": dict(source_object_identity),
+            "policy_identity": _sanitize_file_provider_evidence(dict(policy_identity)),
+            "source_object_identity": _sanitize_file_provider_evidence(dict(source_object_identity)),
             "policy_identity_matched": False,
             "source_object_identity_matched": False,
             "readiness_index": dict(index_evidence),
@@ -1211,10 +1213,7 @@ def _public_raw_manifest_evidence(readiness: Mapping[str, Any]) -> dict[str, Any
         key_text = str(key)
         if key_text in hidden_local_fields:
             continue
-        if key_text == "manifest_uri":
-            payload[key_text] = value
-        else:
-            payload[key_text] = _sanitize_file_provider_evidence(value)
+        payload[key_text] = _sanitize_file_provider_evidence_scalar(key_text, value)
     for key in hidden_local_fields:
         if key in readiness and readiness.get(key) not in (None, ""):
             payload[key] = "[local-path]"
