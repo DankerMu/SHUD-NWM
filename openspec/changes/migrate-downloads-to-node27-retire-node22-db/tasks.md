@@ -1,13 +1,17 @@
 ## 1. Current-State Evidence
 
-- [ ] 1.1 Capture node-22 scheduler, Slurm Gateway, compute API, historical
+- [x] 1.1 Capture node-22 scheduler, Slurm Gateway, compute API, historical
   PostgreSQL `:55433`, and sanitized runtime env evidence.
   Evidence floor: receipt identifies active processes, ports, scheduler status,
   `DATABASE_URL` host/port without credentials, and current Slurm queue.
-- [ ] 1.2 Capture node-27 ingest/display DB identity, cron status, public
+- [x] 1.2 Capture node-27 ingest/display DB identity, cron status, public
   latest-product GFS/IFS identity, and object-store roots.
   Evidence floor: receipt proves node-27 active DB is `:55432`, display runtime
   remains readonly, and public API reports the latest GFS/IFS cycle.
+  Evidence: `docs/runbooks/receipts/2026-06-27-node27-download-migration-phase0.md`
+  records node-22 scheduler/Slurm/API/PostgreSQL state, sanitized compute env,
+  node-27 ingest/display env separation, cron, local health, and public
+  latest-product identity for GFS/IFS at `2026-06-26T12:00:00Z`.
 
 ## 2. Node-27 Download Runner
 
@@ -66,4 +70,3 @@
   Evidence floor: static guard fails on active node-22 `:55433`/business
   `DATABASE_URL` writer assumptions, while allowing historical archived context;
   OpenSpec, ruff, focused tests, docs lint, and live receipts pass.
-
