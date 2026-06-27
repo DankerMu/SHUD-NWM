@@ -7474,6 +7474,64 @@ def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventor
         assert token in inventory_text
 
 
+def test_chain_workspace_log_compat_forwarders_match_owner_module_and_inventory() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_workspace
+
+    method_names = legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDER_NAMES
+    method_owner_names = legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_METHOD_OWNER_FUNCTION_NAMES
+    top_level_names = legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDER_NAMES
+    top_level_owner_names = legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES
+
+    assert len(method_names) == len(set(method_names))
+    assert len(method_owner_names) == len(set(method_owner_names))
+    assert len(method_names) == len(method_owner_names)
+    assert len(top_level_names) == len(top_level_owner_names)
+    assert legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_OWNER_MISSING == ()
+    assert legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING == ()
+    assert legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING == ()
+    assert set(chain_workspace.__all__) == set(legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_OWNER_FUNCTION_NAMES)
+    assert set(legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDERS) == set(method_names)
+    assert set(legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDERS) == set(top_level_names)
+
+    for facade_name, owner_name in zip(method_names, method_owner_names, strict=True):
+        assert legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDERS[facade_name] is getattr(
+            chain_workspace,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
+    for facade_name, owner_name in zip(top_level_names, top_level_owner_names, strict=True):
+        assert legacy_chain._CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDERS[facade_name] is getattr(
+            chain_workspace,
+            owner_name,
+        )
+        assert callable(getattr(legacy_chain, facade_name))
+
+    inventory_text = _chain_inventory_text()
+    compat_tokens = sorted(
+        name for name in vars(legacy_chain) if name.startswith("_CHAIN_WORKSPACE_LOG_COMPAT_")
+    )
+    for token in (*compat_tokens, "chain_workspace", "chain-workspace-log-forwarders"):
+        assert token in inventory_text
+
+
+def test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_slurm_client
+
+    assert issubclass(legacy_chain.HttpSlurmGatewayClient, chain_slurm_client.HttpSlurmGatewayClient)
+    client = legacy_chain.HttpSlurmGatewayClient("http://gateway.example/")
+    assert client.base_url == "http://gateway.example"
+    assert client._error_cls is legacy_chain.SlurmClientError
+    assert client._coerce_mapping is legacy_chain._coerce_mapping
+    assert client._response_json_or_text is legacy_chain._response_json_or_text
+    assert client._error_code_from_response is legacy_chain._error_code_from_response
+
+    inventory_text = _chain_inventory_text()
+    for token in ("HttpSlurmGatewayClient", "chain_slurm_client.HttpSlurmGatewayClient"):
+        assert token in inventory_text
+
+
 def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

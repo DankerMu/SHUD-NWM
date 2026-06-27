@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -9,8 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
-
-import httpx
 
 import services.orchestrator.time_consistency as _time_consistency_module
 import services.tile_publisher as _tile_publisher_module
@@ -40,8 +37,10 @@ from services.orchestrator import (
     chain_array_accounting,
     chain_manifests,
     chain_runtime_utils,
+    chain_slurm_client,
     chain_source_cycle,
     chain_stage_execution,
+    chain_workspace,
     persistence,
     production_contract,
     reservation,
@@ -910,6 +909,53 @@ if tuple(field for field, _ in _CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING
 ):
     raise RuntimeError("chain array accounting dependency bindings drifted from field fixture")
 
+_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDER_NAMES = (
+    "_log_uri_for_pipeline_job",
+    "_display_log_publication_for_stage",
+    "_display_log_publication_for_pipeline_job",
+    "_try_publish_log_for_advertise",
+    "_log_persistence_error",
+    "_raise_publish_error_after_durable_update",
+    "_persist_gateway_logs",
+    "_write_local_stage_log",
+    "_log_uri_for_stage",
+    "_published_log_path",
+    "_workspace_path",
+    "_safe_workspace_write_bytes",
+    "_safe_workspace_read_bytes",
+)
+_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_OWNER_FUNCTION_NAMES = (
+    "log_uri_for_pipeline_job",
+    "display_log_publication_for_stage",
+    "display_log_publication_for_pipeline_job",
+    "try_publish_log_for_advertise",
+    "log_persistence_error",
+    "raise_publish_error_after_durable_update",
+    "persist_gateway_logs",
+    "write_local_stage_log",
+    "log_uri_for_stage",
+    "published_log_path",
+    "workspace_path",
+    "safe_workspace_write_bytes",
+    "safe_workspace_read_bytes",
+)
+_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDER_NAMES = ("_workspace_relative_parts",)
+_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES = ("workspace_relative_parts",)
+_CHAIN_WORKSPACE_LOG_COMPAT_OWNER_FUNCTION_NAMES = (
+    *_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_OWNER_FUNCTION_NAMES,
+    *_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+)
+_CHAIN_WORKSPACE_LOG_COMPAT_OWNER_MISSING = tuple(
+    name for name in _CHAIN_WORKSPACE_LOG_COMPAT_OWNER_FUNCTION_NAMES if not hasattr(chain_workspace, name)
+)
+if _CHAIN_WORKSPACE_LOG_COMPAT_OWNER_MISSING:
+    raise RuntimeError(
+        "chain workspace/log compatibility names missing from owner module: "
+        f"{', '.join(_CHAIN_WORKSPACE_LOG_COMPAT_OWNER_MISSING)}"
+    )
+if set(getattr(chain_workspace, "__all__", ())) != set(_CHAIN_WORKSPACE_LOG_COMPAT_OWNER_FUNCTION_NAMES):
+    raise RuntimeError("chain workspace/log compatibility names drifted from owner __all__")
+
 
 def build_model_run_assembly(
     basin: Mapping[str, Any],
@@ -1358,76 +1404,16 @@ class OrchestratorRepository(Protocol):
         raise NotImplementedError
 
 
-class HttpSlurmGatewayClient:
+class HttpSlurmGatewayClient(chain_slurm_client.HttpSlurmGatewayClient):
     def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-    def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", "/api/v1/slurm/jobs", json=payload, expected=(200, 201))
-
-    def submit_job_array(
-        self,
-        job_type: str | Mapping[str, Any],
-        cycle_id: str | None = None,
-        stage_name: str | None = None,
-        tasks: Sequence[Mapping[str, Any]] | None = None,
-        manifest: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if isinstance(job_type, Mapping):
-            payload = dict(job_type)
-        else:
-            payload = {"job_type": job_type}
-        if cycle_id is not None:
-            payload["cycle_id"] = cycle_id
-        if stage_name is not None:
-            payload["stage_name"] = stage_name
-        if tasks is not None:
-            payload["tasks"] = [dict(task) for task in tasks]
-        if manifest is not None:
-            payload["manifest"] = dict(manifest)
-        return self._request("POST", "/api/v1/slurm/job-arrays", json=payload, expected=(200, 201))
-
-    def get_job_status(self, job_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/slurm/jobs/{job_id}", expected=(200,))
-
-    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
-        response = self._request("GET", f"/api/v1/slurm/jobs/{job_id}/array-tasks", expected=(200,))
-        if isinstance(response, list):
-            return [dict(item) for item in response]
-        tasks = response.get("tasks") if isinstance(response, Mapping) else None
-        if isinstance(tasks, Sequence) and not isinstance(tasks, str | bytes):
-            return [dict(_coerce_mapping(item)) for item in tasks]
-        raise SlurmClientError(
-            "SLURM_GATEWAY_INVALID_RESPONSE",
-            "Slurm Gateway returned an invalid array task response.",
-            {"response": response},
+        super().__init__(
+            base_url,
+            timeout=timeout,
+            error_cls=SlurmClientError,
+            coerce_mapping=_coerce_mapping,
+            response_json_or_text=_response_json_or_text,
+            error_code_from_response=_error_code_from_response,
         )
-
-    def fetch_logs(self, job_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v1/slurm/jobs/{job_id}/logs", expected=(200,))
-
-    def cancel_job(self, job_id: str) -> dict[str, Any]:
-        return self._request("DELETE", f"/api/v1/slurm/jobs/{job_id}", expected=(200,))
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        expected: tuple[int, ...],
-        json: dict[str, Any] | None = None,
-    ) -> Any:
-        try:
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-                response = client.request(method, path, json=json)
-        except httpx.HTTPError as error:
-            raise SlurmClientError("SLURM_GATEWAY_UNAVAILABLE", f"Slurm Gateway request failed: {error}") from error
-        if response.status_code not in expected:
-            details = _response_json_or_text(response)
-            code = _error_code_from_response(details)
-            raise SlurmClientError(code, f"Slurm Gateway returned HTTP {response.status_code}.", {"response": details})
-        return response.json()
 
 
 class ForecastOrchestrator:
@@ -1693,22 +1679,12 @@ class ForecastOrchestrator:
         return cancelled
 
     def _log_uri_for_pipeline_job(self, job: Mapping[str, Any]) -> str | None:
-        if job.get("log_uri"):
-            return str(job["log_uri"])
-        run_id = job.get("run_id")
-        stage = job.get("stage")
-        job_id = job.get("job_id")
-        if run_id and stage and job_id:
-            return self._log_uri_for_stage(
-                source_id=_source_id_from_cycle_id(job.get("cycle_id")) or self.config.source_id,
-                cycle_time=_cycle_time_from_cycle_id(job.get("cycle_id")),
-                run_id=str(run_id),
-                job_id=str(job_id),
-                stage=str(stage),
-            )
-        if run_id and stage:
-            return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
-        return None
+        return chain_workspace.log_uri_for_pipeline_job(
+            self,
+            job,
+            source_id_from_cycle_id=_source_id_from_cycle_id,
+            cycle_time_from_cycle_id=_cycle_time_from_cycle_id,
+        )
 
     def _display_log_publication_for_stage(
         self,
@@ -1720,62 +1696,31 @@ class ForecastOrchestrator:
         stage: str,
         existing_log_uri: str | None = None,
     ) -> DisplayLogPublication:
-        candidate_uri = existing_log_uri or self._log_uri_for_stage(
+        return chain_workspace.display_log_publication_for_stage(
+            self,
             source_id=source_id,
             cycle_time=cycle_time,
             run_id=run_id,
             job_id=job_id,
             stage=stage,
-        )
-        should_persist_logs = existing_log_uri is None
-        advertised_uri = existing_log_uri
-        return DisplayLogPublication(
-            candidate_uri=candidate_uri,
-            advertised_uri=advertised_uri,
-            should_persist_logs=should_persist_logs,
+            existing_log_uri=existing_log_uri,
         )
 
     def _display_log_publication_for_pipeline_job(self, job: Mapping[str, Any]) -> DisplayLogPublication | None:
-        candidate_uri = self._log_uri_for_pipeline_job(job)
-        if candidate_uri is None:
-            return None
-        existing_log_uri = str(job["log_uri"]) if job.get("log_uri") else None
-        should_persist_logs = existing_log_uri is None
-        advertised_uri = existing_log_uri
-        return DisplayLogPublication(
-            candidate_uri=candidate_uri,
-            advertised_uri=advertised_uri,
-            should_persist_logs=should_persist_logs,
-        )
+        return chain_workspace.display_log_publication_for_pipeline_job(self, job)
 
     def _try_publish_log_for_advertise(
         self, slurm_job_id: str, publication: DisplayLogPublication
     ) -> DisplayLogPublicationAttempt:
-        if not publication.should_persist_logs:
-            return DisplayLogPublicationAttempt(advertised_uri=publication.advertised_uri)
-        try:
-            self._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
-        except Exception as exc:
-            publish_error = self._log_persistence_error(publication.candidate_uri, exc)
-            return DisplayLogPublicationAttempt(advertised_uri=None, error=publish_error)
-        return DisplayLogPublicationAttempt(advertised_uri=publication.candidate_uri)
+        return chain_workspace.try_publish_log_for_advertise(self, slurm_job_id, publication)
 
     @staticmethod
     def _log_persistence_error(candidate_uri: str, error: Exception) -> OrchestratorError:
-        if isinstance(error, OrchestratorError) and error.error_code == "PUBLISHED_LOG_WRITE_FAILED":
-            details = dict(error.details)
-            if details.get("log_uri") == candidate_uri:
-                return error
-        return OrchestratorError(
-            "PUBLISHED_LOG_WRITE_FAILED",
-            "Failed to publish gateway logs.",
-            {"log_uri": candidate_uri},
-        )
+        return chain_workspace.log_persistence_error(candidate_uri, error)
 
     @staticmethod
     def _raise_publish_error_after_durable_update(attempt: DisplayLogPublicationAttempt | None) -> None:
-        if attempt is not None and attempt.error is not None:
-            raise attempt.error
+        return chain_workspace.raise_publish_error_after_durable_update(attempt)
 
     def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
         from services.orchestrator import chain_forecast_execution
@@ -1951,27 +1896,16 @@ class ForecastOrchestrator:
         )
 
     def _write_local_stage_log(self, log_uri: str, payload: Mapping[str, Any]) -> str:
-        content = json.dumps(redact_payload(dict(payload)), sort_keys=True).encode("utf-8")
-        published_path = self._published_log_path(log_uri)
-        if published_path is None:
-            self.object_store.write_bytes_atomic(log_uri, content)
-            return log_uri
-        published_root = _absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
-        try:
-            ensure_directory_no_follow(published_root)
-            atomic_write_bytes_no_follow(
-                published_path,
-                content,
-                containment_root=published_root,
-                temp_suffix="part",
-            )
-        except (OSError, SafeFilesystemError) as exc:
-            raise OrchestratorError(
-                "PUBLISHED_LOG_WRITE_FAILED",
-                "Failed to publish local stage logs.",
-                {"log_uri": log_uri},
-            ) from exc
-        return log_uri
+        return chain_workspace.write_local_stage_log(
+            self,
+            log_uri,
+            payload,
+            redact_payload_fn=redact_payload,
+            absolute_configured_path=_absolute_configured_path,
+            ensure_directory=ensure_directory_no_follow,
+            atomic_write_bytes=atomic_write_bytes_no_follow,
+            safe_filesystem_error_cls=SafeFilesystemError,
+        )
 
     def _resume_cycle_stage(
         self,
@@ -3158,34 +3092,17 @@ class ForecastOrchestrator:
         return chain_forecast_templates.render_stage_template(self, stage, context)
 
     def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> None:
-        logs = _coerce_mapping(self.slurm_client.fetch_logs(slurm_job_id))
-        content = str(logs.get("logs", ""))
-        try:
-            published_path = self._published_log_path(log_uri)
-            if published_path is None:
-                self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
-                return
-            published_root = _absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
-            try:
-                ensure_directory_no_follow(published_root)
-                atomic_write_bytes_no_follow(
-                    published_path,
-                    content.encode("utf-8"),
-                    containment_root=published_root,
-                    temp_suffix="part",
-                )
-            except (OSError, SafeFilesystemError) as exc:
-                raise OrchestratorError(
-                    "PUBLISHED_LOG_WRITE_FAILED",
-                    "Failed to publish gateway logs.",
-                    {"log_uri": log_uri},
-                ) from exc
-        except ArtifactLogError as exc:
-            raise OrchestratorError(
-                "PUBLISHED_LOG_WRITE_FAILED",
-                "Failed to publish gateway logs.",
-                {"log_uri": log_uri},
-            ) from exc
+        return chain_workspace.persist_gateway_logs(
+            self,
+            slurm_job_id,
+            log_uri,
+            coerce_mapping=_coerce_mapping,
+            absolute_configured_path=_absolute_configured_path,
+            ensure_directory=ensure_directory_no_follow,
+            atomic_write_bytes=atomic_write_bytes_no_follow,
+            safe_filesystem_error_cls=SafeFilesystemError,
+            artifact_log_error_cls=ArtifactLogError,
+        )
 
     def _log_uri_for_stage(
         self,
@@ -3196,26 +3113,26 @@ class ForecastOrchestrator:
         job_id: str,
         stage: str,
     ) -> str:
-        if _published_artifact_root_configured():
-            return published_log_uri(
-                source=normalize_source_id(source_id),
-                cycle_time=cycle_time or _utcnow(),
-                run_id=run_id,
-                job_id=job_id,
-                stream=_log_stream_for_stage(stage),
-            )
-        return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
+        return chain_workspace.log_uri_for_stage(
+            self,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            run_id=run_id,
+            job_id=job_id,
+            stage=stage,
+            published_artifact_root_configured=_published_artifact_root_configured,
+            utcnow=_utcnow,
+            log_stream_for_stage=_log_stream_for_stage,
+            normalize_source_id_fn=normalize_source_id,
+            published_log_uri_fn=published_log_uri,
+        )
 
     def _published_log_path(self, log_uri: str) -> Path | None:
-        published_root = os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip()
-        if not published_root:
-            return None
-        prefix = os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://").strip() or "published://"
-        if not log_uri.startswith(prefix):
-            return None
-        relative = published_log_relative_path(log_uri, uri_prefix=prefix)
-        root = _absolute_configured_path(Path(published_root))
-        return root / relative
+        return chain_workspace.published_log_path(
+            log_uri,
+            absolute_configured_path=_absolute_configured_path,
+            published_log_relative_path_fn=published_log_relative_path,
+        )
 
     def _build_run_context(
         self,
@@ -3385,35 +3302,25 @@ class ForecastOrchestrator:
         chain_manifests.write_run_manifest(self, context, manifest)
 
     def _workspace_path(self, *parts: str) -> Path:
-        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
-        if any(Path(part).is_absolute() or ".." in Path(part).parts for part in parts):
-            raise OrchestratorError(
-                "WORKSPACE_PATH_ESCAPE",
-                "Workspace path components must be relative and must not contain traversal segments.",
-                {"parts": list(parts), "workspace_root": str(workspace_root)},
-            )
-        resolved = workspace_root.joinpath(*parts)
-        try:
-            resolved.relative_to(workspace_root)
-        except ValueError as exc:
-            raise OrchestratorError(
-                "WORKSPACE_PATH_ESCAPE",
-                "Resolved workspace path is outside workspace_root.",
-                {"path": str(resolved), "workspace_root": str(workspace_root)},
-            ) from exc
-        return resolved
+        return chain_workspace.workspace_path(self, *parts)
 
     def _safe_workspace_write_bytes(self, path: Path, content: bytes) -> Path:
-        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
-        _workspace_relative_parts(path, workspace_root)
-        ensure_directory_no_follow(workspace_root)
-        ensure_directory_no_follow(path.parent, containment_root=workspace_root)
-        return atomic_write_bytes_no_follow(path, content, containment_root=workspace_root, temp_suffix="part")
+        return chain_workspace.safe_workspace_write_bytes(
+            self,
+            path,
+            content,
+            workspace_relative_parts_fn=_workspace_relative_parts,
+            ensure_directory=ensure_directory_no_follow,
+            atomic_write_bytes=atomic_write_bytes_no_follow,
+        )
 
     def _safe_workspace_read_bytes(self, path: Path) -> bytes:
-        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
-        _workspace_relative_parts(path, workspace_root)
-        return read_bytes_no_follow(path, containment_root=workspace_root)
+        return chain_workspace.safe_workspace_read_bytes(
+            self,
+            path,
+            workspace_relative_parts_fn=_workspace_relative_parts,
+            read_bytes=read_bytes_no_follow,
+        )
 
 
 _CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING = tuple(
@@ -3981,14 +3888,47 @@ def _nested_mapping(value: Any) -> dict[str, Any]:
 
 
 def _workspace_relative_parts(path: Path, workspace_root: Path) -> tuple[str, ...]:
-    try:
-        relative = path.relative_to(workspace_root)
-    except ValueError as exc:
-        raise SafeFilesystemError(f"Path must stay under workspace root: {path}") from exc
-    parts = tuple(relative.parts)
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise SafeFilesystemError(f"Unsafe workspace path: {path}")
-    return parts
+    return chain_workspace.workspace_relative_parts(path, workspace_root)
+
+
+_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING = tuple(
+    name
+    for name in _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDER_NAMES
+    if not callable(getattr(ForecastOrchestrator, name, None))
+)
+_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING = tuple(
+    name for name in _CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDER_NAMES if not callable(globals().get(name))
+)
+if _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING:
+    raise RuntimeError(
+        "chain workspace/log compatibility methods missing from facade: "
+        f"{', '.join(_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING)}"
+    )
+if _CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING:
+    raise RuntimeError(
+        "chain workspace/log compatibility top-level helpers missing from facade: "
+        f"{', '.join(_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING)}"
+    )
+_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_workspace, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDER_NAMES,
+            _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
+_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
+    {
+        facade_name: getattr(chain_workspace, owner_name)
+        for facade_name, owner_name in zip(
+            _CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDER_NAMES,
+            _CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
+            strict=True,
+        )
+    }
+)
 
 
 def parse_sacct_array_results(

@@ -169,3 +169,24 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_state.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.7 Extract chain workspace/log and HTTP Slurm client owner slices.
+  - Module/Scope: move workspace path safety, workspace read/write, published
+    log URI/path construction, gateway log persistence, local stage log writing,
+    and log-publication helper bodies from `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_workspace.py`; move
+    `HttpSlurmGatewayClient` request behavior to
+    `services/orchestrator/chain_slurm_client.py`.
+  - Stable Facade: keep legacy `ForecastOrchestrator` private workspace/log
+    methods, top-level `_workspace_relative_parts`, and
+    `services.orchestrator.chain.HttpSlurmGatewayClient` import path compatible
+    through thin forwarders/subclassing.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py`, `chain_workspace.py`, and `chain_slurm_client.py`, each owner
+    module kept below 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "workspace_log_compat or http_slurm_gateway_client or pipeline_logs or workspace or published_log"`;
+    `uv run pytest -q tests/test_pipeline_logs_artifacts.py`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_workspace.py services/orchestrator/chain_slurm_client.py tests/test_orchestration_chain.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
