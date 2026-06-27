@@ -449,6 +449,17 @@ from services.orchestrator.scheduler_core import ProductionScheduler
 
 ProductionScheduler.__module__ = __name__
 
+from services.orchestrator.scheduler_file_providers import (  # noqa: E402
+    CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
+    REGISTRY_MANIFEST_SCHEMA_VERSION,
+    FileCanonicalReadinessProvider,
+    FileRawHandoffCandidateRepository,
+    FileSchedulerModelRegistry,
+    SchedulerFileProviderError,
+    publish_canonical_readiness_index,
+    publish_scheduler_registry_manifest,
+)
+
 
 def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[str, Any]]:
     from services.orchestrator import scheduler_models

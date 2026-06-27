@@ -3,31 +3,36 @@ from __future__ import annotations
 from services.orchestrator import scheduler as _scheduler
 
 
-class _DbFreeBlockedModelRegistry:
-    def list_models(
-        self,
-        *,
-        basin_version_id: str | None,
-        active: bool | None,
-        limit: int,
-        offset: int,
-    ) -> _scheduler.Mapping[str, _scheduler.Any]:
-        del basin_version_id, active, limit, offset
-        raise RuntimeError("DB-free scheduler file registry provider is not implemented")
+def _db_free_file_registry_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.ModelRegistryReader:
+    from services.orchestrator.scheduler_file_providers import FileSchedulerModelRegistry
 
-    def get_model(self, model_id: str) -> _scheduler.Mapping[str, _scheduler.Any]:
-        del model_id
-        raise RuntimeError("DB-free scheduler file registry provider is not implemented")
+    return FileSchedulerModelRegistry(
+        str(config.scheduler_registry_manifest),
+        object_store_root=config.object_store_root,
+        object_store_prefix=_scheduler.os.getenv("OBJECT_STORE_PREFIX"),
+        published_artifact_root=config.published_artifact_root,
+        now=config.now,
+    )
 
 
-def _db_free_file_provider_blocker(config: _scheduler.ProductionSchedulerConfig) -> dict[str, _scheduler.Any]:
-    return {
-        "code": "db_free_file_providers_not_implemented",
-        "field": "db_free_file_providers",
-        "reason": "file_registry_readiness_journal_state_index_not_implemented",
-        "message": "DB-free scheduler mode is configured, but file registry/readiness/journal/state-index providers are not implemented in this slice.",
-        "db_free_runtime": config.db_free_runtime_evidence(),
-    }
+def _db_free_canonical_readiness_provider_from_config(
+    config: _scheduler.ProductionSchedulerConfig,
+) -> _scheduler.CanonicalReadinessProvider:
+    from services.orchestrator.scheduler_file_providers import FileCanonicalReadinessProvider
+
+    return FileCanonicalReadinessProvider(
+        str(config.scheduler_canonical_readiness_index),
+        object_store_root=config.object_store_root,
+        object_store_prefix=_scheduler.os.getenv("OBJECT_STORE_PREFIX"),
+        published_artifact_root=config.published_artifact_root,
+        now=config.now,
+    )
+
+
+def _db_free_raw_handoff_repository() -> _scheduler.ActiveCandidateRepository:
+    from services.orchestrator.scheduler_file_providers import FileRawHandoffCandidateRepository
+
+    return FileRawHandoffCandidateRepository()
 
 
 class ProductionScheduler:
@@ -50,31 +55,34 @@ class ProductionScheduler:
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
         db_free_required = bool(getattr(self.config, "db_free_required", False))
-        self._db_free_file_provider_blocker: dict[str, _scheduler.Any] | None = None
         self._reconcile_store = reconcile_store
         self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
         self._reconcile_sacct_query = reconcile_sacct_query
         if db_free_required:
-            self.registry = registry if registry is not None else _DbFreeBlockedModelRegistry()
-            self.adapters = dict(adapters or {})
-            self._db_free_file_provider_blocker = _db_free_file_provider_blocker(self.config)
+            self.registry = registry if registry is not None else _db_free_file_registry_from_config(self.config)
+            self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
         else:
             self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
             self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
-        self.active_repository = active_repository
+        if active_repository is not None:
+            self.active_repository = active_repository
+        elif db_free_required:
+            self.active_repository = _db_free_raw_handoff_repository()
+        else:
+            self.active_repository = None
         if (
             canonical_readiness_provider is _scheduler._CANONICAL_READINESS_PROVIDER_UNSET
             or canonical_readiness_provider is None
         ):
-            reason = (
-                "db_free_file_readiness_provider_not_implemented"
-                if db_free_required
-                else "canonical_readiness_provider_absent"
-            )
-            self.canonical_readiness_provider = _scheduler._UnavailableCanonicalReadinessProvider(
-                reason=reason, dependency="canonical_readiness_provider", retryable=True
-            )
+            if db_free_required:
+                self.canonical_readiness_provider = _db_free_canonical_readiness_provider_from_config(self.config)
+            else:
+                self.canonical_readiness_provider = _scheduler._UnavailableCanonicalReadinessProvider(
+                    reason="canonical_readiness_provider_absent",
+                    dependency="canonical_readiness_provider",
+                    retryable=True,
+                )
         else:
             self.canonical_readiness_provider = canonical_readiness_provider
         self.forcing_producer = forcing_producer
@@ -86,6 +94,33 @@ class ProductionScheduler:
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
         config = config or _scheduler.ProductionSchedulerConfig()
         if config.db_free_required:
+            if (
+                config.require_runtime_roots
+                and _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked"
+            ):
+                return cls(
+                    config=config,
+                    registry=_scheduler._BlockedModelRegistry(),
+                    adapters={},
+                    active_repository=None,
+                    canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
+                        reason="db_free_runtime_root_preflight_blocked",
+                        dependency="canonical_readiness_provider",
+                        retryable=True,
+                    ),
+                )
+            if config.db_free_runtime_preflight()["status"] == "blocked":
+                return cls(
+                    config=config,
+                    registry=_scheduler._BlockedModelRegistry(),
+                    adapters={},
+                    active_repository=None,
+                    canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
+                        reason="db_free_runtime_preflight_blocked",
+                        dependency="canonical_readiness_provider",
+                        retryable=True,
+                    ),
+                )
             return cls(config=config)
         if (
             config.require_runtime_roots

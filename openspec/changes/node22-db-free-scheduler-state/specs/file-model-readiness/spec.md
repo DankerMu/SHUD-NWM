@@ -66,6 +66,17 @@ file/object-store index instead of `PsycopgMetStore`.
 - **THEN** scheduler treats canonical readiness as unavailable or incomplete
 - **AND** evidence identifies the failing index field without secrets.
 
+#### Scenario: Readiness publisher writes index last
+
+- **WHEN** the canonical readiness publisher refreshes the file-backed
+  readiness index
+- **THEN** referenced canonical product objects and checksums are verified
+  before publication
+- **AND** the readiness index is written last with schema version,
+  `generated_at`, checksum, source/cycle/model/basin identity, forecast-hour
+  coverage, product counts, product URIs, object-existence evidence, and
+  bounded publisher evidence.
+
 #### Scenario: Raw handoff boundary remains enforced
 
 - **WHEN** node-22 DB-free scheduler evaluates a node-27 raw source cycle

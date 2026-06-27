@@ -472,8 +472,11 @@ def run_once(self) -> SchedulerPassResult:
         # in-flight statuses from accounting. Comment-reconcile finds back a
         # crashed cohort's slurm_job_id so we never re-submit an already
         # in-flight cohort.
-        db_free_file_provider_blocker = getattr(self, "_db_free_file_provider_blocker", None)
-        if self.config.db_free_required and db_free_file_provider_blocker is not None:
+        restart_reconcile_evidence = self._run_restart_reconcile()
+        restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
+        models, model_evidence = self._discover_models()
+        registry_evidence = model_evidence.get("registry") if isinstance(model_evidence, Mapping) else None
+        if isinstance(registry_evidence, Mapping) and registry_evidence.get("status") == "blocked":
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
@@ -482,21 +485,18 @@ def run_once(self) -> SchedulerPassResult:
                     "finished_at": _format_utc(finished_at),
                     "lock": lock_evidence,
                     "root_preflight": root_preflight,
-                    "db_free_runtime": {
-                        **db_free_preflight,
-                        "provider_blocker": redact_payload(dict(db_free_file_provider_blocker)),
-                    },
+                    "db_free_runtime": db_free_preflight,
                     "counts": _empty_counts(),
                     "candidates": [],
                     "blocked_candidates": [],
                     "skipped_candidates": [],
                     "duplicate_exclusions": list(self.config.source_exclusions),
-                    "model_discovery": _empty_model_discovery(),
+                    "model_discovery": model_evidence,
                     "source_cycles": [],
                     "model_run_evidence": [],
                     "slurm_cancellation_evidence": [],
                     "no_mutation_proof": _no_mutation_proof(),
-                    "execution_boundary": "db_free_file_provider_blocked",
+                    "execution_boundary": "db_free_registry_blocked",
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
@@ -507,9 +507,6 @@ def run_once(self) -> SchedulerPassResult:
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
-        restart_reconcile_evidence = self._run_restart_reconcile()
-        restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
-        models, model_evidence = self._discover_models()
         cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
         (
             candidates,

@@ -330,6 +330,161 @@ Invariant Matrix:
   - Non-DB-free postgres mode -> existing postgres lock/backend tests still
     pass.
 
+## Issue #832 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- Versioned JSON registry/readiness schemas consumed by production scheduler.
+- Manifest-last publication, checksum binding, and object existence evidence.
+- File/object URI reads under DB-free production config.
+- Scheduler planning semantics for raw handoff, canonical-zero reuse, and no
+  retired `download_source_cycle` submission.
+- DB-backed factory reachability for model registry and canonical readiness.
+
+Must preserve:
+
+- Existing postgres-backed registry/readiness remains reachable outside
+  DB-free mode.
+- Existing canonical readiness semantics continue to come from
+  `evaluate_canonical_readiness`; file mode only changes the source of product
+  rows and validation evidence.
+- Node-27 remains source acquisition owner; node-22 consumes raw readiness and
+  starts at `convert` when raw is already ready.
+- File journal and state snapshot index remain later issue scope; #832 must not
+  claim those write/read contracts are implemented.
+- Existing scheduler compatibility facade imports and monkeypatch paths remain
+  stable.
+
+Must add/change:
+
+- DB-free `ProductionScheduler.from_env()` builds a file-backed model registry
+  from `NHMS_SCHEDULER_REGISTRY_MANIFEST` without
+  `PsycopgModelRegistryStore.from_env()`.
+- DB-free canonical readiness uses `NHMS_SCHEDULER_CANONICAL_READINESS_INDEX`
+  without `PsycopgMetStore`.
+- Registry and readiness manifests validate schema version, generated time,
+  checksum, source/cycle/model/basin identity, and bounded counts before trust.
+- Missing, stale, checksum-mismatched, unsupported, object-missing, duplicate,
+  or identity-mismatched files fail closed with redacted evidence.
+- Registry/readiness publishers write content and checksum evidence before
+  atomically publishing the final manifest/index.
+
+Risk packs considered for #832:
+
+- Public API / CLI / script entry: selected - `ProductionScheduler.from_env()`
+  and `run_once()` consume the new file providers.
+- Config / project setup: selected - canonical DB-free env paths select the
+  manifest/index sources.
+- File IO / path safety / overwrite: selected - loader and publisher read and
+  atomically publish trusted JSON/object evidence.
+- Schema / columns / units / field names: selected - registry/readiness JSON
+  schemas are new scheduler contracts.
+- Auth / permissions / secrets: selected - evidence must redact local paths,
+  object buckets, and secret-bearing URI fragments.
+- Concurrency / shared state / ordering: selected - manifest-last publication
+  prevents readers from trusting partial refreshes.
+- Resource limits / large input / discovery: selected - JSON and product/model
+  discovery are bounded by bytes, entry counts, and evidence size.
+- Legacy compatibility / examples: selected - non-DB-free postgres mode and
+  existing model coercion semantics are preserved.
+- Error handling / rollback / partial outputs: selected - every invalid file or
+  stale artifact becomes a stable planning blocker before submission.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or packaging change in #832.
+- Documentation / migration notes: selected - OpenSpec records the new file
+  contracts used by later deployment issues.
+- Geospatial / CRS / basin geometry: not selected - #832 preserves basin IDs
+  and segment counts but does not inspect geometry.
+- Hydro-met time series / forcing windows: selected - canonical readiness
+  forecast-hour coverage and product rows gate forcing reuse.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver
+  numerical behavior changes.
+- PostGIS / TimescaleDB domain behavior: not selected - #832 removes
+  scheduler reads from those stores in DB-free mode rather than changing DB
+  schema semantics.
+- Slurm production lifecycle / mock-vs-real parity: selected - raw-ready
+  canonical-zero candidates must submit downstream stages without retired
+  download jobs.
+- External hydro-met providers / snapshot reproducibility: selected -
+  source/cycle/policy/object identity from provider evidence must match the
+  readiness index.
+- Run manifest / QC provenance: selected - candidate manifests must carry
+  canonical/readiness/raw evidence and `restart_stage=convert`.
+- Published NHMS artifacts / display identity: not selected - display products
+  are outside #832.
+
+Boundary-surface checklist:
+
+- Shared helper roots: new file provider module, `scheduler_core.py`,
+  `scheduler_models.py`, `scheduler_candidates.py`, and raw manifest helpers.
+- Public entrypoints: `ProductionScheduler.from_env()` and scheduler
+  `run_once()` in DB-free mode.
+- Read surfaces: registry manifest, canonical readiness index, referenced
+  model manifests, canonical product objects, and node-27 raw manifest evidence.
+- Write/delete/overwrite surfaces: registry/readiness publisher staging files
+  and final manifest/index publish only; no journal/state-index writes in #832.
+- Staging/publish/rollback surfaces: manifest-last atomic writes and cleanup of
+  publisher temporary files.
+- Producer/consumer evidence boundaries: publisher receipts, model discovery
+  evidence, canonical readiness evidence, candidate state evidence, and model
+  run manifest construction.
+- Stale-state/idempotency boundaries: stale generated times, checksum mismatch,
+  duplicate IDs, missing objects, and repeated publisher refreshes.
+- Unchanged downstream consumers: postgres-mode scheduler tests, existing
+  canonical readiness evaluator tests, and future file journal/state-index
+  tasks.
+
+Invariant Matrix:
+
+- Governing invariant: in DB-free scheduler mode, model and canonical
+  readiness truth is trusted only when a versioned file/object manifest binds
+  identity, checksum, freshness, and object existence; otherwise planning fails
+  closed before any retired download or DB fallback can occur.
+- Source-of-truth identity/contract: registry `schema_version`, manifest
+  checksum, model/basin/package identity, readiness `schema_version`,
+  source/cycle/model/basin/policy/object identity, product checksums, and raw
+  manifest source/cycle identity.
+- Producers: registry publisher, readiness publisher, and node-27 raw manifest
+  publisher/stager.
+- Validators/preflight: file loader byte/schema/depth/count checks, checksum
+  verifier, object existence verifier, stale generated-time verifier, and
+  DB-free runtime preflight.
+- Storage/cache/query: file registry `list_models()/get_model()`, file
+  canonical readiness provider, `LocalObjectStore`/safe filesystem reads; DB
+  registry/met stores are forbidden in DB-free mode.
+- Public routes/entrypoints: `ProductionScheduler.from_env()` wires file
+  providers and `run_once()` uses them for discovery/readiness before
+  candidate submission.
+- Frontend/downstream consumers: none directly - scheduler evidence and model
+  run manifests are the downstream contract in #832.
+- Failure paths/rollback/stale state: missing/malformed/oversized JSON,
+  unsupported schema, duplicate model IDs, checksum mismatch, stale generated
+  time, object missing, identity mismatch, invalid raw manifest, and incomplete
+  canonical coverage.
+- Evidence/audit/readiness: bounded publisher receipts, model discovery
+  registry evidence, canonical readiness evidence, raw handoff evidence, and
+  no-DB factory guard assertions.
+- Regression rows:
+  - Valid registry manifest with verified package manifest -> DB-free model
+    discovery selects the model and records registry checksum without DB calls.
+  - Duplicate/missing/checksum-invalid registry manifest -> planning blocks
+    before submission with stable redacted evidence.
+  - Valid readiness index with matching source/cycle/model/basin and products
+    -> existing canonical evaluator receives product rows and records ready or
+    canonical-zero evidence.
+  - Missing/stale/schema-invalid/checksum-invalid/object-missing readiness
+    index -> canonical readiness fails closed without `PsycopgMetStore`.
+  - Ready node-27 raw evidence plus canonical-zero rows -> candidate carries
+    `restart_stage=convert` and Slurm request does not include
+    `download_source_cycle`.
+  - Missing/invalid node-27 raw evidence plus canonical-zero rows -> candidate
+    blocks and no Slurm submission occurs.
+  - Non-DB-free postgres mode -> legacy registry/readiness factories remain
+    available where existing tests cover them.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains
