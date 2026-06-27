@@ -758,10 +758,14 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
 
 
 def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
-    if value in (None, "") or not db_free_required:
+    del db_free_required
+    if value in (None, ""):
         return value
     text = str(value).strip()
-    parsed = urlparse(text)
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return "[invalid-uri]" if ":" in text else text
     if parsed.scheme:
         scheme = parsed.scheme.lower()
         if scheme in _DB_FREE_DB_BACKEND_VALUES or "postgres" in scheme or "psycopg" in scheme:

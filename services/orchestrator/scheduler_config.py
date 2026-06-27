@@ -433,7 +433,10 @@ def _db_free_path_evidence_scalar(value: Any) -> Any:
     if value in (None, ""):
         return None
     text = str(value).strip()
-    parsed = urlparse(text)
+    try:
+        parsed = _db_free_urlparse(text)
+    except ValueError:
+        return "[invalid-uri]"
     if parsed.scheme:
         return "[object-uri]" if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES else "[uri]"
     return _evidence_scalar(text)
@@ -465,7 +468,10 @@ def _db_free_selector_evidence_scalar(value: Any) -> Any:
     if value in (None, ""):
         return None
     text = str(value).strip()
-    parsed = urlparse(text)
+    try:
+        parsed = _db_free_urlparse(text)
+    except ValueError:
+        return "[invalid-uri]"
     if parsed.scheme:
         return _db_free_scheme_for_evidence(parsed.scheme)
     return _evidence_scalar(text)
@@ -508,7 +514,11 @@ def _db_free_path_check(
     if text == "":
         check["path"] = None
         return check, _db_free_blocker("db_free_required_path_blank", env, "blank")
-    parsed = urlparse(text)
+    try:
+        parsed = _db_free_urlparse(text)
+    except ValueError:
+        check.update({"path": "[invalid-uri]", "uri": True, "object_uri": False, "scheme": "[invalid]"})
+        return check, _db_free_blocker("db_free_required_path_malformed_uri", env, "malformed_uri")
     if parsed.scheme:
         check.update(_db_free_uri_evidence(parsed))
         if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES and kind == "file":
@@ -582,6 +592,15 @@ def _db_free_uri_evidence(parsed: Any) -> dict[str, Any]:
     }
 
 
+def _db_free_urlparse(value: str) -> Any:
+    try:
+        return urlparse(value)
+    except ValueError:
+        if ":" in value:
+            raise
+        return urlparse("")
+
+
 def _db_free_scheme_for_evidence(scheme: str) -> str:
     normalized = scheme.lower()
     if normalized in _DB_FREE_DB_BACKEND_VALUES or "postgres" in normalized or "psycopg" in normalized:
@@ -632,7 +651,10 @@ def _db_free_s3_uri_boundary(raw_uri: str, parsed: Any) -> dict[str, Any]:
         raise ValueError("missing_bucket")
     key = _db_free_safe_object_key(str(parsed.path or "").lstrip("/"))
     prefix = os.getenv(_DB_FREE_OBJECT_STORE_PREFIX_ENV, "").strip().rstrip("/")
-    prefix_parsed = urlparse(prefix) if prefix else None
+    try:
+        prefix_parsed = _db_free_urlparse(prefix) if prefix else None
+    except ValueError as error:
+        raise ValueError("object_uri_not_allowlisted") from error
     if prefix_parsed is None or prefix_parsed.scheme.lower() != "s3":
         raise ValueError("object_uri_not_allowlisted")
     if _db_free_common_object_uri_unsafe_reason(prefix, prefix_parsed) is not None or not prefix_parsed.netloc:

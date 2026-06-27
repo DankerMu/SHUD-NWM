@@ -15377,6 +15377,22 @@ def test_legacy_non_db_free_postgres_config_remains_valid(tmp_path: Path) -> Non
     assert config.scheduler_registry_backend == "postgres"
 
 
+def test_legacy_scheduler_backend_uri_evidence_is_summarized(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        scheduler_registry_backend="postgresql://nhms:supersecret@db.prod.example:55433/nhms?token=qhh",
+    )
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+    rendered = json.dumps(evidence, sort_keys=True)
+
+    assert evidence["scheduler_registry_backend"] == "[db-like]"
+    assert "supersecret" not in rendered
+    assert "db.prod.example" not in rendered
+    assert "55433" not in rendered
+    assert "token" not in rendered
+    assert "postgresql" not in rendered.lower()
+
+
 def test_db_free_database_url_blocks_before_lock_or_factories(monkeypatch: Any, tmp_path: Path) -> None:
     _set_db_free_scheduler_env(monkeypatch, tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:supersecret@db.prod.example:55433/nhms")
@@ -15456,6 +15472,26 @@ def test_db_free_selector_uri_blocks_without_endpoint_leak(
     assert "postgresql" not in rendered.lower()
 
 
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+def test_db_free_malformed_selector_uri_blocks_without_crash(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(selector_env, "postgresql://[bad/path")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert selector_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    assert result.evidence["db_free_runtime"]["checks"][selector_env]["selected"] == "[invalid-uri]"
+    assert "bad/path" not in rendered
+    assert "postgresql" not in rendered.lower()
+
+
 @pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
 @pytest.mark.parametrize("path_case", ["missing", "blank", "outside", "unsafe"])
 def test_db_free_required_path_misconfig_blocks_exact_field_before_lock(
@@ -15527,6 +15563,28 @@ def test_db_free_required_path_db_uri_blocks_without_endpoint_leak(
     assert "postgresql" not in rendered.lower()
 
 
+@pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
+def test_db_free_malformed_required_path_uri_blocks_without_crash(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(path_env, "postgresql://[bad/path")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert path_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    path_check = result.evidence["db_free_runtime"]["checks"][path_env]
+    assert path_check["path"] == "[invalid-uri]"
+    assert path_check["scheme"] == "[invalid]"
+    assert "bad/path" not in rendered
+    assert "postgresql" not in rendered.lower()
+
+
 @pytest.mark.parametrize(
     "object_uri",
     [
@@ -15562,6 +15620,25 @@ def test_db_free_object_uri_misconfig_blocks_without_raw_uri_leak(
     assert "token=secret" not in rendered
     assert "secret.json" not in rendered
     assert "other-prod" not in rendered
+
+
+def test_db_free_object_uri_blocks_malformed_object_store_prefix_without_crash(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://[bad/prefix")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", "s3://nhms-prod/scheduler/registry.json")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    blockers = result.evidence["db_free_runtime"]["blockers"]
+    assert "NHMS_SCHEDULER_REGISTRY_MANIFEST" in {blocker["field"] for blocker in blockers}
+    assert result.evidence["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[object-uri]"
+    assert "bad/prefix" not in rendered
 
 
 def test_db_free_safe_object_uri_paths_pass_runtime_preflight(
