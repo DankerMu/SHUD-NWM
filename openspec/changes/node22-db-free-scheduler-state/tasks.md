@@ -154,7 +154,7 @@
 
 ## 6. DB-Free Runtime Integration And Deployment Compatibility
 
-- [ ] 6.1 Update DB-free Slurm preflight policy.
+- [x] 6.1 Update DB-free Slurm preflight policy.
   Evidence floor: with DB-free mode and Slurm enabled, missing `DATABASE_URL`
   does not produce `SLURM_PREFLIGHT_DATABASE_URL_MISSING`; non-DB root,
   manifest, secret, and template safety checks still run.

@@ -157,6 +157,7 @@ class ReservationBlockedPayloadCallback(Protocol):
     def __call__(
         self,
         *,
+        config: SchedulerEvidenceConfig,
         pass_id: str,
         artifact_path: Path,
         reason: str,
@@ -471,6 +472,7 @@ def _call_reservation_blocked_payload(
 ) -> dict[str, Any]:
     if context.reservation_blocked_payload is not None:
         return context.reservation_blocked_payload(
+            config=context.config,
             pass_id=pass_id,
             artifact_path=artifact_path,
             reason=reason,
@@ -478,6 +480,7 @@ def _call_reservation_blocked_payload(
             evidence_safe=context.evidence_safe,
         )
     return evidence_reservation_blocked_payload(
+        config=context.config,
         pass_id=pass_id,
         artifact_path=artifact_path,
         reason=reason,
@@ -628,6 +631,7 @@ from services.orchestrator.scheduler_evidence_proofs import (  # noqa: E402, F40
 
 def evidence_reservation_blocked_payload(
     *,
+    config: SchedulerEvidenceConfig,
     pass_id: str,
     artifact_path: Path,
     reason: str,
@@ -638,18 +642,28 @@ def evidence_reservation_blocked_payload(
         "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
         "pass_id": pass_id,
         "status": "blocked",
-        "artifact_path": str(artifact_path),
+        "artifact_path": artifact_path_evidence(config, artifact_path),
         "reason": reason,
         "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
         "message": "Scheduler evidence write proof failed before production mutation.",
     }
-    payload.update(dict(details or {}))
+    safe_details = dict(details or {})
+    if "artifact_path" in safe_details:
+        safe_details["artifact_path"] = artifact_path_evidence(config, artifact_path)
+    payload.update(safe_details)
     return evidence_safe(payload)
 
 
-def evidence_write_error_payload(error: OSError) -> dict[str, Any]:
+def evidence_write_error_payload(
+    error: OSError,
+    config: SchedulerEvidenceConfig | None = None,
+) -> dict[str, Any]:
     if isinstance(error, SchedulerEvidenceWriteError):
-        return {"reason": error.reason, **error.details}
+        details = dict(error.details)
+        artifact_path = details.get("artifact_path")
+        if config is not None and artifact_path not in (None, ""):
+            details["artifact_path"] = artifact_path_evidence(config, Path(str(artifact_path)))
+        return {"reason": error.reason, **details}
     return {"reason": "evidence_write_failed", "error": str(error)}
 
 
@@ -779,10 +793,11 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
 
 
 def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
-    del db_free_required
     if value in (None, ""):
         return value
     text = str(value).strip()
+    if db_free_required and text == "file":
+        return "file"
     try:
         parsed = urlparse(text)
     except ValueError:
@@ -795,6 +810,8 @@ def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
     lower = text.lower()
     if lower in _DB_FREE_DB_BACKEND_VALUES or "postgres" in lower or "psycopg" in lower:
         return "[db-like]"
+    if db_free_required:
+        return "[non-file]"
     return text
 
 

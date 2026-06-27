@@ -556,6 +556,8 @@ def _db_free_selector_evidence_scalar(value: Any) -> Any:
     if value in (None, ""):
         return None
     text = str(value).strip()
+    if text == "file":
+        return "file"
     try:
         parsed = _db_free_urlparse(text)
     except ValueError:
@@ -565,7 +567,7 @@ def _db_free_selector_evidence_scalar(value: Any) -> Any:
         return scheme if scheme == "[db-like]" else "[uri]"
     if _db_free_selector_text_is_db_like(text):
         return "[db-like]"
-    return _evidence_scalar(text)
+    return "[non-file]"
 
 
 def _db_free_selector_text_is_db_like(value: Any) -> bool:

@@ -231,10 +231,16 @@ def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, A
 
 def _db_free_mask_lock_paths(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {
-            str(key): "[local-path]" if str(key) == "lock_path" else _db_free_mask_lock_paths(item)
-            for key, item in value.items()
-        }
+        masked: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text == "lock_path":
+                masked[key_text] = "[local-path]"
+            elif key_text == "raw":
+                masked[key_text] = "[lock-payload]"
+            else:
+                masked[key_text] = _db_free_mask_lock_paths(item)
+        return masked
     if isinstance(value, list):
         return [_db_free_mask_lock_paths(item) for item in value]
     return value
@@ -732,7 +738,7 @@ def run_once(self) -> SchedulerPassResult:
         except (OSError, SchedulerEvidenceWriteError) as error:
             if evidence_reservation.get("status") != "blocked":
                 raise
-            evidence["evidence_write_error"] = _evidence_write_error_payload(error)
+            evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)
             artifact_path = None
         status = _evidence_status(evidence, pass_status)
         return SchedulerPassResult(
@@ -1014,13 +1020,14 @@ def _scheduler_evidence_write_context(self) -> _scheduler_evidence_module.Schedu
                 artifact_path=artifact_path,
             )
         ),
-        reservation_blocked_payload=lambda pass_id, artifact_path, reason, details, evidence_safe: (
+        reservation_blocked_payload=lambda config, pass_id, artifact_path, reason, details, evidence_safe: (
             _evidence_reservation_blocked_payload(
+                config=config,
                 pass_id=pass_id,
                 artifact_path=artifact_path,
                 reason=reason,
                 details=details,
             )
         ),
-        evidence_write_error_payload=_scheduler._evidence_write_error_payload,
+        evidence_write_error_payload=lambda error: _scheduler._evidence_write_error_payload(error, self.config),
     )

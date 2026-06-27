@@ -566,12 +566,14 @@ _require_safe_directory_final_component = _scheduler_runtime_roots_forwarder("_r
 
 def _evidence_reservation_blocked_payload(
     *,
+    config: Any | None = None,
     pass_id: str,
     artifact_path: Path,
     reason: str,
     details: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _scheduler_evidence.evidence_reservation_blocked_payload(
+        config=config or type("SchedulerEvidenceConfigShim", (), {"scheduler_db_free_required": False})(),
         pass_id=pass_id,
         artifact_path=artifact_path,
         reason=reason,
@@ -580,8 +582,8 @@ def _evidence_reservation_blocked_payload(
     )
 
 
-def _evidence_write_error_payload(error: OSError) -> dict[str, Any]:
-    return _scheduler_evidence.evidence_write_error_payload(error)
+def _evidence_write_error_payload(error: OSError, config: Any | None = None) -> dict[str, Any]:
+    return _scheduler_evidence.evidence_write_error_payload(error, config)
 
 
 def _scheduler_resolved_runtime_roots(config: ProductionSchedulerConfig) -> dict[str, Any]:

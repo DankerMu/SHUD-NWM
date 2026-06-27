@@ -1154,12 +1154,14 @@ def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
 
     def fake_evidence_reservation_blocked_payload(
         *,
+        config: Any,
         pass_id: str,
         artifact_path: Path,
         reason: str,
         details: Mapping[str, Any] | None,
         evidence_safe: Any,
     ) -> dict[str, Any]:
+        assert config is not None
         assert pass_id == "pass-1"
         assert artifact_path == tmp_path / "blocked.json"
         assert reason == "blocked"
@@ -6203,6 +6205,37 @@ def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artif
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
     assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_db_free_evidence_reservation_blocker_masks_artifact_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    from services.orchestrator import scheduler_evidence
+
+    started_at = _dt("2026-06-27T16:00:00Z")
+    config = ProductionSchedulerConfig(dry_run=False, now=started_at)
+    context = _scheduler_evidence_test_context(config)
+    pass_id = "scheduler_2026062716_abcdef123456"
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    blocked = scheduler_evidence.reserve_pre_execution_evidence(
+        context,
+        pass_id,
+        started_at,
+        1,
+        now=started_at,
+    )
+    rendered = json.dumps(blocked, sort_keys=True)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "evidence_artifact_exists"
+    assert blocked["artifact_path"] == "[local-path]"
+    assert str(evidence_dir) not in rendered
+    assert "db-free-local-root" not in rendered
 
 
 def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit(
@@ -15517,6 +15550,39 @@ def test_db_free_selector_file_uri_uses_uri_evidence_not_file_backend(
 
 
 @pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+@pytest.mark.parametrize(
+    "selector_value",
+    [
+        "/tmp/unsafe-secret-token/backend",
+        "../unsafe-secret-token/backend",
+        "prod-secret-token",
+        "db.prod.example",
+    ],
+)
+def test_db_free_selector_non_file_text_uses_bounded_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+    selector_value: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(selector_env, selector_value)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    selector_check = result.evidence["db_free_runtime"]["checks"][selector_env]
+    assert selector_check["selected"] == "[non-file]"
+    runtime_field = _DB_FREE_SELECTOR_RUNTIME_CONFIG_FIELDS[selector_env]
+    assert result.evidence["runtime_config"][runtime_field] == "[non-file]"
+    assert selector_value not in rendered
+    assert "unsafe-secret-token" not in rendered
+    assert "db.prod.example" not in rendered
+
+
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
 def test_db_free_selector_db_like_text_blocks_without_dependency_leak(
     monkeypatch: Any,
     tmp_path: Path,
@@ -16097,6 +16163,28 @@ def test_db_free_file_lock_contention_is_bounded_and_no_submit(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     rendered = json.dumps(result.evidence, sort_keys=True)
     assert "db-free-local-root" not in rendered
+    assert str(config.lock_path) not in rendered
+
+
+def test_db_free_file_lock_contention_masks_raw_existing_lock_payload(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig()
+    lock_path = Path(config.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_payload = f"{config.lock_path}:unsafe-secret-token"
+    lock_path.write_text(json.dumps(raw_payload), encoding="utf-8")
+
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["lock_path"] == "[local-path]"
+    assert result.evidence["lock"]["existing_lock"]["raw"] == "[lock-payload]"
+    assert raw_payload not in rendered
+    assert "unsafe-secret-token" not in rendered
     assert str(config.lock_path) not in rendered
 
 
