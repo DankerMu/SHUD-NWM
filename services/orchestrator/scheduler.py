@@ -6,15 +6,16 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from threading import RLock
 from types import FunctionType, MappingProxyType
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4 as _uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
+from packages.common.redaction import redact_payload  # noqa: F401
 from packages.common.slurm_env import (
     iter_secret_manifest_findings,
 )
@@ -37,6 +38,22 @@ from services.orchestrator.reservation import (
     SubmitOverlapReceipt,
     run_concurrent_submissions,
     timed_submission,
+)
+from services.orchestrator.scheduler_adapters import (  # noqa: F401
+    _CANONICAL_READINESS_PROVIDER_UNSET,
+    ActiveCandidateRepository,
+    CanonicalReadinessProvider,
+    CycleDiscoveryAdapter,
+    ForcingProducerRunner,
+    ModelRegistryReader,
+    ProductionOrchestratorFactory,
+    _active_repository_from_env,
+    _canonical_readiness_provider_from_env,
+    _default_adapters,
+    _forcing_producer_from_env,
+    _MetStoreCanonicalReadinessProvider,
+    _orchestrator_repository_from_env,
+    _UnavailableCanonicalReadinessProvider,
 )
 from services.orchestrator.scheduler_lease import (  # noqa: F401
     LOCK_OWNER,
@@ -208,7 +225,6 @@ from services.orchestrator.scheduler_state import (  # noqa: F401
     _terminal_hydro_truth_supersedes_failure,
     _top_level_source_cycle_download_blocker,
 )
-from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 _SCHEDULER_STATE_COMPAT_EXPORT_NAMES = tuple(
@@ -638,165 +654,6 @@ SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 
 
 SchedulerEvidenceWriteError = _scheduler_evidence.SchedulerEvidenceWriteError
-
-
-class ModelRegistryReader(Protocol):
-    def list_models(
-        self,
-        *,
-        basin_version_id: str | None,
-        active: bool | None,
-        limit: int,
-        offset: int,
-    ) -> Mapping[str, Any]:
-        raise NotImplementedError
-
-    def get_model(self, model_id: str) -> Mapping[str, Any]:
-        raise NotImplementedError
-
-    def get_model_internal(self, model_id: str) -> Mapping[str, Any]:
-        raise NotImplementedError
-
-
-class CycleDiscoveryAdapter(Protocol):
-    def discover_cycles(
-        self,
-        cycle_date: str | date | datetime,
-        end_date: str | date | datetime | None = None,
-    ) -> list[CycleDiscovery]:
-        raise NotImplementedError
-
-
-class ActiveCandidateRepository(Protocol):
-    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
-        raise NotImplementedError
-
-    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
-        raise NotImplementedError
-
-    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
-        raise NotImplementedError
-
-    def active_slurm_jobs(
-        self,
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        model_id: str,
-    ) -> Sequence[Mapping[str, Any]]:
-        raise NotImplementedError
-
-    def candidate_state(
-        self,
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        model_id: str,
-        run_id: str,
-        forcing_version_id: str,
-        candidate_id: str,
-    ) -> Mapping[str, Any] | None:
-        raise NotImplementedError
-
-
-class CanonicalReadinessProvider(Protocol):
-    def canonical_readiness(
-        self,
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        forecast_hours: Sequence[int],
-        policy_identity: Mapping[str, Any],
-        source_object_identity: Mapping[str, Any],
-        canonical_product_id: str,
-        model_id: str,
-        basin_id: str,
-    ) -> Mapping[str, Any]:
-        raise NotImplementedError
-
-
-class ForcingProducerRunner(Protocol):
-    def produce(
-        self,
-        *,
-        source_id: str | None = None,
-        cycle_time: str | datetime,
-        model_id: str,
-        max_lead_hours: int | None = None,
-        basin_id: str | None = None,
-        basin_version_id: str | None = None,
-        river_network_version_id: str | None = None,
-        canonical_product_id: str | None = None,
-        canonical_identity: Mapping[str, Any] | None = None,
-    ) -> Any:
-        raise NotImplementedError
-
-
-class ProductionOrchestratorFactory(Protocol):
-    def __call__(self, source_id: str) -> ForecastOrchestrator:
-        raise NotImplementedError
-
-
-_CANONICAL_READINESS_PROVIDER_UNSET = object()
-
-
-class _UnavailableCanonicalReadinessProvider:
-    def __init__(self, *, reason: str, dependency: str, retryable: bool) -> None:
-        self.reason = reason
-        self.dependency = dependency
-        self.retryable = retryable
-
-    def canonical_readiness(
-        self,
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        forecast_hours: Sequence[int],
-        policy_identity: Mapping[str, Any],
-        source_object_identity: Mapping[str, Any],
-        canonical_product_id: str,
-        model_id: str,
-        basin_id: str,
-    ) -> Mapping[str, Any]:
-        discovery = CycleDiscovery(
-            cycle_id=cycle_id_for(source_id, cycle_time),
-            source_id=source_id,
-            cycle_time=cycle_time,
-            cycle_hour=cycle_time.hour,
-            available=True,
-            status="discovered",
-        )
-        candidate = SchedulerCandidate(
-            candidate_id=f"{source_id}:{_format_utc(cycle_time)}:{model_id}:canonical_readiness",
-            source_id=source_id,
-            cycle_id=cycle_id_for(source_id, cycle_time),
-            cycle_time_utc=cycle_time,
-            model_id=model_id,
-            basin_id=basin_id,
-            basin_version_id=None,
-            river_network_version_id=None,
-            segment_count=None,
-            output_segment_count=None,
-            model_package_uri=None,
-            resource_profile={},
-            display_capabilities={},
-            frequency_capabilities={},
-            horizon={},
-            scenario_id="canonical_readiness",
-            run_id="",
-            forcing_version_id="",
-            status="blocked",
-        )
-        return _canonical_readiness_unavailable_evidence(
-            discovery,
-            candidate,
-            forecast_hours=forecast_hours,
-            policy_identity=policy_identity,
-            source_object_identity=source_object_identity,
-            reason=self.reason,
-            dependency=self.dependency,
-            retryable=self.retryable,
-        )
 
 
 ProductionSchedulerConfig = importlib.import_module(
@@ -1910,229 +1767,55 @@ def _scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Map
 _slurm_status_sync_failed_evidence = _scheduler_candidates._slurm_status_sync_failed_evidence
 
 
-def _scheduler_execution_boundary_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
-    return _scheduler_evidence.scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+def _scheduler_evidence_forwarder(name: str, **default_kwargs: Any) -> Callable[..., Any]:
+    def forwarder(*args: Any, **kwargs: Any) -> Any:
+        return getattr(_scheduler_evidence, name)(*args, **{**default_kwargs, **kwargs})
+
+    return forwarder
 
 
-def _slurm_status_sync_proof(
-    *,
-    sync_required: bool = False,
-    reservation: Mapping[str, Any] | None = None,
-    blocked: bool = False,
-) -> dict[str, Any]:
-    return _scheduler_evidence.slurm_status_sync_proof(
-        sync_required=sync_required,
-        reservation=reservation,
-        blocked=blocked,
-    )
-
-
-def _slurm_status_sync_proof_from_candidates(
-    slurm_status_sync_evidence: Sequence[Mapping[str, Any]],
-    *,
-    reservation: Mapping[str, Any],
-) -> dict[str, Any]:
-    return _scheduler_evidence.slurm_status_sync_proof_from_candidates(
-        slurm_status_sync_evidence,
-        reservation=reservation,
-    )
-
-
-def _execution_write_proof(
-    *,
-    reservation: Mapping[str, Any] | None = None,
-    execution_required: bool = False,
-    blocked: bool = False,
-) -> dict[str, Any]:
-    return _scheduler_evidence.execution_write_proof(
-        reservation=reservation,
-        execution_required=execution_required,
-        blocked=blocked,
-    )
-
-
-def _execution_write_proof_from_evidence(
-    execution_evidence: Sequence[Mapping[str, Any]],
-    *,
-    reservation: Mapping[str, Any],
-) -> dict[str, Any]:
-    return _scheduler_evidence.execution_write_proof_from_evidence(
-        execution_evidence,
-        reservation=reservation,
-    )
-
-
-def _slurm_cancellation_proof(
-    *,
-    cancellation_required: bool = False,
-    reservation: Mapping[str, Any] | None = None,
-    blocked: bool = False,
-) -> dict[str, Any]:
-    return _scheduler_evidence.slurm_cancellation_proof(
-        cancellation_required=cancellation_required,
-        reservation=reservation,
-        blocked=blocked,
-    )
-
-
-def _slurm_cancellation_proof_from_evidence(
-    cancellation_evidence: Sequence[Mapping[str, Any]],
-    *,
-    reservation: Mapping[str, Any],
-) -> dict[str, Any]:
-    return _scheduler_evidence.slurm_cancellation_proof_from_evidence(
-        cancellation_evidence,
-        reservation=reservation,
-    )
-
-
-def _slurm_status_sync_count(proof: Mapping[str, Any]) -> int:
-    return _scheduler_evidence.slurm_status_sync_count(proof)
-
-
-def _slurm_status_sync_unknown_count(proof: Mapping[str, Any]) -> int:
-    return _scheduler_evidence.slurm_status_sync_unknown_count(proof)
-
-
-def _slurm_status_sync_mutated(proof: Mapping[str, Any]) -> bool:
-    return _scheduler_evidence.slurm_status_sync_mutated(proof)
-
-
-def _slurm_status_sync_failed(proof: Mapping[str, Any]) -> bool:
-    return _scheduler_evidence.slurm_status_sync_failed(proof)
-
-
-def _slurm_cancelled_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
-    return _scheduler_evidence.slurm_cancelled_count(cancellation_evidence)
-
-
-def _slurm_cancellation_blocked_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
-    return _scheduler_evidence.slurm_cancellation_blocked_count(cancellation_evidence)
-
-
-def _slurm_cancellation_unknown_count(proof: Mapping[str, Any]) -> int:
-    return _scheduler_evidence.slurm_cancellation_unknown_count(proof)
-
-
-def _scheduler_mutation_proof(
-    *,
-    execution_write_proof: Mapping[str, Any],
-    slurm_status_sync_proof: Mapping[str, Any],
-    slurm_cancellation_proof: Mapping[str, Any],
-) -> dict[str, bool | str]:
-    return _scheduler_evidence.scheduler_mutation_proof(
-        execution_write_proof=execution_write_proof,
-        slurm_status_sync_proof=slurm_status_sync_proof,
-        slurm_cancellation_proof=slurm_cancellation_proof,
-    )
-
-
-def _proof_mutation_value(proof: Mapping[str, Any]) -> bool | str:
-    return _scheduler_evidence.proof_mutation_value(proof)
-
-
-def _named_proof_value(proof: Mapping[str, Any], write_field: str, absent_field: str) -> bool | str:
-    return _scheduler_evidence.named_proof_value(proof, write_field, absent_field)
-
-
-def _slurm_submit_proof_value(proof: Mapping[str, Any]) -> bool | str:
-    return _scheduler_evidence.slurm_submit_proof_value(proof)
-
-
-def _pipeline_status_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
-    return _scheduler_evidence.pipeline_status_write_proof_value(proof)
-
-
-def _pipeline_event_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
-    return _scheduler_evidence.pipeline_event_write_proof_value(proof)
-
-
-def _merge_proof_values(*values: bool | str) -> bool | str:
-    return _scheduler_evidence.merge_proof_values(*values)
-
-
-def _positive_count(value: Any) -> bool:
-    return _scheduler_evidence.positive_count(value)
+_scheduler_execution_boundary_from_cancellation = _scheduler_evidence_forwarder(
+    "scheduler_execution_boundary_from_cancellation"
+)
+_slurm_status_sync_proof = _scheduler_evidence_forwarder(
+    "slurm_status_sync_proof",
+    sync_required=False,
+    reservation=None,
+    blocked=False,
+)
+_slurm_status_sync_proof_from_candidates = _scheduler_evidence_forwarder("slurm_status_sync_proof_from_candidates")
+_execution_write_proof = _scheduler_evidence_forwarder(
+    "execution_write_proof",
+    reservation=None,
+    execution_required=False,
+    blocked=False,
+)
+_execution_write_proof_from_evidence = _scheduler_evidence_forwarder("execution_write_proof_from_evidence")
+_slurm_cancellation_proof = _scheduler_evidence_forwarder(
+    "slurm_cancellation_proof",
+    cancellation_required=False,
+    reservation=None,
+    blocked=False,
+)
+_slurm_cancellation_proof_from_evidence = _scheduler_evidence_forwarder("slurm_cancellation_proof_from_evidence")
+_slurm_status_sync_count = _scheduler_evidence_forwarder("slurm_status_sync_count")
+_slurm_status_sync_unknown_count = _scheduler_evidence_forwarder("slurm_status_sync_unknown_count")
+_slurm_status_sync_mutated = _scheduler_evidence_forwarder("slurm_status_sync_mutated")
+_slurm_status_sync_failed = _scheduler_evidence_forwarder("slurm_status_sync_failed")
+_slurm_cancelled_count = _scheduler_evidence_forwarder("slurm_cancelled_count")
+_slurm_cancellation_blocked_count = _scheduler_evidence_forwarder("slurm_cancellation_blocked_count")
+_slurm_cancellation_unknown_count = _scheduler_evidence_forwarder("slurm_cancellation_unknown_count")
+_scheduler_mutation_proof = _scheduler_evidence_forwarder("scheduler_mutation_proof")
+_proof_mutation_value = _scheduler_evidence_forwarder("proof_mutation_value")
+_named_proof_value = _scheduler_evidence_forwarder("named_proof_value")
+_slurm_submit_proof_value = _scheduler_evidence_forwarder("slurm_submit_proof_value")
+_pipeline_status_write_proof_value = _scheduler_evidence_forwarder("pipeline_status_write_proof_value")
+_pipeline_event_write_proof_value = _scheduler_evidence_forwarder("pipeline_event_write_proof_value")
+_merge_proof_values = _scheduler_evidence_forwarder("merge_proof_values")
+_positive_count = _scheduler_evidence_forwarder("positive_count")
 
 
 _nested_bool = _scheduler_candidate_quality_forwarder("_nested_bool")
-
-
-def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
-    from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
-    from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
-
-    return {
-        "gfs": GFSAdapter(config=GFSAdapterConfig(), repository=None),
-        "IFS": IFSAdapter(config=IFSAdapterConfig(), repository=None),
-    }
-
-
-class _MetStoreCanonicalReadinessProvider:
-    def __init__(self, store: Any) -> None:
-        self.store = store
-
-    def canonical_readiness(
-        self,
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        forecast_hours: Sequence[int],
-        policy_identity: Mapping[str, Any],
-        source_object_identity: Mapping[str, Any],
-        canonical_product_id: str,
-        model_id: str,
-        basin_id: str,
-    ) -> Mapping[str, Any]:
-        products = self.store.list_canonical_products(source_id=source_id, cycle_time=cycle_time)
-        return evaluate_canonical_readiness(
-            source_id=source_id,
-            cycle_time=cycle_time,
-            products=products,
-            forecast_hours=forecast_hours,
-            policy_identity=policy_identity,
-            source_object_identity=source_object_identity,
-            canonical_product_id=canonical_product_id,
-            model_id=model_id,
-            basin_id=basin_id,
-        ).evidence
-
-
-def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider:
-    try:
-        from packages.common.met_store import PsycopgMetStore
-
-        return _MetStoreCanonicalReadinessProvider(PsycopgMetStore.from_env())
-    except ImportError:
-        return _UnavailableCanonicalReadinessProvider(
-            reason="canonical_readiness_dependency_unavailable",
-            dependency="canonical_readiness_provider",
-            retryable=True,
-        )
-    except Exception:
-        return _UnavailableCanonicalReadinessProvider(
-            reason="canonical_readiness_provider_unavailable",
-            dependency="canonical_readiness_provider",
-            retryable=True,
-        )
-
-
-def _forcing_producer_from_env() -> ForcingProducerRunner:
-    from workers.forcing_producer import ForcingProducer
-
-    return ForcingProducer.from_env()
-
-
-def _active_repository_from_env() -> ActiveCandidateRepository:
-    from services.orchestrator.chain import PsycopgOrchestratorRepository
-
-    return PsycopgOrchestratorRepository.from_env()
-
-
-def _orchestrator_repository_from_env() -> Any:
-    from services.orchestrator.chain import PsycopgOrchestratorRepository
-
-    return PsycopgOrchestratorRepository.from_env()
 
 
 def _empty_counts() -> dict[str, int]:

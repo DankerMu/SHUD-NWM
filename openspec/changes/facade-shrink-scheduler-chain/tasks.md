@@ -171,6 +171,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.11 Extract scheduler adapter/provider owner slice.
+  - Module/Scope: move scheduler adapter/provider protocols, canonical
+    readiness fallback/provider construction, default source adapters, forcing
+    producer construction, and repository factories from
+    `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_adapters.py`.
+  - Stable Facade: keep legacy scheduler adapter/provider names importable and
+    monkeypatch-compatible through `services.orchestrator.scheduler`.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_adapters.py` as the scheduler adapter/provider owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_qhh_production_bootstrap.py -k "from_env or default_adapters or active_repository_from_env or canonical_readiness_provider_from_env or forcing_producer_from_env or MetStoreCanonicalReadinessProvider or canonical_readiness"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_adapters.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
