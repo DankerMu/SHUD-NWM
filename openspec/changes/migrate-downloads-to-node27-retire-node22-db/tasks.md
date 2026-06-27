@@ -40,6 +40,10 @@
   files, a manifest with 397 entries, and a node-27 DB
   `met.forecast_cycle` row with `source_id=gfs`, `status=raw_complete`, and
   `manifest_uri=s3://nhms/raw/gfs/2026062612/manifest.json`.
+  `docs/runbooks/receipts/2026-06-27-node27-download-ifs-live-proof.md` records
+  the matching IFS proof for the same cycle: 54 physical raw bundle files,
+  424 manifest entries, and node-27 DB `source_id=IFS`, `status=raw_complete`,
+  `manifest_uri=s3://nhms/raw/IFS/2026062612/manifest.json`.
 
 ## 3. Production Download Ownership
 
