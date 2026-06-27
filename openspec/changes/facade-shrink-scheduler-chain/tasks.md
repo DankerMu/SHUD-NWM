@@ -209,3 +209,22 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_cycle.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.9 Extract chain forecast trigger owner slice.
+  - Module/Scope: move legacy forecast trigger, canonical-ready trigger,
+    staged forecast creation, stage status query, ready-cycle iteration, stale
+    canonical demotion, auto-trigger canonical readiness validation, ready-cycle
+    listing, model listing, and completed-forecast checks from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_forecast_trigger.py`.
+  - Stable Facade: keep public `ForecastOrchestrator.trigger_*` /
+    `stage_statuses` methods plus legacy private trigger helpers on
+    `services.orchestrator.chain`, forwarding through the owner module while
+    preserving old monkeypatch paths for auto-trigger identity helpers.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and `chain_forecast_trigger.py`, with the owner under 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "trigger_ready_forecasts or canonical_readiness or stale_canonical or trigger_forecast or stage_statuses or has_completed_forecast"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_trigger.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
