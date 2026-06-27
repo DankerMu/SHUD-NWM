@@ -31,3 +31,18 @@
     `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.2 Extract chain runtime utility owner slice.
+  - Module/Scope: move cycle/job id helpers, restart/cohort checks,
+    time/date-range parsing, auto-trigger identity helpers, template export
+    helpers, and gateway response helpers from `services/orchestrator/chain.py`
+    to `services/orchestrator/chain_runtime_utils.py`.
+  - Stable Facade: keep `services.orchestrator.chain` private utility names
+    importable and patchable through the legacy module.
+  - Inventory/Evidence Update: add chain inventory coverage for the retained
+    `chain-runtime-utility-facade` alias group.
+  - Verification: `uv run pytest -q tests/test_orchestration_chain.py -k "auto_trigger or template_export or source_cycle or retry_provenance or candidate_state or repaired or repair or date_range"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_source_cycle.py services/orchestrator/chain_runtime_utils.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
