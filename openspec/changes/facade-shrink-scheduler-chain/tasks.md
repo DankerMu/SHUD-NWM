@@ -85,6 +85,24 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.6 Extract scheduler candidate quality/output owner slice.
+  - Module/Scope: move candidate artifact references, resource summaries,
+    forcing/output/display/frequency quality states, residual blockers, output
+    river manifest helpers, output URI/key helpers, station metadata helpers,
+    nested bool coercion, and terminal/unavailable status classification from
+    `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_candidate_quality.py`.
+  - Stable Facade: keep legacy scheduler private helper names importable from
+    `services.orchestrator.scheduler`, forwarding lazily to the owner module.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_candidate_quality.py` as the candidate quality/output
+    owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "candidate_quality or output_evidence or resource_summary or residual_blockers or output_river or model_run_evidence or candidate_evidence"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_candidate_quality.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
