@@ -16,6 +16,25 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.2 Extract scheduler runtime/cancellation owner slice.
+  - Module/Scope: move `ProductionScheduler.run_once`, restart reconcile,
+    retention, pre-execution evidence reservation, prelock evidence writing,
+    scheduler evidence context construction, and cancel-requested active Slurm
+    method bodies from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_runtime.py` and
+    `services/orchestrator/scheduler_cancellation.py`.
+  - Stable Facade: keep legacy `ProductionScheduler` methods on
+    `services.orchestrator.scheduler`, lazily forwarding to owner modules while
+    preserving old `uuid4` and `MAX_EVIDENCE_BYTES` monkeypatch behavior.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    update scheduler cancellation compatibility ownership for the new
+    cancellation owner module.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "run_once or scheduler or cancel or reconcile or retention or evidence or slurm_gateway or slurm_preflight"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_runtime.py services/orchestrator/scheduler_cancellation.py tests/test_production_scheduler.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.

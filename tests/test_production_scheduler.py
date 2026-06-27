@@ -278,6 +278,7 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
         "execution-restart-cohort-wrappers",
         "scheduler-evidence-write-compat",
         "cancellation-status-proof-wrappers",
+        "scheduler-preflight-compat",
     )
     for token in (
         "_SCHEDULER_STATE_COMPAT_REEXPORT_NAMES",
@@ -432,16 +433,17 @@ def test_scheduler_discovery_compat_forwarders_delegate_to_owner_module(
         assert models == ()
         assert context.discover_source_window_provider is not None
         assert context.cycle_completion_status_provider is not None
-        return [scheduler_discovery_module.SchedulerSourceCycle(discovery=discovery, horizon={})], [
-            {"delegated": True}
-        ]
+        return [scheduler_discovery_module.SchedulerSourceCycle(discovery=discovery, horizon={})], [{"delegated": True}]
 
     monkeypatch.setattr(scheduler_discovery_module, "cycle_completion_status", fake_cycle_completion_status)
-    assert scheduler._cycle_completion_status(
-        discovery,
-        (),
-        horizon={"max_lead_hours": 168},
-    ) == "complete"
+    assert (
+        scheduler._cycle_completion_status(
+            discovery,
+            (),
+            horizon={"max_lead_hours": 168},
+        )
+        == "complete"
+    )
 
     monkeypatch.setattr(scheduler_discovery_module, "discover_source_window", fake_discover_source_window)
     assert scheduler._discover_source_window(
@@ -708,6 +710,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
     cycle_time = _dt("2026-05-21T06:00:00Z")
 
     with monkeypatch.context() as patch_context:
+
         def patched_stage(candidate_arg: Any) -> str:
             del candidate_arg
             return "forecast"
@@ -736,6 +739,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
         assert scheduler_module._restart_compatible_candidate_cohorts(candidates) == [((1, "forecast"), candidates)]
 
     with monkeypatch.context() as patch_context:
+
         def patched_fresh(candidate_arg: Any) -> bool:
             del candidate_arg
             return False
@@ -779,6 +783,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
     assert scheduler_module._candidate_restart_cohort_key("forecast") == (1, "forecast")
 
     with monkeypatch.context() as patch_context:
+
         def patched_format_cycle_time(cycle_time_arg: datetime) -> str:
             del cycle_time_arg
             return "2026052106"
@@ -808,6 +813,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
         )
 
     with monkeypatch.context() as patch_context:
+
         def patched_run_id_for_candidate(
             source_id: str,
             cycle_time_arg: datetime,
@@ -850,6 +856,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
         ) == [(candidates, "run-for-candidate")]
 
     with monkeypatch.context() as patch_context:
+
         def patched_format_cycle_time(cycle_time_arg: datetime) -> str:
             del cycle_time_arg
             return "2026052106"
@@ -1347,12 +1354,12 @@ def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inven
         assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES[facade_name] == owner_name
         assert hasattr(scheduler_candidates_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES[
-            facade_name
-        ] is getattr(scheduler_candidates_module, owner_name)
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[
-            facade_name
-        ] is getattr(scheduler_module, facade_name)
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES[facade_name] is getattr(
+            scheduler_candidates_module, owner_name
+        )
+        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[facade_name] is getattr(
+            scheduler_module, facade_name
+        )
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_candidates_module, owner_name)
     for method_name in retained_method_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
@@ -1426,21 +1433,30 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
         "slurm_status_sync_proof"
     )
     assert calls[-1]["kwargs"] == {"sync_required": True, "reservation": reservation, "blocked": False}
-    assert scheduler_module._slurm_status_sync_proof_from_candidates(
-        sync_evidence,
-        reservation=reservation,
-    )["owner"] == "slurm_status_sync_proof_from_candidates"
+    assert (
+        scheduler_module._slurm_status_sync_proof_from_candidates(
+            sync_evidence,
+            reservation=reservation,
+        )["owner"]
+        == "slurm_status_sync_proof_from_candidates"
+    )
     assert calls[-1]["args"] == (sync_evidence,)
     assert calls[-1]["kwargs"] == {"reservation": reservation}
-    assert scheduler_module._slurm_cancellation_proof(
-        cancellation_required=True,
-        reservation=reservation,
-    )["owner"] == "slurm_cancellation_proof"
+    assert (
+        scheduler_module._slurm_cancellation_proof(
+            cancellation_required=True,
+            reservation=reservation,
+        )["owner"]
+        == "slurm_cancellation_proof"
+    )
     assert calls[-1]["kwargs"] == {"cancellation_required": True, "reservation": reservation, "blocked": False}
-    assert scheduler_module._slurm_cancellation_proof_from_evidence(
-        cancellation_evidence,
-        reservation=reservation,
-    )["owner"] == "slurm_cancellation_proof_from_evidence"
+    assert (
+        scheduler_module._slurm_cancellation_proof_from_evidence(
+            cancellation_evidence,
+            reservation=reservation,
+        )["owner"]
+        == "slurm_cancellation_proof_from_evidence"
+    )
     assert calls[-1]["args"] == (cancellation_evidence,)
     assert calls[-1]["kwargs"] == {"reservation": reservation}
     assert scheduler_module._slurm_status_sync_count(proof)["owner"] == "slurm_status_sync_count"
@@ -1459,11 +1475,14 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
     assert calls[-1]["args"] == (cancellation_evidence,)
     assert scheduler_module._slurm_cancellation_unknown_count(proof)["owner"] == "slurm_cancellation_unknown_count"
     assert calls[-1]["args"] == (proof,)
-    assert scheduler_module._scheduler_mutation_proof(
-        execution_write_proof=execution_write_proof,
-        slurm_status_sync_proof=slurm_status_sync_proof,
-        slurm_cancellation_proof=slurm_cancellation_proof,
-    )["owner"] == "scheduler_mutation_proof"
+    assert (
+        scheduler_module._scheduler_mutation_proof(
+            execution_write_proof=execution_write_proof,
+            slurm_status_sync_proof=slurm_status_sync_proof,
+            slurm_cancellation_proof=slurm_cancellation_proof,
+        )["owner"]
+        == "scheduler_mutation_proof"
+    )
     assert calls[-1]["kwargs"] == {
         "execution_write_proof": execution_write_proof,
         "slurm_status_sync_proof": slurm_status_sync_proof,
@@ -1477,13 +1496,9 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
     assert calls[-1]["args"] == (proof, "pipeline_status_writes", "absent")
     assert scheduler_module._slurm_submit_proof_value(proof)["owner"] == "slurm_submit_proof_value"
     assert calls[-1]["args"] == (proof,)
-    assert scheduler_module._pipeline_status_write_proof_value(proof)["owner"] == (
-        "pipeline_status_write_proof_value"
-    )
+    assert scheduler_module._pipeline_status_write_proof_value(proof)["owner"] == ("pipeline_status_write_proof_value")
     assert calls[-1]["args"] == (proof,)
-    assert scheduler_module._pipeline_event_write_proof_value(proof)["owner"] == (
-        "pipeline_event_write_proof_value"
-    )
+    assert scheduler_module._pipeline_event_write_proof_value(proof)["owner"] == ("pipeline_event_write_proof_value")
     assert calls[-1]["args"] == (proof,)
     assert scheduler_module._merge_proof_values(False, True, scheduler_module.UNKNOWN_AFTER_ATTEMPT)["owner"] == (
         "merge_proof_values"
@@ -2415,7 +2430,7 @@ def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_
     assert scheduler_module._candidate_restart_stage(candidate) is None
     cohorts = scheduler_module._restart_compatible_candidate_cohorts([candidate])
     assert len(cohorts) == 1
-    (cohort_key, cohort_candidates), = cohorts
+    ((cohort_key, cohort_candidates),) = cohorts
     assert cohort_key == (0, "full")
     assert cohort_candidates == [candidate]
 
@@ -2533,9 +2548,7 @@ def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Pat
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeActiveRepository(active=False),
-        canonical_readiness_provider=FakeCanonicalReadinessProvider(
-            {("gfs", cycle_time): unavailable_evidence}
-        ),
+        canonical_readiness_provider=FakeCanonicalReadinessProvider({("gfs", cycle_time): unavailable_evidence}),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -2934,9 +2947,7 @@ def test_disallowed_cycle_hours_do_not_reach_candidates_readiness_forcing_or_sub
     assert forcing_producer.calls == []
     assert orchestrator.calls == []
     excluded = [
-        item
-        for item in result.evidence["source_cycles"]
-        if item.get("selection_reason") == "cycle_hour_not_allowed"
+        item for item in result.evidence["source_cycles"] if item.get("selection_reason") == "cycle_hour_not_allowed"
     ]
     assert [item["cycle_time_utc"] for item in excluded] == [
         "2026-05-21T06:00:00Z",
@@ -2947,8 +2958,7 @@ def test_disallowed_cycle_hours_do_not_reach_candidates_readiness_forcing_or_sub
 
 def test_pass_source_cycle_evidence_redacts_forbidden_probe_credentials(tmp_path: Path) -> None:
     signed_probe = (
-        "https://user:password@provider.example.test/file"
-        "?token=super-secret&X-Amz-Signature=secret-signature"
+        "https://user:password@provider.example.test/file?token=super-secret&X-Amz-Signature=secret-signature"
     )
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
@@ -3108,9 +3118,7 @@ def test_scheduler_candidate_state_identity_mismatch_blocks_evidence_reuse_befor
                 "status_to": "partially_failed",
                 "details": {
                     "stage": "forcing",
-                    "task_results": [
-                        {**identity, "basin_id": "basin_other", "task_id": 0, "status": "failed"}
-                    ],
+                    "task_results": [{**identity, "basin_id": "basin_other", "task_id": 0, "status": "failed"}],
                 },
             },
             "pipeline_events[0].details.task_results[0]",
@@ -3478,10 +3486,7 @@ def test_partial_shared_m23_event_details_and_tasks_are_non_authoritative(
     assert result.evidence["counts"]["submitted_count"] == 1
     assert decision is None
     assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
-    assert any(
-        source.startswith("pipeline_events[0].details")
-        for source in validation["legacy_non_authoritative"]
-    )
+    assert any(source.startswith("pipeline_events[0].details") for source in validation["legacy_non_authoritative"])
     assert orchestrator.calls
 
 
@@ -4480,9 +4485,7 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
         assert "decision" not in state
         assert "failure" not in state
         assert state["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026052106_download"
-        assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == (
-            "job_cycle_gfs_2026052106_retry_active"
-        )
+        assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == ("job_cycle_gfs_2026052106_retry_active")
         assert state["repaired_stage_evidence"]["manifest_uri"] == (
             "s3://nhms-prod/qhh/raw/gfs/2026052106/manifest.json"
         )
@@ -6103,9 +6106,7 @@ def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_e
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeSlurmActiveRepository(
-            active_jobs=[
-                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
-            ]
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -6196,9 +6197,7 @@ def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeSlurmActiveRepository(
-            active_jobs=[
-                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
-            ]
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -6248,9 +6247,7 @@ def test_pre_execution_non_regular_artifact_blocks_before_cancel(
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeSlurmActiveRepository(
-            active_jobs=[
-                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
-            ]
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
         ),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -7816,7 +7813,9 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
             )
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
-            reservation_seen_before_cancel.append(bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json"))))
+            reservation_seen_before_cancel.append(
+                bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json")))
+            )
             cancel_calls.append((cycle_id, reason))
             return [
                 {
@@ -8696,10 +8695,7 @@ def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_c
 
     assert result.evidence["counts"]["submitted_count"] == 2
     assert len(orchestrator.calls) == 2
-    calls_by_model = {
-        call["basins"][0]["model_id"]: call
-        for call in orchestrator.calls
-    }
+    calls_by_model = {call["basins"][0]["model_id"]: call for call in orchestrator.calls}
     assert calls_by_model["model_a"]["basins"][0]["restart_stage"] == "parse"
     assert calls_by_model["model_a"]["basins"][0]["orchestration_run_id"].endswith("_parse_model_a")
     assert "restart_stage" not in calls_by_model["model_b"]["basins"][0]
@@ -8889,8 +8885,7 @@ def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path:
             "status": "probe_failed",
             "error_class": "NetworkDownloadError",
             "error_message": (
-                f"DNS failed for {source}: {signed_probe.replace('@aws/', f'@{source}/')} "
-                "access_key=secret-access-key"
+                f"DNS failed for {source}: {signed_probe.replace('@aws/', f'@{source}/')} access_key=secret-access-key"
             ),
         }
         for source in ("aws", "azure", "google", "ecmwf")
@@ -9987,11 +9982,11 @@ def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or
 
 @pytest.mark.parametrize(
     ("latest_status", "expected_reason"),
-        [
-            ("permanently_failed", "permanent_failure_guard"),
-            ("cancelled", "manual_retry_required_after_cancelled"),
-            ("running", "active_slurm_job"),
-        ],
+    [
+        ("permanently_failed", "permanent_failure_guard"),
+        ("cancelled", "manual_retry_required_after_cancelled"),
+        ("running", "active_slurm_job"),
+    ],
 )
 def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
     tmp_path: Path,
@@ -10359,7 +10354,7 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
                         "retry_count": 4,
                         "previous_job_id": "job_old_failed",
                     },
-                }
+                },
             ],
         }
     )
@@ -10458,16 +10453,10 @@ def test_backfill_selects_oldest_incomplete_cycle_and_defers_later_gaps_for_warm
     selected_cycles = [
         item["cycle_id"]
         for item in result.evidence["source_cycles"]
-        if "cycle_id" in item
-        and item.get("type") != "backfill_deferred"
-        and item.get("status") != "excluded"
+        if "cycle_id" in item and item.get("type") != "backfill_deferred" and item.get("status") != "excluded"
     ]
     assert selected_cycles == ["gfs_2026052100"]
-    deferred = [
-        item
-        for item in result.evidence["source_cycles"]
-        if item.get("type") == "backfill_deferred"
-    ]
+    deferred = [item for item in result.evidence["source_cycles"] if item.get("type") == "backfill_deferred"]
     assert [item["cycle_id"] for item in deferred] == ["gfs_2026052106", "gfs_2026052112"]
     assert {item["reason"] for item in deferred} == {"backfill_deferred_waiting_for_prior_cycle"}
     audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "gfs")
@@ -10518,9 +10507,7 @@ def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
         if "cycle_id" in item and item.get("type") != "backfill_deferred"
     ]
     deferred = [
-        item["cycle_id"]
-        for item in result.evidence["source_cycles"]
-        if item.get("type") == "backfill_deferred"
+        item["cycle_id"] for item in result.evidence["source_cycles"] if item.get("type") == "backfill_deferred"
     ]
     assert selected == ["gfs_2026053000"]
     assert deferred == ["gfs_2026053006"]
@@ -10565,10 +10552,10 @@ def test_backfill_selects_global_oldest_cycle_across_sources_and_defers_later_cy
     result = scheduler.run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 2
-    assert [
-        (call["source"], call["cycle_time"])
-        for call in orchestrator.calls
-    ] == [("gfs", _dt("2026-05-30T00:00:00Z")), ("IFS", _dt("2026-05-30T00:00:00Z"))]
+    assert [(call["source"], call["cycle_time"]) for call in orchestrator.calls] == [
+        ("gfs", _dt("2026-05-30T00:00:00Z")),
+        ("IFS", _dt("2026-05-30T00:00:00Z")),
+    ]
 
 
 def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
@@ -10600,10 +10587,9 @@ def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
     result = scheduler.run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 1
-    assert [
-        (call["source"], call["cycle_time"])
-        for call in orchestrator.calls
-    ] == [("gfs", _dt("2026-05-30T00:00:00Z"))]
+    assert [(call["source"], call["cycle_time"]) for call in orchestrator.calls] == [
+        ("gfs", _dt("2026-05-30T00:00:00Z"))
+    ]
     deferred = [
         item
         for item in result.evidence["source_cycles"]
@@ -10660,9 +10646,7 @@ def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_downloa
         if "cycle_id" in item and item.get("type") != "backfill_deferred"
     ]
     deferred = [
-        item["cycle_id"]
-        for item in result.evidence["source_cycles"]
-        if item.get("type") == "backfill_deferred"
+        item["cycle_id"] for item in result.evidence["source_cycles"] if item.get("type") == "backfill_deferred"
     ]
     assert selected == ["gfs_2026053006"]
     assert deferred == ["gfs_2026053018"]
@@ -10709,11 +10693,7 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
     unavailable = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "gfs_2026052100")
     assert unavailable["selection_status"] == "not_selected"
     assert unavailable["selection_reason"] == "source_cycle_unavailable_does_not_consume_source_budget"
-    deferred = [
-        item
-        for item in result.evidence["source_cycles"]
-        if item.get("type") == "backfill_deferred"
-    ]
+    deferred = [item for item in result.evidence["source_cycles"] if item.get("type") == "backfill_deferred"]
     assert [item["cycle_id"] for item in deferred] == ["gfs_2026052112"]
     audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "gfs")
     assert audit["gap_count"] == 3
@@ -10774,12 +10754,8 @@ def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume
 
     result = scheduler.run_once()
 
-    selected = next(
-        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
-    )
-    probe_failed = next(
-        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
-    )
+    selected = next(item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806")
+    probe_failed = next(item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800")
     assert selected["cycle_id"] == "ifs_2026060806"
     assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
     assert probe_failed["status"] == "probe_failed"
@@ -10850,12 +10826,8 @@ def test_backfill_rate_limited_gap_keeps_retryable_evidence_and_does_not_consume
 
     result = scheduler.run_once()
 
-    selected = next(
-        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
-    )
-    rate_limited = next(
-        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
-    )
+    selected = next(item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806")
+    rate_limited = next(item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800")
     assert selected["cycle_id"] == "ifs_2026060806"
     assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
     assert rate_limited["status"] == "rate_limited"
@@ -10978,8 +10950,7 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
         ) -> PipelineResult:
             self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
             raise RuntimeError(
-                "failed https://user:pass@example.test/log?signature=sig123 "
-                "token=tok123 password=pass123"
+                "failed https://user:pass@example.test/log?signature=sig123 token=tok123 password=pass123"
             )
 
     orchestrator = SecretFailureOrchestrator()
@@ -11767,9 +11738,7 @@ def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts
     )
     assert result.evidence["model_run_evidence"][0]["submitted"] is True
     submitted_basin = orchestrator.calls[0]["basins"][0]
-    assert submitted_basin["candidate_id"] == (
-        "gfs:2026-05-21T06:00:00Z:basins_qhh_shud:forecast_gfs_deterministic"
-    )
+    assert submitted_basin["candidate_id"] == ("gfs:2026-05-21T06:00:00Z:basins_qhh_shud:forecast_gfs_deterministic")
     assert submitted_basin["run_id"] == "fcst_gfs_2026052106_basins_qhh_shud"
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_basins_qhh_shud"
     assert submitted_basin["model_package_uri"] == "s3://nhms/models/basins_qhh_shud/package/"
@@ -12774,8 +12743,8 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         summary = stage["task_results_summary"]
         assert len(stage["task_results"]) == 1
         assert stage["task_results"][0]["candidate_id"] == item["candidate_id"]
-        assert item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (
-            stage["task_results"][0]["slurm_job_id"]
+        assert (
+            item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (stage["task_results"][0]["slurm_job_id"])
         )
         assert summary["total_count"] == 3
         assert summary["matched_count"] == 1
@@ -13094,8 +13063,7 @@ def test_docs_reserve_plan_for_no_mutation_and_use_submit_for_production_submiss
         assert "--plan" not in section, relative_path
 
     reservation_text = "\n".join(
-        (repo_root / relative_path).read_text(encoding="utf-8")
-        for relative_path in production_sections
+        (repo_root / relative_path).read_text(encoding="utf-8") for relative_path in production_sections
     )
     assert "--plan" in reservation_text
     assert "dry-run/no-mutation" in reservation_text
@@ -14751,7 +14719,7 @@ class FakeForcingProducer:
                     "tsd_forc": f"s3://nhms/forcing/{source_id}/{compact_cycle}/basin_a_v1/{model_id}/forcing.tsd.forc",
                     "package_manifest": (
                         f"s3://nhms/forcing/{source_id}/{compact_cycle}/basin_a_v1/{model_id}/forcing_package.json"
-                    )
+                    ),
                 },
             },
         )()
@@ -15433,9 +15401,7 @@ def _clear_grib_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NHMS_GRIB_SYSTEM_ECCODES", raising=False)
 
 
-def test_grib_env_check_valid_root_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_grib_env_check_valid_root_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
     root = tmp_path / "nhms-grib"
     (root / "bin").mkdir(parents=True)
@@ -15449,9 +15415,7 @@ def test_grib_env_check_valid_root_passes(
     assert checks["lib_present"] is True
 
 
-def test_grib_env_check_root_missing_bin_blocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_grib_env_check_root_missing_bin_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
     root = tmp_path / "nhms-grib"
     (root / "lib").mkdir(parents=True)  # bin/ absent
@@ -15463,9 +15427,7 @@ def test_grib_env_check_root_missing_bin_blocks(
     assert "GRIB_ENV_ROOT_INVALID" in codes
 
 
-def test_grib_env_check_root_missing_lib_blocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_grib_env_check_root_missing_lib_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
     root = tmp_path / "nhms-grib"
     (root / "bin").mkdir(parents=True)  # lib/ absent
@@ -15492,9 +15454,7 @@ def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
     assert checks["system_eccodes_available"] is True
 
 
-def test_grib_env_check_empty_root_without_assertion_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_grib_env_check_empty_root_without_assertion_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default no-fence: empty root + nothing asserted -> no GRIB blocker.
     _clear_grib_env(monkeypatch)
     config = _config(tmp_path, slurm_env={})
@@ -15524,9 +15484,7 @@ def test_grib_env_check_empty_root_nodes_lacking_eccodes_asserted_blocks(
     assert checks["system_eccodes_available"] is False
 
 
-def test_grib_env_check_probe_exception_fails_safe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_grib_env_check_probe_exception_fails_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
     config = _config(tmp_path, slurm_env={})
 
@@ -15540,9 +15498,7 @@ def test_grib_env_check_probe_exception_fails_safe(
     assert checks["system_eccodes_available"] is False
 
 
-def test_slurm_preflight_surfaces_grib_blocker_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_slurm_preflight_surfaces_grib_blocker_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
     roots = _slurm_roots(tmp_path)
     # Keep gateway healthy so the only blocker is the GRIB one.
@@ -15641,9 +15597,7 @@ def test_preflight_http_probes_configured_gateway_url(
         raise AssertionError("preflight must not use in-process create_gateway().health()")
 
     monkeypatch.setattr(gateway_module, "create_gateway", _boom)
-    client = _install_fake_httpx(
-        monkeypatch, response=_FakeHttpResponse(200, _healthy_health_payload())
-    )
+    client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _healthy_health_payload()))
 
     config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
@@ -15703,9 +15657,7 @@ def test_preflight_http_probe_legacy_status_only_fallback(
 ) -> None:
     # Backward compat: a gateway still on the old shape (only ``status``) is
     # accepted via the legacy fallback.
-    _install_fake_httpx(
-        monkeypatch, response=_FakeHttpResponse(200, {"status": "ok", "backend": "mock"})
-    )
+    _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, {"status": "ok", "backend": "mock"}))
 
     config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
@@ -16127,9 +16079,7 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
     result = scheduler.run_once()
 
     # The crashed reservation was bound back by idempotency comment at pass start.
-    assert bound_calls == [
-        {"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}
-    ]
+    assert bound_calls == [{"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}]
     reconcile_evidence = result.evidence["restart_reconcile"]
     assert reconcile_evidence["status"] == "completed"
     reserved = reconcile_evidence["reserved_unbound"]
@@ -16250,9 +16200,7 @@ def test_postgres_advisory_lock_key_uses_scheduler_compat_monkeypatch(
     assert patched_lease.lock_key == 123
 
 
-def test_postgres_lock_backend_does_not_touch_file_guard(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
+def test_postgres_lock_backend_does_not_touch_file_guard(monkeypatch: Any, tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         dry_run=False,
@@ -16354,9 +16302,7 @@ def test_renew_never_leaves_lock_empty_and_keeps_valid_json(tmp_path: Path) -> N
     assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
 
 
-def test_renew_failing_mid_write_leaves_original_lock_intact(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
+def test_renew_failing_mid_write_leaves_original_lock_intact(monkeypatch: Any, tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
     lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
     assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
@@ -16542,9 +16488,7 @@ def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
     assert heartbeat._thread is None
 
 
-def test_run_once_skips_submission_when_lease_lost_mid_pass(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
+def test_run_once_skips_submission_when_lease_lost_mid_pass(monkeypatch: Any, tmp_path: Path) -> None:
     # A holder whose lease was reclaimed mid-pass must stop before submitting:
     # heartbeat.lost short-circuits the pass to a lease_lost result with no
     # orchestration, no submission, and no mutation.
@@ -16574,9 +16518,7 @@ def test_run_once_skips_submission_when_lease_lost_mid_pass(
     def _start_lost(self: Any) -> None:
         self.lost = True
 
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._LeaseHeartbeat.start", _start_lost
-    )
+    monkeypatch.setattr("services.orchestrator.scheduler._LeaseHeartbeat.start", _start_lost)
 
     result = scheduler.run_once()
 
