@@ -195,15 +195,9 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
     if field_name == "resolved_runtime_roots":
         return _compact_resolved_runtime_roots(value)
     if field_name == "runtime_config":
-        return _compact_mapping(
-            value,
-            (
-                "service_role",
-                "require_runtime_roots",
-                "dry_run",
-                "allowed_cycle_hours_utc",
-            ),
-        )
+        return _compact_runtime_config(value)
+    if field_name == "db_free_runtime":
+        return _compact_db_free_runtime(value)
     if field_name == "root_preflight":
         return _compact_root_preflight(value)
     if field_name == "evidence_pre_execution":
@@ -215,7 +209,12 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
                 "candidate_count",
             ),
         )
-    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+    if field_name in {
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "restart_reconcile_proof",
+    }:
         return _compact_mapping(
             value,
             (
@@ -232,6 +231,14 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
                 "cancel_called",
                 "cancelled_job_count",
                 "mutation_occurred",
+                "bind_reservation_count",
+                "update_job_status_count",
+                "reserved_unbound_mutation_count",
+                "inflight_mutation_count",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+                "pipeline_status_write_count",
+                "pipeline_event_write_count",
             ),
         )
     if field_name == "no_mutation_proof":
@@ -247,8 +254,11 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
                 "met_result_table_writes",
                 "pipeline_status_writes",
                 "pipeline_event_writes",
+                "restart_reconcile_writes",
             ),
         )
+    if field_name == "retention":
+        return _compact_retention(value)
     if field_name == "readiness":
         return _compact_mapping(
             value,
@@ -321,12 +331,14 @@ def _compact_limit(value: Any) -> Any:
     return _compact_mapping(value, ("reason",))
 
 
-def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
-    if value is None:
-        return {}
-    if field_name == "resolved_runtime_roots":
-        return _compact_resolved_runtime_roots(value)
-    if field_name == "runtime_config":
+def _compact_runtime_config(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("runtime_config", value)
+    db_free_runtime = value.get("db_free_runtime")
+    db_free_required = value.get("scheduler_db_free_required") is True or (
+        isinstance(db_free_runtime, Mapping) and db_free_runtime.get("required") is True
+    )
+    if not db_free_required:
         return _compact_mapping(
             value,
             (
@@ -336,6 +348,149 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "allowed_cycle_hours_utc",
             ),
         )
+    compact = _compact_mapping(
+        value,
+        (
+            "service_role",
+            "require_runtime_roots",
+            "database_url_configured",
+            "scheduler_db_free_required",
+            "scheduler_state_backend",
+            "scheduler_lock_backend",
+            "scheduler_registry_backend",
+            "scheduler_canonical_readiness_backend",
+            "scheduler_journal_backend",
+            "scheduler_state_index_backend",
+            "dry_run",
+            "allowed_cycle_hours_utc",
+        ),
+    )
+    if isinstance(db_free_runtime, Mapping):
+        compact["db_free_runtime"] = _compact_db_free_runtime(value.get("db_free_runtime"))
+    return compact
+
+
+def _compact_db_free_runtime(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("db_free_runtime", value)
+    compact = _compact_mapping(
+        value,
+        (
+            "status",
+            "required",
+            "required_env",
+            "database_url_configured",
+            "canonical_selector_fields",
+            "canonical_path_fields",
+        ),
+    )
+    selectors = value.get("selectors")
+    if isinstance(selectors, Mapping):
+        compact["selectors"] = {
+            str(env): _compact_mapping(
+                selector,
+                ("configured", "selected", "required_value", "file_selected"),
+            )
+            for env, selector in selectors.items()
+            if isinstance(selector, Mapping)
+        }
+    paths = value.get("paths")
+    if isinstance(paths, Mapping):
+        compact["paths"] = {
+            str(env): _compact_db_free_path_or_check(path)
+            for env, path in paths.items()
+            if isinstance(path, Mapping)
+        }
+    checks = value.get("checks")
+    if isinstance(checks, Mapping):
+        compact["checks"] = {
+            str(env): _compact_db_free_path_or_check(check)
+            for env, check in checks.items()
+            if isinstance(check, Mapping)
+        }
+    blockers = value.get("blockers")
+    if isinstance(blockers, Sequence) and not isinstance(blockers, str | bytes | bytearray):
+        compact["blockers"] = [
+            _compact_mapping(blocker, ("code", "field", "reason", "path", "error_type"))
+            for blocker in blockers
+            if isinstance(blocker, Mapping)
+        ]
+    provider_blocker = value.get("provider_blocker")
+    if isinstance(provider_blocker, Mapping):
+        compact["provider_blocker"] = _compact_mapping(provider_blocker, ("code", "field", "reason"))
+    nested_evidence = value.get("evidence")
+    if (
+        isinstance(nested_evidence, Mapping)
+        and "selectors" not in compact
+        and "paths" not in compact
+        and "checks" not in compact
+    ):
+        compact["evidence"] = _compact_db_free_runtime(nested_evidence)
+    return compact
+
+
+def _compact_db_free_path_or_check(value: Mapping[str, Any]) -> dict[str, Any]:
+    return _compact_mapping(
+        value,
+        (
+            "configured",
+            "selected",
+            "required_value",
+            "file_selected",
+            "value_recorded",
+            "path",
+            "kind",
+            "uri",
+            "object_uri",
+            "supported_object_uri",
+            "scheme",
+            "absolute",
+            "contained",
+            "exists",
+            "writable",
+            "object_boundary",
+            "bucket",
+            "namespace",
+        ),
+    )
+
+
+def _compact_retention(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("retention", value)
+    compact = _compact_mapping(
+        value,
+        (
+            "status",
+            "enabled",
+            "dry_run",
+            "forced_dry_run_by_scheduler",
+            "forced_dry_run_reason",
+            "retention_days",
+            "freed_bytes",
+        ),
+    )
+    counts = value.get("counts")
+    if isinstance(counts, Mapping):
+        compact["counts"] = _compact_mapping(counts, ("planned", "deleted", "skipped", "failed"))
+    for field_name in ("planned", "deleted", "skipped", "failed"):
+        items = value.get(field_name)
+        if isinstance(items, Sequence) and not isinstance(items, str | bytes | bytearray):
+            compact[f"{field_name}_count"] = len(items)
+    if "deleted_count" in value:
+        compact["deleted_count"] = value["deleted_count"]
+    return compact
+
+
+def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
+    if value is None:
+        return {}
+    if field_name == "resolved_runtime_roots":
+        return _compact_resolved_runtime_roots(value)
+    if field_name == "runtime_config":
+        return _compact_runtime_config(value)
+    if field_name == "db_free_runtime":
+        return _compact_db_free_runtime(value)
     if field_name == "root_preflight":
         return _compact_root_preflight(value)
     if field_name == "evidence_pre_execution":
@@ -347,7 +502,12 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "candidate_count",
             ),
         )
-    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+    if field_name in {
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "restart_reconcile_proof",
+    }:
         return _compact_mapping(
             value,
             (
@@ -364,6 +524,14 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "cancel_called",
                 "cancelled_job_count",
                 "mutation_occurred",
+                "bind_reservation_count",
+                "update_job_status_count",
+                "reserved_unbound_mutation_count",
+                "inflight_mutation_count",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+                "pipeline_status_write_count",
+                "pipeline_event_write_count",
             ),
         )
     if field_name == "no_mutation_proof":
@@ -379,8 +547,11 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "met_result_table_writes",
                 "pipeline_status_writes",
                 "pipeline_event_writes",
+                "restart_reconcile_writes",
             ),
         )
+    if field_name == "retention":
+        return _compact_retention(value)
     if field_name == "readiness":
         compact = _compact_mapping(
             value,
@@ -451,7 +622,12 @@ def _bounded_retained_field_summary(field_name: str, value: Any) -> dict[str, An
         summary["original_value"] = None
     else:
         summary["omitted_value_type"] = type(value).__name__
-    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+    if field_name in {
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "restart_reconcile_proof",
+    }:
         summary["proof_status"] = _mapping_status(value)
     elif field_name in {"evidence_pre_execution", "root_preflight", "readiness"}:
         summary["source_status"] = _mapping_status(value)
@@ -533,6 +709,7 @@ def bounded_evidence_payload(
         "counts": payload.get("counts", _scheduler_evidence.empty_counts()),
         "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
         "runtime_config": payload.get("runtime_config"),
+        "db_free_runtime": payload.get("db_free_runtime"),
         "root_preflight": payload.get("root_preflight"),
         "evidence_pre_execution": payload.get("evidence_pre_execution"),
         "candidates": [],
@@ -546,8 +723,16 @@ def bounded_evidence_payload(
         "execution_write_proof": payload.get("execution_write_proof"),
         "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
         "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
+        "restart_reconcile_proof": payload.get("restart_reconcile_proof"),
         "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
+        "retention": payload.get("retention"),
     }
+    if "db_free_runtime" not in payload:
+        bounded_payload.pop("db_free_runtime", None)
+    if "retention" not in payload:
+        bounded_payload.pop("retention", None)
+    if "restart_reconcile_proof" not in payload:
+        bounded_payload.pop("restart_reconcile_proof", None)
     return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
 
 
@@ -557,6 +742,8 @@ __all__ = [
     "_compact_counts",
     "_compact_limit",
     "_compact_mapping",
+    "_compact_db_free_runtime",
+    "_compact_retention",
     "_compact_required_bounded_field",
     "_compact_required_bounded_fields",
     "_compact_resolved_runtime_roots",

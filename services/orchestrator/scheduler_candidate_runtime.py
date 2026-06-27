@@ -344,6 +344,7 @@ _slurm_status_sync_failed = _scheduler_evidence_forwarder("slurm_status_sync_fai
 _slurm_cancelled_count = _scheduler_evidence_forwarder("slurm_cancelled_count")
 _slurm_cancellation_blocked_count = _scheduler_evidence_forwarder("slurm_cancellation_blocked_count")
 _slurm_cancellation_unknown_count = _scheduler_evidence_forwarder("slurm_cancellation_unknown_count")
+_restart_reconcile_proof = _scheduler_evidence_forwarder("restart_reconcile_proof")
 _scheduler_mutation_proof = _scheduler_evidence_forwarder("scheduler_mutation_proof")
 _proof_mutation_value = _scheduler_evidence_forwarder("proof_mutation_value")
 _named_proof_value = _scheduler_evidence_forwarder("named_proof_value")
@@ -376,6 +377,7 @@ _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES = MappingProxyType(
         "_slurm_cancelled_count": "slurm_cancelled_count",
         "_slurm_cancellation_blocked_count": "slurm_cancellation_blocked_count",
         "_slurm_cancellation_unknown_count": "slurm_cancellation_unknown_count",
+        "_restart_reconcile_proof": "restart_reconcile_proof",
         "_scheduler_mutation_proof": "scheduler_mutation_proof",
         "_proof_mutation_value": "proof_mutation_value",
         "_named_proof_value": "named_proof_value",
@@ -858,6 +860,7 @@ EXPORTS = {
         "_scheduler_partial_count_from_execution",
         "_scheduler_pass_status_from_cancellation",
         "_scheduler_pass_status_from_execution",
+        "_restart_reconcile_proof",
         "_scheduler_resolved_runtime_roots",
         "_scheduler_root_blocker",
         "_scheduler_root_check",

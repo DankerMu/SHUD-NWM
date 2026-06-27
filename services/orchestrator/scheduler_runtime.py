@@ -118,6 +118,10 @@ def _require_evidence_artifact_available(*args, **kwargs):
     return getattr(_scheduler, "_require_evidence_artifact_available")(*args, **kwargs)
 
 
+def _restart_reconcile_proof(*args, **kwargs):
+    return getattr(_scheduler, "_restart_reconcile_proof")(*args, **kwargs)
+
+
 def _require_safe_directory_final_component(*args, **kwargs):
     return getattr(_scheduler, "_require_safe_directory_final_component")(*args, **kwargs)
 
@@ -504,6 +508,7 @@ def run_once(self) -> SchedulerPassResult:
                 artifact_path=artifact_path,
             )
         restart_reconcile_evidence = self._run_restart_reconcile()
+        restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
         models, model_evidence = self._discover_models()
         cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
         (
@@ -577,11 +582,12 @@ def run_once(self) -> SchedulerPassResult:
                 artifact_path=artifact_path,
             )
         if not self.config.dry_run and mutation_candidate_count:
-            evidence_reservation = self._reserve_pre_execution_evidence(
-                pass_id,
-                started_at,
-                mutation_candidate_count,
-            )
+            if evidence_reservation["status"] == "not_required":
+                evidence_reservation = self._reserve_pre_execution_evidence(
+                    pass_id,
+                    started_at,
+                    mutation_candidate_count,
+                )
             if evidence_reservation["status"] == "blocked":
                 execution_evidence = [
                     _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
@@ -718,6 +724,7 @@ def run_once(self) -> SchedulerPassResult:
                 execution_write_proof=execution_write_proof,
                 slurm_status_sync_proof=slurm_status_sync_proof,
                 slurm_cancellation_proof=slurm_cancellation_proof,
+                restart_reconcile_proof=restart_reconcile_proof,
             )
             no_mutation_proof = {
                 "adapter_download_called": False,
@@ -730,8 +737,19 @@ def run_once(self) -> SchedulerPassResult:
                 "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
                 "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
             }
+            if scheduler_mutation_proof.get("restart_reconcile_writes") is not False:
+                no_mutation_proof["restart_reconcile_writes"] = scheduler_mutation_proof["restart_reconcile_writes"]
             failed_count = _scheduler_failed_count_from_execution(execution_evidence)
             partial_count = _scheduler_partial_count_from_execution(execution_evidence)
+        elif restart_reconcile_proof.get("mutation_occurred") is True:
+            no_mutation_proof = {
+                **_no_mutation_proof(),
+                "pipeline_status_writes": True,
+                "pipeline_event_writes": restart_reconcile_proof.get("pipeline_event_writes") is True,
+                "restart_reconcile_writes": True,
+            }
+            if execution_boundary == "planning_only":
+                execution_boundary = "restart_reconcile"
         finished_at = _now(self.config)
         evidence = self._base_evidence(pass_id, started_at)
         evidence["operator_filters"].update(model_evidence["operator_filters"])
@@ -785,6 +803,7 @@ def run_once(self) -> SchedulerPassResult:
         )
         if restart_reconcile_evidence is not None:
             evidence["restart_reconcile"] = restart_reconcile_evidence
+            evidence["restart_reconcile_proof"] = restart_reconcile_proof
         overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
         if overlap_receipt is not None:
             # M24 §3A Evidence Floor: archive the overlapping-submit receipt
@@ -793,7 +812,7 @@ def run_once(self) -> SchedulerPassResult:
             evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
         if slurm_preflight_evidence is not None:
             evidence["slurm_preflight"] = slurm_preflight_evidence
-        if not self.config.dry_run and mutation_candidate_count and evidence_reservation["status"] != "not_required":
+        if evidence_reservation["status"] != "not_required":
             evidence["evidence_pre_execution"] = evidence_reservation
         if root_preflight["status"] != "not_required":
             evidence["root_preflight"] = root_preflight
@@ -814,7 +833,7 @@ def run_once(self) -> SchedulerPassResult:
         )
         try:
             artifact_path = self._write_evidence(pass_id, evidence)
-        except (OSError, SchedulerEvidenceWriteError) as error:
+        except (OSError, RuntimeError, ValueError, SchedulerEvidenceWriteError) as error:
             if evidence_reservation.get("status") != "blocked":
                 raise
             evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)

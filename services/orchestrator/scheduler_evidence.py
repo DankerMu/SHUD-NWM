@@ -35,12 +35,15 @@ _REQUIRED_BOUNDED_EVIDENCE_FIELDS = frozenset(
         "readiness",
         "resolved_runtime_roots",
         "runtime_config",
+        "db_free_runtime",
         "root_preflight",
         "evidence_pre_execution",
         "execution_write_proof",
         "slurm_status_sync_proof",
         "slurm_cancellation_proof",
+        "restart_reconcile_proof",
         "no_mutation_proof",
+        "retention",
     )
 )
 _SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS = (
@@ -633,6 +636,7 @@ from services.orchestrator.scheduler_evidence_proofs import (  # noqa: E402, F40
     pipeline_status_write_proof_value,
     positive_count,
     proof_mutation_value,
+    restart_reconcile_proof,
     scheduler_execution_boundary_from_cancellation,
     scheduler_mutation_proof,
     scheduler_pass_status_from_cancellation,
@@ -970,6 +974,7 @@ __all__ = [
     "proof_mutation_value",
     "require_evidence_artifact_available",
     "reserve_pre_execution_evidence",
+    "restart_reconcile_proof",
     "root_evidence_item",
     "scheduler_execution_boundary_from_cancellation",
     "scheduler_mutation_proof",

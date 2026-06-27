@@ -186,7 +186,10 @@ class ProductionSchedulerConfig:
         _scheduler._reject_blank_config_path(self.workspace_root, "workspace_root")
         _scheduler._reject_blank_config_path(self.lock_path, "lock_path")
         _scheduler._reject_blank_config_path(self.evidence_dir, "evidence_dir")
-        workspace_root_raw_preflight_path = _raw_config_path_preserve_components(self.workspace_root)
+        workspace_root_raw_preflight_path = _raw_config_path_preserve_components(
+            self.workspace_root,
+            db_free_required=db_free_required,
+        )
         workspace_root_preflight_path = _config_path_preserve_final_component_for_mode(
             self.workspace_root,
             db_free_required=db_free_required,
@@ -201,6 +204,7 @@ class ProductionSchedulerConfig:
         object_store_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.object_store_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         object_store_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.object_store_root,
@@ -220,6 +224,7 @@ class ProductionSchedulerConfig:
         published_artifact_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.published_artifact_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         published_artifact_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.published_artifact_root,
@@ -253,6 +258,7 @@ class ProductionSchedulerConfig:
         runtime_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.runtime_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         runtime_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.runtime_root,
@@ -269,6 +275,7 @@ class ProductionSchedulerConfig:
         temp_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.temp_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         temp_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.temp_root,
@@ -285,6 +292,7 @@ class ProductionSchedulerConfig:
         scheduler_lock_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.scheduler_lock_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         scheduler_lock_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.scheduler_lock_root,
@@ -302,6 +310,7 @@ class ProductionSchedulerConfig:
         scheduler_evidence_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.scheduler_evidence_root,
             workspace_root,
+            db_free_required=db_free_required,
         )
         scheduler_evidence_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.scheduler_evidence_root,
@@ -400,6 +409,7 @@ class ProductionSchedulerConfig:
             lock_path_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
                 self.lock_path,
                 workspace_root,
+                db_free_required=db_free_required,
             )
             lock_path_preflight_path = _config_path_relative_to_preserve_final_for_mode(
                 self.lock_path,
@@ -456,6 +466,7 @@ class ProductionSchedulerConfig:
             evidence_dir_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
                 self.evidence_dir,
                 workspace_root,
+                db_free_required=db_free_required,
             )
             evidence_dir_preflight_path = _config_path_relative_to_preserve_final_for_mode(
                 self.evidence_dir,
@@ -585,30 +596,54 @@ def _evidence_scalar(value: Any) -> Any:
     return redact_payload(str(value))
 
 
-def _raw_config_path_preserve_components(value: Path | str) -> Path:
-    path = Path(value).expanduser()
+def _expanduser_for_mode(value: Path | str, *, db_free_required: bool) -> Path:
+    path = Path(value)
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        if not db_free_required:
+            raise
+        return path
+
+
+def _raw_config_path_preserve_components(value: Path | str, *, db_free_required: bool = False) -> Path:
+    path = _expanduser_for_mode(value, db_free_required=db_free_required)
     if not path.is_absolute():
         return Path.cwd() / path
     return path
 
 
-def _raw_config_path_relative_to_preserve_components(value: Path | str, base: Path) -> Path:
-    path = Path(value).expanduser()
+def _raw_config_path_relative_to_preserve_components(
+    value: Path | str,
+    base: Path,
+    *,
+    db_free_required: bool = False,
+) -> Path:
+    path = _expanduser_for_mode(value, db_free_required=db_free_required)
     if not path.is_absolute():
         return base / path
     return path
 
 
-def _optional_raw_config_path_relative_to_preserve_components(value: Path | str | None, base: Path) -> Path | None:
+def _optional_raw_config_path_relative_to_preserve_components(
+    value: Path | str | None,
+    base: Path,
+    *,
+    db_free_required: bool = False,
+) -> Path | None:
     if value in (None, ""):
         return None
-    return _raw_config_path_relative_to_preserve_components(value, base)
+    return _raw_config_path_relative_to_preserve_components(
+        value,
+        base,
+        db_free_required=db_free_required,
+    )
 
 
 def _config_path_preserve_final_component_for_mode(value: Path | str, *, db_free_required: bool) -> Path:
     if not db_free_required:
         return _scheduler._config_path_preserve_final_component(value)
-    path = Path(value).expanduser()
+    path = _expanduser_for_mode(value, db_free_required=True)
     if not path.is_absolute():
         path = Path.cwd() / path
     return _safe_preserve_final_component(path)
@@ -622,7 +657,7 @@ def _config_path_relative_to_preserve_final_for_mode(
 ) -> Path:
     if not db_free_required:
         return _scheduler._config_path_relative_to_preserve_final(value, base)
-    path = Path(value).expanduser()
+    path = _expanduser_for_mode(value, db_free_required=True)
     if not path.is_absolute():
         path = base / path
     return _safe_preserve_final_component(path)
@@ -670,7 +705,7 @@ def _optional_config_path_for_mode(value: Path | str | None, *, db_free_required
         return None
     if not db_free_required:
         return _scheduler._optional_config_path(value)
-    path = Path(value).expanduser()
+    path = _expanduser_for_mode(value, db_free_required=True)
     if not path.is_absolute():
         path = Path.cwd() / path
     return _resolve_config_path_for_mode(path, db_free_required=True)
@@ -688,7 +723,7 @@ def _confined_path_for_mode(
     try:
         return _scheduler._confined_path(value, workspace_root, field_name)
     except (OSError, RuntimeError, ValueError):
-        path = Path(value).expanduser()
+        path = _expanduser_for_mode(value, db_free_required=True)
         if not path.is_absolute():
             path = workspace_root / path
         return _safe_preserve_final_component(path)
@@ -788,9 +823,9 @@ def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...
         if value in (None, ""):
             continue
         try:
-            root = Path(value).expanduser().resolve(strict=False)
+            root = _expanduser_for_mode(value, db_free_required=True).resolve(strict=False)
         except (OSError, RuntimeError):
-            root = Path(value).expanduser()
+            root = _expanduser_for_mode(value, db_free_required=True)
             if not root.is_absolute():
                 root = Path.cwd() / root
         if root not in roots:
@@ -831,7 +866,7 @@ def _db_free_path_check(
         check["supported_object_uri"] = False
         return check, _db_free_blocker("db_free_required_path_unsupported_uri", env, "unsupported_uri")
     check["path"] = "[local-path]"
-    path = Path(text).expanduser()
+    path = _expanduser_for_mode(text, db_free_required=True)
     if not path.is_absolute():
         check.update({"absolute": False, "contained": False})
         return check, _db_free_blocker("db_free_required_path_relative", env, "relative", path=str(path))

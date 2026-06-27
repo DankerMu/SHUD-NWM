@@ -5957,6 +5957,91 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
     assert "slurm_submit_called" in shim_payload["no_mutation_proof"]
 
 
+def test_db_free_bounded_evidence_preserves_runtime_selector_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig(now=_dt("2026-06-27T16:00:00Z"))
+    payload = _large_scheduler_evidence_payload("scheduler_2026062716_dbfree_bounded")
+    payload["runtime_config"] = scheduler_module._scheduler_runtime_config_evidence(config)
+    payload["db_free_runtime"] = config.db_free_runtime_preflight()
+    payload["resolved_runtime_roots"] = scheduler_module._scheduler_resolved_runtime_roots(config)
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=5_000,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 5_000
+    assert bounded["status"] == "resource_limit_blocked"
+    runtime_config = bounded["runtime_config"]
+    assert runtime_config["database_url_configured"] is False
+    assert runtime_config["scheduler_db_free_required"] is True
+    assert runtime_config["scheduler_state_backend"] == "file"
+    assert runtime_config["scheduler_lock_backend"] == "file"
+    assert runtime_config["scheduler_registry_backend"] == "file"
+    assert runtime_config["scheduler_canonical_readiness_backend"] == "file"
+    assert runtime_config["scheduler_journal_backend"] == "file"
+    assert runtime_config["scheduler_state_index_backend"] == "file"
+    db_free_runtime = runtime_config["db_free_runtime"]
+    assert set(db_free_runtime["selectors"]) == set(_DB_FREE_SELECTOR_ENV_KEYS)
+    assert set(db_free_runtime["paths"]) == set(_DB_FREE_PATH_ENV_KEYS)
+    assert db_free_runtime["selectors"]["NHMS_SCHEDULER_REGISTRY_BACKEND"]["selected"] == "file"
+    assert db_free_runtime["paths"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    assert bounded["db_free_runtime"]["status"] == "ready"
+    assert bounded["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    for path in paths.values():
+        assert str(path) not in rendered
+    assert "db-free-local-root" not in rendered
+
+
+def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_paths() -> None:
+    payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_bounded")
+    payload["retention"] = {
+        "schema_version": "nhms.production_scheduler.retention.v1",
+        "status": "completed",
+        "enabled": True,
+        "dry_run": True,
+        "forced_dry_run_by_scheduler": True,
+        "forced_dry_run_reason": "evidence_preflight_blocked",
+        "retention_days": 14,
+        "counts": {"planned": 2, "deleted": 0, "skipped": 1, "failed": 0},
+        "planned": [
+            {"key": "raw/gfs/2026050100/secret-token-file.nc", "path": "/private/secret-token-file.nc"},
+            {"key": "runs/fcst_gfs_2026050100_model_a", "path": "/private/run-path"},
+        ],
+        "deleted": [],
+        "skipped": [{"key": "tiles/protected", "path": "/private/tiles"}],
+        "failed": [],
+        "freed_bytes": 0,
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_800,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 2_800
+    retention = bounded["retention"]
+    assert retention["status"] == "completed"
+    assert retention["enabled"] is True
+    assert retention["dry_run"] is True
+    assert retention["forced_dry_run_by_scheduler"] is True
+    assert retention["forced_dry_run_reason"] == "evidence_preflight_blocked"
+    assert retention["counts"] == {"planned": 2, "deleted": 0, "skipped": 1, "failed": 0}
+    assert retention["planned_count"] == 2
+    assert retention["deleted_count"] == 0
+    assert "planned" not in retention
+    assert "deleted" not in retention
+    assert "secret-token-file" not in rendered
+    assert "/private" not in rendered
+
+
 def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_path: Path) -> None:
     from services.orchestrator import scheduler_evidence
 
@@ -6205,6 +6290,56 @@ def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artif
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
     assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_pre_execution_blocked_final_runtime_error_returns_no_artifact(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "abc123def456"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    original_write_new_regular_file = scheduler_module._write_new_regular_file
+
+    def fail_final_evidence_artifact(
+        artifact_name: str,
+        serialized: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        if artifact_name == f"{pass_id}.json":
+            raise RuntimeError("forced final evidence failure")
+        original_write_new_regular_file(
+            artifact_name,
+            serialized,
+            dir_fd=dir_fd,
+            artifact_path=artifact_path,
+        )
+
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    monkeypatch.setattr(scheduler_module, "_write_new_regular_file", fail_final_evidence_artifact)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.parent.mkdir(parents=True)
+    reservation_path.write_text("existing reservation\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.artifact_path is None
+    assert orchestrator.calls == []
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["evidence_write_error"]["reason"] == "evidence_write_failed"
+    assert result.evidence["evidence_write_error"]["error"] == "forced final evidence failure"
 
 
 def test_db_free_evidence_reservation_blocker_masks_artifact_path(
@@ -16442,6 +16577,69 @@ def test_db_free_unsafe_workspace_root_constructs_and_blocks_before_lock(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
+def test_db_free_unknown_user_workspace_root_constructs_and_blocks_redacted(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    unknown_workspace = "~nhms_missing_user/workspace"
+    monkeypatch.setenv("WORKSPACE_ROOT", unknown_workspace)
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", f"{unknown_workspace}/locks")
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", f"{unknown_workspace}/evidence")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig()
+    runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(
+        {"runtime_preflight": runtime_preflight, "evidence": result.evidence},
+        sort_keys=True,
+    )
+
+    assert runtime_preflight["status"] == "blocked"
+    assert runtime_preflight["checks"]["workspace_root"]["path"] == "[local-path]"
+    assert result.status == "preflight_blocked"
+    assert result.evidence["root_preflight"]["status"] == "blocked"
+    assert result.evidence["root_preflight"]["checks"]["workspace_root"]["path"] == "[local-path]"
+    assert result.evidence["lock"]["reason"] == "scheduler_root_preflight_blocked"
+    assert "nhms_missing_user" not in rendered
+    assert unknown_workspace not in rendered
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_unknown_user_required_path_blocks_redacted_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    unknown_path = "~nhms_missing_user/registry-manifest.json"
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", unknown_path)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig()
+    db_free_preflight = config.db_free_runtime_preflight()
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(
+        {"db_free_preflight": db_free_preflight, "evidence": result.evidence},
+        sort_keys=True,
+    )
+
+    assert db_free_preflight["status"] == "blocked"
+    assert db_free_preflight["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]["path"] == "[local-path]"
+    blocker = next(
+        blocker
+        for blocker in result.evidence["db_free_runtime"]["blockers"]
+        if blocker["field"] == "NHMS_SCHEDULER_REGISTRY_MANIFEST"
+    )
+    assert blocker["path"] == "[local-path]"
+    assert "nhms_missing_user" not in rendered
+    assert unknown_path not in rendered
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(
     monkeypatch: Any,
     tmp_path: Path,
@@ -17628,6 +17826,92 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
     assert reserved["outcomes"][0]["action"] == "bound"
     assert reserved["outcomes"][0]["slurm_job_id"] == "88123"
     assert reserved["outcomes"][0]["idempotency_key"] == key
+
+
+def test_restart_reconcile_mutation_is_recorded_when_later_reservation_blocks(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "dddccc111222"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    key = "fcst_gfs_2026052106_model_a:forcing"
+
+    class _ReservedUnboundJob:
+        job_id = "job_reserved_crash"
+        idempotency_key = key
+        status = "reserved"
+        slurm_job_id = None
+        stage = "forcing"
+        job_type = "produce_forcing_array"
+
+    query_calls: list[str] = []
+    bound_calls: list[dict[str, Any]] = []
+
+    class _MutatingReconcileStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            query_calls.append("reserved_unbound")
+            return [_ReservedUnboundJob()]
+
+        def query_inflight_jobs(self) -> list[Any]:
+            query_calls.append("inflight")
+            return []
+
+        def bind_reservation(self, idem: str, *, slurm_job_id: str, status: str = "submitted") -> dict[str, Any]:
+            record = {"idempotency_key": idem, "slurm_job_id": slurm_job_id, "status": status}
+            bound_calls.append(record)
+            return record
+
+        def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError("reservation-blocked reconcile must not update durable state")
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="88123",
+                raw_state="RUNNING",
+                job_name="nhms_forcing",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("reservation block must stop execution"),
+        reconcile_store=_MutatingReconcileStore(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=lambda _slurm_job_id: None,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.parent.mkdir(parents=True)
+    reservation_path.write_text("existing reservation\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    assert query_calls == ["reserved_unbound", "inflight"]
+    assert bound_calls == [{"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}]
+    assert reservation_path.read_text(encoding="utf-8") == "existing reservation\n"
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["restart_reconcile"]["status"] == "completed"
+    assert result.evidence["restart_reconcile"]["reserved_unbound"]["outcomes"][0]["action"] == "bound"
+    assert result.evidence["restart_reconcile_proof"]["mutation_occurred"] is True
+    assert result.evidence["restart_reconcile_proof"]["bind_reservation_count"] == 1
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    no_mutation = result.evidence["no_mutation_proof"]
+    assert no_mutation["slurm_submit_called"] is False
+    assert no_mutation["pipeline_status_writes"] is True
+    assert no_mutation["restart_reconcile_writes"] is True
+    assert no_mutation != _expected_no_mutation_proof()
 
 
 def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
