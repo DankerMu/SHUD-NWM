@@ -103,6 +103,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.7 Extract scheduler config owner slice.
+  - Module/Scope: move `ProductionSchedulerConfig` and its root/path/env
+    normalization body from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_config.py`.
+  - Stable Facade: keep
+    `services.orchestrator.scheduler.ProductionSchedulerConfig`
+    import-compatible by aliasing the owner class and preserving the legacy
+    `__module__` value.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_config.py` as the scheduler config owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "default_config_paths_created or plan_production_cli or blank_config_paths or allowed_cycle_hours or evidence_dir_symlink"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_config.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
