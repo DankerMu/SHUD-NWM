@@ -11,22 +11,16 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from errno import EACCES, ELOOP, ENOTDIR, EPERM
 from functools import wraps
-from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from threading import RLock
 from types import FunctionType, MappingProxyType
 from typing import Any, Protocol
-from urllib.parse import urlparse
 from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload
-from packages.common.shud_preflight import check_shud_executable
 from packages.common.slurm_env import (
     iter_secret_manifest_findings,
-    reserved_slurm_env_reason,
-    secret_bearing_url_reason,
-    secret_manifest_key_reason,
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager
@@ -35,6 +29,7 @@ from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence
 from services.orchestrator import scheduler_execution as _scheduler_execution
 from services.orchestrator import scheduler_lease as _scheduler_lease_module
+from services.orchestrator import scheduler_preflight as _scheduler_preflight
 from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
     ForecastOrchestrator,
@@ -474,8 +469,7 @@ for _scheduler_state_direct_name, _scheduler_state_owner_value in _SCHEDULER_STA
         continue
     if _SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS[_scheduler_state_direct_name] is not _scheduler_state_owner_value:
         raise RuntimeError(
-            "scheduler state direct re-export drifted from owner module: "
-            f"{_scheduler_state_direct_name}"
+            f"scheduler state direct re-export drifted from owner module: {_scheduler_state_direct_name}"
         )
 del _scheduler_state_direct_name, _scheduler_state_owner_value
 _SCHEDULER_STATE_COMPAT_EXPORTS = tuple(
@@ -519,8 +513,7 @@ if _SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING:
     )
 if _SCHEDULER_LEASE_COMPAT_FACADE_MISSING:
     raise RuntimeError(
-        "scheduler lease compatibility names missing from facade: "
-        f"{', '.join(_SCHEDULER_LEASE_COMPAT_FACADE_MISSING)}"
+        f"scheduler lease compatibility names missing from facade: {', '.join(_SCHEDULER_LEASE_COMPAT_FACADE_MISSING)}"
     )
 _SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS = MappingProxyType(
     {name: getattr(_scheduler_lease_module, name) for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES}
@@ -535,8 +528,7 @@ if not set(_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES).issubset(_SCHEDULER_LEASE_COMPA
 for _scheduler_lease_direct_name, _scheduler_lease_owner_value in _SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS.items():
     if _SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[_scheduler_lease_direct_name] is not _scheduler_lease_owner_value:
         raise RuntimeError(
-            "scheduler lease direct re-export drifted from owner module: "
-            f"{_scheduler_lease_direct_name}"
+            f"scheduler lease direct re-export drifted from owner module: {_scheduler_lease_direct_name}"
         )
 del _scheduler_lease_direct_name, _scheduler_lease_owner_value
 _SCHEDULER_LEASE_COMPAT_EXPORTS = tuple(
@@ -831,15 +823,17 @@ class ProductionSchedulerConfig:
         default_factory=lambda: os.getenv("SLURM_SHARED_LOG_ROOT") or os.getenv("LOG_ROOT")
     )
     runtime_root: Path | str | None = field(
-        default_factory=lambda: os.getenv("NHMS_SCHEDULER_RUNTIME_ROOT")
-        or os.getenv("NHMS_RUNTIME_ROOT")
-        or os.getenv("RUN_WORKSPACE_ROOT")
-        or os.getenv("SHUD_RUNTIME_ROOT")
+        default_factory=lambda: (
+            os.getenv("NHMS_SCHEDULER_RUNTIME_ROOT")
+            or os.getenv("NHMS_RUNTIME_ROOT")
+            or os.getenv("RUN_WORKSPACE_ROOT")
+            or os.getenv("SHUD_RUNTIME_ROOT")
+        )
     )
     temp_root: Path | str | None = field(
-        default_factory=lambda: os.getenv("NHMS_SCHEDULER_TEMP_ROOT")
-        or os.getenv("NHMS_TEMP_ROOT")
-        or os.getenv("TMPDIR")
+        default_factory=lambda: (
+            os.getenv("NHMS_SCHEDULER_TEMP_ROOT") or os.getenv("NHMS_TEMP_ROOT") or os.getenv("TMPDIR")
+        )
     )
     scheduler_lock_root: Path | str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_LOCK_ROOT"))
     scheduler_evidence_root: Path | str | None = field(
@@ -847,20 +841,13 @@ class ProductionSchedulerConfig:
     )
     service_role: str | None = field(default_factory=lambda: os.getenv("NHMS_SERVICE_ROLE"))
     require_runtime_roots: bool = field(default_factory=lambda: _env_flag("NHMS_SCHEDULER_REQUIRE_ROOTS"))
-    database_url: str | None = field(
-        default_factory=lambda: os.getenv("DATABASE_URL")
-    )
+    database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL"))
     slurm_execution_enabled: bool = field(
-        default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
-        or _env_flag("SLURM_EXECUTION_ENABLED")
+        default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED") or _env_flag("SLURM_EXECUTION_ENABLED")
     )
-    slurm_gateway_url: str = field(
-        default_factory=lambda: os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000")
-    )
+    slurm_gateway_url: str = field(default_factory=lambda: os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"))
     service_port: int = field(default_factory=lambda: _env_int("NHMS_SERVICE_PORT", DEFAULT_SERVICE_PORT))
-    forcing_production_enabled: bool = field(
-        default_factory=lambda: _env_flag("NHMS_PRODUCTION_FORCING_ENABLED")
-    )
+    forcing_production_enabled: bool = field(default_factory=lambda: _env_flag("NHMS_PRODUCTION_FORCING_ENABLED"))
     allowed_storage_roots: tuple[Path | str, ...] = field(
         default_factory=lambda: _env_path_list("NHMS_SCHEDULER_ALLOWED_ROOTS")
     )
@@ -1024,9 +1011,7 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "scheduler_lock_backend", lock_backend)
         if self.lock_path is None:
             lock_root = (
-                Path(self.scheduler_lock_root)
-                if self.scheduler_lock_root is not None
-                else workspace_root / "scheduler"
+                Path(self.scheduler_lock_root) if self.scheduler_lock_root is not None else workspace_root / "scheduler"
             )
             lock_root_preflight_path = (
                 scheduler_lock_root_preflight_path
@@ -1247,10 +1232,7 @@ class ProductionScheduler:
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
-        if (
-            canonical_readiness_provider is _CANONICAL_READINESS_PROVIDER_UNSET
-            or canonical_readiness_provider is None
-        ):
+        if canonical_readiness_provider is _CANONICAL_READINESS_PROVIDER_UNSET or canonical_readiness_provider is None:
             self.canonical_readiness_provider = _UnavailableCanonicalReadinessProvider(
                 reason="canonical_readiness_provider_absent",
                 dependency="canonical_readiness_provider",
@@ -1340,9 +1322,7 @@ class ProductionScheduler:
                 artifact_path=artifact_path,
             )
 
-        heartbeat = _LeaseHeartbeat(
-            lock, pass_id, max(1, self.config.lock_ttl_seconds // 3)
-        )
+        heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
         heartbeat.start()
         try:
             root_preflight = _scheduler_runtime_root_preflight(self.config)
@@ -1398,9 +1378,7 @@ class ProductionScheduler:
                 if candidate.get("reason") == "cancel_requested_active_slurm"
             ]
             cancel_active_slurm_requested = (
-                self.config.cancel_active_slurm
-                and not self.config.dry_run
-                and bool(pending_cancel_candidates)
+                self.config.cancel_active_slurm and not self.config.dry_run and bool(pending_cancel_candidates)
             )
             execution_evidence: list[dict[str, Any]] = []
             submitted_count = 0
@@ -1419,8 +1397,8 @@ class ProductionScheduler:
             ]
             slurm_status_sync_proof = _slurm_status_sync_proof(sync_required=bool(pending_status_sync_candidates))
             slurm_cancellation_proof = _slurm_cancellation_proof()
-            mutation_candidate_count = len(candidates) + len(pending_cancel_candidates) + len(
-                pending_status_sync_candidates
+            mutation_candidate_count = (
+                len(candidates) + len(pending_cancel_candidates) + len(pending_status_sync_candidates)
             )
             # §4.2 lease: if the heartbeat reports our lease was taken over
             # mid-pass, short-circuit BEFORE any submission/cancellation so we
@@ -1575,9 +1553,7 @@ class ProductionScheduler:
                                     execution_evidence,
                                     reservation=evidence_reservation,
                                 )
-                                submitted_count = sum(
-                                    1 for item in execution_evidence if item.get("submitted") is True
-                                )
+                                submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
                                 execution_boundary = (
                                     "slurm_gateway_orchestration"
                                     if self.config.slurm_execution_enabled
@@ -1691,11 +1667,7 @@ class ProductionScheduler:
                 evidence["backfill"] = {
                     "enabled": True,
                     "lookback_hours": self.config.lookback_hours,
-                    "audit": [
-                        item
-                        for item in source_cycle_evidence
-                        if item.get("type") == "backfill_audit"
-                    ],
+                    "audit": [item for item in source_cycle_evidence if item.get("type") == "backfill_audit"],
                 }
             else:
                 evidence["backfill"] = {"enabled": False}
@@ -2010,8 +1982,7 @@ class ProductionScheduler:
                 raise ValueError("production scheduler max_passes must be at least 1")
             if max_passes > MAX_CONTINUOUS_JSON_PASSES:
                 raise ValueError(
-                    "production scheduler max_passes exceeds finite JSON output limit "
-                    f"{MAX_CONTINUOUS_JSON_PASSES}"
+                    f"production scheduler max_passes exceeds finite JSON output limit {MAX_CONTINUOUS_JSON_PASSES}"
                 )
         results: list[SchedulerPassResult] = []
         completed = 0
@@ -2178,9 +2149,7 @@ class ProductionScheduler:
             if cancellation_status != "cancelled":
                 cancellation_item["error_code"] = "SLURM_CANCELLATION_GAP"
                 cancellation_item["cancellation_proven"] = False
-            evidence.append(
-                cancellation_item
-            )
+            evidence.append(cancellation_item)
         return evidence
 
     def _orchestrator_for(self, source_id: str) -> ForecastOrchestrator:
@@ -2761,220 +2730,6 @@ _duplicate_cycle_evidence = _scheduler_discovery._duplicate_cycle_evidence
 _backfill_deferred_evidence = _scheduler_discovery._backfill_deferred_evidence
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _restart_compatible_candidate_cohorts(
     candidates: Sequence[SchedulerCandidate],
 ) -> list[tuple[tuple[int, str], list[SchedulerCandidate]]]:
@@ -3043,48 +2798,6 @@ def _candidate_execution_cohort_run_id_for_candidate(
         candidate,
         format_cycle_time=format_cycle_time,
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _candidate_for(
@@ -3406,11 +3119,7 @@ def _pipeline_result_has_pipeline_job_evidence(result: PipelineResult) -> bool:
 
 
 def _pipeline_result_write_absence_proven(result: PipelineResult, absent_field: str) -> bool:
-    outcomes = [
-        outcome
-        for outcome in getattr(result, "candidate_outcomes", ()) or ()
-        if isinstance(outcome, Mapping)
-    ]
+    outcomes = [outcome for outcome in getattr(result, "candidate_outcomes", ()) or () if isinstance(outcome, Mapping)]
     if outcomes and all(outcome.get(absent_field) is True for outcome in outcomes):
         return True
     return False
@@ -3537,10 +3246,14 @@ def _candidate_slurm_preflight_blocked_evidence(
     preflight: Mapping[str, Any],
 ) -> dict[str, Any]:
     blockers = list(preflight.get("blockers") or [])
-    primary = blockers[0] if blockers else {
-        "code": "SLURM_PREFLIGHT_BLOCKED",
-        "message": "Slurm preflight blocked submission.",
-    }
+    primary = (
+        blockers[0]
+        if blockers
+        else {
+            "code": "SLURM_PREFLIGHT_BLOCKED",
+            "message": "Slurm preflight blocked submission.",
+        }
+    )
     return {
         **_candidate_model_run_review_evidence(
             candidate,
@@ -3658,9 +3371,7 @@ def _slurm_resource_profile_blockers(resource_profile: Mapping[str, Any]) -> lis
             for field in collision_fields
         ]
     directive_fields = {
-        key: resource_profile[key]
-        for key in SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS
-        if key in resource_profile
+        key: resource_profile[key] for key in SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS if key in resource_profile
     }
     if not directive_fields:
         return []
@@ -3684,8 +3395,6 @@ def _slurm_resource_profile_blockers(resource_profile: Mapping[str, Any]) -> lis
             }
         ]
     return []
-
-
 
 
 def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -3734,10 +3443,7 @@ def _candidate_execution_evidence(
     output_uris: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     stage_names = [stage.stage for stage in result.stages]
-    stage_statuses = [
-        _stage_run_evidence(stage)
-        for stage in result.stages
-    ]
+    stage_statuses = [_stage_run_evidence(stage) for stage in result.stages]
     slurm_submit_called = _pipeline_result_slurm_submit_called(result)
     pipeline_status_write = _pipeline_result_pipeline_status_write(result)
     pipeline_event_write = _pipeline_result_pipeline_event_write(result)
@@ -3917,9 +3623,7 @@ def _candidate_execution_evidence_item(
         item["candidate_outcome"] = candidate_outcome
         if _is_partial_candidate_evidence(item):
             item["error_code"] = str(candidate_outcome.get("reason") or f"CANDIDATE_{status}").upper()
-            item["error_message"] = (
-                f"Candidate {candidate.candidate_id} was {status} in the partial multi-basin cycle."
-            )
+            item["error_message"] = f"Candidate {candidate.candidate_id} was {status} in the partial multi-basin cycle."
             if not any(blocker.get("code") == item["error_code"] for blocker in item["residual_blockers"]):
                 item["residual_blockers"].append(
                     {
@@ -4010,11 +3714,7 @@ def _candidate_stage_evidence_item(
     task_results = _stage_task_results(stage_payload)
     total_count = len(task_results)
     status_counts = Counter(str(task.get("status") or task.get("state") or "unknown") for task in task_results)
-    matched_tasks = [
-        task
-        for task in task_results
-        if _task_result_matches_candidate(task, candidate, outcome=outcome)
-    ]
+    matched_tasks = [task for task in task_results if _task_result_matches_candidate(task, candidate, outcome=outcome)]
     exact_match_available = _task_candidate_matching_available(task_results, outcome=outcome)
     if exact_match_available:
         selected_tasks = matched_tasks[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
@@ -4102,14 +3802,10 @@ def _task_result_matches_candidate(
         if task_value is not None and task_value == outcome_value:
             return True
     outcome_task_ids = {
-        _normalized_identity(outcome.get(field_name))
-        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+        _normalized_identity(outcome.get(field_name)) for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
     }
     outcome_task_ids.discard(None)
-    task_ids = {
-        _normalized_identity(task.get(field_name))
-        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
-    }
+    task_ids = {_normalized_identity(task.get(field_name)) for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS}
     task_ids.discard(None)
     return bool(task_ids.intersection(outcome_task_ids))
 
@@ -4442,14 +4138,6 @@ def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping
     return counts
 
 
-
-
-
-
-
-
-
-
 def _candidate_output_river_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
     explicit = candidate.resource_profile.get("output_river")
     if isinstance(explicit, Mapping):
@@ -4555,6 +4243,35 @@ def _candidate_station_ids(candidate: SchedulerCandidate) -> list[str]:
     return []
 
 
+_scheduler_shud_executable = _scheduler_preflight._scheduler_shud_executable
+_slurm_shud_executable_check = _scheduler_preflight._slurm_shud_executable_check
+_gateway_endpoint = _scheduler_preflight._gateway_endpoint
+_gateway_self_reference_blocker = _scheduler_preflight._gateway_self_reference_blocker
+_interpret_gateway_health = _scheduler_preflight._interpret_gateway_health
+_in_process_gateway_probe = _scheduler_preflight._in_process_gateway_probe
+_scheduler_grib_env_root = _scheduler_preflight._scheduler_grib_env_root
+_default_grib_system_eccodes_probe = _scheduler_preflight._default_grib_system_eccodes_probe
+_slurm_grib_env_check = _scheduler_preflight._slurm_grib_env_check
+_database_url_blocker = _scheduler_preflight._database_url_blocker
+_database_host = _scheduler_preflight._database_host
+_database_host_is_local = _scheduler_preflight._database_host_is_local
+_database_host_is_unsafe = _scheduler_preflight._database_host_is_unsafe
+_normalize_database_host = _scheduler_preflight._normalize_database_host
+_database_host_ip_address = _scheduler_preflight._database_host_ip_address
+_parse_noncanonical_ipv4_address = _scheduler_preflight._parse_noncanonical_ipv4_address
+_is_noncanonical_numeric_ipv4_host = _scheduler_preflight._is_noncanonical_numeric_ipv4_host
+_is_numeric_ipv4_like_host = _scheduler_preflight._is_numeric_ipv4_like_host
+_is_ipv4_number_part = _scheduler_preflight._is_ipv4_number_part
+_is_noncanonical_ipv4_part = _scheduler_preflight._is_noncanonical_ipv4_part
+_is_unsafe_numeric_ipv4_like_host = _scheduler_preflight._is_unsafe_numeric_ipv4_like_host
+_preflight_allowed_roots = _scheduler_preflight._preflight_allowed_roots
+_storage_root_check = _scheduler_preflight._storage_root_check
+_path_is_under_any = _scheduler_preflight._path_is_under_any
+_slurm_template_allowlist_check = _scheduler_preflight._slurm_template_allowlist_check
+_slurm_env_check = _scheduler_preflight._slurm_env_check
+_production_slurm_env = _scheduler_preflight._production_slurm_env
+
+
 def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     if not config.slurm_execution_enabled:
         return {
@@ -4621,122 +4338,12 @@ def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     }
 
 
-def _scheduler_shud_executable(config: ProductionSchedulerConfig) -> str:
-    env_value = config.slurm_env.get("SHUD_EXECUTABLE") if isinstance(config.slurm_env, Mapping) else None
-    return str(env_value or os.getenv("SHUD_EXECUTABLE") or "").strip()
-
-
-def _slurm_shud_executable_check(
-    config: ProductionSchedulerConfig,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Validate the SHUD executable before any Slurm submission.
-
-    A stub or missing executable produces a typed, redacted blocker that gates
-    the pass at ``slurm_preflight_blocked`` so the scheduler never calls the
-    orchestrator / Slurm gateway, never marks an active job, and never records a
-    hydro success state.
-    """
-
-    executable = _scheduler_shud_executable(config)
-    result = check_shud_executable(executable)
-    blockers = [
-        {
-            "code": str(blocker.get("error_code") or "SHUD_EXECUTABLE_PREFLIGHT_FAILED"),
-            "field": "SHUD_EXECUTABLE",
-            "message": str(blocker.get("message") or "SHUD executable preflight failed."),
-            **(
-                {"library": blocker["library"]}
-                if blocker.get("library") is not None
-                else {}
-            ),
-            **(
-                {"executable": blocker["executable"]}
-                if blocker.get("executable") is not None
-                else {}
-            ),
-        }
-        for blocker in result.blockers
-    ]
-    return redact_payload(dict(result.checks)), blockers
-
-
 # Hosts that, when a gateway URL points at them together with this service's own
 # listen port, mean the gateway is pointing back at the scheduler/orchestrator
 # itself rather than a real Slurm gateway.
 _GATEWAY_SELF_HOSTS = frozenset(
     {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "0.0.0.0", "::", "ip6-localhost", "ip6-loopback"}
 )
-
-
-def _gateway_endpoint(url: str) -> tuple[str | None, int | None]:
-    """Return ``(host, port)`` for a gateway URL without leaking credentials.
-
-    Only the host and port are returned; any ``user:pass@`` userinfo is dropped
-    so it never reaches evidence.
-    """
-
-    candidate = (url or "").strip()
-    if not candidate:
-        return None, None
-    try:
-        parsed = urlparse(candidate)
-        # A bare ``host:port`` (e.g. ``localhost:8000``) has no ``//`` authority,
-        # so urlparse mis-reads the host as the scheme and yields hostname=None.
-        # Re-parse with an explicit ``//`` authority in that case. ``_has_uri_scheme``
-        # cannot distinguish ``localhost:`` from a real ``http:`` scheme, so rely on
-        # the parse result instead.
-        if parsed.hostname is None and "//" not in candidate:
-            parsed = urlparse(f"//{candidate}")
-        host = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return None, None
-    return (host.lower() if host else None), port
-
-
-def _gateway_self_reference_blocker(
-    url: str, service_port: int, *, backend: str
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Pure config comparison (no network) for self-referential gateway URLs.
-
-    Rule: a gateway URL is an *invalid* self-reference when (a) a real Slurm
-    backend is configured, and (b) its host is a loopback / unspecified /
-    localhost name, and (c) its (defaulted) port equals this service's own
-    control-API listen port. That combination means the "gateway" points back at
-    the orchestrator's own API instead of a real Slurm gateway -> a guaranteed
-    loop that can never submit.
-
-    The mock / co-located dev gateway convention (``http://localhost:8000`` with
-    the mock backend) is intentionally NOT flagged, so this never fences a
-    submittable dev/test run (never-break-userspace).
-    """
-
-    host, port = _gateway_endpoint(url)
-    effective_port = port if port is not None else service_port
-    endpoint = {"host": host, "port": effective_port}
-    if host is None:
-        return None, endpoint
-    if backend not in {"real", "slurm"}:
-        return None, endpoint
-    is_loopback_name = host in _GATEWAY_SELF_HOSTS
-    if not is_loopback_name:
-        address = _database_host_ip_address(host)
-        is_loopback_name = address is not None and (address.is_loopback or address.is_unspecified)
-    if is_loopback_name and effective_port == service_port:
-        return (
-            {
-                "code": "SLURM_GATEWAY_SELF_REFERENCE",
-                "field": "SLURM_GATEWAY_URL",
-                "message": (
-                    "Slurm gateway URL resolves to this service's own listen address; "
-                    "configure a real node-22 Slurm gateway endpoint."
-                ),
-                "host": host,
-                "port": effective_port,
-            },
-            endpoint,
-        )
-    return None, endpoint
 
 
 def _slurm_gateway_backend() -> str:
@@ -4753,98 +4360,6 @@ def _slurm_gateway_backend() -> str:
 _GATEWAY_HEALTH_PATH = "/api/v1/slurm/health"
 _GATEWAY_REQUIRED_BINARIES = ("sbatch", "squeue", "sacct", "scancel")
 _GATEWAY_PROBE_TIMEOUT_SECONDS = 10.0
-
-
-def _interpret_gateway_health(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
-    """Map a gateway ``/api/v1/slurm/health`` body to a probe verdict.
-
-    Prefers the Lane 1 structure (top-level ``healthy: bool`` + per-binary
-    ``binaries[name].executable``): any required binary that is not executable
-    flips the verdict to unhealthy. Falls back to the legacy ``status`` field
-    (``healthy``/``ok``) when the new fields are absent, so a gateway still on
-    the old shape is never wrongly fenced or wrongly passed.
-    """
-
-    binaries = payload.get("binaries")
-    reasons: list[str] = []
-    if isinstance(binaries, Mapping) and binaries:
-        missing = [
-            name
-            for name in _GATEWAY_REQUIRED_BINARIES
-            if not bool((binaries.get(name) or {}).get("executable"))
-        ]
-        binaries_ok = not missing
-        if missing:
-            reasons.append("missing/non-executable Slurm binaries: " + ", ".join(missing))
-    else:
-        # Legacy gateway without per-binary probes: cannot prove binaries.
-        binaries_ok = None
-
-    if "healthy" in payload:
-        top_healthy = bool(payload.get("healthy"))
-    else:
-        status = str(payload.get("status", "") or "").lower()
-        top_healthy = status in {"healthy", "ok"}
-    if not top_healthy:
-        reason = str(payload.get("error", "") or "").strip()
-        reasons.append(reason or "gateway reported unhealthy")
-
-    if binaries_ok is None:
-        is_healthy = top_healthy
-    else:
-        is_healthy = top_healthy and binaries_ok
-
-    return {
-        "mode": mode,
-        "backend": str(payload.get("backend", mode) or mode),
-        "version": str(payload.get("version", "") or ""),
-        "healthy": is_healthy,
-        "submit_capable": is_healthy,
-        "accounting_available": is_healthy,
-        "reason": ("; ".join(reasons) or None) if not is_healthy else None,
-    }
-
-
-def _in_process_gateway_probe(mode: str) -> dict[str, Any]:
-    """In-process health for the co-located mock/dev gateway convention.
-
-    The mock backend runs in-process (no HTTP server to probe), so the dev
-    convention reads ``create_gateway().health()`` directly. This keeps a
-    submittable dev/test run from ever being fenced (never-break-userspace);
-    the HTTP probe path is reserved for a real node-22 gateway deployment.
-    """
-
-    from services.slurm_gateway.config import SlurmGatewaySettings
-    from services.slurm_gateway.gateway import create_gateway
-
-    try:
-        gateway = create_gateway(SlurmGatewaySettings())
-        health = gateway.health()
-        return _interpret_gateway_health(
-            {
-                "backend": getattr(health, "backend", mode),
-                "version": getattr(health, "version", ""),
-                "status": getattr(health, "status", ""),
-                "healthy": getattr(health, "healthy", None),
-                "error": getattr(health, "error", "") or "",
-                "binaries": {
-                    name: {
-                        "resolved": getattr(probe, "resolved", False),
-                        "executable": getattr(probe, "executable", False),
-                    }
-                    for name, probe in (getattr(health, "binaries", {}) or {}).items()
-                },
-            },
-            mode=mode,
-        )
-    except Exception as error:  # noqa: BLE001 - probe must be fail-safe, never raise.
-        return {
-            "mode": mode,
-            "healthy": False,
-            "submit_capable": False,
-            "accounting_available": False,
-            "reason": str(redact_payload(str(error))),
-        }
 
 
 def _default_gateway_probe(config: ProductionSchedulerConfig) -> dict[str, Any]:
@@ -4995,495 +4510,6 @@ def _slurm_gateway_check(
     return redact_payload(checks), redact_payload(blockers)
 
 
-def _scheduler_grib_env_root(config: ProductionSchedulerConfig) -> str:
-    env_value = (
-        config.slurm_env.get("NHMS_GRIB_ENV_ROOT")
-        if isinstance(config.slurm_env, Mapping)
-        else None
-    )
-    return str(env_value or os.getenv("NHMS_GRIB_ENV_ROOT") or "").strip()
-
-
-def _default_grib_system_eccodes_probe(
-    config: ProductionSchedulerConfig,
-) -> Mapping[str, Any]:
-    """Model whether compute nodes ship system cdo+libeccodes.
-
-    The control node cannot probe a compute node's shared libraries without a
-    job, so absent an explicit operator assertion to the contrary we do NOT
-    fence a submission: node-eccodes-availability DEFAULTS to available. Set
-    ``NHMS_GRIB_SYSTEM_ECCODES=false`` on a partition whose nodes lack system
-    cdo/eccodes when you intentionally leave ``NHMS_GRIB_ENV_ROOT`` empty to
-    restore the fail-loud (an empty root skips PATH injection, which only breaks
-    GRIB at runtime where the node genuinely lacks eccodes).
-    """
-
-    asserted = (
-        config.slurm_env.get("NHMS_GRIB_SYSTEM_ECCODES")
-        if isinstance(config.slurm_env, Mapping)
-        else None
-    )
-    asserted = str(asserted or os.getenv("NHMS_GRIB_SYSTEM_ECCODES") or "").strip()
-    if asserted.lower() in {"0", "false", "no"}:
-        return {
-            "system_eccodes_available": False,
-            "reason": "operator asserted compute nodes lack system cdo/eccodes",
-        }
-    # Truthy ("1"/"true"/"yes") OR unset/empty/unknown -> available (no fence).
-    return {"system_eccodes_available": True}
-
-
-def _slurm_grib_env_check(
-    config: ProductionSchedulerConfig,
-    *,
-    probe: Callable[[ProductionSchedulerConfig], Mapping[str, Any]] | None = None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Fail loud when GRIB tooling will be unavailable on the compute node.
-
-    Compute nodes lack system cdo/libeccodes; GRIB clip/read only works when
-    ``NHMS_GRIB_ENV_ROOT`` (a shared conda env with bin/ + lib/) is injected into
-    the sbatch PATH/LD_LIBRARY_PATH. That injection is truthiness-only and never
-    validates the directory, so a typo'd root silently injects a broken PATH and
-    an empty root silently skips injection -- both break GRIB at runtime with no
-    fail-loud (this bit us in #291). Two gates, both required by spec §4.5:
-
-    1. **Root SET:** ``<root>/bin`` AND ``<root>/lib`` must both exist as dirs,
-       else ``GRIB_ENV_ROOT_INVALID``.
-    2. **Root UNSET/empty:** injection is skipped. The default (no assertion)
-       does NOT block -- only an explicit operator assertion that nodes lack
-       eccodes (``NHMS_GRIB_SYSTEM_ECCODES=false``) does. ``probe`` (injectable,
-       default ``_default_grib_system_eccodes_probe``) models that; only when it
-       reports unavailable -> ``GRIB_ENV_UNAVAILABLE``, else NO blocker. A probe
-       that raises fails safe as BLOCKED rather than faking PASS.
-
-    Valid root with real bin+lib, or empty root absent an operator assertion
-    that nodes lack eccodes, PASS. When genuinely OK this adds NO blocker so it
-    never fences a healthy run (never-break-userspace).
-    """
-
-    checks: dict[str, Any] = {}
-    blockers: list[dict[str, Any]] = []
-
-    root = _scheduler_grib_env_root(config)
-    checks["root"] = root or None
-
-    if root:
-        root_path = Path(root)
-        bin_ok = (root_path / "bin").is_dir()
-        lib_ok = (root_path / "lib").is_dir()
-        checks["bin_present"] = bin_ok
-        checks["lib_present"] = lib_ok
-        if not (bin_ok and lib_ok):
-            blockers.append(
-                {
-                    "code": "GRIB_ENV_ROOT_INVALID",
-                    "field": "NHMS_GRIB_ENV_ROOT",
-                    "message": (
-                        f"NHMS_GRIB_ENV_ROOT set but {root}/bin or {root}/lib "
-                        "missing; GRIB tooling would not be injected on the "
-                        "compute node."
-                    ),
-                    "root": root,
-                    "bin_present": bin_ok,
-                    "lib_present": lib_ok,
-                }
-            )
-        return redact_payload(checks), redact_payload(blockers)
-
-    probe_fn = probe or _default_grib_system_eccodes_probe
-    try:
-        result = dict(probe_fn(config))
-    except Exception as error:  # noqa: BLE001 - injected probe must not break the pass.
-        result = {
-            "system_eccodes_available": False,
-            "reason": str(redact_payload(str(error))),
-        }
-
-    available = bool(result.get("system_eccodes_available"))
-    checks["system_eccodes_available"] = available
-    if not available:
-        blockers.append(
-            {
-                "code": "GRIB_ENV_UNAVAILABLE",
-                "field": "NHMS_GRIB_ENV_ROOT",
-                "message": (
-                    "NHMS_GRIB_ENV_ROOT is empty so GRIB env injection is "
-                    "skipped, and compute-node system eccodes is not confirmed; "
-                    "GRIB clip/read would fail at runtime on the node."
-                ),
-                **({"reason": str(result["reason"])} if result.get("reason") else {}),
-            }
-        )
-
-    return redact_payload(checks), redact_payload(blockers)
-
-
-def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
-    if not database_url:
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_MISSING",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution requires a compute-node reachable DATABASE_URL before submission.",
-        }
-    host = _database_host(database_url)
-    if _database_host_is_unsafe(host):
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution rejects malformed or unsafe DATABASE_URL hosts.",
-            "host": host,
-        }
-    if _database_host_is_local(host):
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution rejects localhost-only DATABASE_URL values.",
-            "host": host,
-        }
-    return None
-
-
-def _database_host(database_url: str | None) -> str | None:
-    if not database_url:
-        return None
-    try:
-        parsed = urlparse(database_url)
-    except ValueError:
-        return None
-    if parsed.scheme == "sqlite":
-        return "localhost"
-    try:
-        host = parsed.hostname
-        parsed.port
-    except ValueError:
-        return None
-    return host
-
-
-def _database_host_is_local(host: str | None) -> bool:
-    if host is None:
-        return True
-    normalized = _normalize_database_host(host)
-    if normalized in LOCALHOST_NAMES:
-        return True
-    if normalized.endswith(".localhost"):
-        return True
-    address = _database_host_ip_address(normalized)
-    if address is None:
-        return False
-    return address.is_loopback or address.is_unspecified
-
-
-def _database_host_is_unsafe(host: str | None) -> bool:
-    if host is None:
-        return True
-    normalized = _normalize_database_host(host)
-    if not normalized:
-        return True
-    if DATABASE_HOST_ALLOWED_RE.fullmatch(normalized) is None:
-        return True
-    address = _database_host_ip_address(normalized)
-    if address is not None and address.is_link_local:
-        return True
-    if ":" in normalized:
-        if address is None:
-            return True
-    return _is_unsafe_numeric_ipv4_like_host(normalized)
-
-
-def _normalize_database_host(host: str) -> str:
-    normalized = host.strip().lower()
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    return normalized.rstrip(".")
-
-
-def _database_host_ip_address(host: str) -> Any | None:
-    try:
-        return ip_address(host)
-    except ValueError:
-        return _parse_noncanonical_ipv4_address(host)
-
-
-def _parse_noncanonical_ipv4_address(host: str) -> IPv4Address | None:
-    if not _is_noncanonical_numeric_ipv4_host(host):
-        return None
-    parts = host.split(".")
-    values: list[int] = []
-    for part in parts:
-        if part == "":
-            return None
-        try:
-            values.append(int(part, 0))
-        except ValueError:
-            return None
-    if len(values) == 1:
-        value = values[0]
-    elif len(values) == 2:
-        value = (values[0] << 24) | values[1]
-    elif len(values) == 3:
-        value = (values[0] << 24) | (values[1] << 16) | values[2]
-    elif len(values) == 4:
-        value = (values[0] << 24) | (values[1] << 16) | (values[2] << 8) | values[3]
-    else:
-        return None
-    if value < 0 or value > 0xFFFFFFFF:
-        return None
-    return IPv4Address(value)
-
-
-def _is_noncanonical_numeric_ipv4_host(host: str) -> bool:
-    if not host:
-        return False
-    if not _is_numeric_ipv4_like_host(host):
-        return False
-    parts = host.split(".")
-    return len(parts) != 4 or any(_is_noncanonical_ipv4_part(part) for part in parts)
-
-
-def _is_numeric_ipv4_like_host(host: str) -> bool:
-    parts = host.split(".")
-    return all(_is_ipv4_number_part(part) for part in parts)
-
-
-def _is_ipv4_number_part(part: str) -> bool:
-    if part == "":
-        return False
-    if part.lower().startswith("0x"):
-        return len(part) > 2 and all(character in "0123456789abcdefABCDEF" for character in part[2:])
-    return part.isdigit()
-
-
-def _is_noncanonical_ipv4_part(part: str) -> bool:
-    if part == "":
-        return True
-    if part.lower().startswith("0x"):
-        return True
-    return len(part) > 1 and part.startswith("0")
-
-
-def _is_unsafe_numeric_ipv4_like_host(host: str) -> bool:
-    if not _is_numeric_ipv4_like_host(host):
-        return False
-    return _database_host_ip_address(host) is None
-
-
-def _preflight_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
-    roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
-    resolved: list[Path] = []
-    for root in roots:
-        candidate = root.expanduser().resolve()
-        if candidate not in resolved:
-            resolved.append(candidate)
-    return tuple(resolved)
-
-
-def _storage_root_check(
-    field_name: str,
-    value: Path | str | None,
-    allowed_roots: Sequence[Path],
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    if value in (None, ""):
-        return (
-            {
-                "configured": False,
-                "path": None,
-                "contained": False,
-                "compute_node_visible": False,
-            },
-            {
-                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_MISSING",
-                "field": field_name,
-                "message": f"Slurm execution requires configured {field_name}.",
-            },
-        )
-    path = Path(value).expanduser()
-    resolved = path.resolve()
-    visible = path.exists() and path.is_dir()
-    contained = _path_is_under_any(resolved, allowed_roots)
-    check = {
-        "configured": True,
-        "path": str(resolved),
-        "contained": contained,
-        "compute_node_visible": visible,
-    }
-    if not contained:
-        return (
-            check,
-            {
-                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_OUT_OF_ROOT",
-                "field": field_name,
-                "path": str(resolved),
-                "message": f"Slurm {field_name} must stay under configured project or production roots.",
-            },
-        )
-    if not visible:
-        return (
-            check,
-            {
-                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_NOT_VISIBLE",
-                "field": field_name,
-                "path": str(resolved),
-                "message": f"Slurm {field_name} must exist as a compute-node visible directory.",
-            },
-        )
-    return check, None
-
-
-def _path_is_under_any(path: Path, allowed_roots: Sequence[Path]) -> bool:
-    for root in allowed_roots:
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
-
-
-def _slurm_template_allowlist_check(config: ProductionSchedulerConfig) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    templates = dict(config.slurm_job_type_templates or {})
-    blockers: list[dict[str, Any]] = []
-    expected_by_stage = {stage.stage: stage.job_type for stage in ForecastOrchestrator.stages}
-    allowed_names = set(DEFAULT_JOB_TYPE_TEMPLATES.values())
-    checks: dict[str, Any] = {}
-    for stage_name, job_type in expected_by_stage.items():
-        template_name = templates.get(job_type)
-        check = {
-            "job_type": job_type,
-            "template_name": template_name,
-            "allowlisted": template_name in allowed_names,
-            "array_capable": stage_name in SLURM_ARRAY_STAGE_NAMES,
-        }
-        checks[stage_name] = check
-        if template_name not in allowed_names:
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_TEMPLATE_NOT_ALLOWLISTED",
-                    "field": f"slurm_job_type_templates.{job_type}",
-                    "stage": stage_name,
-                    "job_type": job_type,
-                    "template_name": template_name,
-                    "message": f"Slurm stage {stage_name} must use an allowlisted sbatch template.",
-                }
-            )
-        expected_template = DEFAULT_JOB_TYPE_TEMPLATES.get(job_type)
-        if template_name in allowed_names and template_name != expected_template:
-            check["expected_template_name"] = expected_template
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_TEMPLATE_MISMATCH",
-                    "field": f"slurm_job_type_templates.{job_type}",
-                    "stage": stage_name,
-                    "job_type": job_type,
-                    "template_name": template_name,
-                    "expected_template_name": expected_template,
-                    "message": f"Slurm stage {stage_name} must use the template assigned to its job type.",
-                }
-            )
-        if stage_name in SLURM_ARRAY_STAGE_NAMES and not str(template_name or "").endswith("_array.sbatch"):
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ARRAY_TEMPLATE_REQUIRED",
-                    "field": f"slurm_job_type_templates.{job_type}",
-                    "stage": stage_name,
-                    "job_type": job_type,
-                    "template_name": template_name,
-                    "message": f"Slurm stage {stage_name} requires an array-capable template.",
-                }
-            )
-    return {"stage_templates": checks}, blockers
-
-
-def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    blockers: list[dict[str, Any]] = []
-    sanitized: dict[str, str] = {}
-    for key, value in env.items():
-        key_text = str(key)
-        value_text = str(value)
-        key_secret_reason = secret_manifest_key_reason(key_text)
-        if key_secret_reason is not None:
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
-                    "field": "slurm_env.[redacted]",
-                    "reason": key_secret_reason,
-                    "message": "Slurm scheduler evidence and exports reject secret-shaped environment keys.",
-                }
-            )
-            sanitized["[redacted]"] = "[redacted]"
-            continue
-        if not SAFE_SLURM_ENV_KEY_RE.fullmatch(key_text):
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_KEY_UNSAFE",
-                    "field": f"slurm_env.{key_text}",
-                    "message": "Slurm exported environment keys must be uppercase shell identifiers.",
-                }
-            )
-            continue
-        reserved_reason = reserved_slurm_env_reason(key_text)
-        if reserved_reason is not None:
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_RESERVED_REJECTED",
-                    "field": f"slurm_env.{key_text}",
-                    "reason": reserved_reason,
-                    "message": "Slurm exported environment cannot override reserved runtime variables.",
-                }
-            )
-            sanitized[key_text] = "[reserved]"
-            continue
-        if len(value_text) > MAX_SLURM_ENV_VALUE_LENGTH:
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_VALUE_TOO_LONG",
-                    "field": f"slurm_env.{key_text}",
-                    "max_length": MAX_SLURM_ENV_VALUE_LENGTH,
-                    "message": "Slurm exported environment values must be bounded.",
-                }
-            )
-            sanitized[key_text] = value_text[:64] + "...[truncated]"
-            continue
-        secret_url_reason = secret_bearing_url_reason(value_text)
-        if secret_url_reason is not None:
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
-                    "field": f"slurm_env.{key_text}",
-                    "reason": secret_url_reason,
-                    "message": (
-                        "Slurm exported environment values must not contain URL credentials "
-                        "or secret query parameters."
-                    ),
-                }
-            )
-            sanitized[key_text] = "[redacted]"
-            continue
-        if SHELL_META_RE.search(value_text) or not SAFE_SLURM_ENV_VALUE_RE.fullmatch(value_text):
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_VALUE_UNSAFE",
-                    "field": f"slurm_env.{key_text}",
-                    "message": "Slurm exported environment values must be shell-safe.",
-                }
-            )
-            sanitized[key_text] = "[unsafe]"
-            continue
-        sanitized[key_text] = value_text
-    return {"count": len(env), "sanitized": sanitized}, blockers
-
-
-def _production_slurm_env(explicit_env: Mapping[str, Any]) -> dict[str, str]:
-    env = {str(key): str(value) for key, value in dict(explicit_env).items()}
-    for key in PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS:
-        if key in env:
-            continue
-        value = os.getenv(key)
-        if value not in (None, ""):
-            env[key] = str(value)
-    return env
-
-
 def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) -> str:
     if not cancelled_jobs:
         return "blocked"
@@ -5508,10 +4534,7 @@ def _cancelled_job_pipeline_status_write(job: Mapping[str, Any]) -> bool:
 def _cancelled_job_pipeline_event_write(job: Mapping[str, Any]) -> bool:
     if _cancelled_job_pipeline_status_write(job):
         return True
-    return (
-        job.get("cancellation_proven") is False
-        and str(job.get("error_code") or "") == "JOB_ALREADY_TERMINAL"
-    )
+    return job.get("cancellation_proven") is False and str(job.get("error_code") or "") == "JOB_ALREADY_TERMINAL"
 
 
 def _scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
@@ -5786,9 +4809,7 @@ _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES = MappingProxyType(
         "_empty_counts": "empty_counts",
     }
 )
-_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES = tuple(
-    _SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES
-)
+_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES = tuple(_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES)
 _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES = MappingProxyType(
     {"_slurm_status_sync_failed_evidence": "_slurm_status_sync_failed_evidence"}
 )
@@ -5826,9 +4847,7 @@ _SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING = (
         if not hasattr(ProductionScheduler, name)
     ),
     *tuple(
-        name
-        for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES
-        if name not in globals()
+        name for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES if name not in globals()
     ),
 )
 _SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP = tuple(
@@ -5876,12 +4895,14 @@ _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES = MappingProxyType
 _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES = MappingProxyType(
     {name: globals()[name] for name in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES}
 )
-for _scheduler_cancellation_status_alias_name, _scheduler_cancellation_status_owner_value in (
-    _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES.items()
-):
-    if _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[
-        _scheduler_cancellation_status_alias_name
-    ] is not _scheduler_cancellation_status_owner_value:
+for (
+    _scheduler_cancellation_status_alias_name,
+    _scheduler_cancellation_status_owner_value,
+) in _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES.items():
+    if (
+        _SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[_scheduler_cancellation_status_alias_name]
+        is not _scheduler_cancellation_status_owner_value
+    ):
         raise RuntimeError(
             "scheduler cancellation/status candidate alias drifted from owner module: "
             f"{_scheduler_cancellation_status_alias_name}"
@@ -6291,8 +5312,6 @@ def _empty_model_discovery() -> dict[str, Any]:
     }
 
 
-
-
 def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     normalized: list[str] = []
     exclusions: list[dict[str, Any]] = []
@@ -6549,15 +5568,15 @@ _SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES = MappingProxyType(
 _SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES = MappingProxyType(
     {name: globals()[name] for name in _SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES}
 )
-for _scheduler_discovery_facade_name, _scheduler_discovery_owner_value in (
-    _SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES.items()
-):
+for (
+    _scheduler_discovery_facade_name,
+    _scheduler_discovery_owner_value,
+) in _SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES.items():
     if _SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES[_scheduler_discovery_facade_name] is not (
         _scheduler_discovery_owner_value
     ):
         raise RuntimeError(
-            "scheduler discovery direct alias drifted from owner module: "
-            f"{_scheduler_discovery_facade_name}"
+            f"scheduler discovery direct alias drifted from owner module: {_scheduler_discovery_facade_name}"
         )
 del _scheduler_discovery_facade_name, _scheduler_discovery_owner_value
 
@@ -6619,15 +5638,15 @@ _SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES = MappingProxyType(
 _SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES = MappingProxyType(
     {name: globals()[name] for name in _SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES}
 )
-for _scheduler_candidate_facade_name, _scheduler_candidate_owner_value in (
-    _SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES.items()
-):
+for (
+    _scheduler_candidate_facade_name,
+    _scheduler_candidate_owner_value,
+) in _SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES.items():
     if _SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES[_scheduler_candidate_facade_name] is not (
         _scheduler_candidate_owner_value
     ):
         raise RuntimeError(
-            "scheduler candidate direct alias drifted from owner module: "
-            f"{_scheduler_candidate_facade_name}"
+            f"scheduler candidate direct alias drifted from owner module: {_scheduler_candidate_facade_name}"
         )
 del _scheduler_candidate_facade_name, _scheduler_candidate_owner_value
 
@@ -6779,15 +5798,15 @@ _SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS = MappingProxyType(
 _SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS = MappingProxyType(
     {name: globals()[name] for name in _SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES}
 )
-for _scheduler_evidence_direct_name, _scheduler_evidence_owner_value in (
-    _SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS.items()
-):
+for (
+    _scheduler_evidence_direct_name,
+    _scheduler_evidence_owner_value,
+) in _SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS.items():
     if _SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS[_scheduler_evidence_direct_name] is not (
         _scheduler_evidence_owner_value
     ):
         raise RuntimeError(
-            "scheduler evidence direct alias drifted from owner module: "
-            f"{_scheduler_evidence_direct_name}"
+            f"scheduler evidence direct alias drifted from owner module: {_scheduler_evidence_direct_name}"
         )
 del _scheduler_evidence_direct_name, _scheduler_evidence_owner_value
 _SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS = MappingProxyType(
@@ -6803,10 +5822,6 @@ _SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS = MappingProxyType(
 
 def _now(config: ProductionSchedulerConfig) -> datetime:
     return config.now or datetime.now(UTC)
-
-
-
-
 
 
 def _sleep(seconds: float) -> None:
