@@ -245,3 +245,20 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_control.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.11 Extract chain analysis orchestrator class owner slice.
+  - Module/Scope: move the legacy `AnalysisOrchestrator` class wrapper from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_analysis_orchestrator.py`, keeping analysis
+    method bodies delegated to `services/orchestrator/chain_analysis.py`.
+  - Stable Facade: keep `services.orchestrator.chain.AnalysisOrchestrator`
+    import-compatible by aliasing the owner class and preserving the legacy
+    `__module__` value.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and `chain_analysis_orchestrator.py`, with the owner under 1000
+    lines.
+  - Verification: `uv run pytest -q tests/test_analysis_pipeline.py tests/test_orchestration_chain.py -k "analysis or manifest"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_analysis_orchestrator.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
