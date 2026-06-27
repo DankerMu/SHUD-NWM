@@ -35,6 +35,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.3 Extract scheduler candidate manifest owner slice.
+  - Module/Scope: move scheduler candidate construction, forcing-result merge,
+    canonical identity, basin manifest, manual retry attempt, and warm-start
+    manifest-field helper bodies from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_candidate_manifest.py`.
+  - Stable Facade: keep legacy scheduler private helper names importable from
+    `services.orchestrator.scheduler`, forwarding lazily to the owner module;
+    keep candidate-construction aliases such as `_blocked_candidate` and
+    `_candidate_with_state_evidence` anchored at the facade.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_candidate_manifest.py` as the candidate manifest owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "candidate_for or candidate_manifest or warm_start or forcing_result or candidate_identity or basin_manifest or duplicate_candidate_identity"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_candidate_manifest.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
