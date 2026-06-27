@@ -171,6 +171,8 @@ def is_sensitive_key(key: str) -> bool:
 def _should_redact_mapping_value(key: str, value: Any) -> bool:
     if AUTH_NAMESPACE_KEY_RE.fullmatch(key) and isinstance(value, Mapping):
         return False
+    if key.lower().endswith("_configured") and isinstance(value, bool):
+        return False
     if key.lower() == "password_present" and isinstance(value, bool):
         return False
     return is_sensitive_key(key)

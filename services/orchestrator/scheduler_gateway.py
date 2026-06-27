@@ -19,15 +19,23 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     checks: dict[str, Any] = {}
 
-    database_url = config.database_url
-    db_blocker = _scheduler._database_url_blocker(database_url)
-    checks["database"] = {
-        "configured": bool(database_url),
-        "host": _scheduler._database_host(database_url),
-        "compute_node_reachable": db_blocker is None,
-    }
-    if db_blocker is not None:
-        blockers.append(db_blocker)
+    if getattr(config, "db_free_required", False):
+        checks["database"] = {
+            "configured": bool(getattr(config, "database_url_configured", False)),
+            "required": False,
+            "db_free_runtime": True,
+            "compute_node_reachable": "not_required",
+        }
+    else:
+        database_url = config.database_url
+        db_blocker = _scheduler._database_url_blocker(database_url)
+        checks["database"] = {
+            "configured": bool(database_url),
+            "host": _scheduler._database_host(database_url),
+            "compute_node_reachable": db_blocker is None,
+        }
+        if db_blocker is not None:
+            blockers.append(db_blocker)
 
     roots = {
         "workspace_root": config.workspace_root,

@@ -5,11 +5,31 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
+from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 __all__ = ("ProductionSchedulerConfig",)
+
+_DB_FREE_REQUIRED_ENV = "NHMS_SCHEDULER_DB_FREE_REQUIRED"
+_DB_FREE_SELECTOR_SPECS = (
+    ("scheduler_state_backend", "NHMS_SCHEDULER_STATE_BACKEND", "postgres"),
+    ("scheduler_lock_backend", "NHMS_SCHEDULER_LOCK_BACKEND", "file"),
+    ("scheduler_registry_backend", "NHMS_SCHEDULER_REGISTRY_BACKEND", "postgres"),
+    ("scheduler_canonical_readiness_backend", "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "postgres"),
+    ("scheduler_journal_backend", "NHMS_SCHEDULER_JOURNAL_BACKEND", "postgres"),
+    ("scheduler_state_index_backend", "NHMS_SCHEDULER_STATE_INDEX_BACKEND", "postgres"),
+)
+_DB_FREE_PATH_SPECS = (
+    ("scheduler_registry_manifest", "NHMS_SCHEDULER_REGISTRY_MANIFEST", "file"),
+    ("scheduler_canonical_readiness_index", "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", "file"),
+    ("scheduler_journal_root", "NHMS_SCHEDULER_JOURNAL_ROOT", "directory"),
+    ("scheduler_state_index", "NHMS_SCHEDULER_STATE_INDEX", "file"),
+)
+_DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "published"})
+_DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +62,27 @@ class ProductionSchedulerConfig:
     service_role: str | None = field(default_factory=lambda: os.getenv("NHMS_SERVICE_ROLE"))
     require_runtime_roots: bool = field(default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REQUIRE_ROOTS"))
     database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL"))
+    database_url_configured: bool = field(default_factory=lambda: os.getenv("DATABASE_URL") is not None)
+    scheduler_db_free_required: bool = field(default_factory=lambda: _scheduler._env_flag(_DB_FREE_REQUIRED_ENV))
+    scheduler_state_backend: str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_STATE_BACKEND"))
+    scheduler_registry_backend: str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_REGISTRY_BACKEND")
+    )
+    scheduler_registry_manifest: str | Path | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_REGISTRY_MANIFEST")
+    )
+    scheduler_canonical_readiness_backend: str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND")
+    )
+    scheduler_canonical_readiness_index: str | Path | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX")
+    )
+    scheduler_journal_backend: str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_JOURNAL_BACKEND"))
+    scheduler_journal_root: str | Path | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_JOURNAL_ROOT"))
+    scheduler_state_index_backend: str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND")
+    )
+    scheduler_state_index: str | Path | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_STATE_INDEX"))
     slurm_execution_enabled: bool = field(
         default_factory=lambda: _scheduler._env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
         or _scheduler._env_flag("SLURM_EXECUTION_ENABLED")
@@ -99,7 +140,7 @@ class ProductionSchedulerConfig:
             _scheduler.DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
         )
     )
-    scheduler_lock_backend: str = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_LOCK_BACKEND", "file"))
+    scheduler_lock_backend: str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_LOCK_BACKEND"))
     lock_path: Path | str | None = None
     evidence_dir: Path | str | None = None
     lock_ttl_seconds: int = _scheduler.DEFAULT_LOCK_TTL_SECONDS
@@ -175,7 +216,11 @@ class ProductionSchedulerConfig:
             _scheduler._resolve_optional_config_path(scheduler_evidence_root_preflight_path),
         )
         object.__setattr__(self, "service_role", str(self.service_role).strip() if self.service_role else None)
-        object.__setattr__(self, "database_url", str(self.database_url).strip() if self.database_url else None)
+        database_url_raw = None if self.database_url is None else str(self.database_url)
+        database_url = database_url_raw.strip() if database_url_raw and database_url_raw.strip() else None
+        object.__setattr__(self, "database_url", database_url)
+        object.__setattr__(self, "database_url_configured", bool(self.database_url_configured or database_url_raw))
+        object.__setattr__(self, "scheduler_db_free_required", bool(self.scheduler_db_free_required))
         allowed_roots = tuple(_scheduler._optional_config_path(root) for root in self.allowed_storage_roots if root)
         object.__setattr__(self, "allowed_storage_roots", allowed_roots)
         templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
@@ -216,10 +261,7 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
-        lock_backend = str(self.scheduler_lock_backend or "file").strip().lower()
-        if lock_backend not in {"file", "postgres"}:
-            raise ValueError("production scheduler scheduler_lock_backend must be 'file' or 'postgres'")
-        object.__setattr__(self, "scheduler_lock_backend", lock_backend)
+        self._normalize_scheduler_backend_fields()
         if self.lock_path is None:
             lock_root = (
                 Path(self.scheduler_lock_root)
@@ -268,3 +310,250 @@ class ProductionSchedulerConfig:
             object.__setattr__(self, "evidence_dir", evidence_dir)
         if self.now is not None:
             object.__setattr__(self, "now", _scheduler._ensure_utc(self.now))
+
+    @property
+    def db_free_required(self) -> bool:
+        return self.scheduler_db_free_required
+
+    def _normalize_scheduler_backend_fields(self) -> None:
+        for attr, _env, legacy_default in _DB_FREE_SELECTOR_SPECS:
+            raw_value = getattr(self, attr)
+            value = None if raw_value is None else str(raw_value).strip().lower()
+            if self.scheduler_db_free_required:
+                object.__setattr__(self, attr, value)
+                continue
+            normalized = value or legacy_default
+            if attr == "scheduler_lock_backend" and normalized not in {"file", "postgres"}:
+                raise ValueError("production scheduler scheduler_lock_backend must be 'file' or 'postgres'")
+            object.__setattr__(self, attr, normalized)
+        for attr, _env, _kind in _DB_FREE_PATH_SPECS:
+            raw_value = getattr(self, attr)
+            value = None if raw_value is None else str(raw_value).strip()
+            object.__setattr__(self, attr, value)
+
+    def db_free_runtime_evidence(self) -> dict[str, Any]:
+        selectors = {
+            env: {
+                "configured": getattr(self, attr) is not None,
+                "selected": _evidence_scalar(getattr(self, attr)),
+                "required_value": "file",
+            }
+            for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS
+        }
+        paths = {
+            env: {
+                "configured": getattr(self, attr) not in (None, ""),
+                "path": _evidence_scalar(getattr(self, attr)),
+                "kind": kind,
+            }
+            for attr, env, kind in _DB_FREE_PATH_SPECS
+        }
+        return {
+            "required": self.scheduler_db_free_required,
+            "required_env": _DB_FREE_REQUIRED_ENV,
+            "database_url_configured": bool(self.database_url_configured),
+            "selectors": selectors,
+            "paths": paths,
+            "canonical_selector_fields": [env for _attr, env, _default in _DB_FREE_SELECTOR_SPECS],
+            "canonical_path_fields": [env for _attr, env, _kind in _DB_FREE_PATH_SPECS],
+        }
+
+    def db_free_runtime_preflight(self) -> dict[str, Any]:
+        if not self.scheduler_db_free_required:
+            return {
+                "status": "not_required",
+                "required": False,
+                "blockers": [],
+                "checks": {},
+            }
+        checks: dict[str, Any] = {}
+        blockers: list[dict[str, Any]] = []
+        checks["database_url"] = {
+            "env": "DATABASE_URL",
+            "configured": bool(self.database_url_configured),
+            "value_recorded": False,
+        }
+        if self.database_url_configured:
+            blockers.append(
+                {
+                    "code": "database_url_forbidden",
+                    "field": "DATABASE_URL",
+                    "reason": "database_url_forbidden",
+                    "message": "DB-free scheduler mode forbids scheduler DATABASE_URL before lock acquisition.",
+                }
+            )
+        for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
+            value = getattr(self, attr)
+            check, blocker = _db_free_selector_check(env, value)
+            checks[env] = check
+            if blocker is not None:
+                blockers.append(blocker)
+        allowed_roots = _db_free_allowed_roots(self)
+        for attr, env, kind in _DB_FREE_PATH_SPECS:
+            value = getattr(self, attr)
+            check, blocker = _db_free_path_check(env, value, kind=kind, allowed_roots=allowed_roots)
+            checks[env] = check
+            if blocker is not None:
+                blockers.append(blocker)
+        return {
+            "status": "blocked" if blockers else "ready",
+            "required": True,
+            "blockers": blockers,
+            "checks": checks,
+            "evidence": self.db_free_runtime_evidence(),
+        }
+
+
+def _evidence_scalar(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    return redact_payload(str(value))
+
+
+def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    configured = value is not None
+    selected = None if value in (None, "") else str(value)
+    check = {
+        "env": env,
+        "configured": configured,
+        "selected": selected,
+        "required_value": "file",
+        "file_selected": selected == "file",
+    }
+    if value is None:
+        return check, _db_free_blocker("db_free_selector_missing", env, "missing")
+    if value == "":
+        return check, _db_free_blocker("db_free_selector_blank", env, "blank")
+    if value in _DB_FREE_DB_BACKEND_VALUES:
+        return check, _db_free_blocker("db_free_selector_db_backed", env, "db_backed")
+    if value != "file":
+        return check, _db_free_blocker("db_free_selector_non_file", env, "non_file")
+    return check, None
+
+
+def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for value in (
+        *config.allowed_storage_roots,
+        config.workspace_root,
+        config.object_store_root,
+        config.published_artifact_root,
+        config.runtime_root,
+        config.temp_root,
+    ):
+        if value in (None, ""):
+            continue
+        root = Path(value).expanduser().resolve(strict=False)
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def _db_free_path_check(
+    env: str,
+    value: str | Path | None,
+    *,
+    kind: str,
+    allowed_roots: tuple[Path, ...],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    text = None if value is None else str(value).strip()
+    check: dict[str, Any] = {
+        "env": env,
+        "configured": text not in (None, ""),
+        "path": _evidence_scalar(text),
+        "kind": kind,
+    }
+    if text is None:
+        return check, _db_free_blocker("db_free_required_path_missing", env, "missing")
+    if text == "":
+        return check, _db_free_blocker("db_free_required_path_blank", env, "blank")
+    parsed = urlparse(text)
+    if parsed.scheme:
+        if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES and kind == "file":
+            check["object_uri"] = True
+            check["supported_object_uri"] = True
+            return check, None
+        check["object_uri"] = True
+        check["supported_object_uri"] = False
+        return check, _db_free_blocker("db_free_required_path_unsupported_uri", env, "unsupported_uri")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        check.update({"absolute": False, "contained": False})
+        return check, _db_free_blocker("db_free_required_path_relative", env, "relative", path=str(path))
+    resolved = path.resolve(strict=False)
+    contained = any(_path_is_relative_to(resolved, root) for root in allowed_roots)
+    check.update({"absolute": True, "resolved_path": str(resolved), "contained": contained})
+    if not contained:
+        return check, _db_free_blocker(
+            "db_free_required_path_outside_boundary",
+            env,
+            "outside_boundary",
+            path=str(resolved),
+        )
+    parent = path.parent
+    try:
+        parent_stat = parent.lstat()
+    except FileNotFoundError:
+        return check, _db_free_blocker("db_free_required_path_parent_missing", env, "parent_missing", path=str(parent))
+    except OSError as error:
+        return check, _db_free_blocker(
+            "db_free_required_path_unsafe",
+            env,
+            "unsafe",
+            path=str(parent),
+            error_type=type(error).__name__,
+        )
+    if not parent_stat.st_mode:
+        return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(parent))
+    if parent.is_symlink() or not parent.is_dir():
+        return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(parent))
+    exists = path.exists()
+    check["exists"] = exists
+    if kind == "directory":
+        if not exists:
+            return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
+        if path.is_symlink() or not path.is_dir():
+            return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
+        if not _scheduler._directory_is_writable(path):
+            return check, _db_free_blocker(
+                "db_free_required_path_not_writable",
+                env,
+                "not_writable",
+                path=str(resolved),
+            )
+        check["writable"] = True
+        return check, None
+    if not exists:
+        return check, _db_free_blocker("db_free_required_path_not_found", env, "not_found", path=str(resolved))
+    if path.is_symlink() or not path.is_file():
+        return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
+    return check, None
+
+
+def _db_free_blocker(
+    code: str,
+    field: str,
+    reason: str,
+    *,
+    path: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    blocker = {
+        "code": code,
+        "field": field,
+        "reason": reason,
+        "message": f"DB-free scheduler runtime field {field} is not a safe all-file configuration.",
+    }
+    if path is not None:
+        blocker["path"] = redact_payload(path)
+    if error_type is not None:
+        blocker["error_type"] = error_type
+    return blocker
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

@@ -159,6 +159,7 @@ class FileSchedulerLease:
                 "acquired": False,
                 "contention": True,
                 "lock_path": str(self.lock_path),
+                "lock_type": "file",
                 "reason": error.reason,
                 "existing_lock": {"raw": None},
             }
@@ -248,6 +249,7 @@ class FileSchedulerLease:
                     "acquired": False,
                     "contention": True,
                     "lock_path": str(self.lock_path),
+                    "lock_type": "file",
                     "reason": state["reason"],
                     "existing_lock": state["existing_lock"],
                 }
@@ -269,6 +271,7 @@ class FileSchedulerLease:
                             "acquired": False,
                             "contention": True,
                             "lock_path": str(self.lock_path),
+                            "lock_type": "file",
                             "existing_lock": reread,
                         }
                 unlink_lock_file = _scheduler_compat_function("_unlink_lock_file", _unlink_lock_file)
@@ -283,6 +286,7 @@ class FileSchedulerLease:
                 "acquired": False,
                 "contention": True,
                 "lock_path": str(self.lock_path),
+                "lock_type": "file",
                 "existing_lock": state["existing_lock"],
             }
         except OSError as error:
@@ -293,7 +297,13 @@ class FileSchedulerLease:
             json.dump(payload, handle, sort_keys=True)
         self.acquired = True
         self.lease_token = str(payload.get("lease_token"))
-        return {"acquired": True, "contention": False, "lock_path": str(self.lock_path), "lease": dict(payload)}
+        return {
+            "acquired": True,
+            "contention": False,
+            "lock_path": str(self.lock_path),
+            "lock_type": "file",
+            "lease": dict(payload),
+        }
 
     def release(self, *, pass_id: str) -> None:
         if not self.acquired:

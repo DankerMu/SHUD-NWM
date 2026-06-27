@@ -260,6 +260,42 @@ def run_once(self) -> SchedulerPassResult:
             evidence=evidence,
             artifact_path=artifact_path,
         )
+    db_free_preflight = self.config.db_free_runtime_preflight()
+    if db_free_preflight["status"] == "blocked":
+        evidence = self._base_evidence(pass_id, started_at)
+        evidence.update(
+            {
+                "status": "preflight_blocked",
+                "finished_at": _format_utc(_now(self.config)),
+                "lock": {
+                    "acquired": False,
+                    "contention": False,
+                    "lock_path": str(self.config.lock_path),
+                    "lock_type": "file" if self.config.db_free_required else None,
+                    "reason": "db_free_runtime_preflight_blocked",
+                },
+                "root_preflight": root_preflight,
+                "db_free_runtime": db_free_preflight,
+                "counts": _empty_counts(),
+                "candidates": [],
+                "blocked_candidates": [],
+                "skipped_candidates": [],
+                "duplicate_exclusions": list(self.config.source_exclusions),
+                "model_discovery": _empty_model_discovery(),
+                "source_cycles": [],
+                "model_run_evidence": [],
+                "slurm_cancellation_evidence": [],
+                "no_mutation_proof": _no_mutation_proof(),
+                "execution_boundary": "db_free_runtime_preflight_blocked",
+            }
+        )
+        artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
+        return SchedulerPassResult(
+            pass_id=pass_id,
+            status="preflight_blocked",
+            evidence=evidence,
+            artifact_path=artifact_path,
+        )
     lock = self._build_scheduler_lease()
     lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
     if not lock_result["acquired"]:
@@ -274,8 +310,12 @@ def run_once(self) -> SchedulerPassResult:
                 "blocked_candidates": [],
                 "model_discovery": _empty_model_discovery(),
                 "source_cycles": [],
+                "no_mutation_proof": _no_mutation_proof(),
+                "execution_boundary": "scheduler_lock_contended",
             }
         )
+        if self.config.db_free_required:
+            evidence["db_free_runtime"] = db_free_preflight
         artifact_path = self._write_evidence(pass_id, evidence)
         status = _evidence_status(evidence, "lock_contended")
         return SchedulerPassResult(
@@ -324,6 +364,41 @@ def run_once(self) -> SchedulerPassResult:
         # in-flight statuses from accounting. Comment-reconcile finds back a
         # crashed cohort's slurm_job_id so we never re-submit an already
         # in-flight cohort.
+        db_free_file_provider_blocker = getattr(self, "_db_free_file_provider_blocker", None)
+        if self.config.db_free_required and db_free_file_provider_blocker is not None:
+            finished_at = _now(self.config)
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "preflight_blocked",
+                    "finished_at": _format_utc(finished_at),
+                    "lock": lock_result,
+                    "root_preflight": root_preflight,
+                    "db_free_runtime": {
+                        **db_free_preflight,
+                        "provider_blocker": redact_payload(dict(db_free_file_provider_blocker)),
+                    },
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "skipped_candidates": [],
+                    "duplicate_exclusions": list(self.config.source_exclusions),
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "model_run_evidence": [],
+                    "slurm_cancellation_evidence": [],
+                    "no_mutation_proof": _no_mutation_proof(),
+                    "execution_boundary": "db_free_file_provider_blocked",
+                }
+            )
+            artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "preflight_blocked")
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status=status,
+                evidence=evidence,
+                artifact_path=artifact_path,
+            )
         restart_reconcile_evidence = self._run_restart_reconcile()
         models, model_evidence = self._discover_models()
         cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)

@@ -15127,6 +15127,50 @@ def _set_scheduler_root_env(monkeypatch: Any, roots: Mapping[str, Path]) -> None
     monkeypatch.setenv("NHMS_SCHEDULER_BASIN_IDS", "basin_a")
 
 
+_DB_FREE_SELECTOR_ENV_KEYS = (
+    "NHMS_SCHEDULER_STATE_BACKEND",
+    "NHMS_SCHEDULER_LOCK_BACKEND",
+    "NHMS_SCHEDULER_REGISTRY_BACKEND",
+    "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND",
+    "NHMS_SCHEDULER_JOURNAL_BACKEND",
+    "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
+)
+_DB_FREE_PATH_ENV_KEYS = (
+    "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+    "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+    "NHMS_SCHEDULER_JOURNAL_ROOT",
+    "NHMS_SCHEDULER_STATE_INDEX",
+)
+
+
+def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, Path], dict[str, Path]]:
+    roots = _scheduler_env_roots(root)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    for key in _DB_FREE_SELECTOR_ENV_KEYS:
+        monkeypatch.setenv(key, "file")
+    db_free_dir = roots["workspace_root"] / "db-free"
+    object_index_dir = roots["object_store_root"] / "db-free"
+    db_free_dir.mkdir(parents=True, exist_ok=True)
+    object_index_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST": db_free_dir / "registry-manifest.json",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": object_index_dir / "canonical-readiness-index.json",
+        "NHMS_SCHEDULER_JOURNAL_ROOT": roots["workspace_root"] / "journal",
+        "NHMS_SCHEDULER_STATE_INDEX": object_index_dir / "state-index.json",
+    }
+    for key, path in paths.items():
+        if key == "NHMS_SCHEDULER_JOURNAL_ROOT":
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv(key, str(path))
+    return roots, paths
+
+
 def _run_no_flag_plan() -> dict[str, Any]:
     return cli._plan_production(
         sources=("gfs",),
@@ -15287,6 +15331,221 @@ def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
 
 def _unexpected_run_once(*_args: Any, **_kwargs: Any) -> SchedulerPassResult:
     raise AssertionError("missing DATABASE_URL must fail before candidate or evidence work")
+
+
+def test_db_free_scheduler_config_parses_canonical_env_matrix(monkeypatch: Any, tmp_path: Path) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+
+    config = ProductionSchedulerConfig()
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+
+    assert config.db_free_required is True
+    assert config.database_url is None
+    assert config.database_url_configured is False
+    assert config.scheduler_state_backend == "file"
+    assert config.scheduler_lock_backend == "file"
+    assert config.scheduler_registry_backend == "file"
+    assert config.scheduler_canonical_readiness_backend == "file"
+    assert config.scheduler_journal_backend == "file"
+    assert config.scheduler_state_index_backend == "file"
+    assert config.scheduler_registry_manifest == str(paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"])
+    assert config.scheduler_canonical_readiness_index == str(paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"])
+    assert config.scheduler_journal_root == str(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    assert config.scheduler_state_index == str(paths["NHMS_SCHEDULER_STATE_INDEX"])
+    assert evidence["database_url_configured"] is False
+    assert evidence["scheduler_db_free_required"] is True
+    assert evidence["scheduler_lock_backend"] == "file"
+    assert set(evidence["db_free_runtime"]["canonical_selector_fields"]) == set(_DB_FREE_SELECTOR_ENV_KEYS)
+    assert set(evidence["db_free_runtime"]["canonical_path_fields"]) == set(_DB_FREE_PATH_ENV_KEYS)
+
+
+def test_legacy_non_db_free_postgres_config_remains_valid(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        scheduler_lock_backend="postgres",
+        scheduler_state_backend="postgres",
+        scheduler_registry_backend="postgres",
+        scheduler_canonical_readiness_backend="postgres",
+        scheduler_journal_backend="postgres",
+        scheduler_state_index_backend="postgres",
+    )
+
+    assert config.db_free_required is False
+    assert config.scheduler_lock_backend == "postgres"
+    assert config.scheduler_state_backend == "postgres"
+    assert config.scheduler_registry_backend == "postgres"
+
+
+def test_db_free_database_url_blocks_before_lock_or_factories(monkeypatch: Any, tmp_path: Path) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:supersecret@db.prod.example:55433/nhms")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("DB-free DATABASE_URL blocker must not construct active repository"),
+    )
+
+    scheduler = ProductionScheduler.from_env(ProductionSchedulerConfig())
+    result = scheduler.run_once()
+    rendered = json.dumps(result.evidence)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["acquired"] is False
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    blockers = result.evidence["db_free_runtime"]["blockers"]
+    assert ("database_url_forbidden", "DATABASE_URL") in {
+        (blocker["code"], blocker["field"]) for blocker in blockers
+    }
+    assert "supersecret" not in rendered
+    assert "55433" not in rendered
+
+
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+@pytest.mark.parametrize("selector_value", [None, "", "postgres", "psycopg", "memory"])
+def test_db_free_selector_misconfig_blocks_exact_field_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+    selector_value: str | None,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    if selector_value is None:
+        monkeypatch.delenv(selector_env, raising=False)
+    else:
+        monkeypatch.setenv(selector_env, selector_value)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert selector_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+@pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
+@pytest.mark.parametrize("path_case", ["missing", "blank", "outside", "unsafe"])
+def test_db_free_required_path_misconfig_blocks_exact_field_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+    path_case: str,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    if path_case == "missing":
+        monkeypatch.delenv(path_env, raising=False)
+    elif path_case == "blank":
+        monkeypatch.setenv(path_env, "")
+    elif path_case == "outside":
+        outside = tmp_path / "outside" / path_env.lower()
+        if path_env == "NHMS_SCHEDULER_JOURNAL_ROOT":
+            outside.mkdir(parents=True)
+        else:
+            outside.parent.mkdir(parents=True)
+            outside.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv(path_env, str(outside))
+    else:
+        target = paths[path_env]
+        if target.exists() or target.is_symlink():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        symlink_target = tmp_path / "unsafe-target"
+        if path_env == "NHMS_SCHEDULER_JOURNAL_ROOT":
+            symlink_target.mkdir(exist_ok=True)
+            target.symlink_to(symlink_target, target_is_directory=True)
+        else:
+            symlink_target.write_text("{}", encoding="utf-8")
+            target.symlink_to(symlink_target)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["reason"] == "db_free_runtime_preflight_blocked"
+    assert path_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_providers(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("DB-free from_env must not construct DB-backed active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._canonical_readiness_provider_from_env",
+        lambda: pytest.fail("DB-free from_env must not construct DB-backed readiness provider"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._orchestrator_repository_from_env",
+        lambda: pytest.fail("DB-free file-provider blocker must not construct orchestrator repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._retry_service_from_env",
+        lambda: pytest.fail("DB-free file-provider blocker must not construct retry service"),
+    )
+    monkeypatch.setattr(
+        scheduler_module.StateManager,
+        "from_env",
+        staticmethod(lambda: pytest.fail("DB-free file-provider blocker must not construct state manager")),
+    )
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["db_free_runtime"]["status"] == "ready"
+    assert result.evidence["db_free_runtime"]["provider_blocker"]["code"] == "db_free_file_providers_not_implemented"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["runtime_config"]["database_url_configured"] is False
+    assert result.evidence["runtime_config"]["scheduler_state_backend"] == "file"
+    assert result.evidence["runtime_config"]["scheduler_registry_backend"] == "file"
+    assert result.evidence["runtime_config"]["scheduler_canonical_readiness_backend"] == "file"
+    assert result.evidence["runtime_config"]["scheduler_journal_backend"] == "file"
+    assert result.evidence["runtime_config"]["scheduler_state_index_backend"] == "file"
+    assert set(result.evidence["runtime_config"]["db_free_runtime"]["paths"]) == set(_DB_FREE_PATH_ENV_KEYS)
+    assert "postgres" not in rendered.lower()
+    assert "psycopg" not in rendered.lower()
+    assert "advisory" not in rendered.lower()
+
+
+def test_db_free_file_lock_contention_is_bounded_and_no_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    config = ProductionSchedulerConfig()
+    held_lock = FileSchedulerLease(Path(config.lock_path), ttl_seconds=60, workspace_root=Path(config.workspace_root))
+    acquired = held_lock.acquire(pass_id="already-running", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+
+    try:
+        result = ProductionScheduler.from_env(config).run_once()
+    finally:
+        held_lock.release(pass_id="already-running")
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["contention"] is True
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
 # --- Issue #257 / M23-6: scheduler SHUD executable pre-submit preflight -------

@@ -3,6 +3,33 @@ from __future__ import annotations
 from services.orchestrator import scheduler as _scheduler
 
 
+class _DbFreeBlockedModelRegistry:
+    def list_models(
+        self,
+        *,
+        basin_version_id: str | None,
+        active: bool | None,
+        limit: int,
+        offset: int,
+    ) -> _scheduler.Mapping[str, _scheduler.Any]:
+        del basin_version_id, active, limit, offset
+        raise RuntimeError("DB-free scheduler file registry provider is not implemented")
+
+    def get_model(self, model_id: str) -> _scheduler.Mapping[str, _scheduler.Any]:
+        del model_id
+        raise RuntimeError("DB-free scheduler file registry provider is not implemented")
+
+
+def _db_free_file_provider_blocker(config: _scheduler.ProductionSchedulerConfig) -> dict[str, _scheduler.Any]:
+    return {
+        "code": "db_free_file_providers_not_implemented",
+        "field": "db_free_file_providers",
+        "reason": "file_registry_readiness_journal_state_index_not_implemented",
+        "message": "DB-free scheduler mode is configured, but file registry/readiness/journal/state-index providers are not implemented in this slice.",
+        "db_free_runtime": config.db_free_runtime_evidence(),
+    }
+
+
 class ProductionScheduler:
     def __init__(
         self,
@@ -22,19 +49,34 @@ class ProductionScheduler:
         reconcile_sacct_query: _scheduler.Callable[[str], _scheduler.Any] | None = None,
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
+        db_free_required = bool(getattr(self.config, "db_free_required", False))
+        registry_provided = registry is not None
+        adapters_provided = adapters is not None
+        self._db_free_file_provider_blocker: dict[str, _scheduler.Any] | None = None
         self._reconcile_store = reconcile_store
         self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
         self._reconcile_sacct_query = reconcile_sacct_query
-        self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
-        self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
+        if db_free_required:
+            self.registry = registry if registry is not None else _DbFreeBlockedModelRegistry()
+            self.adapters = dict(adapters or {})
+            if not registry_provided or not adapters_provided:
+                self._db_free_file_provider_blocker = _db_free_file_provider_blocker(self.config)
+        else:
+            self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
+            self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
         self.active_repository = active_repository
         if (
             canonical_readiness_provider is _scheduler._CANONICAL_READINESS_PROVIDER_UNSET
             or canonical_readiness_provider is None
         ):
+            reason = (
+                "db_free_file_readiness_provider_not_implemented"
+                if db_free_required
+                else "canonical_readiness_provider_absent"
+            )
             self.canonical_readiness_provider = _scheduler._UnavailableCanonicalReadinessProvider(
-                reason="canonical_readiness_provider_absent", dependency="canonical_readiness_provider", retryable=True
+                reason=reason, dependency="canonical_readiness_provider", retryable=True
             )
         else:
             self.canonical_readiness_provider = canonical_readiness_provider
@@ -46,6 +88,8 @@ class ProductionScheduler:
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
         config = config or _scheduler.ProductionSchedulerConfig()
+        if config.db_free_required:
+            return cls(config=config)
         if (
             config.require_runtime_roots
             and _scheduler._scheduler_lock_evidence_root_preflight(config)["status"] == "blocked"
@@ -67,6 +111,12 @@ class ProductionScheduler:
 
     def _build_scheduler_lease(self) -> _scheduler.Any:
         database_url = (self.config.database_url or "").strip()
+        if self.config.db_free_required:
+            return _scheduler.FileSchedulerLease(
+                _scheduler.Path(self.config.lock_path),
+                ttl_seconds=self.config.lock_ttl_seconds,
+                workspace_root=_scheduler.Path(self.config.workspace_root),
+            )
         if self.config.scheduler_lock_backend == "postgres" and database_url:
             return _scheduler.PostgresSchedulerLease(
                 database_url,
@@ -233,11 +283,15 @@ class ProductionScheduler:
     def _orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
+        if self.config.db_free_required:
+            raise RuntimeError("DB-free scheduler mode forbids DB-backed default orchestrator construction")
         return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
 
     def _cancel_orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
+        if self.config.db_free_required:
+            raise RuntimeError("DB-free scheduler mode forbids DB-backed default orchestrator construction")
         return self._default_orchestrator_for(source_id, state_manager=None)
 
     def _default_orchestrator_for(

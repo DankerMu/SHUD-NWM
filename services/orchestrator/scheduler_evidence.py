@@ -92,6 +92,18 @@ class SchedulerEvidenceConfig(Protocol):
     interval_seconds: float
     max_cycles_per_source: int
     retry_limit: int
+    database_url_configured: bool
+    scheduler_db_free_required: bool
+    scheduler_state_backend: str | None
+    scheduler_lock_backend: str | None
+    scheduler_registry_backend: str | None
+    scheduler_canonical_readiness_backend: str | None
+    scheduler_journal_backend: str | None
+    scheduler_state_index_backend: str | None
+    scheduler_registry_manifest: Path | str | None
+    scheduler_canonical_readiness_index: Path | str | None
+    scheduler_journal_root: Path | str | None
+    scheduler_state_index: Path | str | None
 
 
 class SchedulerCandidateLike(Protocol):
@@ -701,9 +713,17 @@ def root_evidence_item(
 
 
 def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "service_role": config.service_role,
         "require_runtime_roots": config.require_runtime_roots,
+        "database_url_configured": bool(getattr(config, "database_url_configured", False)),
+        "scheduler_db_free_required": bool(getattr(config, "scheduler_db_free_required", False)),
+        "scheduler_state_backend": getattr(config, "scheduler_state_backend", None),
+        "scheduler_lock_backend": getattr(config, "scheduler_lock_backend", None),
+        "scheduler_registry_backend": getattr(config, "scheduler_registry_backend", None),
+        "scheduler_canonical_readiness_backend": getattr(config, "scheduler_canonical_readiness_backend", None),
+        "scheduler_journal_backend": getattr(config, "scheduler_journal_backend", None),
+        "scheduler_state_index_backend": getattr(config, "scheduler_state_index_backend", None),
         "dry_run": config.dry_run,
         "continuous": config.continuous,
         "interval_seconds": config.interval_seconds,
@@ -716,6 +736,10 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
         "max_cycles_per_source": config.max_cycles_per_source,
         "retry_limit": config.retry_limit,
     }
+    db_free_evidence = getattr(config, "db_free_runtime_evidence", None)
+    if callable(db_free_evidence):
+        payload["db_free_runtime"] = db_free_evidence()
+    return payload
 
 
 def open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:
