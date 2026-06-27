@@ -15477,11 +15477,101 @@ def test_db_free_required_path_misconfig_blocks_exact_field_before_lock(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
+@pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
+def test_db_free_required_path_db_uri_blocks_without_endpoint_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(path_env, "postgresql://nhms:supersecret@db.prod.example:55433/nhms?token=qhh")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert path_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    path_check = result.evidence["db_free_runtime"]["checks"][path_env]
+    assert path_check["path"] == "[uri]"
+    assert path_check["scheme"] == "[db-like]"
+    assert "supersecret" not in rendered
+    assert "db.prod.example" not in rendered
+    assert "55433" not in rendered
+    assert "token" not in rendered
+    assert "postgresql" not in rendered.lower()
+
+
+@pytest.mark.parametrize(
+    "object_uri",
+    [
+        "s3://user:pass@nhms-prod/scheduler/registry.json?token=secret#frag",
+        "s3://nhms-prod/scheduler/../secret.json",
+        "s3://other-prod/scheduler/registry.json",
+        "s3://nhms-prod/other/registry.json",
+        "published://user:pass@manifests/scheduler.json",
+        "published://manifests/../secret.json",
+        "published://private/scheduler.json",
+    ],
+)
+def test_db_free_object_uri_misconfig_blocks_without_raw_uri_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+    object_uri: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms-prod/scheduler")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", object_uri)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    blockers = result.evidence["db_free_runtime"]["blockers"]
+    assert "NHMS_SCHEDULER_REGISTRY_MANIFEST" in {blocker["field"] for blocker in blockers}
+    path_check = result.evidence["db_free_runtime"]["checks"]["NHMS_SCHEDULER_REGISTRY_MANIFEST"]
+    assert path_check["path"] == "[object-uri]"
+    assert path_check["supported_object_uri"] is False
+    assert "user:pass" not in rendered
+    assert "token=secret" not in rendered
+    assert "secret.json" not in rendered
+    assert "other-prod" not in rendered
+
+
+def test_db_free_safe_object_uri_paths_pass_runtime_preflight(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms-prod/scheduler")
+    object_paths = {
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST": "s3://nhms-prod/scheduler/registry-manifest.json",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": "s3://nhms-prod/scheduler/readiness-index.json",
+        "NHMS_SCHEDULER_STATE_INDEX": "published://manifests/scheduler/state-index.json",
+    }
+    for key, uri in object_paths.items():
+        monkeypatch.setenv(key, uri)
+
+    preflight = ProductionSchedulerConfig().db_free_runtime_preflight()
+
+    assert preflight["status"] == "ready"
+    for key in object_paths:
+        check = preflight["checks"][key]
+        assert check["path"] == "[object-uri]"
+        assert check["supported_object_uri"] is True
+
+
 def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_providers(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "true")
+
+    def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("DB-free file-provider blocker must not construct DB-backed factory")
+
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     monkeypatch.setattr(
@@ -15500,6 +15590,25 @@ def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_pro
         "services.orchestrator.scheduler._retry_service_from_env",
         lambda: pytest.fail("DB-free file-provider blocker must not construct retry service"),
     )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._forcing_producer_from_env",
+        lambda: pytest.fail("DB-free from_env must not construct forcing producer"),
+    )
+    monkeypatch.setattr("packages.common.met_store.PsycopgMetStore.from_env", staticmethod(fail_db_factory))
+    monkeypatch.setattr(
+        "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
+        staticmethod(fail_db_factory),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain.PsycopgOrchestratorRepository.from_env",
+        staticmethod(fail_db_factory),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain_repository.PsycopgOrchestratorRepository.from_env",
+        staticmethod(fail_db_factory),
+    )
+    monkeypatch.setattr("services.orchestrator.persistence.PipelineStore", fail_db_factory)
+    monkeypatch.setattr("workers.forcing_producer.producer.ForcingProducer.from_env", staticmethod(fail_db_factory))
     monkeypatch.setattr(
         scheduler_module.StateManager,
         "from_env",
@@ -15524,6 +15633,33 @@ def test_valid_db_free_from_env_uses_file_lock_and_blocks_unimplemented_file_pro
     assert "postgres" not in rendered.lower()
     assert "psycopg" not in rendered.lower()
     assert "advisory" not in rendered.lower()
+
+
+def test_db_free_injected_collaborators_still_block_unimplemented_file_providers(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    config = ProductionSchedulerConfig(dry_run=False)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "DB-free provider blocker must run before orchestrator construction"
+        ),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_file_provider_blocked"
+    assert result.evidence["db_free_runtime"]["provider_blocker"]["code"] == "db_free_file_providers_not_implemented"
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(

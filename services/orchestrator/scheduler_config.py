@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
@@ -30,6 +31,24 @@ _DB_FREE_PATH_SPECS = (
 )
 _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "published"})
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
+_DB_FREE_OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
+_DB_FREE_PUBLIC_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products", "runs"})
+_DB_FREE_SAFE_OBJECT_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_DB_FREE_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
+_DB_FREE_CREDENTIAL_WORDS = (
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "credential",
+    "api_key",
+    "apikey",
+    "access_key",
+    "accesskey",
+    "session_key",
+    "signature",
+)
 
 
 @dataclass(frozen=True)
@@ -343,7 +362,7 @@ class ProductionSchedulerConfig:
         paths = {
             env: {
                 "configured": getattr(self, attr) not in (None, ""),
-                "path": _evidence_scalar(getattr(self, attr)),
+                "path": _db_free_path_evidence_scalar(getattr(self, attr)),
                 "kind": kind,
             }
             for attr, env, kind in _DB_FREE_PATH_SPECS
@@ -410,6 +429,16 @@ def _evidence_scalar(value: Any) -> Any:
     return redact_payload(str(value))
 
 
+def _db_free_path_evidence_scalar(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    parsed = urlparse(text)
+    if parsed.scheme:
+        return "[object-uri]" if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES else "[uri]"
+    return _evidence_scalar(text)
+
+
 def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     configured = value is not None
     selected = None if value in (None, "") else str(value)
@@ -460,22 +489,24 @@ def _db_free_path_check(
     check: dict[str, Any] = {
         "env": env,
         "configured": text not in (None, ""),
-        "path": _evidence_scalar(text),
         "kind": kind,
     }
     if text is None:
+        check["path"] = None
         return check, _db_free_blocker("db_free_required_path_missing", env, "missing")
     if text == "":
+        check["path"] = None
         return check, _db_free_blocker("db_free_required_path_blank", env, "blank")
     parsed = urlparse(text)
     if parsed.scheme:
+        check.update(_db_free_uri_evidence(parsed))
         if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES and kind == "file":
-            check["object_uri"] = True
-            check["supported_object_uri"] = True
-            return check, None
-        check["object_uri"] = True
+            object_check, blocker = _db_free_object_uri_check(env, text, parsed)
+            check.update(object_check)
+            return check, blocker
         check["supported_object_uri"] = False
         return check, _db_free_blocker("db_free_required_path_unsupported_uri", env, "unsupported_uri")
+    check["path"] = _evidence_scalar(text)
     path = Path(text).expanduser()
     if not path.is_absolute():
         check.update({"absolute": False, "contained": False})
@@ -528,6 +559,118 @@ def _db_free_path_check(
     if path.is_symlink() or not path.is_file():
         return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
     return check, None
+
+
+def _db_free_uri_evidence(parsed: Any) -> dict[str, Any]:
+    scheme = str(parsed.scheme or "").lower()
+    return {
+        "path": "[object-uri]" if scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES else "[uri]",
+        "uri": True,
+        "object_uri": scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES,
+        "scheme": _db_free_scheme_for_evidence(scheme),
+    }
+
+
+def _db_free_scheme_for_evidence(scheme: str) -> str:
+    normalized = scheme.lower()
+    if normalized in _DB_FREE_DB_BACKEND_VALUES or "postgres" in normalized or "psycopg" in normalized:
+        return "[db-like]"
+    return normalized
+
+
+def _db_free_object_uri_check(env: str, raw_uri: str, parsed: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    scheme = str(parsed.scheme or "").lower()
+    check: dict[str, Any] = {
+        "object_uri": True,
+        "supported_object_uri": False,
+        "path": "[object-uri]",
+        "scheme": scheme,
+    }
+    unsafe_reason = _db_free_common_object_uri_unsafe_reason(raw_uri, parsed)
+    if unsafe_reason is not None:
+        return check, _db_free_blocker("db_free_required_path_unsafe_uri", env, unsafe_reason)
+    try:
+        if scheme == "s3":
+            boundary = _db_free_s3_uri_boundary(raw_uri, parsed)
+        elif scheme == "published":
+            boundary = _db_free_published_uri_boundary(parsed)
+        else:
+            return check, _db_free_blocker("db_free_required_path_unsupported_uri", env, "unsupported_uri")
+    except ValueError as error:
+        return check, _db_free_blocker("db_free_required_path_unsafe_uri", env, str(error))
+    check.update(boundary)
+    check["supported_object_uri"] = True
+    return check, None
+
+
+def _db_free_common_object_uri_unsafe_reason(raw_uri: str, parsed: Any) -> str | None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in raw_uri):
+        return "control_character"
+    try:
+        _ = parsed.port
+    except ValueError:
+        return "malformed_port"
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return "credentials_query_or_fragment"
+    return None
+
+
+def _db_free_s3_uri_boundary(raw_uri: str, parsed: Any) -> dict[str, Any]:
+    bucket = str(parsed.netloc or "")
+    if not bucket:
+        raise ValueError("missing_bucket")
+    key = _db_free_safe_object_key(str(parsed.path or "").lstrip("/"))
+    prefix = os.getenv(_DB_FREE_OBJECT_STORE_PREFIX_ENV, "").strip().rstrip("/")
+    prefix_parsed = urlparse(prefix) if prefix else None
+    if prefix_parsed is None or prefix_parsed.scheme.lower() != "s3":
+        raise ValueError("object_uri_not_allowlisted")
+    if _db_free_common_object_uri_unsafe_reason(prefix, prefix_parsed) is not None or not prefix_parsed.netloc:
+        raise ValueError("object_uri_not_allowlisted")
+    allowed_bucket = str(prefix_parsed.netloc)
+    if bucket != allowed_bucket:
+        raise ValueError("object_uri_not_allowlisted")
+    allowed_prefix = str(prefix_parsed.path or "").lstrip("/")
+    if allowed_prefix:
+        normalized_prefix = _db_free_safe_object_key(allowed_prefix)
+        if key != normalized_prefix and not key.startswith(f"{normalized_prefix}/"):
+            raise ValueError("object_uri_not_allowlisted")
+    elif key.split("/", maxsplit=1)[0] not in _DB_FREE_PUBLIC_OBJECT_PREFIXES:
+        raise ValueError("object_uri_not_allowlisted")
+    return {
+        "object_boundary": "s3",
+        "bucket": bucket,
+        "namespace": key.split("/", maxsplit=1)[0],
+    }
+
+
+def _db_free_published_uri_boundary(parsed: Any) -> dict[str, Any]:
+    namespace = f"{parsed.netloc}/{str(parsed.path or '').lstrip('/')}" if parsed.netloc else str(parsed.path or "")
+    key = _db_free_safe_object_key(namespace.strip("/"))
+    prefix = key.split("/", maxsplit=1)[0]
+    if prefix not in _DB_FREE_PUBLIC_OBJECT_PREFIXES:
+        raise ValueError("object_uri_not_allowlisted")
+    return {
+        "object_boundary": "published",
+        "namespace": prefix,
+    }
+
+
+def _db_free_safe_object_key(raw_path: str) -> str:
+    if not raw_path or "\\" in raw_path or _DB_FREE_ENCODED_FORBIDDEN_RE.search(raw_path):
+        raise ValueError("unsafe_object_path")
+    decoded = unquote(raw_path)
+    if "\\" in decoded or any(ord(character) < 32 or ord(character) == 127 for character in decoded):
+        raise ValueError("unsafe_object_path")
+    parts = PurePosixPath(decoded).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("unsafe_object_path")
+    for part in parts:
+        lower = part.lower()
+        if any(word in lower for word in _DB_FREE_CREDENTIAL_WORDS):
+            raise ValueError("unsafe_object_path")
+        if not _DB_FREE_SAFE_OBJECT_SEGMENT_RE.fullmatch(part):
+            raise ValueError("unsafe_object_path")
+    return "/".join(parts)
 
 
 def _db_free_blocker(

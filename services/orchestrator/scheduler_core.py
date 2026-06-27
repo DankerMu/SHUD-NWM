@@ -50,8 +50,6 @@ class ProductionScheduler:
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
         db_free_required = bool(getattr(self.config, "db_free_required", False))
-        registry_provided = registry is not None
-        adapters_provided = adapters is not None
         self._db_free_file_provider_blocker: dict[str, _scheduler.Any] | None = None
         self._reconcile_store = reconcile_store
         self._reconcile_store_build_error: str | None = None
@@ -60,8 +58,7 @@ class ProductionScheduler:
         if db_free_required:
             self.registry = registry if registry is not None else _DbFreeBlockedModelRegistry()
             self.adapters = dict(adapters or {})
-            if not registry_provided or not adapters_provided:
-                self._db_free_file_provider_blocker = _db_free_file_provider_blocker(self.config)
+            self._db_free_file_provider_blocker = _db_free_file_provider_blocker(self.config)
         else:
             self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
             self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())

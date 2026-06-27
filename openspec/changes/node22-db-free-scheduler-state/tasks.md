@@ -29,9 +29,9 @@
     Expected: pre-lock blocker names the exact path field; evidence remains
     bounded and redacted.
 - [x] 1.3 Move DB-free scheduler locking to `FileSchedulerLease`.
-  Evidence floor: focused tests and a node-22 bounded pass show
-  `lock_type=file`; concurrent passes cannot both mutate and contention
-  evidence is bounded.
+  Evidence floor: focused local tests show `lock_type=file`; concurrent passes
+  cannot both mutate and contention evidence is bounded. Node-22 bounded pass
+  proof remains part of deployment task 6.4 and post-stop task 7.4.
   Test rows:
   - Input: valid DB-free config.
     Expected: `_build_scheduler_lease()` returns/uses `FileSchedulerLease` and
