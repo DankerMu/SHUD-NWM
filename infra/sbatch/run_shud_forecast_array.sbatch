@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=nhms_{{stage_name}}
 #SBATCH --partition={{partition}}
+{% if exclude_nodes | default('') %}#SBATCH --exclude={{exclude_nodes}}
+{% endif %}
 {% if account | default('') %}#SBATCH --account={{account}}
 {% endif %}
 #SBATCH --nodes={{nodes}}

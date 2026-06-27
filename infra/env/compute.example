@@ -78,6 +78,9 @@ SLURM_GATEWAY_URL=http://127.0.0.1:8081
 SLURM_GATEWAY_BACKEND=slurm
 SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch
 SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
+# Optional comma-separated unhealthy compute nodes to avoid at submit time.
+# Example: SLURM_GATEWAY_EXCLUDE_NODES=cn24
+SLURM_GATEWAY_EXCLUDE_NODES=
 
 GFS_NOMADS_BASE_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
 IFS_OPEN_DATA_SOURCE=ecmwf

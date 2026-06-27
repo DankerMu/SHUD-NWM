@@ -5,6 +5,9 @@ from collections.abc import Mapping
 from typing import Any
 
 SAFE_SLURM_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SAFE_SLURM_NODE_LIST_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?:,[A-Za-z0-9][A-Za-z0-9_.-]{0,127}){0,127}$"
+)
 SLURM_WALLTIME_RE = re.compile(
     r"^(?:(?P<days>\d{1,3})-)?(?P<hours>\d{1,3}):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)$"
 )
@@ -21,7 +24,7 @@ REQUIRED_RESOURCE_FIELDS = {
     "max_concurrent",
     "shud_threads",
 }
-OPTIONAL_RESOURCE_FIELDS = {"account"}
+OPTIONAL_RESOURCE_FIELDS = {"account", "exclude_nodes"}
 RESOURCE_PROFILE_FIELDS = REQUIRED_RESOURCE_FIELDS | OPTIONAL_RESOURCE_FIELDS
 
 RESOURCE_LIMITS = {
@@ -83,6 +86,13 @@ def validate_resource_profile(
             allow_empty=field_name == "account",
         )
 
+    if "exclude_nodes" in normalized:
+        normalized["exclude_nodes"] = validate_slurm_node_list(
+            normalized["exclude_nodes"],
+            f"{path}.exclude_nodes",
+            allow_empty=True,
+        )
+
     for field_name, maximum in RESOURCE_LIMITS.items():
         if field_name not in normalized:
             continue
@@ -106,6 +116,8 @@ def validate_sbatch_directive_context(context: Mapping[str, Any]) -> None:
             validate_directive_token(context[field_name], f"manifest.{field_name}")
     if "account" in context and context.get("account") not in (None, ""):
         validate_slurm_identifier(context["account"], "resource_profile.account", allow_empty=True)
+    if "exclude_nodes" in context and context.get("exclude_nodes") not in (None, ""):
+        validate_slurm_node_list(context["exclude_nodes"], "resource_profile.exclude_nodes", allow_empty=True)
 
 
 def validate_slurm_identifier(value: Any, field: str, *, allow_empty: bool = False) -> str:
@@ -154,6 +166,35 @@ def validate_directive_token(value: Any, field: str) -> str:
             {"field": field, "reason": "invalid_identifier"},
         )
     return value
+
+
+def validate_slurm_node_list(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    if value is None:
+        if allow_empty:
+            return ""
+        raise ResourceProfileValidationError(
+            "Slurm node list is required.",
+            {"field": field, "reason": "required"},
+        )
+    if not isinstance(value, str):
+        raise ResourceProfileValidationError(
+            "Slurm node list must be a string.",
+            {"field": field, "type": type(value).__name__},
+        )
+    text = value.strip()
+    if text == "" and allow_empty:
+        return ""
+    if text != value or text.startswith("-") or SHELL_DIRECTIVE_UNSAFE_RE.search(text):
+        raise ResourceProfileValidationError(
+            "Slurm node list contains unsafe directive characters.",
+            {"field": field, "reason": "unsafe_directive_value"},
+        )
+    if not SAFE_SLURM_NODE_LIST_RE.fullmatch(text):
+        raise ResourceProfileValidationError(
+            "Slurm node list contains unsupported characters.",
+            {"field": field, "reason": "invalid_node_list"},
+        )
+    return text
 
 
 def _safe_resource_profile_field(field: str) -> str:

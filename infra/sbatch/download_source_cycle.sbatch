@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=nhms_{{stage_name}}
 #SBATCH --partition={{partition}}
+{% if exclude_nodes | default('') %}#SBATCH --exclude={{exclude_nodes}}
+{% endif %}
 #SBATCH --nodes={{nodes}}
 #SBATCH --ntasks={{ntasks}}
 #SBATCH --cpus-per-task={{cpus_per_task}}

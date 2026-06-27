@@ -2858,6 +2858,28 @@ def test_partition_override_redirects_resolved_partition(tmp_path: Path) -> None
     assert overridden.resolve_resource_profile("any_model")["partition"] == "CPU"
 
 
+def test_exclude_nodes_override_reaches_profile_and_sbatch(tmp_path: Path) -> None:
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            exclude_nodes="cn24,cn25",
+        )
+    )
+
+    profile = gateway.resolve_resource_profile("any_model")
+    rendered = gateway.render_template(
+        "download_source_cycle",
+        _production_manifest(tmp_path, "download_source_cycle"),
+    )
+
+    assert profile["exclude_nodes"] == "cn24,cn25"
+    assert "#SBATCH --exclude=cn24,cn25" in rendered
+
+
 @pytest.mark.parametrize(
     "malicious_override",
     [
@@ -2876,6 +2898,29 @@ def test_partition_override_rejects_injection(tmp_path: Path, malicious_override
             resource_profiles_path=str(_write_resource_profiles(tmp_path)),
             workspace_dir=str(tmp_path / "workspace"),
             partition_override=malicious_override,
+        )
+    )
+    with pytest.raises(ConfigurationError):
+        gateway.resolve_resource_profile("any_model")
+
+
+@pytest.mark.parametrize(
+    "malicious_exclude_nodes",
+    [
+        "cn24; rm -rf /",
+        "cn24\n#SBATCH x",
+        "-cn24",
+        "cn24 cn25",
+        "cn[24]",
+    ],
+)
+def test_exclude_nodes_override_rejects_injection(tmp_path: Path, malicious_exclude_nodes: str) -> None:
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            exclude_nodes=malicious_exclude_nodes,
         )
     )
     with pytest.raises(ConfigurationError):

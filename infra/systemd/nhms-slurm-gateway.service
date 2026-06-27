@@ -40,6 +40,9 @@ Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=/opt/SHUD-NWM/config/resource_p
 # Set when the cluster's real partition differs from the canonical "compute"
 # profile; redirects resolved partitions without editing the shared profile.
 # Environment=SLURM_GATEWAY_PARTITION_OVERRIDE=CPU
+# Set temporarily to avoid unhealthy compute nodes without editing shared
+# resource profiles, for example when a node has broken DNS.
+# Environment=SLURM_GATEWAY_EXCLUDE_NODES=cn24
 ExecStart=/usr/bin/env uv run python -m services.slurm_gateway
 Restart=on-failure
 RestartSec=5

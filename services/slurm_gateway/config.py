@@ -50,6 +50,10 @@ class SlurmGatewaySettings(BaseSettings):
     # partition differs (e.g. node-22 "CPU") set this so submitted jobs target a
     # valid partition without editing the shared profile config. Empty = no override.
     partition_override: str = ""
+    # Per-deployment node exclusion override (env SLURM_GATEWAY_EXCLUDE_NODES).
+    # This lets operators temporarily avoid unhealthy compute nodes without
+    # editing shared resource profiles or sbatch templates. Empty = no override.
+    exclude_nodes: str = ""
     template_dir: str = "infra/sbatch"
     resource_profiles_path: str = "config/resource_profiles.yaml"
     job_type_templates: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_JOB_TYPE_TEMPLATES))

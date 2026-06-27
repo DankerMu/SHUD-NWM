@@ -368,6 +368,7 @@ SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS = {
     "walltime",
     "max_concurrent",
     "shud_threads",
+    "exclude_nodes",
 }
 SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
     "run_id",

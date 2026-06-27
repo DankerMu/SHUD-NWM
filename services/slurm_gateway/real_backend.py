@@ -542,6 +542,9 @@ class RealSlurmGateway(SlurmGateway):
         partition_override = str(getattr(self.settings, "partition_override", "") or "").strip()
         if partition_override:
             resolved["partition"] = partition_override
+        exclude_nodes = str(getattr(self.settings, "exclude_nodes", "") or "").strip()
+        if exclude_nodes:
+            resolved["exclude_nodes"] = exclude_nodes
 
         try:
             return validate_resource_profile(resolved, model_id=model_id)
