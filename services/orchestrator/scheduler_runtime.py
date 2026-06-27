@@ -106,6 +106,20 @@ def _no_mutation_proof(*args, **kwargs):
     return getattr(_scheduler, "_no_mutation_proof")(*args, **kwargs)
 
 
+def _db_free_journal_write_blocked_reservation(config: Any, candidate_count: int) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "reason": "db_free_file_journal_write_not_implemented",
+        "error_code": "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED",
+        "message": (
+            "DB-free scheduler mutation is blocked until the file orchestration journal "
+            "write side is implemented."
+        ),
+        "scheduler_journal_backend": getattr(config, "scheduler_journal_backend", None),
+        "mutation_candidate_count": candidate_count,
+    }
+
+
 def _now(*args, **kwargs):
     return getattr(_scheduler, "_now")(*args, **kwargs)
 
@@ -472,6 +486,10 @@ def run_once(self) -> SchedulerPassResult:
         # in-flight statuses from accounting. Comment-reconcile finds back a
         # crashed cohort's slurm_job_id so we never re-submit an already
         # in-flight cohort.
+        if self.config.db_free_required:
+            refresh_file_providers = getattr(self, "_refresh_db_free_file_providers", None)
+            if callable(refresh_file_providers):
+                refresh_file_providers()
         restart_reconcile_evidence = self._run_restart_reconcile()
         restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
         models, model_evidence = self._discover_models()
@@ -658,48 +676,69 @@ def run_once(self) -> SchedulerPassResult:
                         blocked_candidates.extend(forcing_blocked_candidates)
                         execution_evidence.extend(forcing_evidence)
                     if candidates:
-                        slurm_preflight = _slurm_preflight(self.config)
-                        if slurm_preflight["status"] != "not_required":
-                            slurm_preflight_evidence = redact_payload(slurm_preflight)
-                        if slurm_preflight["status"] == "blocked":
+                        if self.config.db_free_required and self.orchestrator_factory is None:
+                            db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
+                                self.config,
+                                len(candidates),
+                            )
                             execution_evidence.extend(
                                 [
-                                    _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                    _candidate_evidence_write_blocked_evidence(candidate, db_free_journal_reservation)
                                     for candidate in candidates
                                 ]
                             )
                             execution_write_proof = _execution_write_proof_from_evidence(
                                 execution_evidence,
-                                reservation=evidence_reservation,
+                                reservation=db_free_journal_reservation,
                             )
-                            execution_boundary = "slurm_preflight_blocked"
-                            pass_status = "preflight_blocked"
-                        elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                            execution_evidence.extend(
-                                [
-                                    _candidate_preflight_blocked_evidence(candidate, config=self.config)
-                                    for candidate in candidates
-                                ]
-                            )
-                            execution_write_proof = _execution_write_proof_from_evidence(
-                                execution_evidence,
-                                reservation=evidence_reservation,
-                            )
-                            execution_boundary = "preflight_blocked"
+                            execution_boundary = "db_free_journal_write_blocked"
                             pass_status = "preflight_blocked"
                             no_mutation_proof = _no_mutation_proof()
                         else:
-                            execution_evidence.extend(self._execute_candidates(candidates))
-                            execution_write_proof = _execution_write_proof_from_evidence(
-                                execution_evidence,
-                                reservation=evidence_reservation,
-                            )
-                            submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                            execution_boundary = (
-                                "slurm_gateway_orchestration"
-                                if self.config.slurm_execution_enabled
-                                else "production_orchestration"
-                            )
+                            slurm_preflight = _slurm_preflight(self.config)
+                            if slurm_preflight["status"] != "not_required":
+                                slurm_preflight_evidence = redact_payload(slurm_preflight)
+                            if slurm_preflight["status"] == "blocked":
+                                execution_evidence.extend(
+                                    [
+                                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                        for candidate in candidates
+                                    ]
+                                )
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                execution_boundary = "slurm_preflight_blocked"
+                                pass_status = "preflight_blocked"
+                            elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                                execution_evidence.extend(
+                                    [
+                                        _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                        for candidate in candidates
+                                    ]
+                                )
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                execution_boundary = "preflight_blocked"
+                                pass_status = "preflight_blocked"
+                                no_mutation_proof = _no_mutation_proof()
+                            else:
+                                execution_evidence.extend(self._execute_candidates(candidates))
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                submitted_count = sum(
+                                    1 for item in execution_evidence if item.get("submitted") is True
+                                )
+                                execution_boundary = (
+                                    "slurm_gateway_orchestration"
+                                    if self.config.slurm_execution_enabled
+                                    else "production_orchestration"
+                                )
             if execution_evidence:
                 pass_status = _scheduler_pass_status_from_execution(execution_evidence)
             if cancellation_evidence and not execution_evidence:

@@ -15802,6 +15802,41 @@ def _format_iso_z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _write_db_free_raw_manifest_fixture(
+    roots: Mapping[str, Path],
+    *,
+    source_id: str = "gfs",
+    cycle_time: datetime,
+    manifest_source_id: str | None = None,
+    manifest_cycle_time: str | None = None,
+    manifest_uri: str | None = None,
+    entries: Sequence[Mapping[str, Any]] | None = None,
+    write_raw_files: bool = True,
+    raw_content: bytes = b"node27-raw",
+) -> dict[str, Any]:
+    compact_cycle = format_cycle_time(cycle_time)
+    raw_key = f"raw/{source_id}/{compact_cycle}/{source_id}.f000.bundle.grib2"
+    rows = [dict(row) for row in (entries if entries is not None else [{"local_key": raw_key, "forecast_hour": 0}])]
+    if write_raw_files:
+        for row in rows:
+            local_key = str(row.get("local_key") or "")
+            if local_key and ".." not in Path(local_key).parts:
+                raw_path = roots["object_store_root"] / local_key
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_path.write_bytes(raw_content)
+    manifest_key = f"raw/{source_id}/{compact_cycle}/manifest.json"
+    manifest_path = roots["object_store_root"] / manifest_key
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "source_id": manifest_source_id or source_id,
+        "cycle_time": manifest_cycle_time or _format_iso_z(cycle_time),
+        "manifest_uri": manifest_uri or f"s3://nhms/{manifest_key}",
+        "entries": rows,
+    }
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return {"manifest": manifest, "manifest_key": manifest_key, "manifest_path": manifest_path, "raw_key": raw_key}
+
+
 def _run_no_flag_plan() -> dict[str, Any]:
     return cli._plan_production(
         sources=("gfs",),
@@ -16586,6 +16621,104 @@ def test_file_registry_duplicate_model_id_fails_closed_with_bounded_evidence(
     assert "db-free-local-root" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("case_name", "expected_reason"),
+    [
+        ("schema", "file_manifest_schema_unsupported"),
+        ("stale", "file_manifest_stale"),
+        ("checksum", "file_manifest_checksum_mismatch"),
+        ("missing_shud_code_version", "registry_model_required_field_missing"),
+        ("empty_resource_profile", "file_manifest_mapping_empty"),
+        ("model_manifest_missing", "registry_model_package_manifest_missing"),
+        ("model_manifest_checksum", "registry_model_package_manifest_checksum_mismatch"),
+        ("model_manifest_outside_prefix", "registry_model_package_manifest_unsafe_uri"),
+        ("model_package_local_path", "registry_model_package_uri_unsupported_uri"),
+    ],
+)
+def test_file_registry_manifest_fail_closed_cases(
+    monkeypatch: Any,
+    tmp_path: Path,
+    case_name: str,
+    expected_reason: str,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    model_a, _package_checksum = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    payload: dict[str, Any] = {
+        "schema_version": scheduler_module.REGISTRY_MANIFEST_SCHEMA_VERSION,
+        "generated_at": _format_iso_z(generated_at),
+        "models": [model_a],
+    }
+    if case_name == "schema":
+        payload["schema_version"] = "nhms.scheduler.file_model_registry.v0"
+    elif case_name == "stale":
+        payload["generated_at"] = "2026-01-01T00:00:00Z"
+    elif case_name == "missing_shud_code_version":
+        payload["models"][0].pop("shud_code_version")
+    elif case_name == "empty_resource_profile":
+        payload["models"][0]["resource_profile"] = {}
+    elif case_name == "model_manifest_missing":
+        payload["models"][0]["manifest_uri"] = "s3://nhms/models/missing/manifest.json"
+    elif case_name == "model_manifest_checksum":
+        payload["models"][0]["package_checksum"] = "sha256:bad"
+    elif case_name == "model_manifest_outside_prefix":
+        payload["models"][0]["manifest_uri"] = "s3://outside/models/model_a/manifest.json"
+    elif case_name == "model_package_local_path":
+        payload["models"][0]["model_package_uri"] = str(tmp_path / "outside-package")
+    _write_json_manifest_with_checksum(paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"], payload)
+    if case_name == "checksum":
+        broken = json.loads(paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].read_text(encoding="utf-8"))
+        broken["checksum"] = "sha256:bad"
+        paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].write_text(json.dumps(broken), encoding="utf-8")
+
+    registry = scheduler_module.FileSchedulerModelRegistry(
+        paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+    )
+    page = registry.list_models(basin_version_id=None, active=True, limit=10, offset=0)
+    evidence = registry.scheduler_registry_evidence()
+    rendered = json.dumps(evidence, sort_keys=True)
+
+    assert page["items"] == []
+    assert evidence["status"] == "blocked"
+    assert evidence["blockers"][0]["code"] == expected_reason
+    assert "db-free-local-root" not in rendered
+    assert "outside-package" not in rendered
+    assert "outside" not in rendered
+
+
+def test_file_registry_publisher_failure_keeps_previous_manifest(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    model_a, _package_checksum = _db_free_model_manifest_fixture(roots, _model("model_a", "basin_a"))
+    scheduler_module.publish_scheduler_registry_manifest(
+        [model_a],
+        paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+    )
+    previous = paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].read_bytes()
+    missing_ref = {**model_a, "manifest_uri": "s3://nhms/models/missing/manifest.json"}
+
+    with pytest.raises(scheduler_module.SchedulerFileProviderError) as error_info:
+        scheduler_module.publish_scheduler_registry_manifest(
+            [missing_ref],
+            paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"],
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            generated_at=generated_at,
+        )
+
+    assert error_info.value.reason == "registry_model_package_manifest_missing"
+    assert paths["NHMS_SCHEDULER_REGISTRY_MANIFEST"].read_bytes() == previous
+
+
 def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     monkeypatch: Any,
     tmp_path: Path,
@@ -16629,6 +16762,109 @@ def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     assert evidence["readiness_index"]["entry_product_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
 
 
+def test_file_canonical_readiness_evidence_redacts_identity_paths(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy_identity = {"source": "gfs", "policy_uri": "s3://private-bucket/raw/policy.json"}
+    source_object_identity = {
+        "source": "gfs",
+        "manifest_uri": "s3://private-bucket/raw/gfs/2026052106/manifest.json",
+        "manifest_path": "/home/ghdc/nwm/object-store/raw/gfs/2026052106/manifest.json",
+    }
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=(0,),
+        generated_at=_dt("2026-06-27T00:00:00Z"),
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+    )
+    provider = scheduler_module.FileCanonicalReadinessProvider(
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-06-27T00:00:00Z"),
+    )
+
+    evidence = provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=(0,),
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+        canonical_product_id=fixture["canonical_product_id"],
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+    rendered = json.dumps(evidence, sort_keys=True)
+
+    assert evidence["ready"] is True
+    assert evidence["policy_identity"]["policy_uri"] == "[object-uri]"
+    assert evidence["source_object_identity"]["manifest_uri"] == "[object-uri]"
+    assert evidence["source_object_identity"]["manifest_path"] == "[local-path]"
+    assert "private-bucket" not in rendered
+    assert "/home/ghdc" not in rendered
+
+
+def test_file_canonical_readiness_publisher_failure_keeps_previous_index(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=(0,),
+        generated_at=generated_at,
+    )
+    previous = paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"].read_bytes()
+    broken_product = {
+        "source_id": "gfs",
+        "cycle_time": _format_iso_z(cycle_time),
+        "lead_time_hours": 0,
+        "variable": "air_temperature_2m",
+        "object_uri": "s3://nhms/canonical/gfs/missing/f000.dat",
+        "checksum": "sha256:missing",
+        "lineage_json": {
+            "policy_identity": fixture["policy_identity"],
+            "source_object_identity": fixture["source_object_identity"],
+        },
+    }
+
+    with pytest.raises(scheduler_module.SchedulerFileProviderError) as error_info:
+        scheduler_module.publish_canonical_readiness_index(
+            [
+                {
+                    "source_id": "gfs",
+                    "cycle_time": _format_iso_z(cycle_time),
+                    "model_id": "model_a",
+                    "basin_id": "basin_a",
+                    "canonical_product_id": fixture["canonical_product_id"],
+                    "forecast_hours": [0],
+                    "policy_identity": fixture["policy_identity"],
+                    "source_object_identity": fixture["source_object_identity"],
+                    "products": [broken_product],
+                }
+            ],
+            paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+            object_store_root=roots["object_store_root"],
+            object_store_prefix="s3://nhms",
+            generated_at=generated_at,
+        )
+
+    assert error_info.value.reason == "readiness_product_object_unreadable"
+    assert paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"].read_bytes() == previous
+
+
 @pytest.mark.parametrize(
     ("case_name", "expected_reason"),
     [
@@ -16638,7 +16874,10 @@ def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
         ("checksum", "file_manifest_checksum_mismatch"),
         ("deep", "file_manifest_json_depth_exceeded"),
         ("object_missing", "readiness_product_object_missing"),
+        ("self_reported_checksum", "readiness_product_object_checksum_mismatch"),
+        ("local_object_uri", "readiness_product_object_unsupported_uri"),
         ("identity", "canonical_readiness_index_identity_mismatch"),
+        ("forecast_hours_missing", "canonical_readiness_index_forecast_hours_missing"),
     ],
 )
 def test_file_canonical_readiness_index_fail_closed_cases(
@@ -16728,6 +16967,68 @@ def test_file_canonical_readiness_index_fail_closed_cases(
                 ],
             },
         )
+    elif case_name == "self_reported_checksum":
+        product = _file_readiness_products(
+            roots,
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0,),
+            policy_identity=fixture["policy_identity"],
+            source_object_identity=fixture["source_object_identity"],
+        )[0]
+        store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+        object_path = roots["object_store_root"] / store.normalize_key(product["object_uri"])
+        object_path.write_text(json.dumps({"checksum": product["checksum"]}), encoding="utf-8")
+        _write_json_manifest_with_checksum(
+            paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+            {
+                "schema_version": scheduler_module.CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
+                "generated_at": _format_iso_z(generated_at),
+                "entries": [
+                    {
+                        "source_id": "gfs",
+                        "cycle_time": _format_iso_z(cycle_time),
+                        "model_id": "model_a",
+                        "basin_id": "basin_a",
+                        "canonical_product_id": fixture["canonical_product_id"],
+                        "forecast_hours": [0],
+                        "policy_identity": fixture["policy_identity"],
+                        "source_object_identity": fixture["source_object_identity"],
+                        "products": [product],
+                    }
+                ],
+            },
+        )
+    elif case_name == "local_object_uri":
+        product = _file_readiness_products(
+            roots,
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0,),
+            policy_identity=fixture["policy_identity"],
+            source_object_identity=fixture["source_object_identity"],
+        )[0]
+        product["object_uri"] = str(tmp_path / "outside-canonical.dat")
+        _write_json_manifest_with_checksum(
+            paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+            {
+                "schema_version": scheduler_module.CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
+                "generated_at": _format_iso_z(generated_at),
+                "entries": [
+                    {
+                        "source_id": "gfs",
+                        "cycle_time": _format_iso_z(cycle_time),
+                        "model_id": "model_a",
+                        "basin_id": "basin_a",
+                        "canonical_product_id": fixture["canonical_product_id"],
+                        "forecast_hours": [0],
+                        "policy_identity": fixture["policy_identity"],
+                        "source_object_identity": fixture["source_object_identity"],
+                        "products": [product],
+                    }
+                ],
+            },
+        )
 
     provider = scheduler_module.FileCanonicalReadinessProvider(
         paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
@@ -16738,7 +17039,7 @@ def test_file_canonical_readiness_index_fail_closed_cases(
     evidence = provider.canonical_readiness(
         source_id="gfs",
         cycle_time=cycle_time,
-        forecast_hours=(0,),
+        forecast_hours=(0, 3) if case_name == "forecast_hours_missing" else (0,),
         policy_identity=(
             {"source": "gfs", "forecast_hours": [999]}
             if case_name == "identity"
@@ -16757,6 +17058,7 @@ def test_file_canonical_readiness_index_fail_closed_cases(
     rendered = json.dumps(evidence, sort_keys=True)
     assert "db-free-local-root" not in rendered
     assert str(paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"]) not in rendered
+    assert "outside-canonical" not in rendered
 
 
 def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_without_db_factories(
@@ -16861,6 +17163,50 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
     assert str(config.lock_path) not in rendered
 
 
+def test_db_free_file_providers_refresh_between_scheduler_passes(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    policy_identity = {"source": "gfs", "forecast_hours": list(_gfs_default_forecast_hours())}
+    source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+            )
+        },
+    )
+    scheduler = _RealProductionScheduler.from_env(ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z")))
+
+    first = scheduler.run_once()
+
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+    )
+    assert fixture["policy_identity"] == policy_identity
+    second = scheduler.run_once()
+
+    assert first.status == "preflight_blocked"
+    assert first.evidence["execution_boundary"] == "db_free_registry_blocked"
+    assert second.status == "planned"
+    assert second.evidence["model_discovery"]["registry"]["status"] == "ready"
+    assert second.evidence["candidates"][0]["state_evidence"]["canonical_readiness"]["ready"] is True
+
+
 def test_db_free_injected_collaborators_plan_without_unimplemented_provider_blocker(
     monkeypatch: Any,
     tmp_path: Path,
@@ -16901,20 +17247,7 @@ def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_d
         products=[],
         generated_at=_dt("2026-05-21T12:00:00Z"),
     )
-    raw_key = "raw/gfs/2026052106/gfs.t06z.f000.bundle.grib2"
-    raw_path = roots["object_store_root"] / raw_key
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_path.write_bytes(b"node27-raw")
-    raw_manifest = {
-        "source_id": "gfs",
-        "cycle_time": "2026-05-21T06:00:00Z",
-        "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
-        "entries": [{"local_key": raw_key, "forecast_hour": 0}],
-    }
-    (roots["object_store_root"] / "raw/gfs/2026052106/manifest.json").write_text(
-        json.dumps(raw_manifest, sort_keys=True),
-        encoding="utf-8",
-    )
+    raw_fixture = _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
@@ -16943,6 +17276,8 @@ def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_d
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["restart_stage"] == "convert"
     assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["status"] == "ready"
+    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
+    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
     assert submitted_basin["state_evidence"]["canonical_readiness"]["candidate_row_count"] == 0
     rendered_submission = json.dumps(
         {"calls": orchestrator.calls, "evidence": result.evidence},
@@ -16950,6 +17285,8 @@ def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_d
         default=str,
     )
     assert "download_source_cycle" not in rendered_submission
+    assert str(roots["object_store_root"]) not in rendered_submission
+    assert str(raw_fixture["manifest_path"]) not in rendered_submission
 
 
 def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
@@ -16994,6 +17331,132 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["blocked_candidates"][0]["reason"] == "nfs_raw_manifest_manifest_not_found"
     assert "download_source_cycle" not in json.dumps(result.evidence, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_reason"),
+    [
+        ("bad_json", "nfs_raw_manifest_manifest_invalid_json"),
+        ("source_mismatch", "nfs_raw_manifest_manifest_source_mismatch"),
+        ("cycle_mismatch", "nfs_raw_manifest_manifest_cycle_time_mismatch"),
+        ("uri_mismatch", "nfs_raw_manifest_manifest_uri_mismatch"),
+        ("entries_missing", "nfs_raw_manifest_manifest_entries_missing"),
+        ("local_key_invalid", "nfs_raw_manifest_manifest_entry_local_key_invalid"),
+        ("raw_file_missing", "nfs_raw_manifest_raw_files_missing"),
+    ],
+)
+def test_db_free_from_env_raw_invalid_blocks_without_submission(
+    monkeypatch: Any,
+    tmp_path: Path,
+    case_name: str,
+    expected_reason: str,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        products=[],
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    raw_entries: Sequence[Mapping[str, Any]] | None = None
+    if case_name == "entries_missing":
+        raw_entries = []
+    elif case_name == "local_key_invalid":
+        raw_entries = [{"local_key": "../escape.grib2", "forecast_hour": 0}]
+    raw_fixture = _write_db_free_raw_manifest_fixture(
+        roots,
+        cycle_time=cycle_time,
+        manifest_source_id="ifs" if case_name == "source_mismatch" else None,
+        manifest_cycle_time="2026-05-21T00:00:00Z" if case_name == "cycle_mismatch" else None,
+        manifest_uri="s3://nhms/raw/gfs/2026052100/manifest.json" if case_name == "uri_mismatch" else None,
+        entries=raw_entries,
+        write_raw_files=case_name not in {"local_key_invalid", "raw_file_missing"},
+    )
+    if case_name == "bad_json":
+        raw_fixture["manifest_path"].write_text("{", encoding="utf-8")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=fixture["policy_identity"],
+                source_object_identity=fixture["source_object_identity"],
+            )
+        },
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = _RealProductionScheduler(
+        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert orchestrator.calls == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == expected_reason
+    assert "download_source_cycle" not in rendered
+    assert str(roots["object_store_root"]) not in rendered
+    assert str(raw_fixture["manifest_path"]) not in rendered
+
+
+def test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exists(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        products=[],
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=fixture["policy_identity"],
+                source_object_identity=fixture["source_object_identity"],
+            )
+        },
+    )
+    config = ProductionSchedulerConfig(
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+    )
+
+    result = _RealProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["model_run_evidence"][0]["evidence_pre_execution"]["reason"] == (
+        "db_free_file_journal_write_not_implemented"
+    )
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert "download_source_cycle" not in rendered
+    assert str(roots["object_store_root"]) not in rendered
 
 
 def test_db_free_required_implies_strict_runtime_root_preflight(

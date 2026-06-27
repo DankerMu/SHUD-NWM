@@ -242,6 +242,12 @@ class ProductionScheduler:
             self.sleep(self.config.interval_seconds)
         return results
 
+    def _refresh_db_free_file_providers(self) -> None:
+        for provider in (self.registry, self.canonical_readiness_provider):
+            refresh = getattr(provider, "refresh", None)
+            if callable(refresh):
+                refresh()
+
     def _produce_forcing_for_candidates(
         self, candidates: _scheduler.Sequence[_scheduler.SchedulerCandidate]
     ) -> tuple[

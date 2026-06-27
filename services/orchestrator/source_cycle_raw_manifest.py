@@ -249,6 +249,15 @@ def stage_nfs_raw_manifest_from_env(state_evidence: Mapping[str, Any]) -> dict[s
         raise NfsRawManifestStagingError(
             f"{NFS_RAW_STAGE_ROOT_ENV} or OBJECT_STORE_ROOT is required to stage NFS raw inputs."
         )
+    source_root = os.getenv(NFS_RAW_MANIFEST_ROOT_ENV) or os.getenv("OBJECT_STORE_ROOT")
+    if source_root not in (None, "") and nfs_raw_manifest.get("status") == "ready":
+        manifest_key = str(nfs_raw_manifest.get("manifest_key") or "").strip()
+        if manifest_key:
+            nfs_raw_manifest = {
+                **dict(nfs_raw_manifest),
+                "object_store_root": source_root,
+                "manifest_path": str(_absolute_path(str(source_root)) / manifest_key),
+            }
     return stage_nfs_raw_manifest_to_object_store(
         nfs_raw_manifest,
         target_object_store_root=target_root,
@@ -281,8 +290,8 @@ def stage_nfs_raw_manifest_to_object_store(
                 "status": "skipped",
                 "reason": "source_target_same",
                 "source": NFS_RAW_MANIFEST_READY_SOURCE,
-                "source_object_store_root": str(source_root),
-                "target_object_store_root": str(target_root),
+                "source_object_store_root": "[local-path]",
+                "target_object_store_root": "[local-path]",
                 "manifest_uri": str(readiness.get("manifest_uri") or ""),
                 "manifest_key": manifest_key,
             }
@@ -330,8 +339,8 @@ def stage_nfs_raw_manifest_to_object_store(
         "cycle_time": _format_time(cycle_time),
         "manifest_uri": manifest_uri,
         "manifest_key": manifest_key,
-        "source_object_store_root": str(source_root),
-        "target_object_store_root": str(target_root),
+        "source_object_store_root": "[local-path]",
+        "target_object_store_root": "[local-path]",
         "staged_file_count": copied_files,
         "staged_manifest_bytes": manifest_bytes,
         "staged_raw_bytes": copied_bytes,

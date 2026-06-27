@@ -138,6 +138,16 @@ class FileSchedulerModelRegistry:
         self._load_once()
         return dict(self._evidence)
 
+    def refresh(self) -> None:
+        self._loaded = False
+        self._models = []
+        self._model_by_id = {}
+        self._evidence = {
+            "status": "not_loaded",
+            "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
+            "manifest": _uri_evidence(self.manifest_uri),
+        }
+
     def _load_once(self) -> None:
         if self._loaded:
             return
@@ -296,6 +306,7 @@ class FileCanonicalReadinessProvider:
             model_id=model_id,
             basin_id=basin_id,
         ).evidence
+        result = _sanitize_file_provider_evidence(result)
         result["readiness_index"] = _evidence_safe(
             {
                 **index_evidence,
@@ -331,6 +342,15 @@ class FileCanonicalReadinessProvider:
                 "index": _uri_evidence(self.index_uri),
                 "blockers": [_provider_blocker(error.reason, error.field, evidence=error.evidence)],
             }
+
+    def refresh(self) -> None:
+        self._loaded = False
+        self._entries = {}
+        self._evidence = {
+            "status": "not_loaded",
+            "schema_version": CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
+            "index": _uri_evidence(self.index_uri),
+        }
 
 
 class FileRawHandoffCandidateRepository:
@@ -368,7 +388,7 @@ class FileRawHandoffCandidateRepository:
             "run_id": run_id,
             "forcing_version_id": forcing_version_id,
             "candidate_id": candidate_id,
-            "nfs_raw_manifest": _evidence_safe(readiness),
+            "nfs_raw_manifest": _public_raw_manifest_evidence(readiness),
         }
         if isinstance(readiness, Mapping) and readiness.get("status") == "ready":
             payload["forecast_cycle"] = source_cycle_raw_manifest.forecast_cycle_from_raw_manifest_readiness(
@@ -580,15 +600,25 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         "model_package_uri",
         "manifest_uri",
         "package_checksum",
+        "resource_profile",
+        "display_capabilities",
+        "frequency_capabilities",
+        "shud_code_version",
     )
     row = dict(item)
     for field in required:
         if row.get(field) in (None, ""):
             raise SchedulerFileProviderError("registry_model_required_field_missing", field=f"models[{index}].{field}")
-    resource_profile = _mapping(row.get("resource_profile"))
-    display_capabilities = _mapping(row.get("display_capabilities") or resource_profile.get("display_capabilities"))
-    frequency_capabilities = _mapping(
-        row.get("frequency_capabilities") or resource_profile.get("frequency_capabilities")
+    resource_profile = _required_mapping(row.get("resource_profile"), field=f"models[{index}].resource_profile")
+    display_capabilities = _required_mapping(
+        row.get("display_capabilities"),
+        field=f"models[{index}].display_capabilities",
+        allow_empty=True,
+    )
+    frequency_capabilities = _required_mapping(
+        row.get("frequency_capabilities"),
+        field=f"models[{index}].frequency_capabilities",
+        allow_empty=True,
     )
     segment_count = _optional_nonnegative_int(row.get("segment_count"), field=f"models[{index}].segment_count")
     output_segment_count = _optional_nonnegative_int(
@@ -596,8 +626,15 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         field=f"models[{index}].output_segment_count",
     )
     source_policy = _mapping(row.get("source_policy") or row.get("source_policy_metadata"))
+    model_package_uri = str(row["model_package_uri"])
     manifest_uri = str(row["manifest_uri"])
     package_checksum = str(row["package_checksum"])
+    _require_supported_internal_reference(
+        model_package_uri,
+        roots=roots,
+        field=f"models[{index}].model_package_uri",
+        reason_prefix="registry_model_package_uri",
+    )
     _verify_referenced_checksum(
         manifest_uri,
         package_checksum,
@@ -605,6 +642,7 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         field=f"models[{index}].manifest_uri",
         max_bytes=MAX_MODEL_PACKAGE_MANIFEST_BYTES,
         reason_prefix="registry_model_package_manifest",
+        allow_embedded_checksum=True,
     )
     resource_profile = {
         **resource_profile,
@@ -623,12 +661,12 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         "basin_id": str(row["basin_id"]),
         "basin_version_id": str(row["basin_version_id"]),
         "river_network_version_id": str(row["river_network_version_id"]),
-        "model_package_uri": str(row["model_package_uri"]),
+        "model_package_uri": model_package_uri,
         "manifest_uri": manifest_uri,
         "package_checksum": package_checksum,
         "segment_count": segment_count,
         "output_segment_count": output_segment_count,
-        "shud_code_version": str(row.get("shud_code_version") or resource_profile.get("shud_code_version") or "2.0"),
+        "shud_code_version": str(row["shud_code_version"]),
         "active_flag": row.get("active_flag", True) is not False,
         "lifecycle_state": str(row.get("lifecycle_state") or "active"),
         "resource_profile": resource_profile,
@@ -735,6 +773,7 @@ def _normalize_product_row(
         field=f"entries[{index}].products[{product_index}].object_uri",
         max_bytes=MAX_READINESS_INDEX_BYTES,
         reason_prefix="readiness_product_object",
+        allow_embedded_checksum=False,
     )
     lineage = _mapping(row.get("lineage_json"))
     if "policy_identity" not in lineage:
@@ -828,6 +867,31 @@ def _object_store_for(uri: str, roots: _ProviderRoots) -> LocalObjectStore:
     return LocalObjectStore(root, object_store_prefix=prefix or "")
 
 
+def _require_supported_internal_reference(
+    uri: str,
+    *,
+    roots: _ProviderRoots,
+    field: str,
+    reason_prefix: str,
+) -> None:
+    parsed = urlparse(uri)
+    scheme = str(parsed.scheme or "").lower()
+    if scheme not in {"s3", "published"}:
+        raise SchedulerFileProviderError(f"{reason_prefix}_unsupported_uri", field=field)
+    try:
+        if scheme == "s3" and not (roots.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", "")).strip():
+            raise ValueError("object_store_prefix_required")
+        key = _object_key_for_uri(uri)
+        store = _object_store_for(uri, roots)
+        store.normalize_key(key)
+    except (ObjectStoreError, ValueError) as error:
+        raise SchedulerFileProviderError(
+            f"{reason_prefix}_unsafe_uri",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+
+
 def _object_key_for_uri(uri: str) -> str:
     parsed = urlparse(uri)
     if parsed.scheme == "published":
@@ -843,7 +907,9 @@ def _verify_referenced_checksum(
     field: str,
     max_bytes: int,
     reason_prefix: str,
+    allow_embedded_checksum: bool,
 ) -> None:
+    _require_supported_internal_reference(uri, roots=roots, field=field, reason_prefix=reason_prefix)
     try:
         exists = _uri_exists(uri, roots=roots)
     except (OSError, SafeFilesystemError, ObjectStoreError, ValueError) as error:
@@ -869,6 +935,8 @@ def _verify_referenced_checksum(
     actual_checksum = sha256_bytes(content)
     if _checksum_matches(expected_checksum, actual_checksum):
         return
+    if not allow_embedded_checksum:
+        raise SchedulerFileProviderError(f"{reason_prefix}_checksum_mismatch", field=field)
     try:
         manifest = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1090,6 +1158,15 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _required_mapping(value: Any, *, field: str, allow_empty: bool = False) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise SchedulerFileProviderError("file_manifest_mapping_invalid", field=field)
+    result = dict(value)
+    if not result and not allow_empty:
+        raise SchedulerFileProviderError("file_manifest_mapping_empty", field=field)
+    return result
+
+
 def _optional_nonnegative_int(value: Any, *, field: str) -> int | None:
     if value in (None, ""):
         return None
@@ -1126,3 +1203,55 @@ def _now(roots: _ProviderRoots) -> datetime:
 def _stable_json(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, separators=(",", ":"), default=str)
 
+
+def _public_raw_manifest_evidence(readiness: Mapping[str, Any]) -> dict[str, Any]:
+    hidden_local_fields = {"object_store_root", "manifest_path", "source_object_store_root", "target_object_store_root"}
+    payload: dict[str, Any] = {}
+    for key, value in readiness.items():
+        key_text = str(key)
+        if key_text in hidden_local_fields:
+            continue
+        if key_text == "manifest_uri":
+            payload[key_text] = value
+        else:
+            payload[key_text] = _sanitize_file_provider_evidence(value)
+    for key in hidden_local_fields:
+        if key in readiness and readiness.get(key) not in (None, ""):
+            payload[key] = "[local-path]"
+    return _evidence_safe(payload)
+
+
+def _sanitize_file_provider_evidence(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_file_provider_evidence_scalar(str(key), nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_sanitize_file_provider_evidence(item) for item in value]
+    return _sanitize_file_provider_scalar(value)
+
+
+def _sanitize_file_provider_evidence_scalar(key: str, value: Any) -> Any:
+    lowered = key.lower()
+    if lowered.endswith("_path") or lowered.endswith("_root") or lowered in {"path", "root"}:
+        return "[local-path]" if value not in (None, "") else value
+    if lowered.endswith("_uri") or lowered in {"uri", "object_uri", "manifest_uri"}:
+        return _sanitize_file_provider_scalar(value)
+    return _sanitize_file_provider_evidence(value)
+
+
+def _sanitize_file_provider_scalar(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    parsed = urlparse(text)
+    if parsed.scheme in {"s3", "published"}:
+        return "[object-uri]"
+    if parsed.scheme:
+        return "[uri]"
+    if text.startswith("/") or text.startswith("~"):
+        return "[local-path]"
+    return value
