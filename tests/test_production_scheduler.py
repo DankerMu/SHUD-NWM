@@ -15431,6 +15431,31 @@ def test_db_free_selector_misconfig_blocks_exact_field_before_lock(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
+@pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
+def test_db_free_selector_uri_blocks_without_endpoint_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_env: str,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(selector_env, "postgresql://nhms:supersecret@db.prod.example:55433/nhms?token=qhh")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert selector_env in {blocker["field"] for blocker in result.evidence["db_free_runtime"]["blockers"]}
+    selector_check = result.evidence["db_free_runtime"]["checks"][selector_env]
+    assert selector_check["selected"] == "[db-like]"
+    assert selector_check["file_selected"] is False
+    assert "supersecret" not in rendered
+    assert "db.prod.example" not in rendered
+    assert "55433" not in rendered
+    assert "token" not in rendered
+    assert "postgresql" not in rendered.lower()
+
+
 @pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
 @pytest.mark.parametrize("path_case", ["missing", "blank", "outside", "unsafe"])
 def test_db_free_required_path_misconfig_blocks_exact_field_before_lock(

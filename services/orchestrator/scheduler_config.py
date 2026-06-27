@@ -354,7 +354,7 @@ class ProductionSchedulerConfig:
         selectors = {
             env: {
                 "configured": getattr(self, attr) is not None,
-                "selected": _evidence_scalar(getattr(self, attr)),
+                "selected": _db_free_selector_evidence_scalar(getattr(self, attr)),
                 "required_value": "file",
             }
             for attr, env, _legacy_default in _DB_FREE_SELECTOR_SPECS
@@ -441,13 +441,14 @@ def _db_free_path_evidence_scalar(value: Any) -> Any:
 
 def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     configured = value is not None
-    selected = None if value in (None, "") else str(value)
+    selected = _db_free_selector_evidence_scalar(value)
+    normalized_value = None if value in (None, "") else str(value)
     check = {
         "env": env,
         "configured": configured,
         "selected": selected,
         "required_value": "file",
-        "file_selected": selected == "file",
+        "file_selected": normalized_value == "file",
     }
     if value is None:
         return check, _db_free_blocker("db_free_selector_missing", env, "missing")
@@ -458,6 +459,16 @@ def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any]
     if value != "file":
         return check, _db_free_blocker("db_free_selector_non_file", env, "non_file")
     return check, None
+
+
+def _db_free_selector_evidence_scalar(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    parsed = urlparse(text)
+    if parsed.scheme:
+        return _db_free_scheme_for_evidence(parsed.scheme)
+    return _evidence_scalar(text)
 
 
 def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:

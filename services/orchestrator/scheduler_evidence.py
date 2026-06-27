@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
 from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from services.orchestrator.production_contract import production_contract_matrix
 from services.orchestrator.scheduler_lease import UnsafeSchedulerLockError, _open_lock_parent_directory
@@ -61,6 +62,7 @@ _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "readiness_interpretation",
     "execution_mode",
 )
+_DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 
 
 class SchedulerEvidenceWriteError(OSError):
@@ -713,17 +715,30 @@ def root_evidence_item(
 
 
 def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[str, Any]:
+    db_free_required = bool(getattr(config, "scheduler_db_free_required", False))
     payload = {
         "service_role": config.service_role,
         "require_runtime_roots": config.require_runtime_roots,
         "database_url_configured": bool(getattr(config, "database_url_configured", False)),
-        "scheduler_db_free_required": bool(getattr(config, "scheduler_db_free_required", False)),
-        "scheduler_state_backend": getattr(config, "scheduler_state_backend", None),
-        "scheduler_lock_backend": getattr(config, "scheduler_lock_backend", None),
-        "scheduler_registry_backend": getattr(config, "scheduler_registry_backend", None),
-        "scheduler_canonical_readiness_backend": getattr(config, "scheduler_canonical_readiness_backend", None),
-        "scheduler_journal_backend": getattr(config, "scheduler_journal_backend", None),
-        "scheduler_state_index_backend": getattr(config, "scheduler_state_index_backend", None),
+        "scheduler_db_free_required": db_free_required,
+        "scheduler_state_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_state_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_lock_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_lock_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_registry_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_registry_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_canonical_readiness_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_canonical_readiness_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_journal_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_journal_backend", None), db_free_required=db_free_required
+        ),
+        "scheduler_state_index_backend": _scheduler_backend_evidence(
+            getattr(config, "scheduler_state_index_backend", None), db_free_required=db_free_required
+        ),
         "dry_run": config.dry_run,
         "continuous": config.continuous,
         "interval_seconds": config.interval_seconds,
@@ -740,6 +755,19 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
     if callable(db_free_evidence):
         payload["db_free_runtime"] = db_free_evidence()
     return payload
+
+
+def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
+    if value in (None, "") or not db_free_required:
+        return value
+    text = str(value).strip()
+    parsed = urlparse(text)
+    if parsed.scheme:
+        scheme = parsed.scheme.lower()
+        if scheme in _DB_FREE_DB_BACKEND_VALUES or "postgres" in scheme or "psycopg" in scheme:
+            return "[db-like]"
+        return "[uri]"
+    return text
 
 
 def open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:
