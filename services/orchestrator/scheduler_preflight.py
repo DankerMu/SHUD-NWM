@@ -288,6 +288,7 @@ def _slurm_grib_env_check(
     config: Any,
     *,
     probe: Callable[[Any], Mapping[str, Any]] | None = None,
+    evidence_safe_paths: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Fail loud when GRIB tooling will be unavailable on the compute node.
 
@@ -316,7 +317,8 @@ def _slurm_grib_env_check(
     blockers: list[dict[str, Any]] = []
 
     root = _scheduler_grib_env_root(config)
-    checks["root"] = root or None
+    root_evidence = _db_free_slurm_evidence_value(root) if evidence_safe_paths else root
+    checks["root"] = root_evidence or None
 
     if root:
         root_path = Path(root)
@@ -330,11 +332,11 @@ def _slurm_grib_env_check(
                     "code": "GRIB_ENV_ROOT_INVALID",
                     "field": "NHMS_GRIB_ENV_ROOT",
                     "message": (
-                        f"NHMS_GRIB_ENV_ROOT set but {root}/bin or {root}/lib "
+                        f"NHMS_GRIB_ENV_ROOT set but {root_evidence}/bin or {root_evidence}/lib "
                         "missing; GRIB tooling would not be injected on the "
                         "compute node."
                     ),
-                    "root": root,
+                    "root": root_evidence,
                     "bin_present": bin_ok,
                     "lib_present": lib_ok,
                 }
@@ -523,7 +525,14 @@ def _preflight_allowed_roots(config: Any) -> tuple[Path, ...]:
     roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
     resolved: list[Path] = []
     for root in roots:
-        candidate = root.expanduser().resolve()
+        try:
+            candidate = root.expanduser().resolve()
+        except (OSError, RuntimeError):
+            if not bool(getattr(config, "db_free_required", False)):
+                raise
+            candidate = root.expanduser()
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
         if candidate not in resolved:
             resolved.append(candidate)
     return tuple(resolved)
@@ -665,7 +674,11 @@ def _slurm_template_allowlist_check(config: Any) -> tuple[dict[str, Any], list[d
     return {"stage_templates": checks}, blockers
 
 
-def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _slurm_env_check(
+    env: Mapping[str, str],
+    *,
+    evidence_safe_values: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
     sanitized: dict[str, str] = {}
     for key, value in env.items():
@@ -713,7 +726,7 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
                     "message": "Slurm exported environment values must be bounded.",
                 }
             )
-            sanitized[key_text] = value_text[:64] + "...[truncated]"
+            sanitized[key_text] = "[truncated]" if evidence_safe_values else value_text[:64] + "...[truncated]"
             continue
         secret_url_reason = secret_bearing_url_reason(value_text)
         if secret_url_reason is not None:
@@ -739,8 +752,44 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
             )
             sanitized[key_text] = "[unsafe]"
             continue
-        sanitized[key_text] = value_text
+        sanitized[key_text] = _db_free_slurm_evidence_value(value_text) if evidence_safe_values else value_text
     return {"count": len(env), "sanitized": sanitized}, blockers
+
+
+def _db_free_slurm_evidence_value(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if text == "":
+        return text
+    lower = text.lower()
+    if any(
+        word in lower
+        for word in (
+            "token",
+            "password",
+            "passwd",
+            "pwd",
+            "secret",
+            "credential",
+            "api_key",
+            "apikey",
+            "access_key",
+            "accesskey",
+            "session_key",
+            "signature",
+        )
+    ):
+        return "[redacted]"
+    if lower in {"postgres", "postgresql", "psycopg", "psycopg2", "pg"} or "postgres" in lower or "psycopg" in lower:
+        return "[db-like]"
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return "[invalid-uri]" if ":" in text or text.startswith("//") else "[value]"
+    if parsed.scheme:
+        return "[db-like]" if "postgres" in parsed.scheme.lower() or "psycopg" in parsed.scheme.lower() else "[uri]"
+    if text.startswith(("/", "~")) or "/" in text or "\\" in text:
+        return "[local-path]"
+    return str(redact_payload(text))
 
 
 def _production_slurm_env(explicit_env: Mapping[str, Any]) -> dict[str, str]:

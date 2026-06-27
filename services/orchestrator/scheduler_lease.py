@@ -423,7 +423,7 @@ class FileSchedulerLease:
             value = json.loads(raw.decode("utf-8"))
         except UnsafeSchedulerLockError:
             raise
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
             return {"raw": None}
         finally:
             os.close(fd)

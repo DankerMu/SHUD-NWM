@@ -16197,6 +16197,82 @@ def test_db_free_runtime_root_preflight_blocks_raw_traversal_inside_allowed_root
     assert f"safe-{check_field}" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("root_env", "check_field"),
+    [
+        ("OBJECT_STORE_ROOT", "object_store_root"),
+        ("NHMS_PUBLISHED_ARTIFACT_ROOT", "published_artifact_root"),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", "runtime_root"),
+        ("NHMS_SCHEDULER_TEMP_ROOT", "temp_root"),
+    ],
+)
+def test_db_free_runtime_root_run_once_blocks_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_env: str,
+    check_field: str,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    outside_root = tmp_path / f"outside-{check_field}-secret-token"
+    outside_root.mkdir()
+    monkeypatch.setenv(root_env, str(outside_root))
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["lock"]["acquired"] is False
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["reason"] == "scheduler_root_preflight_blocked"
+    assert result.evidence["root_preflight"]["status"] == "blocked"
+    blocker = next(
+        blocker
+        for blocker in result.evidence["root_preflight"]["blockers"]
+        if blocker["field"] == check_field
+    )
+    assert blocker["path"] == "[local-path]"
+    assert result.evidence["root_preflight"]["checks"][check_field]["path"] == "[local-path]"
+    assert result.evidence["model_discovery"] == scheduler_module._empty_model_discovery()
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert "outside-" not in rendered
+    assert "secret-token" not in rendered
+    assert str(outside_root) not in rendered
+    for root in roots.values():
+        assert str(root) not in rendered
+
+
+def test_db_free_unsafe_workspace_root_constructs_and_blocks_before_lock(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    loop = tmp_path / "workspace-secret-token-loop"
+    loop.symlink_to(loop)
+    unsafe_workspace = loop / "child"
+    monkeypatch.setenv("WORKSPACE_ROOT", str(unsafe_workspace))
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(unsafe_workspace / "locks"))
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(unsafe_workspace / "evidence"))
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    config = ProductionSchedulerConfig()
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.artifact_path is None
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["reason"] == "scheduler_root_preflight_blocked"
+    assert result.evidence["root_preflight"]["status"] == "blocked"
+    assert "workspace-secret-token-loop" not in rendered
+    assert str(unsafe_workspace) not in rendered
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(
     monkeypatch: Any,
     tmp_path: Path,
@@ -16243,6 +16319,66 @@ def test_db_free_file_lock_contention_masks_raw_existing_lock_payload(
     assert result.evidence["lock"]["existing_lock"]["raw"] == "[lock-payload]"
     assert raw_payload not in rendered
     assert "unsafe-secret-token" not in rendered
+    assert str(config.lock_path) not in rendered
+
+
+def test_db_free_file_lock_contention_collapses_unknown_mapping_payload(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig()
+    lock_path = Path(config.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "path": "/tmp/node22-secret-token",
+                "note": "postgresql://user:pass@db.internal.example:55433/nhms",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["lock_type"] == "file"
+    assert result.evidence["lock"]["lock_path"] == "[local-path]"
+    assert result.evidence["lock"]["existing_lock"] == {"raw": "[lock-payload]"}
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert "node22-secret-token" not in rendered
+    assert "postgresql" not in rendered.lower()
+    assert "db.internal.example" not in rendered
+    assert "55433" not in rendered
+    assert str(config.lock_path) not in rendered
+
+
+def test_db_free_file_lock_contention_handles_deep_existing_payload_without_crash(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig()
+    lock_path = Path(config.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = '"deep-secret-token"'
+    for _index in range(1200):
+        payload = '{"nested":' + payload + "}"
+    assert len(payload.encode("utf-8")) < MAX_LOCK_PAYLOAD_BYTES
+    lock_path.write_text(payload, encoding="utf-8")
+
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["lock_path"] == "[local-path]"
+    assert result.evidence["lock"]["existing_lock"] in ({"raw": None}, {"raw": "[lock-payload]"})
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert "deep-secret-token" not in rendered
     assert str(config.lock_path) not in rendered
 
 
@@ -16297,6 +16433,47 @@ def test_db_free_slurm_storage_root_check_masks_symlink_loop_path(tmp_path: Path
     assert blocker["path"] == "[local-path]"
     assert "slurm-secret-token-loop" not in rendered
     assert str(loop) not in rendered
+
+
+def test_db_free_slurm_preflight_masks_env_and_grib_paths(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    log_root = roots["workspace_root"] / "logs"
+    log_root.mkdir()
+    grib_root = tmp_path / "nfs" / "unsafe-secret-token" / "grib"
+    config = ProductionSchedulerConfig(
+        slurm_execution_enabled=True,
+        log_root=log_root,
+        slurm_env={
+            "NHMS_PROFILE": str(tmp_path / "profiles" / "unsafe-secret-token"),
+            "NHMS_DB_HINT": "postgresql://db.internal.example:55433/nhms",
+            "NHMS_GRIB_ENV_ROOT": str(grib_root),
+        },
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["checks"]["environment"]["sanitized"]["NHMS_PROFILE"] == "[redacted]"
+    assert preflight["checks"]["environment"]["sanitized"]["NHMS_DB_HINT"] == "[db-like]"
+    assert preflight["checks"]["environment"]["sanitized"]["NHMS_GRIB_ENV_ROOT"] == "[redacted]"
+    assert preflight["checks"]["grib_env"]["root"] == "[redacted]"
+    assert preflight["checks"]["grib_env"]["bin_present"] is False
+    assert preflight["checks"]["grib_env"]["lib_present"] is False
+    grib_blocker = next(
+        blocker for blocker in preflight["blockers"] if blocker["code"] == "GRIB_ENV_ROOT_INVALID"
+    )
+    assert grib_blocker["root"] == "[redacted]"
+    assert grib_blocker["bin_present"] is False
+    assert grib_blocker["lib_present"] is False
+    assert "unsafe-secret-token" not in rendered
+    assert "postgresql" not in rendered.lower()
+    assert "db.internal.example" not in rendered
+    assert "55433" not in rendered
+    assert str(grib_root) not in rendered
 
 
 # --- Issue #257 / M23-6: scheduler SHUD executable pre-submit preflight -------

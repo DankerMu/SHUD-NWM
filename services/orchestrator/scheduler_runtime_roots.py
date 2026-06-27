@@ -444,7 +444,14 @@ def _scheduler_allowed_roots(config: Any) -> tuple[Path, ...]:
     for value in config.allowed_storage_roots:
         if value in (None, ""):
             continue
-        root = Path(value).expanduser().resolve(strict=False)
+        try:
+            root = Path(value).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            if not bool(getattr(config, "db_free_required", False)):
+                raise
+            root = Path(value).expanduser()
+            if not root.is_absolute():
+                root = Path.cwd() / root
         if root not in roots:
             roots.append(root)
     return tuple(roots)

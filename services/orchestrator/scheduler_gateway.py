@@ -67,7 +67,7 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
     checks["templates"] = template_check
     blockers.extend(template_blockers)
 
-    env_check, env_blockers = _scheduler._slurm_env_check(config.slurm_env)
+    env_check, env_blockers = _scheduler._slurm_env_check(config.slurm_env, evidence_safe_values=db_free_required)
     checks["environment"] = env_check
     blockers.extend(env_blockers)
 
@@ -79,7 +79,7 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
     checks["gateway"] = gateway_check
     blockers.extend(gateway_blockers)
 
-    grib_check, grib_blockers = _scheduler._slurm_grib_env_check(config)
+    grib_check, grib_blockers = _scheduler._slurm_grib_env_check(config, evidence_safe_paths=db_free_required)
     checks["grib_env"] = grib_check
     blockers.extend(grib_blockers)
 

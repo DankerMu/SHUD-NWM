@@ -223,49 +223,121 @@ def _write_new_regular_file(*args, **kwargs):
 
 
 def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, Any]:
-    evidence = redact_payload(dict(value))
     if not getattr(config, "db_free_required", False):
-        return evidence
-    return _db_free_mask_lock_paths(evidence)
+        return redact_payload(dict(value))
+    return _db_free_safe_lock_result(value)
 
 
-def _db_free_mask_lock_paths(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        masked: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if key_text == "lock_path":
-                masked[key_text] = "[local-path]"
-            elif key_text == "raw":
-                masked[key_text] = "[lock-payload]"
-            else:
-                masked[key_text] = _db_free_mask_lock_paths(item)
-        return masked
-    if isinstance(value, list):
-        return [_db_free_mask_lock_paths(item) for item in value]
-    return value
+def _db_free_safe_lock_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for key in ("acquired", "contention"):
+        if key in value:
+            evidence[key] = bool(value.get(key))
+    if "lock_path" in value:
+        evidence["lock_path"] = "[local-path]"
+    if "lock_type" in value:
+        evidence["lock_type"] = _db_free_safe_lock_code(value.get("lock_type"))
+    if "reason" in value:
+        evidence["reason"] = _db_free_safe_lock_code(value.get("reason"))
+    if "error_type" in value:
+        evidence["error_type"] = _db_free_safe_lock_code(value.get("error_type"))
+    if "existing_lock" in value:
+        evidence["existing_lock"] = _db_free_safe_lock_payload(value.get("existing_lock"))
+    if "lease" in value:
+        evidence["lease"] = _db_free_safe_lock_payload(value.get("lease"))
+    return evidence
+
+
+def _db_free_safe_lock_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {"raw": None if value is None else "[lock-payload]"}
+    if value.get("raw") is None:
+        payload: dict[str, Any] = {"raw": None}
+        for key in ("size_bytes", "max_bytes"):
+            item = value.get(key)
+            if isinstance(item, int) and not isinstance(item, bool):
+                payload[key] = item
+        if set(value).issubset(payload.keys()):
+            return payload
+    scheduler_owned = (
+        value.get("owner") == _scheduler.LOCK_OWNER
+        and value.get("schema_version") == _scheduler.LOCK_SCHEMA_VERSION
+    )
+    if not scheduler_owned:
+        return {"raw": "[lock-payload]"}
+    payload = {
+        "owner": _scheduler.LOCK_OWNER,
+        "schema_version": _scheduler.LOCK_SCHEMA_VERSION,
+    }
+    for key in ("pass_id", "heartbeat_at", "started_at"):
+        if key in value:
+            payload[key] = _db_free_safe_lock_code(value.get(key))
+    for key in ("pid", "heartbeat_seq"):
+        item = value.get(key)
+        if isinstance(item, int) and not isinstance(item, bool):
+            payload[key] = item
+    if "lock_path" in value:
+        payload["lock_path"] = "[local-path]"
+    return payload
+
+
+def _db_free_safe_lock_code(value: Any) -> str:
+    text = "" if value is None else str(value)
+    lower = text.lower()
+    if (
+        "/" in text
+        or "\\" in text
+        or "postgres" in lower
+        or "psycopg" in lower
+        or any(
+            word in lower
+            for word in (
+                "token",
+                "password",
+                "passwd",
+                "pwd",
+                "secret",
+                "credential",
+                "api_key",
+                "apikey",
+                "access_key",
+                "accesskey",
+                "session_key",
+                "signature",
+            )
+        )
+    ):
+        return "[lock-payload]"
+    if 0 < len(text) <= 256 and all(character.isalnum() or character in "._:-" for character in text):
+        return text
+    return "[lock-payload]"
 
 
 def run_once(self) -> SchedulerPassResult:
     self._source_readiness_context_cache.clear()
     started_at = _now(self.config)
     pass_id = f"scheduler_{format_cycle_time(started_at)}_{_scheduler.uuid4().hex[:12]}"
-    root_preflight = _scheduler_lock_evidence_root_preflight(self.config)
+    db_free_required = bool(getattr(self.config, "db_free_required", False))
+    root_preflight = (
+        _scheduler_runtime_root_preflight(self.config)
+        if db_free_required
+        else _scheduler_lock_evidence_root_preflight(self.config)
+    )
     if root_preflight["status"] == "blocked":
+        lock_payload = {
+            "acquired": False,
+            "contention": False,
+            "lock_path": str(self.config.lock_path),
+            "reason": "scheduler_root_preflight_blocked",
+        }
+        if db_free_required:
+            lock_payload["lock_type"] = "file"
         evidence = self._base_evidence(pass_id, started_at)
         evidence.update(
             {
                 "status": "preflight_blocked",
                 "finished_at": _format_utc(_now(self.config)),
-                "lock": _db_free_lock_evidence(
-                    self.config,
-                    {
-                        "acquired": False,
-                        "contention": False,
-                        "lock_path": str(self.config.lock_path),
-                        "reason": "scheduler_root_preflight_blocked",
-                    },
-                ),
+                "lock": _db_free_lock_evidence(self.config, lock_payload),
                 "root_preflight": root_preflight,
                 "counts": _empty_counts(),
                 "candidates": [],
@@ -359,8 +431,9 @@ def run_once(self) -> SchedulerPassResult:
     heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
     heartbeat.start()
     try:
-        root_preflight = _scheduler_runtime_root_preflight(self.config)
-        if root_preflight["status"] == "blocked":
+        if not db_free_required:
+            root_preflight = _scheduler_runtime_root_preflight(self.config)
+        if not db_free_required and root_preflight["status"] == "blocked":
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
