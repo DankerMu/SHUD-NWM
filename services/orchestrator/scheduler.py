@@ -26,6 +26,7 @@ from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence
 from services.orchestrator import scheduler_execution as _scheduler_execution
 from services.orchestrator import scheduler_lease as _scheduler_lease_module
+from services.orchestrator import scheduler_models as _scheduler_models
 from services.orchestrator import scheduler_preflight as _scheduler_preflight
 from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
@@ -986,52 +987,7 @@ class ProductionScheduler:
         )
 
     def _discover_models(self) -> tuple[list[RegisteredSchedulerModel], dict[str, Any]]:
-        rows = _fetch_active_model_details(self.registry)
-        exclusions: list[dict[str, Any]] = []
-        runnable: list[RegisteredSchedulerModel] = []
-        duplicate_exclusions = _active_model_duplicate_exclusions(rows)
-
-        for index, row in enumerate(rows):
-            duplicate_exclusion = duplicate_exclusions.get(index)
-            if duplicate_exclusion is not None:
-                exclusions.append(duplicate_exclusion)
-                continue
-            model = _coerce_registered_model(row)
-            if isinstance(model, RegisteredSchedulerModel):
-                runnable.append(model)
-            else:
-                exclusions.append(model)
-
-        runnable.sort(key=lambda item: item.model_id)
-        selected: list[RegisteredSchedulerModel] = []
-        filter_excluded = 0
-        for model in runnable:
-            if not _matches_filters(model, model_ids=self.config.model_ids, basin_ids=self.config.basin_ids):
-                filter_excluded += 1
-                exclusions.append(
-                    {
-                        "model_id": model.model_id,
-                        "basin_id": model.basin_id,
-                        "basin_version_id": model.basin_version_id,
-                        "reason": "operator_filter_excluded",
-                    }
-                )
-                continue
-            selected.append(model)
-
-        evidence = {
-            "active_model_count": len(rows),
-            "runnable_model_count": len(runnable),
-            "selected_model_count": len(selected),
-            "excluded_model_count": len(exclusions),
-            "models": [model.to_dict() for model in selected],
-            "exclusions": exclusions,
-        }
-        evidence["operator_filters"] = {
-            "expression": _filter_expression(self.config.model_ids, self.config.basin_ids),
-            "excluded_runnable_count": filter_excluded,
-        }
-        return selected, evidence
+        return _scheduler_models.discover_models(self)
 
     def _discovery_context(self) -> _scheduler_discovery.SchedulerDiscoveryContext:
         return _scheduler_discovery.SchedulerDiscoveryContext(

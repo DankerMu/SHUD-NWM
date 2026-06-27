@@ -22,6 +22,7 @@ __all__ = (
     "model_duplicate_identity_value_for_evidence",
     "model_exclusion",
     "resource_profile_summary",
+    "discover_models",
 )
 
 
@@ -59,6 +60,59 @@ def fetch_scheduler_model_detail(registry: Any, model_id: str) -> Mapping[str, A
     if callable(internal_getter):
         return internal_getter(model_id)
     return registry.get_model(model_id)
+
+
+def discover_models(scheduler: Any) -> tuple[list[Any], dict[str, Any]]:
+    rows = _scheduler._fetch_active_model_details(scheduler.registry)
+    exclusions: list[dict[str, Any]] = []
+    runnable: list[Any] = []
+    duplicate_exclusions = _scheduler._active_model_duplicate_exclusions(rows)
+
+    for index, row in enumerate(rows):
+        duplicate_exclusion = duplicate_exclusions.get(index)
+        if duplicate_exclusion is not None:
+            exclusions.append(duplicate_exclusion)
+            continue
+        model = _scheduler._coerce_registered_model(row)
+        if isinstance(model, _scheduler.RegisteredSchedulerModel):
+            runnable.append(model)
+        else:
+            exclusions.append(model)
+
+    runnable.sort(key=lambda item: item.model_id)
+    selected: list[Any] = []
+    filter_excluded = 0
+    for model in runnable:
+        if not _scheduler._matches_filters(
+            model,
+            model_ids=scheduler.config.model_ids,
+            basin_ids=scheduler.config.basin_ids,
+        ):
+            filter_excluded += 1
+            exclusions.append(
+                {
+                    "model_id": model.model_id,
+                    "basin_id": model.basin_id,
+                    "basin_version_id": model.basin_version_id,
+                    "reason": "operator_filter_excluded",
+                }
+            )
+            continue
+        selected.append(model)
+
+    evidence = {
+        "active_model_count": len(rows),
+        "runnable_model_count": len(runnable),
+        "selected_model_count": len(selected),
+        "excluded_model_count": len(exclusions),
+        "models": [model.to_dict() for model in selected],
+        "exclusions": exclusions,
+    }
+    evidence["operator_filters"] = {
+        "expression": _scheduler._filter_expression(scheduler.config.model_ids, scheduler.config.basin_ids),
+        "excluded_runnable_count": filter_excluded,
+    }
+    return selected, evidence
 
 
 def coerce_registered_model(row: Mapping[str, Any]) -> Any:

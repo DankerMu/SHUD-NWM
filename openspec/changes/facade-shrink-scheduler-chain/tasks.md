@@ -187,6 +187,22 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.12 Extract scheduler model-discovery method body.
+  - Module/Scope: move the `ProductionScheduler._discover_models` method body
+    from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_models.py`, alongside active model
+    pagination, coercion, duplicate detection, and filter helpers.
+  - Stable Facade: keep `ProductionScheduler._discover_models` callable
+    through `services.orchestrator.scheduler`, forwarding to the owner module
+    while owner composition calls legacy scheduler helper names.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record the method forwarder under the scheduler model-discovery group.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "coerce_registered_model or discover_models or active_model or model_limit or duplicate_active_model or filter"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or scheduler"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_models.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
