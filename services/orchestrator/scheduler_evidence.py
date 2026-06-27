@@ -648,49 +648,58 @@ def evidence_write_error_payload(error: OSError) -> dict[str, Any]:
 
 
 def scheduler_resolved_runtime_roots(config: SchedulerEvidenceConfig) -> dict[str, Any]:
+    evidence_safe_paths = bool(getattr(config, "scheduler_db_free_required", False))
     return {
         "workspace_root": root_evidence_item(
             config.workspace_root,
             env="WORKSPACE_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "object_store_root": root_evidence_item(
             config.object_store_root,
             env="OBJECT_STORE_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "published_artifact_root": root_evidence_item(
             config.published_artifact_root,
             env="NHMS_PUBLISHED_ARTIFACT_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "lock_root": root_evidence_item(
             Path(config.lock_path).parent,
             env="NHMS_SCHEDULER_LOCK_ROOT",
             fallback="WORKSPACE_ROOT/scheduler",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "lock_path": root_evidence_item(
             config.lock_path,
             env="NHMS_SCHEDULER_LOCK_ROOT",
             fallback="WORKSPACE_ROOT/scheduler/production-scheduler.lock",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "evidence_root": root_evidence_item(
             config.evidence_dir,
             env="NHMS_SCHEDULER_EVIDENCE_ROOT",
             fallback="WORKSPACE_ROOT/scheduler/evidence",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "runtime_root": root_evidence_item(
             config.runtime_root,
             env="NHMS_SCHEDULER_RUNTIME_ROOT|NHMS_RUNTIME_ROOT|RUN_WORKSPACE_ROOT|SHUD_RUNTIME_ROOT",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
         "temp_root": root_evidence_item(
             config.temp_root,
             env="NHMS_SCHEDULER_TEMP_ROOT|NHMS_TEMP_ROOT|TMPDIR",
             required=config.require_runtime_roots,
+            evidence_safe_paths=evidence_safe_paths,
         ),
     }
 
@@ -701,8 +710,14 @@ def root_evidence_item(
     env: str,
     required: bool,
     fallback: str | None = None,
+    evidence_safe_paths: bool = False,
 ) -> dict[str, Any]:
-    path = None if value in (None, "") else str(Path(value).expanduser().resolve(strict=False))
+    if value in (None, ""):
+        path = None
+    elif evidence_safe_paths:
+        path = "[local-path]"
+    else:
+        path = str(Path(value).expanduser().resolve(strict=False))
     payload = {
         "path": path,
         "configured": path is not None,

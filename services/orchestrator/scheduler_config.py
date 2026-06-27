@@ -172,15 +172,28 @@ class ProductionSchedulerConfig:
     _temp_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
     _lock_root_preflight_path: Path = field(init=False, repr=False, compare=False)
     _evidence_root_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _workspace_root_raw_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _object_store_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _published_artifact_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _runtime_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _temp_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _lock_root_raw_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _evidence_root_raw_preflight_path: Path = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _scheduler._reject_blank_config_path(self.workspace_root, "workspace_root")
         _scheduler._reject_blank_config_path(self.lock_path, "lock_path")
         _scheduler._reject_blank_config_path(self.evidence_dir, "evidence_dir")
+        workspace_root_raw_preflight_path = _raw_config_path_preserve_components(self.workspace_root)
         workspace_root_preflight_path = _scheduler._config_path_preserve_final_component(self.workspace_root)
         workspace_root = workspace_root_preflight_path.resolve()
+        object.__setattr__(self, "_workspace_root_raw_preflight_path", workspace_root_raw_preflight_path)
         object.__setattr__(self, "_workspace_root_preflight_path", workspace_root_preflight_path)
         object.__setattr__(self, "workspace_root", workspace_root)
+        object_store_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.object_store_root,
+            workspace_root,
+        )
         object_store_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.object_store_root,
             workspace_root,
@@ -190,7 +203,12 @@ class ProductionSchedulerConfig:
             "object_store_root",
             _scheduler._resolve_optional_config_path(object_store_root_preflight_path),
         )
+        object.__setattr__(self, "_object_store_root_raw_preflight_path", object_store_root_raw_preflight_path)
         object.__setattr__(self, "_object_store_root_preflight_path", object_store_root_preflight_path)
+        published_artifact_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.published_artifact_root,
+            workspace_root,
+        )
         published_artifact_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.published_artifact_root,
             workspace_root,
@@ -200,22 +218,41 @@ class ProductionSchedulerConfig:
             "published_artifact_root",
             _scheduler._resolve_optional_config_path(published_artifact_root_preflight_path),
         )
+        object.__setattr__(
+            self,
+            "_published_artifact_root_raw_preflight_path",
+            published_artifact_root_raw_preflight_path,
+        )
         object.__setattr__(self, "_published_artifact_root_preflight_path", published_artifact_root_preflight_path)
         log_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.log_root, workspace_root
         )
         object.__setattr__(self, "log_root", _scheduler._resolve_optional_config_path(log_root_preflight_path))
+        runtime_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.runtime_root,
+            workspace_root,
+        )
         runtime_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.runtime_root,
             workspace_root,
         )
         object.__setattr__(self, "runtime_root", _scheduler._resolve_optional_config_path(runtime_root_preflight_path))
+        object.__setattr__(self, "_runtime_root_raw_preflight_path", runtime_root_raw_preflight_path)
         object.__setattr__(self, "_runtime_root_preflight_path", runtime_root_preflight_path)
+        temp_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.temp_root,
+            workspace_root,
+        )
         temp_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.temp_root, workspace_root
         )
         object.__setattr__(self, "temp_root", _scheduler._resolve_optional_config_path(temp_root_preflight_path))
+        object.__setattr__(self, "_temp_root_raw_preflight_path", temp_root_raw_preflight_path)
         object.__setattr__(self, "_temp_root_preflight_path", temp_root_preflight_path)
+        scheduler_lock_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.scheduler_lock_root,
+            workspace_root,
+        )
         scheduler_lock_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.scheduler_lock_root,
             workspace_root,
@@ -224,6 +261,10 @@ class ProductionSchedulerConfig:
             self,
             "scheduler_lock_root",
             _scheduler._resolve_optional_config_path(scheduler_lock_root_preflight_path),
+        )
+        scheduler_evidence_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
+            self.scheduler_evidence_root,
+            workspace_root,
         )
         scheduler_evidence_root_preflight_path = _scheduler._optional_config_path_relative_to_preserve_final(
             self.scheduler_evidence_root,
@@ -297,15 +338,26 @@ class ProductionSchedulerConfig:
                 if scheduler_lock_root_preflight_path is not None
                 else workspace_root / "scheduler"
             )
+            lock_root_raw_preflight_path = (
+                scheduler_lock_root_raw_preflight_path
+                if scheduler_lock_root_raw_preflight_path is not None
+                else workspace_root / "scheduler"
+            )
             lock_path = _scheduler._confined_path(lock_root / "production-scheduler.lock", workspace_root, "lock_path")
+            object.__setattr__(self, "_lock_root_raw_preflight_path", lock_root_raw_preflight_path)
             object.__setattr__(self, "_lock_root_preflight_path", lock_root_preflight_path)
             object.__setattr__(self, "lock_path", lock_path)
         else:
+            lock_path_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
+                self.lock_path,
+                workspace_root,
+            )
             lock_path_preflight_path = _scheduler._config_path_relative_to_preserve_final(
                 self.lock_path, workspace_root
             )
             lock_path = _scheduler._confined_path(self.lock_path, workspace_root, "lock_path")
             _scheduler._require_under_workspace(lock_path, workspace_root, "lock_path")
+            object.__setattr__(self, "_lock_root_raw_preflight_path", lock_path_raw_preflight_path.parent)
             object.__setattr__(self, "_lock_root_preflight_path", lock_path_preflight_path.parent)
             object.__setattr__(self, "lock_path", lock_path)
         if self.evidence_dir is None:
@@ -319,17 +371,28 @@ class ProductionSchedulerConfig:
                 if scheduler_evidence_root_preflight_path is not None
                 else workspace_root / "scheduler" / "evidence"
             )
+            evidence_root_raw_preflight_path = (
+                scheduler_evidence_root_raw_preflight_path
+                if scheduler_evidence_root_raw_preflight_path is not None
+                else workspace_root / "scheduler" / "evidence"
+            )
             evidence_dir = _scheduler._confined_path(evidence_root, workspace_root, "evidence_dir")
             _scheduler._require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_raw_preflight_path", evidence_root_raw_preflight_path)
             object.__setattr__(self, "_evidence_root_preflight_path", evidence_root_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         else:
+            evidence_dir_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
+                self.evidence_dir,
+                workspace_root,
+            )
             evidence_dir_preflight_path = _scheduler._config_path_relative_to_preserve_final(
                 self.evidence_dir, workspace_root
             )
             evidence_dir = _scheduler._confined_path(self.evidence_dir, workspace_root, "evidence_dir")
             _scheduler._require_under_workspace(evidence_dir, workspace_root, "evidence_dir")
             _scheduler._require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_raw_preflight_path", evidence_dir_raw_preflight_path)
             object.__setattr__(self, "_evidence_root_preflight_path", evidence_dir_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         if self.now is not None:
@@ -434,6 +497,26 @@ def _evidence_scalar(value: Any) -> Any:
     return redact_payload(str(value))
 
 
+def _raw_config_path_preserve_components(value: Path | str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return Path.cwd() / path
+    return path
+
+
+def _raw_config_path_relative_to_preserve_components(value: Path | str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return base / path
+    return path
+
+
+def _optional_raw_config_path_relative_to_preserve_components(value: Path | str | None, base: Path) -> Path | None:
+    if value in (None, ""):
+        return None
+    return _raw_config_path_relative_to_preserve_components(value, base)
+
+
 def _db_free_path_evidence_scalar(value: Any) -> Any:
     if value in (None, ""):
         return None
@@ -444,7 +527,7 @@ def _db_free_path_evidence_scalar(value: Any) -> Any:
         return "[invalid-uri]"
     if parsed.scheme:
         return "[object-uri]" if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES else "[uri]"
-    return _evidence_scalar(text)
+    return "[local-path]"
 
 
 def _db_free_selector_check(env: str, value: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -541,11 +624,20 @@ def _db_free_path_check(
             return check, blocker
         check["supported_object_uri"] = False
         return check, _db_free_blocker("db_free_required_path_unsupported_uri", env, "unsupported_uri")
-    check["path"] = _evidence_scalar(text)
+    check["path"] = "[local-path]"
     path = Path(text).expanduser()
     if not path.is_absolute():
         check.update({"absolute": False, "contained": False})
         return check, _db_free_blocker("db_free_required_path_relative", env, "relative", path=str(path))
+    unsafe_component_reason = _db_free_local_path_component_reason(path)
+    if unsafe_component_reason is not None:
+        check.update({"absolute": True, "contained": False})
+        return check, _db_free_blocker(
+            "db_free_required_path_unsafe",
+            env,
+            unsafe_component_reason,
+            path=str(path),
+        )
     try:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError) as error:
@@ -558,7 +650,7 @@ def _db_free_path_check(
             error_type=type(error).__name__,
         )
     contained = any(_path_is_relative_to(resolved, root) for root in allowed_roots)
-    check.update({"absolute": True, "resolved_path": str(resolved), "contained": contained})
+    check.update({"absolute": True, "resolved_path": "[local-path]", "contained": contained})
     if not contained:
         return check, _db_free_blocker(
             "db_free_required_path_outside_boundary",
@@ -604,6 +696,16 @@ def _db_free_path_check(
     if path.is_symlink() or not path.is_file():
         return check, _db_free_blocker("db_free_required_path_unsafe", env, "unsafe", path=str(resolved))
     return check, None
+
+
+def _db_free_local_path_component_reason(path: Path) -> str | None:
+    for part in path.parts:
+        if part in {"", ".", ".."}:
+            return "traversal"
+        lower = part.lower()
+        if any(word in lower for word in _DB_FREE_CREDENTIAL_WORDS):
+            return "credential_component"
+    return None
 
 
 def _db_free_uri_evidence(parsed: Any) -> dict[str, Any]:
@@ -745,10 +847,20 @@ def _db_free_blocker(
         "message": f"DB-free scheduler runtime field {field} is not a safe all-file configuration.",
     }
     if path is not None:
-        blocker["path"] = redact_payload(path)
+        blocker["path"] = _db_free_blocker_path_evidence(path)
     if error_type is not None:
         blocker["error_type"] = error_type
     return blocker
+
+
+def _db_free_blocker_path_evidence(path: str) -> str:
+    try:
+        parsed = _db_free_urlparse(str(path))
+    except ValueError:
+        return "[invalid-uri]"
+    if parsed.scheme:
+        return "[object-uri]" if parsed.scheme in _DB_FREE_SUPPORTED_OBJECT_URI_SCHEMES else "[uri]"
+    return "[local-path]"
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:

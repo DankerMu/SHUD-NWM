@@ -14,18 +14,36 @@ from services.orchestrator import scheduler as _scheduler
 def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
     if not config.require_runtime_roots:
         return _scheduler._scheduler_root_preflight_not_required(config)
+    evidence_safe_paths = bool(getattr(config, "db_free_required", False))
     allowed_roots = _scheduler._scheduler_allowed_roots(config)
-    allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(config, allowed_roots)
+    allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
+        config,
+        allowed_roots,
+        evidence_safe_paths=evidence_safe_paths,
+    )
     enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
     checks["allowed_roots_policy"] = allowed_roots_check
     blockers: list[dict[str, Any]] = []
     if allowed_roots_blocker is not None:
         blockers.append(allowed_roots_blocker)
-    for field_name, path in (
-        ("workspace_root", config._workspace_root_preflight_path),
-        ("lock_root", config._lock_root_preflight_path),
-        ("evidence_root", config._evidence_root_preflight_path),
+    workspace_root_preflight_path = config._workspace_root_preflight_path
+    for field_name, path, raw_path in (
+        (
+            "workspace_root",
+            config._workspace_root_preflight_path,
+            getattr(config, "_workspace_root_raw_preflight_path", config._workspace_root_preflight_path),
+        ),
+        (
+            "lock_root",
+            config._lock_root_preflight_path,
+            getattr(config, "_lock_root_raw_preflight_path", config._lock_root_preflight_path),
+        ),
+        (
+            "evidence_root",
+            config._evidence_root_preflight_path,
+            getattr(config, "_evidence_root_raw_preflight_path", config._evidence_root_preflight_path),
+        ),
     ):
         check, blocker = _scheduler._scheduler_root_check(
             field_name,
@@ -36,33 +54,75 @@ def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
             allow_create=False,
             require_approved_root=enforce_approved_roots and field_name == "workspace_root",
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
-            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
+            workspace_root=workspace_root_preflight_path,
+            evidence_safe_paths=evidence_safe_paths,
+            raw_value=raw_path,
         )
         checks[field_name] = check
         if blocker is not None:
             blockers.append(blocker)
-    return _scheduler._scheduler_root_preflight_payload(config, checks, blockers)
+    return _scheduler._scheduler_root_preflight_payload(
+        config, checks, blockers, evidence_safe_paths=evidence_safe_paths
+    )
 
 
 def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
     if not config.require_runtime_roots:
         return _scheduler._scheduler_root_preflight_not_required(config)
+    evidence_safe_paths = bool(getattr(config, "db_free_required", False))
     allowed_roots = _scheduler._scheduler_allowed_roots(config)
-    allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(config, allowed_roots)
+    allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
+        config,
+        allowed_roots,
+        evidence_safe_paths=evidence_safe_paths,
+    )
     enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
     checks["allowed_roots_policy"] = allowed_roots_check
     blockers: list[dict[str, Any]] = []
     if allowed_roots_blocker is not None:
         blockers.append(allowed_roots_blocker)
-    for field_name, path in (
-        ("workspace_root", config._workspace_root_preflight_path),
-        ("object_store_root", config._object_store_root_preflight_path),
-        ("published_artifact_root", config._published_artifact_root_preflight_path),
-        ("runtime_root", config._runtime_root_preflight_path),
-        ("temp_root", config._temp_root_preflight_path),
-        ("lock_root", config._lock_root_preflight_path),
-        ("evidence_root", config._evidence_root_preflight_path),
+    workspace_root_preflight_path = config._workspace_root_preflight_path
+    for field_name, path, raw_path in (
+        (
+            "workspace_root",
+            config._workspace_root_preflight_path,
+            getattr(config, "_workspace_root_raw_preflight_path", config._workspace_root_preflight_path),
+        ),
+        (
+            "object_store_root",
+            config._object_store_root_preflight_path,
+            getattr(config, "_object_store_root_raw_preflight_path", config._object_store_root_preflight_path),
+        ),
+        (
+            "published_artifact_root",
+            config._published_artifact_root_preflight_path,
+            getattr(
+                config,
+                "_published_artifact_root_raw_preflight_path",
+                config._published_artifact_root_preflight_path,
+            ),
+        ),
+        (
+            "runtime_root",
+            config._runtime_root_preflight_path,
+            getattr(config, "_runtime_root_raw_preflight_path", config._runtime_root_preflight_path),
+        ),
+        (
+            "temp_root",
+            config._temp_root_preflight_path,
+            getattr(config, "_temp_root_raw_preflight_path", config._temp_root_preflight_path),
+        ),
+        (
+            "lock_root",
+            config._lock_root_preflight_path,
+            getattr(config, "_lock_root_raw_preflight_path", config._lock_root_preflight_path),
+        ),
+        (
+            "evidence_root",
+            config._evidence_root_preflight_path,
+            getattr(config, "_evidence_root_raw_preflight_path", config._evidence_root_preflight_path),
+        ),
     ):
         # The published artifact root is a control-node display mount. Compute
         # stages write to object_store_root; the local publish stage creates and
@@ -77,7 +137,9 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
             allow_create=allow_publish_root_create,
             require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
-            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
+            workspace_root=workspace_root_preflight_path,
+            evidence_safe_paths=evidence_safe_paths,
+            raw_value=raw_path,
         )
         checks[field_name] = check
         if blocker is not None:
@@ -86,7 +148,9 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
     checks["service_role"] = service_role_check
     if service_role_blocker is not None:
         blockers.append(service_role_blocker)
-    return _scheduler._scheduler_root_preflight_payload(config, checks, blockers)
+    return _scheduler._scheduler_root_preflight_payload(
+        config, checks, blockers, evidence_safe_paths=evidence_safe_paths
+    )
 
 
 def _scheduler_root_preflight_not_required(config: Any) -> dict[str, Any]:
@@ -103,13 +167,19 @@ def _scheduler_root_preflight_payload(
     config: Any,
     checks: Mapping[str, Any],
     blockers: Sequence[Mapping[str, Any]],
+    *,
+    evidence_safe_paths: bool = False,
 ) -> dict[str, Any]:
     return {
         "status": "blocked" if blockers else "ready",
         "required": True,
         "blockers": [dict(blocker) for blocker in blockers],
         "checks": dict(checks),
-        "allowed_roots": [str(root) for root in _scheduler._scheduler_allowed_roots(config)],
+        "allowed_roots": (
+            ["[local-path]" for _root in _scheduler._scheduler_allowed_roots(config)]
+            if evidence_safe_paths
+            else [str(root) for root in _scheduler._scheduler_allowed_roots(config)]
+        ),
     }
 
 
@@ -124,7 +194,10 @@ def _scheduler_root_check(
     require_approved_root: bool = True,
     require_under_workspace: bool = False,
     workspace_root: Path | None = None,
+    evidence_safe_paths: bool = False,
+    raw_value: Path | str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    evidence_path = "[local-path]" if evidence_safe_paths else None
     if value in (None, ""):
         check = {
             "configured": False,
@@ -142,15 +215,58 @@ def _scheduler_root_check(
     if not path.is_absolute():
         check = {
             "configured": True,
-            "path": str(path),
+            "path": evidence_path or str(path),
             "exists": False,
             "is_dir": False,
             "contained": False,
             "approved_root_required": require_approved_root,
             "writable": False,
         }
-        return check, _scheduler._scheduler_root_blocker(field_name, "RELATIVE", str(path))
-    resolved = path.resolve(strict=False)
+        return check, _scheduler._scheduler_root_blocker(field_name, "RELATIVE", evidence_path or str(path))
+    if evidence_safe_paths:
+        raw_path = path if raw_value in (None, "") else Path(raw_value).expanduser()
+        unsafe_component_reason = _scheduler_root_path_component_reason(raw_path)
+        if unsafe_component_reason is not None:
+            check = {
+                "configured": True,
+                "path": evidence_path or str(path),
+                "exists": False,
+                "is_dir": False,
+                "contained": False,
+                "approved_root_required": require_approved_root,
+                "writable": False,
+            }
+            return check, _scheduler._scheduler_root_blocker(
+                field_name, unsafe_component_reason, evidence_path or str(path)
+            )
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError as error:
+        unsafe_reason = _scheduler._scheduler_root_os_error_reason(error)
+        check = {
+            "configured": True,
+            "path": evidence_path or str(path),
+            "exists": False,
+            "is_dir": False,
+            "contained": False,
+            "approved_root_required": require_approved_root,
+            "writable": False,
+            "unsafe_reason": unsafe_reason,
+        }
+        return check, _scheduler._scheduler_root_blocker(field_name, unsafe_reason, evidence_path or str(path))
+    except RuntimeError:
+        unsafe_reason = "UNSAFE_PATH"
+        check = {
+            "configured": True,
+            "path": evidence_path or str(path),
+            "exists": False,
+            "is_dir": False,
+            "contained": False,
+            "approved_root_required": require_approved_root,
+            "writable": False,
+            "unsafe_reason": unsafe_reason,
+        }
+        return check, _scheduler._scheduler_root_blocker(field_name, unsafe_reason, evidence_path or str(path))
     exists = False
     is_dir = False
     is_symlink = False
@@ -185,12 +301,13 @@ def _scheduler_root_check(
             under_workspace = False
         else:
             try:
-                resolved.relative_to(workspace_root)
-            except ValueError:
+                workspace_anchor = Path(workspace_root).expanduser().resolve(strict=False)
+                resolved.relative_to(workspace_anchor)
+            except (OSError, RuntimeError, ValueError):
                 under_workspace = False
     check = {
         "configured": True,
-        "path": str(resolved),
+        "path": evidence_path or str(resolved),
         "exists": exists,
         "is_dir": is_dir,
         "symlink": is_symlink,
@@ -203,20 +320,50 @@ def _scheduler_root_check(
         check["under_workspace"] = under_workspace
     if unsafe_reason is not None:
         check["unsafe_reason"] = unsafe_reason
-        return check, _scheduler._scheduler_root_blocker(field_name, unsafe_reason, str(resolved))
+        return check, _scheduler._scheduler_root_blocker(field_name, unsafe_reason, evidence_path or str(resolved))
     if require_under_workspace and not under_workspace:
-        return check, _scheduler._scheduler_root_blocker(field_name, "OUT_OF_WORKSPACE", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(
+            field_name, "OUT_OF_WORKSPACE", evidence_path or str(resolved)
+        )
     if is_symlink:
-        return check, _scheduler._scheduler_root_blocker(field_name, "SYMLINK", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(field_name, "SYMLINK", evidence_path or str(resolved))
     if require_approved_root and not contained:
-        return check, _scheduler._scheduler_root_blocker(field_name, "OUT_OF_APPROVED_ROOT", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(
+            field_name, "OUT_OF_APPROVED_ROOT", evidence_path or str(resolved)
+        )
     if must_exist and not exists:
-        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_FOUND", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_FOUND", evidence_path or str(resolved))
     if exists and not is_dir:
-        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_DIRECTORY", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_DIRECTORY", evidence_path or str(resolved))
     if not writable:
-        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_WRITABLE", str(resolved))
+        return check, _scheduler._scheduler_root_blocker(field_name, "NOT_WRITABLE", evidence_path or str(resolved))
     return check, None
+
+
+def _scheduler_root_path_component_reason(path: Path) -> str | None:
+    for part in path.parts:
+        if part in {"", ".", ".."}:
+            return "UNSAFE_PATH"
+        lower = part.lower()
+        if any(
+            word in lower
+            for word in (
+                "token",
+                "password",
+                "passwd",
+                "pwd",
+                "secret",
+                "credential",
+                "api_key",
+                "apikey",
+                "access_key",
+                "accesskey",
+                "session_key",
+                "signature",
+            )
+        ):
+            return "UNSAFE_PATH"
+    return None
 
 
 def _scheduler_root_blocker(field_name: str, reason: str, path: str | None) -> dict[str, Any]:
@@ -272,13 +419,19 @@ def _scheduler_service_role_check(service_role: str | None) -> tuple[dict[str, A
 def _scheduler_allowed_roots_policy_check(
     config: Any,
     allowed_roots: Sequence[Path],
+    *,
+    evidence_safe_paths: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     configured_roots = tuple(root for root in config.allowed_storage_roots if root not in (None, ""))
     check = {
         "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
         "configured": bool(configured_roots),
         "non_empty": bool(allowed_roots),
-        "allowed_roots": [str(root) for root in allowed_roots],
+        "allowed_roots": (
+            ["[local-path]" for _root in allowed_roots]
+            if evidence_safe_paths
+            else [str(root) for root in allowed_roots]
+        ),
         "independent_policy_required": True,
     }
     if not allowed_roots:

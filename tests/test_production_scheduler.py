@@ -15631,7 +15631,7 @@ def test_db_free_required_path_symlink_loop_blocks_without_crash(
         else:
             target.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
-    loop = target.parent / "loop"
+    loop = target.parent / "secret-token-loop"
     if loop.exists() or loop.is_symlink():
         loop.unlink()
     loop.symlink_to(loop)
@@ -15639,6 +15639,7 @@ def test_db_free_required_path_symlink_loop_blocks_without_crash(
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
 
     result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
 
     assert result.status == "preflight_blocked"
     blockers = result.evidence["db_free_runtime"]["blockers"]
@@ -15646,6 +15647,52 @@ def test_db_free_required_path_symlink_loop_blocks_without_crash(
     assert ("db_free_required_path_unsafe", path_env) in {
         (blocker["code"], blocker["field"]) for blocker in blockers
     }
+    path_check = result.evidence["db_free_runtime"]["checks"][path_env]
+    assert path_check["path"] == "[local-path]"
+    assert "secret-token-loop" not in rendered
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+@pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
+@pytest.mark.parametrize("path_case", ["outside_boundary", "traversal_sensitive_component"])
+def test_db_free_required_local_path_blocks_without_raw_path_leak(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+    path_case: str,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    if path_case == "outside_boundary":
+        raw_path = tmp_path / "outside-boundary" / path_env.lower()
+        if path_env == "NHMS_SCHEDULER_JOURNAL_ROOT":
+            raw_path.mkdir(parents=True)
+        else:
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text("{}", encoding="utf-8")
+        expected_code = "db_free_required_path_outside_boundary"
+        forbidden_fragments = ("outside-boundary", str(raw_path))
+    else:
+        raw_path = roots["workspace_root"] / "db-free" / ".." / f"{path_env.lower()}-unsafe-secret-token"
+        expected_code = "db_free_required_path_unsafe"
+        forbidden_fragments = ("..", "unsafe-secret-token", str(raw_path))
+    monkeypatch.setenv(path_env, str(raw_path))
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    path_check = result.evidence["db_free_runtime"]["checks"][path_env]
+    assert path_check["path"] == "[local-path]"
+    blocker = next(
+        blocker
+        for blocker in result.evidence["db_free_runtime"]["blockers"]
+        if blocker["field"] == path_env and blocker["code"] == expected_code
+    )
+    assert blocker["path"] == "[local-path]"
+    for fragment in forbidden_fragments:
+        assert fragment not in rendered
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
@@ -15846,6 +15893,70 @@ def test_db_free_required_implies_strict_runtime_root_preflight(
     assert "service_role" in runtime_preflight["checks"]
     assert lock_preflight["required"] is True
     assert lock_preflight["status"] == "ready"
+
+
+def test_db_free_runtime_root_preflight_masks_local_paths_when_blocked(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    outside_root = tmp_path / "outside-root-boundary"
+    outside_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(outside_root))
+
+    config = ProductionSchedulerConfig()
+    runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    resolved_roots = scheduler_module._scheduler_resolved_runtime_roots(config)
+    rendered = json.dumps(
+        {"runtime_preflight": runtime_preflight, "resolved_roots": resolved_roots},
+        sort_keys=True,
+    )
+
+    assert runtime_preflight["status"] == "blocked"
+    assert runtime_preflight["checks"]["object_store_root"]["path"] == "[local-path]"
+    blocker = next(
+        blocker
+        for blocker in runtime_preflight["blockers"]
+        if blocker["field"] == "object_store_root"
+    )
+    assert blocker["path"] == "[local-path]"
+    assert runtime_preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == [
+        "[local-path]"
+        for _root in runtime_preflight["allowed_roots"]
+    ]
+    assert set(runtime_preflight["allowed_roots"]) == {"[local-path]"}
+    assert resolved_roots["object_store_root"]["path"] == "[local-path]"
+    assert "outside-root-boundary" not in rendered
+    assert str(outside_root) not in rendered
+    assert str(roots["workspace_root"]) not in rendered
+
+
+def test_db_free_runtime_root_preflight_blocks_raw_traversal_inside_allowed_root(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    resolved_root = roots["object_store_root"] / "safe-root"
+    resolved_root.mkdir()
+    raw_root = roots["object_store_root"] / "nested" / ".." / "safe-root"
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(raw_root))
+
+    config = ProductionSchedulerConfig()
+    runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    rendered = json.dumps(runtime_preflight, sort_keys=True)
+
+    assert runtime_preflight["status"] == "blocked"
+    object_store_check = runtime_preflight["checks"]["object_store_root"]
+    assert object_store_check["path"] == "[local-path]"
+    blocker = next(
+        blocker
+        for blocker in runtime_preflight["blockers"]
+        if blocker["field"] == "object_store_root"
+    )
+    assert blocker["reason"] == "unsafe_path"
+    assert blocker["path"] == "[local-path]"
+    assert ".." not in rendered
+    assert str(raw_root) not in rendered
 
 
 def test_db_free_file_lock_contention_is_bounded_and_no_submit(
