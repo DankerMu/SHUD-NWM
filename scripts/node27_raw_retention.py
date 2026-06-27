@@ -6,8 +6,8 @@ This script only targets source raw data under:
     <object-store-root>/raw/<source>/<YYYYMMDDHH>
 
 It deliberately does not touch canonical, forcing, runs, published products, or
-static grids. Deletion is dry-run by default and every run emits bounded JSON
-evidence for operator review.
+static grids. Production retention always deletes aged raw cycles after safety
+preflight and emits bounded JSON evidence for operator review.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "nhms.node27_raw_retention.v1"
+SCHEMA_VERSION = "nhms.node27_raw_retention.production.v1"
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_SOURCES = ("gfs", "ifs")
 CYCLE_NAME_LENGTH = 10
@@ -31,7 +31,6 @@ CYCLE_NAME_LENGTH = 10
 class RawRetentionConfig:
     object_store_root: Path
     retention_days: int
-    dry_run: bool
     sources: frozenset[str]
     summary_path: Path | None
 
@@ -43,13 +42,6 @@ class RetentionTarget:
     source: str
     cycle_time: datetime
     size_bytes: int
-
-
-def _env_flag(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, *, default: int) -> int:
@@ -126,12 +118,6 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
     if retention_days <= 0:
         blockers.append({"field": "retention_days", "reason": "must_be_positive", "value": retention_days})
 
-    dry_run = _env_flag("NODE27_RAW_RETENTION_DRY_RUN", default=True)
-    if args.execute:
-        dry_run = False
-    if args.dry_run:
-        dry_run = True
-
     summary_value = args.summary_path or os.getenv("NODE27_RAW_RETENTION_SUMMARY_PATH") or ""
     summary_path = Path(summary_value).expanduser() if summary_value.strip() else None
     if summary_path is not None and not summary_path.is_absolute():
@@ -147,7 +133,6 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
         RawRetentionConfig(
             object_store_root=resolved_root,
             retention_days=retention_days,
-            dry_run=dry_run,
             sources=sources,
             summary_path=summary_path,
         ),
@@ -227,15 +212,14 @@ def run_retention(config: RawRetentionConfig, *, now: datetime) -> dict[str, Any
     deleted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     freed_bytes = 0
-    if not config.dry_run:
-        for target, payload in zip(targets, planned, strict=True):
-            try:
-                shutil.rmtree(target.path)
-            except OSError as error:
-                failed.append({**payload, "error": str(error)})
-                continue
-            deleted.append(payload)
-            freed_bytes += int(payload["size_bytes"])
+    for target, payload in zip(targets, planned, strict=True):
+        try:
+            shutil.rmtree(target.path)
+        except OSError as error:
+            failed.append({**payload, "error": str(error)})
+            continue
+        deleted.append(payload)
+        freed_bytes += int(payload["size_bytes"])
     finished_at = datetime.now(UTC)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -247,7 +231,7 @@ def run_retention(config: RawRetentionConfig, *, now: datetime) -> dict[str, Any
         "sources": sorted(config.sources),
         "retention_days": config.retention_days,
         "cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "dry_run": config.dry_run,
+        "execution_mode": "production_execute",
         "counts": {
             "planned": len(planned),
             "deleted": len(deleted),
@@ -267,6 +251,7 @@ def _blocked_payload(blockers: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "preflight_blocked",
+        "execution_mode": "preflight_blocked",
         "started_at": now,
         "finished_at": now,
         "blockers": list(blockers),
@@ -292,8 +277,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retention-days", type=int)
     parser.add_argument("--sources")
     parser.add_argument("--summary-path")
-    parser.add_argument("--dry-run", action="store_true", default=False)
-    parser.add_argument("--execute", action="store_true", default=False)
     return parser
 
 

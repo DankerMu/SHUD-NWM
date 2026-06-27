@@ -121,9 +121,9 @@
 - [x] 5.1 Add an independent raw NFS retention runner for node-27-owned source
   bundles.
   Evidence floor: runner only targets
-  `<object-store-root>/raw/<source>/<YYYYMMDDHH>`, defaults to dry-run,
-  rejects unsafe roots, skips symlinks/non-cycle names, writes JSON evidence,
-  and supports explicit execute mode.
+  `<object-store-root>/raw/<source>/<YYYYMMDDHH>`, always executes after
+  safety preflight, rejects unsafe roots, skips symlinks/non-cycle names, and
+  writes JSON evidence.
   Evidence: `scripts/node27_raw_retention.py`,
   `scripts/node27_raw_retention_once.sh`,
   `infra/env/node27-raw-retention.example`, and focused tests.
@@ -132,6 +132,11 @@
   user `nwm`, a live summary JSON exists under the retention log root, and the
   first live run records planned/deleted/skipped/failed counts.
   Evidence: `docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md`.
+- [ ] 5.3 Upgrade the node-27 raw retention timer to production execute-only
+  semantics.
+  Evidence floor: repo and node-27 runtime no longer expose
+  `NODE27_RAW_RETENTION_DRY_RUN`, retention summaries use production execution
+  mode, and a live node-27 run records planned/deleted/skipped/failed counts.
 
 ## 6. Later Node-22 Scheduler-State Reduction
 
@@ -142,6 +147,7 @@
   Latest status: 2026-06-27 live evidence shows node-22 scheduler still reads
   `DATABASE_URL` pointing at `:55433`, uses `NHMS_SCHEDULER_LOCK_BACKEND=postgres`,
   and opens live PostgreSQL sessions during scheduler passes.
+  Retirement gate: `docs/runbooks/node22-db-retirement-runbook.md`.
 
 ## 7. Retire Node-22 Historical PostgreSQL
 

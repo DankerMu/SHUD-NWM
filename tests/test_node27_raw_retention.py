@@ -15,31 +15,30 @@ def _write_raw_cycle(root: Path, source: str, cycle: str, *, name: str = "manife
     return path
 
 
-def _config(root: Path, *, dry_run: bool = True) -> node27_raw_retention.RawRetentionConfig:
+def _config(root: Path) -> node27_raw_retention.RawRetentionConfig:
     return node27_raw_retention.RawRetentionConfig(
         object_store_root=root,
         retention_days=14,
-        dry_run=dry_run,
         sources=frozenset({"gfs", "ifs"}),
         summary_path=None,
     )
 
 
-def test_node27_raw_retention_dry_run_plans_without_deleting(tmp_path: Path) -> None:
+def test_node27_raw_retention_production_deletes_aged_targets(tmp_path: Path) -> None:
     old_cycle = _write_raw_cycle(tmp_path, "gfs", "2026060100")
     _write_raw_cycle(tmp_path, "IFS", "2026062612")
 
     result = node27_raw_retention.run_retention(
-        _config(tmp_path, dry_run=True),
+        _config(tmp_path),
         now=datetime(2026, 6, 27, 12, tzinfo=UTC),
     )
 
     assert result["status"] == "completed"
-    assert result["dry_run"] is True
+    assert result["execution_mode"] == "production_execute"
     assert result["counts"]["planned"] == 1
-    assert result["counts"]["deleted"] == 0
+    assert result["counts"]["deleted"] == 1
     assert result["planned"][0]["key"] == "raw/gfs/2026060100"
-    assert old_cycle.exists()
+    assert not old_cycle.exists()
 
 
 def test_node27_raw_retention_execute_deletes_only_aged_enabled_sources(tmp_path: Path) -> None:
@@ -48,7 +47,7 @@ def test_node27_raw_retention_execute_deletes_only_aged_enabled_sources(tmp_path
     disabled = _write_raw_cycle(tmp_path, "era5", "2026060100")
 
     result = node27_raw_retention.run_retention(
-        _config(tmp_path, dry_run=False),
+        _config(tmp_path),
         now=datetime(2026, 6, 27, 12, tzinfo=UTC),
     )
 
@@ -71,7 +70,7 @@ def test_node27_raw_retention_skips_non_cycle_and_symlink_targets(tmp_path: Path
         pytest.skip(f"symlink unavailable: {error}")
 
     result = node27_raw_retention.run_retention(
-        _config(tmp_path, dry_run=False),
+        _config(tmp_path),
         now=datetime(2026, 6, 27, 12, tzinfo=UTC),
     )
 
@@ -88,3 +87,8 @@ def test_node27_raw_retention_preflight_rejects_unsafe_root(monkeypatch: pytest.
 
     assert config is None
     assert any(item["reason"] == "path_is_root" for item in blockers)
+
+
+def test_node27_raw_retention_dry_run_cli_is_removed() -> None:
+    with pytest.raises(SystemExit):
+        node27_raw_retention.build_parser().parse_args(["--dry-run"])
