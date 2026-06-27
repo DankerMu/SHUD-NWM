@@ -190,3 +190,22 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_workspace.py services/orchestrator/chain_slurm_client.py tests/test_orchestration_chain.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.8 Extract chain forecast cycle normalization owner slice.
+  - Module/Scope: move cycle basin normalization, cohort warm-start application,
+    cycle basin identity validation, cycle pipeline-job lookup, existing-stage
+    job selection, download raw-manifest retry check, and stage job predicate
+    helper bodies from `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_forecast_cycle.py`.
+  - Stable Facade: keep legacy `ForecastOrchestrator` private method and
+    static helper names importable/patchable through
+    `services.orchestrator.chain`, forwarding to the owner module.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and `chain_forecast_cycle.py`, with the new owner under 1000
+    lines.
+  - Verification: `uv run pytest -q tests/test_warm_start.py -k "warm_start"`;
+    `uv run pytest -q tests/test_warm_start_chaining.py -k "warm_start"`;
+    `uv run pytest -q tests/test_orchestration_chain.py -k "find_existing_stage_job or duplicate_candidate_identity or cycle_basin or normalize_cycle or candidate_identity or existing_stage"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_forecast_cycle.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
