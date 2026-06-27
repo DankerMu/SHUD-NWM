@@ -127,10 +127,11 @@
   Evidence: `scripts/node27_raw_retention.py`,
   `scripts/node27_raw_retention_once.sh`,
   `infra/env/node27-raw-retention.example`, and focused tests.
-- [ ] 5.2 Install and run the node-27 raw retention systemd timer.
+- [x] 5.2 Install and run the node-27 raw retention systemd timer.
   Evidence floor: node-27 has `nhms-node27-raw-retention.timer` enabled for
   user `nwm`, a live summary JSON exists under the retention log root, and the
   first live run records planned/deleted/skipped/failed counts.
+  Evidence: `docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md`.
 
 ## 6. Later Node-22 Scheduler-State Reduction
 

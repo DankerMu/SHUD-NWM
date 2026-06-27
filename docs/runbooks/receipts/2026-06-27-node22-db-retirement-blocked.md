@@ -21,6 +21,19 @@ branch=master
 head=c134e5b
 ```
 
+Post-sync verification after removing node-22 active production download
+submission code:
+
+```text
+branch=master
+head=24505db
+nhms-compute-api.service=active
+nhms-slurm-gateway.service=active
+nhms-compute-scheduler.service=inactive
+infra/sbatch/download_source_cycle.sbatch=removed
+config/job_type_templates.yaml active download_source_cycle mapping=removed
+```
+
 Sanitized scheduler env excerpt from
 `/scratch/frd_muziyao/NWM/infra/env/compute.host.env`:
 
