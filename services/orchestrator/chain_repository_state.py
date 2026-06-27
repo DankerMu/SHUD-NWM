@@ -86,6 +86,7 @@ def candidate_state(
             finished_at,
             exit_code,
             retry_count,
+            manual_retry_marker,
             error_code,
             error_message,
             log_uri,

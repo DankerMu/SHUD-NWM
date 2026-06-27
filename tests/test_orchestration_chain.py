@@ -5824,6 +5824,38 @@ def test_psycopg_candidate_state_source_cycle_retry_success_repairs_stale_failed
     assert retry_job["status"] == "succeeded"
 
 
+def test_psycopg_candidate_state_linked_retry_repairs_slurm_local_time_skew() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(
+                finished_at="2026-05-01T14:10:00Z",
+                started_at="2026-05-01T14:00:00Z",
+                updated_at="2026-05-01T00:10:00Z",
+                retry_count=0,
+            ),
+            _successful_source_cycle_retry_job(
+                submitted_at="2026-05-01T00:20:00Z",
+                finished_at=None,
+                updated_at="2026-05-01T00:40:00Z",
+                retry_count=1,
+            ),
+        ],
+        events=[
+            _manual_retry_event(
+                details={
+                    "previous_job_id": "job_cycle_gfs_2026050100_download",
+                    "retry_count": 1,
+                },
+            )
+        ],
+    )
+
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026050100_download"
+    assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+
+
 def test_psycopg_candidate_state_source_cycle_multihop_retry_repairs_failed_ancestors() -> None:
     original_job_id = "job_cycle_gfs_2026050100_download"
     failed_retry_job_id = "job_cycle_gfs_2026050100_download_retry_1"

@@ -347,6 +347,7 @@ def _linked_successful_source_cycle_retry(
             failed_job,
             cycle_id=cycle_id,
             cycle_run_id=cycle_run_id,
+            require_temporal_order=False,
         ):
             continue
         repair_event = events_by_retry_job_id.get(retry_job_id_text, event)
@@ -411,6 +412,7 @@ def _source_cycle_retry_job_repairs_failure(
     *,
     cycle_id: str,
     cycle_run_id: str,
+    require_temporal_order: bool = True,
 ) -> bool:
     if str(retry_job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
         return False
@@ -418,7 +420,7 @@ def _source_cycle_retry_job_repairs_failure(
         return False
     failed_time = _source_cycle_stage_terminal_time(failed_job)
     retry_time = _source_cycle_stage_terminal_time(retry_job)
-    if retry_time is not None and failed_time is not None and retry_time < failed_time:
+    if require_temporal_order and retry_time is not None and failed_time is not None and retry_time < failed_time:
         return False
     failed_attempt = _coerce_int(failed_job.get("retry_count"), default=0)
     retry_attempt = _coerce_int(retry_job.get("retry_count"), default=failed_attempt)
