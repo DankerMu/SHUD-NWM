@@ -15,14 +15,21 @@
 
 ## 2. Node-27 Download Runner
 
-- [ ] 2.1 Add node-27 download env template and wrapper/runner with preflight.
+- [x] 2.1 Add node-27 download env template and wrapper/runner with preflight.
   Evidence floor: preflight fails before mutation when `DATABASE_URL`,
   `OBJECT_STORE_ROOT`, `WORKSPACE_ROOT`, GRIB tools, bbox/cycle config, lock, or
   log roots are missing/unsafe; output is credential-safe JSON.
-- [ ] 2.2 Run focused tests for node-27 download preflight and summary evidence.
+- [x] 2.2 Run focused tests for node-27 download preflight and summary evidence.
   Evidence floor: tests cover writer-vs-readonly DB classification, node-22
   `:55433` rejection, display env separation, path safety, lock behavior, and
   redaction.
+  Evidence: `scripts/node27_download_cycles.py`,
+  `scripts/node27_download_once.sh`, `infra/env/node27-download.example`, and
+  `tests/test_node27_download_cycles.py` implement and cover the bounded
+  node-27 download runner. Verification passed:
+  `uv run pytest -q tests/test_node27_download_cycles.py` (6 passed),
+  `uv run ruff check scripts/node27_download_cycles.py tests/test_node27_download_cycles.py`,
+  and `bash -n scripts/node27_download_once.sh`.
 - [ ] 2.3 Produce node-27 live proof for one safe GFS or IFS cycle.
   Evidence floor: node-27 writes/verifies raw manifest and `met.forecast_cycle`
   in `:55432` without any node-22 DB access.

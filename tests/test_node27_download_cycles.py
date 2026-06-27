@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import scripts.node27_download_cycles as downloader
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WRAPPER = REPO_ROOT / "scripts" / "node27_download_once.sh"
+ENV_EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-download.example"
+
+
+def _prepare_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    object_store_root = tmp_path / "object-store"
+    workspace_root = tmp_path / "workspace"
+    log_root = tmp_path / "logs"
+    fake_bin = tmp_path / "bin"
+    for path in (object_store_root, workspace_root, log_root, fake_bin):
+        path.mkdir(parents=True, exist_ok=True)
+    cdo = fake_bin / "cdo"
+    cdo.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cdo.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("NHMS_NODE27_DOWNLOAD_ROLE", downloader.DOWNLOAD_ROLE)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", downloader.DOWNLOAD_ROLE)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NODE27_DOWNLOAD_LOG_ROOT", str(log_root))
+    monkeypatch.setenv("NODE27_DOWNLOAD_LOCK_PATH", str(tmp_path / "download.lock"))
+    monkeypatch.setenv("NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC", "0,12")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_SOUTH", "8")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_NORTH", "64")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", "63")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "145")
+    monkeypatch.setenv("NODE27_DOWNLOAD_ALLOWED_DATABASE_ENDPOINTS", "127.0.0.1:55432,localhost:55432")
+    return object_store_root, workspace_root, log_root, fake_bin
+
+
+def _run_main(capsys: pytest.CaptureFixture[str], args: list[str]) -> tuple[int, dict[str, Any], str]:
+    rc = downloader.main(args)
+    rendered = capsys.readouterr().out
+    return rc, json.loads(rendered), rendered
+
+
+def _blocker_codes(summary: dict[str, Any]) -> set[str]:
+    preflight = summary.get("preflight") or {}
+    direct = summary.get("blockers") or []
+    return {blocker["code"] for blocker in [*preflight.get("blockers", []), *direct]}
+
+
+def _fail_if_called(*_args: object, **_kwargs: object) -> downloader.SourceDownloadResult:
+    raise AssertionError("download command must not run before preflight passes")
+
+
+def test_preflight_rejects_node22_historical_database_before_download_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(downloader, "run_source_download", _fail_if_called)
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26T12:00:00Z",
+            "--source",
+            "GFS",
+            "--database-url",
+            "postgresql://node22_writer:writer-secret@10.0.2.100:55433/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == downloader.PREFLIGHT_BLOCKED_RC
+    assert summary["status"] == "preflight_blocked"
+    assert {
+        "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT",
+        "DATABASE_URL_ENDPOINT_NOT_NODE27",
+    }.issubset(_blocker_codes(summary))
+    assert "writer-secret" not in rendered
+
+
+def test_preflight_rejects_display_readonly_runtime_and_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "display_readonly")
+    monkeypatch.setattr(downloader, "run_source_download", _fail_if_called)
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26T12:00:00Z",
+            "--database-url",
+            "postgresql://nhms_display_ro:readonly-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == downloader.PREFLIGHT_BLOCKED_RC
+    assert {
+        "DOWNLOAD_DISPLAY_READONLY_ROLE_FORBIDDEN",
+        "DATABASE_URL_READONLY_IDENTITY",
+    }.issubset(_blocker_codes(summary))
+    assert "readonly-secret" not in rendered
+
+
+def test_preflight_ready_summary_is_credential_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, fake_bin = _prepare_env(monkeypatch, tmp_path)
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26 12:00:00+00:00",
+            "--source",
+            "GFS",
+            "--database-url",
+            "postgresql://node27_download_rw:writer-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+            "--preflight-only",
+        ],
+    )
+
+    assert rc == 0
+    assert summary["schema"] == downloader.DOWNLOAD_SUMMARY_SCHEMA
+    assert summary["status"] == "preflight_ready"
+    assert summary["cycle_time"] == "2026-06-26T12:00:00Z"
+    assert summary["sources"] == ["GFS"]
+    assert summary["preflight"]["status"] == "ready"
+    assert summary["preflight"]["database"] == {
+        "configured": True,
+        "database": "nhms",
+        "host": "127.0.0.1",
+        "password_present": True,
+        "port": 55432,
+        "scheme": "postgresql",
+        "username_class": "writer_candidate",
+        "username_present": True,
+    }
+    assert summary["preflight"]["toolchain"]["cdo"]["path"] == str(fake_bin / "cdo")
+    assert "writer-secret" not in rendered
+
+
+def test_one_source_failure_isolated_while_other_source_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+
+    def fake_download(source: str, cycle_time: str, _env: dict[str, str]) -> downloader.SourceDownloadResult:
+        if source == "GFS":
+            return downloader.SourceDownloadResult(
+                source=source,
+                cycle_time=cycle_time,
+                status="failed",
+                return_code=1,
+                command=["nhms-gfs", "download"],
+                result={"error_code": "HTTP_403"},
+                stdout_tail="",
+                stderr_tail="password=download-secret",
+            )
+        return downloader.SourceDownloadResult(
+            source=source,
+            cycle_time=cycle_time,
+            status="downloaded",
+            return_code=0,
+            command=["nhms-ifs", "download"],
+            result={"status": "raw_complete", "files": 2},
+            stdout_tail='{"status":"raw_complete"}',
+            stderr_tail="",
+        )
+
+    monkeypatch.setattr(downloader, "run_source_download", fake_download)
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26T12:00:00Z",
+            "--database-url",
+            "postgresql://node27_download_rw:writer-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["downloads"]["processed"] == 2
+    assert summary["downloads"]["downloaded"] == 1
+    assert summary["downloads"]["failed"] == 1
+    assert [detail["source"] for detail in summary["downloads"]["details"]] == ["GFS", "IFS"]
+    assert "download-secret" not in rendered
+    assert "writer-secret" not in rendered
+
+
+def test_lock_held_blocks_without_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(downloader, "run_source_download", _fail_if_called)
+
+    @contextmanager
+    def fake_lock(_lock_path: str) -> Iterator[bool]:
+        yield False
+
+    monkeypatch.setattr(downloader, "download_lock", fake_lock)
+
+    rc, summary, _rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26T12:00:00Z",
+            "--database-url",
+            "postgresql://node27_download_rw:writer-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == downloader.LOCK_BLOCKED_RC
+    assert summary["status"] == "lock_blocked"
+    assert _blocker_codes(summary) == {"NODE27_DOWNLOAD_LOCK_HELD"}
+
+
+def test_wrapper_and_env_contract_do_not_source_display_env() -> None:
+    wrapper = WRAPPER.read_text(encoding="utf-8")
+    env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    assert "node27-download.env" in wrapper
+    assert "DOWNLOAD_ENV_DISPLAY_RUNTIME_FORBIDDEN" in wrapper
+    assert "infra/env/display.env" not in wrapper
+    assert "NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download" in env_example
+    assert "127.0.0.1:55432" in env_example
+    assert "55433" in env_example
+

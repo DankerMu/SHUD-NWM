@@ -1,0 +1,43 @@
+# Node-27 source download example for scripts/node27_download_once.sh.
+# Copy to infra/env/node27-download.env with mode 0600 on node-27, then replace
+# placeholders with writer credentials and local paths. This file is not for the
+# display API; do not source infra/env/display.env for download work.
+
+NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download
+
+# Writer-capable node-27 PostgreSQL URL. Do not use display_readonly, and never
+# point this at node-22 historical PostgreSQL :55433.
+DATABASE_URL=postgresql://nhms_download_rw:change-me@127.0.0.1:55432/nhms
+NODE27_DOWNLOAD_ALLOWED_DATABASE_ENDPOINTS=127.0.0.1:55432,localhost:55432
+
+# Node-27 local view of shared object-store and a node-27 local workspace root.
+OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+OBJECT_STORE_PREFIX=s3://nhms
+WORKSPACE_ROOT=/home/nwm/node27-download-work
+
+# Manual Phase-1 cycle selection. Phase 2 adds production automatic selection.
+NODE27_DOWNLOAD_CYCLE_TIME=
+NHMS_NODE27_DOWNLOAD_SOURCES=GFS,IFS
+NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC=0,12
+
+# Local working/log roots owned by the nwm user on node-27.
+NODE27_DOWNLOAD_LOG_ROOT=/home/nwm/node27-download-logs
+NODE27_DOWNLOAD_LOG_FILE=/home/nwm/node27-download-logs/download.log
+NODE27_DOWNLOAD_LOCK_PATH=/tmp/node27-download.lock
+NODE27_DOWNLOAD_SUMMARY_PATH=/home/nwm/node27-download-logs/last-summary.json
+
+# Download spatial clip bbox: China mainland (18-54N / 73-135E) + 10 degree buffer.
+NHMS_DOWNLOAD_BBOX_SOUTH=8
+NHMS_DOWNLOAD_BBOX_NORTH=64
+NHMS_DOWNLOAD_BBOX_WEST=63
+NHMS_DOWNLOAD_BBOX_EAST=145
+
+# Shared GRIB env with cdo/eccodes, when system PATH does not provide cdo.
+NHMS_GRIB_ENV_ROOT=/home/nwm/nhms-grib
+
+# Source-specific defaults aligned to production business cycles.
+GFS_CYCLE_HOURS_UTC=0,12
+IFS_CYCLE_HOURS_UTC=0,12
+GFS_NOMADS_BASE_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
+IFS_OPEN_DATA_SOURCE=ecmwf
+
