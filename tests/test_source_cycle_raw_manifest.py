@@ -8,6 +8,7 @@ from typing import Any
 from services.orchestrator.source_cycle_raw_manifest import (
     forecast_cycle_from_raw_manifest_readiness,
     nfs_raw_manifest_readiness,
+    stage_nfs_raw_manifest_to_object_store,
 )
 
 
@@ -126,3 +127,33 @@ def test_nfs_raw_manifest_readiness_rejects_manifest_before_files_land(tmp_path:
     assert readiness["status"] == "invalid"
     assert readiness["reason"] == "raw_files_missing"
     assert readiness["required"] is True
+
+
+def test_stage_nfs_raw_manifest_to_compute_visible_object_store(tmp_path: Path) -> None:
+    source_root = tmp_path / "nfs"
+    target_root = tmp_path / "scratch-object-store"
+    _write_manifest(source_root)
+    stale_manifest = target_root / "raw/gfs/2026062612/manifest.json"
+    stale_manifest.parent.mkdir(parents=True, exist_ok=True)
+    stale_manifest.write_text("stale\n", encoding="utf-8")
+
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 26, 12, tzinfo=UTC),
+        object_store_root=source_root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+
+    staged = stage_nfs_raw_manifest_to_object_store(
+        readiness,
+        target_object_store_root=target_root,
+        target_object_store_prefix="s3://nhms",
+    )
+
+    assert staged["status"] == "staged"
+    assert staged["staged_file_count"] == 1
+    assert (target_root / "raw/gfs/2026062612/file-a.grib2").read_bytes() == b"grib-bytes"
+    assert json.loads((target_root / "raw/gfs/2026062612/manifest.json").read_text(encoding="utf-8"))[
+        "source_id"
+    ] == "gfs"

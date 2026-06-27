@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from packages.common.safe_fs import (
     SafeFilesystemError,
+    ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
+    unlink_no_follow,
     verify_directory_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
@@ -23,6 +27,9 @@ NFS_RAW_MANIFEST_ENABLED_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ENABLED"
 NFS_RAW_MANIFEST_REQUIRED_ENV = "NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"
 NFS_RAW_MANIFEST_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
 NFS_RAW_MANIFEST_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"
+NFS_RAW_STAGE_ENABLED_ENV = "NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE"
+NFS_RAW_STAGE_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT"
+NFS_RAW_STAGE_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX"
 NFS_RAW_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 NFS_RAW_MANIFEST_READY_SOURCE = "node27_nfs_raw_manifest"
 
@@ -32,10 +39,20 @@ __all__ = (
     "NFS_RAW_MANIFEST_READY_SOURCE",
     "NFS_RAW_MANIFEST_REQUIRED_ENV",
     "NFS_RAW_MANIFEST_ROOT_ENV",
+    "NFS_RAW_STAGE_ENABLED_ENV",
+    "NFS_RAW_STAGE_PREFIX_ENV",
+    "NFS_RAW_STAGE_ROOT_ENV",
+    "NfsRawManifestStagingError",
     "forecast_cycle_from_raw_manifest_readiness",
     "nfs_raw_manifest_readiness",
     "nfs_raw_manifest_readiness_from_env",
+    "stage_nfs_raw_manifest_from_env",
+    "stage_nfs_raw_manifest_to_object_store",
 )
+
+
+class NfsRawManifestStagingError(RuntimeError):
+    """Raised when node-22 cannot materialize node-27 NFS raw for compute."""
 
 
 def nfs_raw_manifest_readiness_from_env(source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
@@ -221,6 +238,106 @@ def forecast_cycle_from_raw_manifest_readiness(
     }
 
 
+def stage_nfs_raw_manifest_from_env(state_evidence: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not _env_flag(NFS_RAW_STAGE_ENABLED_ENV):
+        return None
+    nfs_raw_manifest = state_evidence.get("nfs_raw_manifest")
+    if not isinstance(nfs_raw_manifest, Mapping) or nfs_raw_manifest.get("status") != "ready":
+        return None
+    target_root = os.getenv(NFS_RAW_STAGE_ROOT_ENV) or os.getenv("OBJECT_STORE_ROOT")
+    if target_root in (None, ""):
+        raise NfsRawManifestStagingError(
+            f"{NFS_RAW_STAGE_ROOT_ENV} or OBJECT_STORE_ROOT is required to stage NFS raw inputs."
+        )
+    return stage_nfs_raw_manifest_to_object_store(
+        nfs_raw_manifest,
+        target_object_store_root=target_root,
+        target_object_store_prefix=os.getenv(NFS_RAW_STAGE_PREFIX_ENV)
+        or os.getenv("OBJECT_STORE_PREFIX")
+        or os.getenv(NFS_RAW_MANIFEST_PREFIX_ENV)
+        or "s3://nhms",
+    )
+
+
+def stage_nfs_raw_manifest_to_object_store(
+    readiness: Mapping[str, Any],
+    *,
+    target_object_store_root: str | Path,
+    target_object_store_prefix: str = "s3://nhms",
+) -> dict[str, Any]:
+    if readiness.get("status") != "ready":
+        raise NfsRawManifestStagingError("NFS raw manifest must be ready before staging.")
+    source_root_value = readiness.get("object_store_root")
+    manifest_key = str(readiness.get("manifest_key") or "").strip()
+    manifest_path_value = readiness.get("manifest_path")
+    if source_root_value in (None, "") or manifest_path_value in (None, "") or not manifest_key:
+        raise NfsRawManifestStagingError("NFS raw manifest evidence is missing source root or manifest path.")
+
+    source_root = verify_directory_no_follow(_absolute_path(str(source_root_value)))
+    target_root = ensure_directory_no_follow(_absolute_path(target_object_store_root))
+    try:
+        if source_root.samefile(target_root):
+            return {
+                "status": "skipped",
+                "reason": "source_target_same",
+                "source": NFS_RAW_MANIFEST_READY_SOURCE,
+                "source_object_store_root": str(source_root),
+                "target_object_store_root": str(target_root),
+                "manifest_uri": str(readiness.get("manifest_uri") or ""),
+                "manifest_key": manifest_key,
+            }
+    except OSError:
+        pass
+
+    manifest_path = _absolute_path(str(manifest_path_value))
+    payload, payload_error = _read_manifest_payload(
+        manifest_path,
+        root=source_root,
+        max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+    )
+    if payload_error is not None:
+        raise NfsRawManifestStagingError(str(payload_error.get("reason") or "manifest_unreadable"))
+    source_id = str(readiness.get("source_id") or "")
+    cycle_time = parse_cycle_time(str(readiness.get("cycle_time") or ""))
+    validation_error = _validate_manifest_identity(payload, source_id=source_id, cycle_time=cycle_time)
+    if validation_error is not None:
+        raise NfsRawManifestStagingError(str(validation_error.get("reason") or "manifest_identity_invalid"))
+    entries = payload.get("entries")
+    if not isinstance(entries, Sequence) or isinstance(entries, str | bytes | bytearray) or not entries:
+        raise NfsRawManifestStagingError("manifest_entries_missing")
+    local_keys, entry_error = _entry_local_keys(entries)
+    if entry_error is not None:
+        raise NfsRawManifestStagingError(str(entry_error.get("reason") or "manifest_entry_invalid"))
+    _file_evidence, file_error = _verify_entry_files(source_root, local_keys)
+    if file_error is not None:
+        raise NfsRawManifestStagingError(str(file_error.get("reason") or "raw_files_invalid"))
+
+    copied_files = 0
+    copied_bytes = 0
+    for local_key in sorted(set(local_keys)):
+        copied_bytes += _copy_object_file(source_root, target_root, local_key)
+        copied_files += 1
+    manifest_bytes = _copy_object_file(source_root, target_root, manifest_key)
+    manifest_uri = str(readiness.get("manifest_uri") or "").strip() or _manifest_uri_for_key(
+        manifest_key,
+        target_object_store_prefix,
+    )
+    return {
+        "status": "staged",
+        "source": NFS_RAW_MANIFEST_READY_SOURCE,
+        "source_id": normalize_source_id(source_id),
+        "cycle_id": str(readiness.get("cycle_id") or cycle_id_for(source_id, cycle_time)),
+        "cycle_time": _format_time(cycle_time),
+        "manifest_uri": manifest_uri,
+        "manifest_key": manifest_key,
+        "source_object_store_root": str(source_root),
+        "target_object_store_root": str(target_root),
+        "staged_file_count": copied_files,
+        "staged_manifest_bytes": manifest_bytes,
+        "staged_raw_bytes": copied_bytes,
+    }
+
+
 def _read_manifest_payload(
     path: Path,
     *,
@@ -240,6 +357,33 @@ def _read_manifest_payload(
     if not isinstance(payload, dict):
         return {}, {"reason": "manifest_not_object"}
     return payload, None
+
+
+def _copy_object_file(source_root: Path, target_root: Path, key: str) -> int:
+    validation = validate_object_path(key)
+    if not validation.valid:
+        raise NfsRawManifestStagingError(f"Invalid staged object key {key!r}: {validation.error}")
+    source_path = source_root / key
+    target_path = target_root / key
+    try:
+        source_stat = stat_no_follow(source_path, containment_root=source_root)
+    except (OSError, SafeFilesystemError) as error:
+        raise NfsRawManifestStagingError(f"Source object {key} is not readable: {error}") from error
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise NfsRawManifestStagingError(f"Source object {key} is not a regular file.")
+    ensure_directory_no_follow(target_path.parent, containment_root=target_root)
+    temp_path = target_path.with_name(f".{target_path.name}.{uuid4().hex}.stage")
+    try:
+        shutil.copyfile(source_path, temp_path, follow_symlinks=False)
+        os.replace(temp_path, target_path)
+    except OSError as error:
+        raise NfsRawManifestStagingError(f"Failed to stage object {key}: {error}") from error
+    finally:
+        try:
+            unlink_no_follow(temp_path, containment_root=target_root, missing_ok=True)
+        except (OSError, SafeFilesystemError):
+            pass
+    return int(source_stat.st_size)
 
 
 def _validate_manifest_identity(

@@ -76,16 +76,29 @@
   raw files, synthetic candidate state without DB rows, restart-from-convert,
   and required-manifest blocking. Verification passed:
   `uv run pytest -q tests/test_source_cycle_raw_manifest.py tests/test_chain_repository_nfs_raw_manifest.py tests/test_production_scheduler.py::test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert tests/test_production_scheduler.py::test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback`
-  plus adjacent scheduler regression coverage (9 passed total), and focused
+  plus adjacent scheduler regression coverage (11 passed total), and focused
   `ruff check`.
-- [ ] 4.4 Enable the NFS raw-manifest gate on node-22 production scheduler.
+- [x] 4.4 Stage node-27 NFS raw into compute-visible object-store before
+  downstream submit.
+  Evidence floor: because Slurm compute nodes may not read `/ghdc`, scheduler
+  copies the ready NFS manifest's raw files into `OBJECT_STORE_ROOT` on the
+  node-22 side before calling Slurm, and writes the manifest last.
+  Evidence: `services/orchestrator/source_cycle_raw_manifest.py` implements
+  `stage_nfs_raw_manifest_to_object_store`, and
+  `services/orchestrator/scheduler_execution.py` calls it in the pre-submit
+  path when `NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true`. Verification:
+  focused tests cover direct staging and scheduler pre-submit staging.
+- [ ] 4.5 Enable the NFS raw-manifest gate on node-22 production scheduler.
   Evidence floor: node-22 runtime env sets
   `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` and points
-  `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` at the shared NFS object-store.
-- [ ] 4.5 Record live GFS and IFS end-to-end receipts through the NFS handoff.
+  `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` at the shared NFS object-store, plus
+  `NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true` and a compute-visible
+  `NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT`.
+- [ ] 4.6 Record live GFS and IFS end-to-end receipts through the NFS handoff.
   Evidence floor: public latest-product advances for both sources from
   node-27-downloaded raw cycles after node-22 scheduler observes the NFS raw
-  manifest and starts downstream stages without submitting node-22 download.
+  manifest, stages raw to compute-visible object-store, and starts downstream
+  stages without submitting node-22 download.
 
 ## 5. Later Node-22 Scheduler-State Reduction
 

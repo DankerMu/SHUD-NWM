@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from services.orchestrator import source_cycle_raw_manifest
+
 
 class SchedulerExecutionCandidate(Protocol):
     candidate_id: str
@@ -305,6 +307,35 @@ def execute_candidate_cohort(
         if not basins:
             return evidence
     try:
+        evidence.extend(_stage_nfs_raw_inputs_for_candidates(submitted_candidates))
+    except Exception as error:
+        safe_error_message = context.evidence_safe(str(error))
+        for candidate in submitted_candidates:
+            output_uri = candidate_output_uris.get(candidate.candidate_id)
+            evidence.append(
+                {
+                    **context.candidate_identity_evidence(candidate, output_uri=output_uri),
+                    "status": "blocked",
+                    "submitted": False,
+                    "slurm_submit_called": False,
+                    "execution_attempted": False,
+                    "mutation_occurred": False,
+                    "cycle_id": cycle_id,
+                    "error_code": "RAW_INPUT_STAGING_FAILED",
+                    "error_message": safe_error_message,
+                    **context.candidate_model_run_review_evidence(
+                        candidate,
+                        output_uri=output_uri,
+                        outcome=None,
+                        status="blocked",
+                        stage_statuses=[],
+                    ),
+                    "standard_chain_shape": context.standard_chain_shape(),
+                    "qhh_script_invoked": False,
+                }
+            )
+        return evidence
+    try:
         result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
     except Exception as error:
         safe_error_message = context.evidence_safe(getattr(error, "message", str(error)))
@@ -357,6 +388,29 @@ def execute_candidate_cohort(
             output_uris=candidate_output_uris,
         )
     )
+    return evidence
+
+
+def _stage_nfs_raw_inputs_for_candidates(candidates: Sequence[SchedulerExecutionCandidate]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    staged_keys: set[str] = set()
+    for candidate in candidates:
+        state_evidence = candidate.state_evidence
+        if not isinstance(state_evidence, Mapping):
+            continue
+        nfs_raw_manifest = state_evidence.get("nfs_raw_manifest")
+        if isinstance(nfs_raw_manifest, Mapping):
+            key = str(
+                nfs_raw_manifest.get("manifest_uri")
+                or nfs_raw_manifest.get("manifest_path")
+                or f"{candidate.source_id}:{candidate.cycle_id}"
+            )
+            if key in staged_keys:
+                continue
+            staged_keys.add(key)
+        staged = source_cycle_raw_manifest.stage_nfs_raw_manifest_from_env(state_evidence)
+        if staged is not None:
+            evidence.append({"type": "nfs_raw_manifest_staging", **staged})
     return evidence
 
 

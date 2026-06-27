@@ -23,6 +23,15 @@ the source acquisition handoff between the two nodes.
 - **AND** it marks fresh ingestion as not required for that candidate
 - **AND** it does not submit node-22 `download_source_cycle` for that cycle.
 
+#### Scenario: Raw-ready cycle is staged for compute nodes before submit
+
+- **WHEN** node-22 scheduler is configured to stage node-27 NFS raw inputs
+- **AND** it is about to submit a raw-ready downstream restart candidate
+- **THEN** it copies the manifest's referenced raw files from shared NFS to the
+  configured compute-visible object-store root
+- **AND** it copies the raw manifest last
+- **AND** it records raw-input staging evidence before calling Slurm.
+
 #### Scenario: Missing required NFS raw blocks fallback download
 
 - **WHEN** the scheduler is configured to require node-27 NFS raw manifests

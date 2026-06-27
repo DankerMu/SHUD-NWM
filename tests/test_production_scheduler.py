@@ -60,6 +60,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
@@ -2008,6 +2009,86 @@ def test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert(tmp_path: P
     assert state_evidence["raw_manifest_reuse"]["source"] == "node27_nfs_raw_manifest"
     assert state_evidence["nfs_raw_manifest"]["status"] == "ready"
     assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
+
+
+def test_nfs_raw_ready_candidate_stages_raw_before_convert_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-26T12:00:00Z")
+    nfs_root = tmp_path / "nfs"
+    target_root = tmp_path / "scratch-object-store"
+    raw_key = "raw/gfs/2026062612/gfs.t12z.f000.bundle.grib2"
+    raw_file = nfs_root / raw_key
+    raw_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_file.write_bytes(b"node27-raw")
+    manifest = {
+        "source_id": "gfs",
+        "cycle_time": "2026-06-26T12:00:00+00:00",
+        "manifest_uri": "s3://nhms/raw/gfs/2026062612/manifest.json",
+        "entries": [
+            {
+                "remote_url": "https://example.invalid/gfs",
+                "local_key": raw_key,
+                "variable": "prcp_rate_or_amount",
+                "forecast_hour": 0,
+            }
+        ],
+    }
+    (nfs_root / "raw/gfs/2026062612/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    nfs_readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        object_store_root=nfs_root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026062612/manifest.json"}
+    active_repository = FakeCandidateStateRepository(
+        {
+            "forecast_cycle": {
+                "cycle_id": "gfs_2026062612",
+                "source_id": "gfs",
+                "cycle_time": "2026-06-26T12:00:00Z",
+                "status": "raw_complete",
+                "manifest_uri": "s3://nhms/raw/gfs/2026062612/manifest.json",
+            },
+            "nfs_raw_manifest": nfs_readiness,
+        }
+    )
+    monkeypatch.setenv("NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT", str(target_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-06-27T00:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-06-26T12:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert (target_root / raw_key).read_bytes() == b"node27-raw"
+    assert json.loads((target_root / "raw/gfs/2026062612/manifest.json").read_text(encoding="utf-8")) == manifest
+    staging = [
+        item for item in result.evidence["model_run_evidence"] if item.get("type") == "nfs_raw_manifest_staging"
+    ]
+    assert staging and staging[0]["status"] == "staged"
+    assert orchestrator.calls[0]["basins"][0]["restart_stage"] == "convert"
 
 
 def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_path: Path) -> None:

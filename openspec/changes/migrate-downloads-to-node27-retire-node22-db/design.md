@@ -42,20 +42,26 @@ present and valid.
 
 2. **NFS manifest is the handoff contract.** Node-27 writes raw files and
    `raw/<source>/<cycle>/manifest.json` to the shared NFS object-store. Node-22
-   validates that manifest, its source/cycle identity, URI suffix, entry list,
-   and referenced local files before treating the source cycle as raw-ready.
+   scheduler/control node validates that manifest, its source/cycle identity,
+   URI suffix, entry list, and referenced local files before treating the source
+   cycle as raw-ready.
 
-3. **Scheduler remains on node-22.** When NFS raw is ready but canonical product
+3. **Compute-visible staging is required.** Slurm compute nodes cannot be
+   assumed to read `/ghdc/data/nwm` even when the scheduler/control node can.
+   Before submitting `convert`, node-22 stages the NFS raw files into the
+   compute-visible `OBJECT_STORE_ROOT` and copies the manifest last.
+
+4. **Scheduler remains on node-22.** When NFS raw is ready but canonical product
    rows are absent, the scheduler builds a downstream restart candidate at
    `convert` and disables fresh download for that cycle. Missing required NFS
    raw evidence blocks the candidate instead of submitting node-22 download.
 
-4. **DB retirement remains a later cleanup.** Node-22 local PostgreSQL `:55433`
+5. **DB retirement remains a later cleanup.** Node-22 local PostgreSQL `:55433`
    is historical and sunset-bound, but stopping it is not part of this slice.
    That retirement needs its own replacement for scheduler locks/job state,
    archive evidence, and live observation window.
 
-5. **Rollback keeps topology truth intact.** A temporary rollback may disable
+6. **Rollback keeps topology truth intact.** A temporary rollback may disable
    the node-22 NFS gate while the new path is fixed, but docs and guardrails
    must still mark node-27 as the download owner and node-22 download as a
    deprecated emergency fallback.
@@ -65,10 +71,11 @@ present and valid.
 1. Capture current live evidence and freeze active dependency facts.
 2. Add node-27 download preflight and bounded runner.
 3. Add the node-22 scheduler NFS raw manifest bridge and required gate.
-4. Promote node-27 download to production source-cycle ownership.
-5. Observe live GFS/IFS cycles that use node-27 raw and node-22 downstream
-   compute from the shared NFS handoff.
-6. Plan any node-22 DB retirement or scheduler-state reduction as a separate
+4. Add node-22 pre-submit staging from NFS raw to compute-visible object-store.
+5. Promote node-27 download to production source-cycle ownership.
+6. Observe live GFS/IFS cycles that use node-27 raw and node-22 downstream
+   compute from the NFS handoff plus local staging.
+7. Plan any node-22 DB retirement or scheduler-state reduction as a separate
    governed change after the handoff is stable.
 
 ## Risks
@@ -78,6 +85,8 @@ present and valid.
 - Existing 22 scheduler jobs may still be running during cutover.
 - If the NFS raw manifest gate is enabled before node-27 cron is stable, 22 will
   correctly block rather than silently perform node-22 downloads.
+- If the staging root is not compute-visible, downstream Slurm stages will fail
+  even though scheduler NFS validation passed.
 - Pre-contract run packages may still need explicit transitional mirror handling.
 
 ## Rollback

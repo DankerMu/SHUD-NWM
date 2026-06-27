@@ -72,6 +72,12 @@ NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=8
 NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true
 NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT=/ghdc/data/nwm/object-store
 NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
+# Slurm compute nodes may not mount /ghdc. The scheduler/control node stages
+# node-27 NFS raw into the compute-visible OBJECT_STORE_ROOT before submitting
+# convert/forcing/forecast stages.
+NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true
+NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

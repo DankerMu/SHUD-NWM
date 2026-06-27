@@ -19,14 +19,18 @@ node-27
 node-22
   -> production scheduler/control point remains here
   -> checks shared NFS raw manifest produced by node-27
+  -> stages that cycle's raw files into compute-visible /scratch object-store
   -> starts downstream cycle from convert when raw is ready
   -> does not fall back to production download when NFS raw is required
 ```
 
 这样处理能解决当前最急的拆分点：下载和数据面归 node-27，调度和 Slurm/SHUD
-仍归 node-22，中间只用共享 NFS 上的 raw manifest 交接。node-22 本地
-PostgreSQL `:55433` 仍是历史负担，但退役它需要先替换 scheduler lock/job
-state，不并入这次下载迁移切片。
+仍归 node-22，中间用共享 NFS 上的 raw manifest 交接。由于 Slurm compute
+nodes 不能假定可读 `/ghdc/data/nwm`，node-22 scheduler/control node 在提交
+`convert` 前必须把该 cycle raw 物化到 compute-visible `OBJECT_STORE_ROOT`
+（当前 `/scratch/frd_muziyao/nhms-prod/object-store`）。node-22 本地 PostgreSQL
+`:55433` 仍是历史负担，但退役它需要先替换 scheduler lock/job state，不并入
+这次下载迁移切片。
 
 ## 2. 当前事实
 
@@ -34,8 +38,9 @@ state，不并入这次下载迁移切片。
   host；display API 使用 `127.0.0.1:55432/nhms`。
 - node-27 已能把 GFS/IFS `2026-06-26T12:00:00Z` raw 下载到共享 NFS
   object-store，并写入 node-27 `met.forecast_cycle`。
-- node-22 能看到同一份 NFS raw manifest；这说明不需要 rsync，也不需要 22
-  访问 27 的本地磁盘。
+- node-22 登录/控制节点能看到同一份 NFS raw manifest；但 Slurm compute node
+  快检显示 `/ghdc/data/nwm/object-store/...` 为 `NFS_READ_FAIL`，
+  `/scratch/frd_muziyao/nhms-prod/object-store/...` 为 `SCRATCH_READ_OK`。
 - node-22 仍运行 production scheduler/Slurm Gateway/SHUD runtime；它应该继续
   负责启动 cycle。
 - node-22 本地 `:55433` 仍可能服务 scheduler lock/job state。它不能再作为
@@ -49,6 +54,8 @@ state，不并入这次下载迁移切片。
   `raw/<source>/<cycle>/manifest.json`。
 - node-22 scheduler 在候选 cycle 上检查 NFS raw manifest；manifest 缺失、
   非法、source/cycle 不匹配或引用文件缺失时阻断该 cycle。
+- node-22 scheduler 在提交 Slurm 前把 NFS raw manifest 及其引用文件 staged
+  到 compute-visible `OBJECT_STORE_ROOT`，manifest 最后落盘。
 - raw 已 ready 且 canonical 产品缺失时，node-22 scheduler 从 `convert` 开始
   后续链路，禁止提交 `download_source_cycle`。
 - runbook、env template 和 OpenSpec 明确：27 下载，22 调度，NFS 交接。
@@ -88,9 +95,10 @@ raw manifest、raw files 和 node-27 DB source-cycle evidence。
 ### Phase 3: 禁止 node-22 下载兜底
 
 启用 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` 后，缺失或非法 manifest
-直接 block candidate；ready manifest + canonical zero rows 则从 `convert`
-启动。完成标准：focused tests 证明 scheduler 不提交 `download_source_cycle`，
-node-22 runtime env 指向共享 NFS object-store。
+直接 block candidate；ready manifest + canonical zero rows 则先 staged raw 到
+compute-visible object-store，再从 `convert` 启动。完成标准：focused tests
+证明 scheduler 不提交 `download_source_cycle`，node-22 runtime env 指向共享
+NFS object-store 和 `/scratch` staging root。
 
 ### Phase 4: 生产观察窗口
 
@@ -110,7 +118,8 @@ node-22 `:55433`。完成标准：归档/dump、checksum、rollback、两类 liv
 - node-27 live：GFS/IFS raw manifest 和 raw files 位于共享 NFS object-store。
 - node-27 DB：`met.forecast_cycle` 使用 active PostgreSQL `:55432`。
 - node-22 scheduler：候选 evidence 含 `nfs_raw_manifest`，ready 时
-  `restart_stage=convert`，missing required raw 时 block。
+  `restart_stage=convert`，提交前 `model_run_evidence` 含
+  `nfs_raw_manifest_staging`，missing required raw 时 block。
 - public display：latest-product 最终推进到 node-27 下载的 source/cycle。
 - env/secret：22 runtime 配置只暴露脱敏 evidence，不泄漏 credential。
 - regression：focused pytest、ruff、OpenSpec validate 全部通过。
@@ -123,6 +132,8 @@ node-22 `:55433`。完成标准：归档/dump、checksum、rollback、两类 liv
   node-27 evidence root。
 - NFS gate 早于 27 cron 稳定启用会让 22 block。这个行为是故意的，优先
   阻止 22 静默兜底下载。
+- compute node 不能读 `/ghdc`。scheduler/control node 必须先 staging 到
+  `/scratch`，并且 manifest 最后复制，避免 convert 看到半成品 raw。
 - 22 scheduler 当前可能仍有在跑 job。启用前先看 Slurm 队列和 scheduler
   状态，不杀正在运行的 compute job。
 

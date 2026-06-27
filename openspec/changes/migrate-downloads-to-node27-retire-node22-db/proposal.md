@@ -14,6 +14,8 @@ not from a node-22-local download or a separate node-22 source-cycle truth.
   persistence.
 - Keep the production scheduler on node-22, but make it detect completed
   node-27 downloads through shared NFS raw manifests.
+- Stage node-27 NFS raw files into node-22's compute-visible object-store before
+  submitting downstream Slurm stages, because compute nodes may not read `/ghdc`.
 - When NFS raw is ready and canonical products are absent, start the cycle from
   `convert` instead of submitting node-22 `download_source_cycle`.
 - Keep node-22 DB retirement as a later, separately gated cleanup; this change
@@ -38,7 +40,7 @@ not from a node-22-local download or a separate node-22 source-cycle truth.
 - New or updated node-27 download scripts/wrappers under `scripts/`
 - `infra/env/node27-*.example`, node-27 cron/runbook material
 - `services/orchestrator/*` scheduler/chain source-cycle readiness and restart
-  boundaries
+  boundaries, plus pre-submit raw staging
 - `infra/sbatch/*.sbatch` remains the downstream compute execution substrate
 - `docs/runbooks/current-production-ops.md`,
   `docs/governance/ROLE_BOUNDARY.md`, topology guardrails, and live receipts
