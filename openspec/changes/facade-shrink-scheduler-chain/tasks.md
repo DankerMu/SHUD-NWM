@@ -347,3 +347,20 @@
     `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_analysis_orchestrator.py`;
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
+
+- [x] 2.12 Extract chain config/source/error owner slice.
+  - Module/Scope: move source scenario mapping, orchestration error classes,
+    `OrchestratorConfig`, and `_env_flag` from
+    `services/orchestrator/chain.py` to
+    `services/orchestrator/chain_config.py`.
+  - Stable Facade: keep legacy chain import paths for config, source mapping,
+    and orchestration errors by aliasing owner definitions and preserving
+    legacy class `__module__` values.
+  - Inventory/Evidence Update: refresh structural line-count inventory for
+    `chain.py` and `chain_config.py`, with the owner under 1000 lines.
+  - Verification: `uv run pytest -q tests/test_orchestrator.py tests/test_analysis_pipeline.py -k "config or already_active or PipelineAlreadyActive"`;
+    `uv run pytest -q tests/test_ifs_forecast_integration.py tests/test_source_identity.py tests/test_orchestration_chain.py tests/test_production_scheduler.py -k "scenario or http_slurm_gateway_client or package or require_forecast_warm_start or SlurmClientError"`;
+    `uv run pytest -q tests/test_entropy_audit_script.py -k "compatibility_facade or structural_file_budget or chain"`;
+    `uv run ruff check services/orchestrator/chain.py services/orchestrator/chain_config.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
