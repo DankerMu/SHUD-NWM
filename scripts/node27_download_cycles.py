@@ -484,9 +484,13 @@ def _normalize_sources(values: Sequence[str] | None, env: dict[str, str]) -> tup
 
 def _download_command(source: str, cycle_time: str) -> list[str]:
     if source == "IFS":
-        return ["nhms-ifs", "download", "--cycle-time", cycle_time]
+        script = Path(sys.executable).with_name("nhms-ifs")
+        executable = str(script) if script.exists() else "nhms-ifs"
+        return [executable, "download", "--cycle-time", cycle_time]
     if source == "GFS":
-        return ["nhms-gfs", "download", "--cycle-time", cycle_time]
+        script = Path(sys.executable).with_name("nhms-gfs")
+        executable = str(script) if script.exists() else "nhms-gfs"
+        return [executable, "download", "--cycle-time", cycle_time]
     raise ValueError(f"Unsupported source: {source}")
 
 
