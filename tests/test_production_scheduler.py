@@ -15585,6 +15585,39 @@ def test_db_free_malformed_required_path_uri_blocks_without_crash(
     assert "postgresql" not in rendered.lower()
 
 
+@pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
+def test_db_free_required_path_symlink_loop_blocks_without_crash(
+    monkeypatch: Any,
+    tmp_path: Path,
+    path_env: str,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    target = paths[path_env]
+    if target.exists() or target.is_symlink():
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    loop = target.parent / "loop"
+    if loop.exists() or loop.is_symlink():
+        loop.unlink()
+    loop.symlink_to(loop)
+    monkeypatch.setenv(path_env, str(loop / "child"))
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+
+    assert result.status == "preflight_blocked"
+    blockers = result.evidence["db_free_runtime"]["blockers"]
+    assert path_env in {blocker["field"] for blocker in blockers}
+    assert ("db_free_required_path_unsafe", path_env) in {
+        (blocker["code"], blocker["field"]) for blocker in blockers
+    }
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
 @pytest.mark.parametrize(
     "object_uri",
     [

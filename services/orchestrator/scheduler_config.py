@@ -532,7 +532,17 @@ def _db_free_path_check(
     if not path.is_absolute():
         check.update({"absolute": False, "contained": False})
         return check, _db_free_blocker("db_free_required_path_relative", env, "relative", path=str(path))
-    resolved = path.resolve(strict=False)
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        check.update({"absolute": True, "contained": False})
+        return check, _db_free_blocker(
+            "db_free_required_path_unsafe",
+            env,
+            "unsafe",
+            path=str(path),
+            error_type=type(error).__name__,
+        )
     contained = any(_path_is_relative_to(resolved, root) for root in allowed_roots)
     check.update({"absolute": True, "resolved_path": str(resolved), "contained": contained})
     if not contained:
