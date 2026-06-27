@@ -88,17 +88,24 @@
   `services/orchestrator/scheduler_execution.py` calls it in the pre-submit
   path when `NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true`. Verification:
   focused tests cover direct staging and scheduler pre-submit staging.
-- [ ] 4.5 Enable the NFS raw-manifest gate on node-22 production scheduler.
+- [x] 4.5 Enable the NFS raw-manifest gate on node-22 production scheduler.
   Evidence floor: node-22 runtime env sets
   `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` and points
   `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` at the shared NFS object-store, plus
   `NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true` and a compute-visible
   `NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT`.
+  Evidence: `docs/runbooks/receipts/2026-06-27-node22-nfs-raw-stage-live-proof.md`
+  records node-22 runtime env activation, Slurm compute-node read proof
+  (`/ghdc` fails, `/scratch` succeeds), GFS/IFS raw staging smoke checks, and
+  the restarted compute API / scheduler pass.
 - [ ] 4.6 Record live GFS and IFS end-to-end receipts through the NFS handoff.
   Evidence floor: public latest-product advances for both sources from
   node-27-downloaded raw cycles after node-22 scheduler observes the NFS raw
   manifest, stages raw to compute-visible object-store, and starts downstream
   stages without submitting node-22 download.
+  Latest status: the 2026-06-27 node-22 scheduler pass exited successfully but
+  produced `candidate_count=0`, so it did not yet satisfy the end-to-end
+  handoff evidence floor.
 
 ## 5. Later Node-22 Scheduler-State Reduction
 
