@@ -34,6 +34,23 @@ infra/sbatch/download_source_cycle.sbatch=removed
 config/job_type_templates.yaml active download_source_cycle mapping=removed
 ```
 
+Latest post-sync scheduler pass on `24505db` / `d648c76`:
+
+```text
+artifact=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026062713_326820860c6d.json
+started_at=2026-06-27T13:41:05.490051Z
+finished_at=2026-06-27T13:43:01.438523Z
+status=planned
+dry_run=false
+selected_model_count=2
+candidate_count=0
+source_cycle_count=0
+submitted_count=0
+lock_type=postgres_advisory
+contains_download_source_cycle=false
+contains_fresh_ingestion=false
+```
+
 Sanitized scheduler env excerpt from
 `/scratch/frd_muziyao/NWM/infra/env/compute.host.env`:
 
