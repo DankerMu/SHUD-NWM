@@ -239,6 +239,63 @@ def test_one_source_failure_isolated_while_other_source_completes(
     assert "writer-secret" not in rendered
 
 
+def test_grib_env_root_bin_is_added_to_download_subprocess_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    grib_bin = tmp_path / "nhms-grib" / "bin"
+    grib_bin.mkdir(parents=True)
+    cdo = grib_bin / "cdo"
+    cdo.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cdo.chmod(0o755)
+    monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", str(tmp_path / "nhms-grib"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    seen_path: list[str] = []
+
+    def fake_download(source: str, cycle_time: str, env: dict[str, str]) -> downloader.SourceDownloadResult:
+        seen_path.append(env["PATH"])
+        return downloader.SourceDownloadResult(
+            source=source,
+            cycle_time=cycle_time,
+            status="downloaded",
+            return_code=0,
+            command=["nhms-gfs", "download"],
+            result={"status": "raw_complete", "files": 1},
+            stdout_tail='{"status":"raw_complete"}',
+            stderr_tail="",
+        )
+
+    monkeypatch.setattr(downloader, "run_source_download", fake_download)
+
+    rc, summary, _rendered = _run_main(
+        capsys,
+        [
+            "--cycle-time",
+            "2026-06-26T12:00:00Z",
+            "--source",
+            "GFS",
+            "--database-url",
+            "postgresql://node27_download_rw:writer-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["preflight"]["toolchain"]["cdo"]["path"] == str(cdo)
+    assert seen_path == [f"{grib_bin}{os.pathsep}/usr/bin"]
+
+
 def test_lock_held_blocks_without_download(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -286,4 +343,3 @@ def test_wrapper_and_env_contract_do_not_source_display_env() -> None:
     assert "NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download" in env_example
     assert "127.0.0.1:55432" in env_example
     assert "55433" in env_example
-

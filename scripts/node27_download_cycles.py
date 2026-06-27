@@ -494,6 +494,22 @@ def _download_command(source: str, cycle_time: str) -> list[str]:
     raise ValueError(f"Unsupported source: {source}")
 
 
+def _env_with_grib_toolchain(env: dict[str, str]) -> dict[str, str]:
+    prepared = dict(env)
+    grib_root = (prepared.get("NHMS_GRIB_ENV_ROOT") or "").strip()
+    if not grib_root:
+        return prepared
+    grib_bin = Path(grib_root) / "bin"
+    if not grib_bin.is_dir():
+        return prepared
+    current_path = prepared.get("PATH") or ""
+    path_parts = current_path.split(os.pathsep) if current_path else []
+    grib_bin_text = str(grib_bin)
+    if grib_bin_text not in path_parts:
+        prepared["PATH"] = os.pathsep.join([grib_bin_text, *path_parts]) if path_parts else grib_bin_text
+    return prepared
+
+
 def _bounded_text(value: str, *, limit: int = 4096) -> str:
     safe = redact_text(value)
     if len(safe) <= limit:
@@ -722,7 +738,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit_json_summary(summary)
             return LOCK_BLOCKED_RC
 
-        details = [run_source_download(source, cycle_time, env).as_dict() for source in sources]
+        download_env = _env_with_grib_toolchain(env)
+        details = [run_source_download(source, cycle_time, download_env).as_dict() for source in sources]
 
     counts = _download_counts(details)
     return_code = 1 if counts["failed"] else 0

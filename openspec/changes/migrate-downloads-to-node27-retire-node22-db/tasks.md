@@ -30,9 +30,16 @@
   `uv run pytest -q tests/test_node27_download_cycles.py` (6 passed),
   `uv run ruff check scripts/node27_download_cycles.py tests/test_node27_download_cycles.py`,
   and `bash -n scripts/node27_download_once.sh`.
-- [ ] 2.3 Produce node-27 live proof for one safe GFS or IFS cycle.
+- [x] 2.3 Produce node-27 live proof for one safe GFS or IFS cycle.
   Evidence floor: node-27 writes/verifies raw manifest and `met.forecast_cycle`
   in `:55432` without any node-22 DB access.
+  Evidence: `docs/runbooks/receipts/2026-06-27-node27-download-gfs-live-proof.md`
+  records node-27 GFS `2026-06-26T12:00:00Z` download success after installing
+  user-local GRIB tools at `/home/nwm/nhms-grib` and opening the shared NFS
+  `object-store/raw` write surface. The live run wrote 58 physical raw bundle
+  files, a manifest with 397 entries, and a node-27 DB
+  `met.forecast_cycle` row with `source_id=gfs`, `status=raw_complete`, and
+  `manifest_uri=s3://nhms/raw/gfs/2026062612/manifest.json`.
 
 ## 3. Production Download Ownership
 
