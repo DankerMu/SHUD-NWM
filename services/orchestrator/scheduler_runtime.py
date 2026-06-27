@@ -1029,5 +1029,5 @@ def _scheduler_evidence_write_context(self) -> _scheduler_evidence_module.Schedu
                 details=details,
             )
         ),
-        evidence_write_error_payload=lambda error: _scheduler._evidence_write_error_payload(error, self.config),
+        evidence_write_error_payload=_scheduler._evidence_write_error_payload,
     )

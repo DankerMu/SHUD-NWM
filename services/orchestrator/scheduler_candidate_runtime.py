@@ -583,6 +583,8 @@ def _evidence_reservation_blocked_payload(
 
 
 def _evidence_write_error_payload(error: OSError, config: Any | None = None) -> dict[str, Any]:
+    if config is None:
+        return _scheduler_evidence.evidence_write_error_payload(error)
     return _scheduler_evidence.evidence_write_error_payload(error, config)
 
 

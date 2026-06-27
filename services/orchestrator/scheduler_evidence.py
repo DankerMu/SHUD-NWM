@@ -179,7 +179,7 @@ class SchedulerEvidenceWriteContext:
     write_new_regular_file: WriteNewRegularFileCallback | None = None
     require_evidence_artifact_available: RequireEvidenceArtifactAvailableCallback | None = None
     reservation_blocked_payload: ReservationBlockedPayloadCallback | None = None
-    evidence_write_error_payload: Callable[[OSError], dict[str, Any]] | None = None
+    evidence_write_error_payload: Callable[..., dict[str, Any]] | None = None
 
 
 def base_evidence(
@@ -264,10 +264,10 @@ def write_prelock_blocked_evidence(
             return write_evidence_callback(pass_id, evidence)
         return write_evidence(context, pass_id, evidence)
     except SchedulerEvidenceWriteError as error:
-        evidence["evidence_write_error"] = {"reason": error.reason, **error.details}
+        evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
     except OSError as error:
-        evidence["evidence_write_error"] = {"reason": "evidence_write_failed", "error": str(error)}
+        evidence["evidence_write_error"] = _call_evidence_write_error_payload(context, error)
         return None
 
 
@@ -489,6 +489,15 @@ def _call_reservation_blocked_payload(
     )
 
 
+def _call_evidence_write_error_payload(context: SchedulerEvidenceWriteContext, error: OSError) -> dict[str, Any]:
+    if context.evidence_write_error_payload is not None:
+        try:
+            return context.evidence_write_error_payload(error, context.config)
+        except TypeError:
+            return context.evidence_write_error_payload(error)
+    return evidence_write_error_payload(error, context.config)
+
+
 def candidate_evidence_write_blocked_evidence(
     candidate: SchedulerCandidateLike,
     reservation: Mapping[str, Any],
@@ -664,6 +673,8 @@ def evidence_write_error_payload(
         if config is not None and artifact_path not in (None, ""):
             details["artifact_path"] = artifact_path_evidence(config, Path(str(artifact_path)))
         return {"reason": error.reason, **details}
+    if config is not None and bool(getattr(config, "scheduler_db_free_required", False)):
+        return {"reason": "evidence_write_failed", "error_type": type(error).__name__}
     return {"reason": "evidence_write_failed", "error": str(error)}
 
 
@@ -801,6 +812,8 @@ def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
     try:
         parsed = urlparse(text)
     except ValueError:
+        if db_free_required:
+            return "[invalid-uri]"
         return "[invalid-uri]" if ":" in text else text
     if parsed.scheme:
         scheme = parsed.scheme.lower()

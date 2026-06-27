@@ -6238,6 +6238,62 @@ def test_db_free_evidence_reservation_blocker_masks_artifact_path(
     assert "db-free-local-root" not in rendered
 
 
+def test_db_free_prelock_evidence_write_failure_masks_artifact_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_BACKEND", "memory")
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
+    config = ProductionSchedulerConfig(now=_dt("2026-06-27T16:00:00Z"))
+    pass_id = "scheduler_2026062716_abcdef123456"
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    result = ProductionScheduler.from_env(config).run_once()
+    rendered = json.dumps(result.evidence, sort_keys=True)
+
+    assert result.status == "preflight_blocked"
+    assert result.artifact_path is None
+    assert result.evidence["evidence_write_error"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["evidence_write_error"]["artifact_path"] == "[local-path]"
+    assert str(evidence_dir) not in rendered
+    assert "db-free-local-root" not in rendered
+
+
+def test_db_free_prelock_size_limit_failure_masks_artifact_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    from services.orchestrator import scheduler_evidence
+
+    config = ProductionSchedulerConfig(now=_dt("2026-06-27T16:00:00Z"))
+    context = _scheduler_evidence_test_context(config, max_evidence_bytes=1)
+    evidence: dict[str, Any] = {
+        "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        "pass_id": "scheduler_2026062716_abcdef123456",
+        "status": "preflight_blocked",
+        "payload": "x" * 1000,
+    }
+
+    artifact_path = scheduler_evidence.write_prelock_blocked_evidence(
+        context,
+        "scheduler_2026062716_abcdef123456",
+        evidence,
+        {"checks": {"evidence_root": {"writable": True}}},
+    )
+    rendered = json.dumps(evidence, sort_keys=True)
+
+    assert artifact_path is None
+    assert evidence["evidence_write_error"]["reason"] == "evidence_size_limit_exceeded"
+    assert evidence["evidence_write_error"]["artifact_path"] == "[local-path]"
+    assert "db-free-local-root" not in rendered
+    assert str(config.evidence_dir) not in rendered
+
+
 def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit(
     monkeypatch: Any,
     tmp_path: Path,
@@ -15555,6 +15611,7 @@ def test_db_free_selector_file_uri_uses_uri_evidence_not_file_backend(
     [
         "/tmp/unsafe-secret-token/backend",
         "../unsafe-secret-token/backend",
+        "//[unsafe-secret-token",
         "prod-secret-token",
         "db.prod.example",
     ],
@@ -15574,9 +15631,10 @@ def test_db_free_selector_non_file_text_uses_bounded_evidence(
 
     assert result.status == "preflight_blocked"
     selector_check = result.evidence["db_free_runtime"]["checks"][selector_env]
-    assert selector_check["selected"] == "[non-file]"
+    expected_evidence = "[invalid-uri]" if selector_value.startswith("//[") else "[non-file]"
+    assert selector_check["selected"] == expected_evidence
     runtime_field = _DB_FREE_SELECTOR_RUNTIME_CONFIG_FIELDS[selector_env]
-    assert result.evidence["runtime_config"][runtime_field] == "[non-file]"
+    assert result.evidence["runtime_config"][runtime_field] == expected_evidence
     assert selector_value not in rendered
     assert "unsafe-secret-token" not in rendered
     assert "db.prod.example" not in rendered
@@ -16203,6 +16261,10 @@ def test_db_free_slurm_preflight_masks_storage_root_paths(
     rendered = json.dumps(preflight, sort_keys=True)
 
     assert preflight["status"] == "blocked"
+    database_check = preflight["checks"]["database"]
+    assert database_check["required"] is False
+    assert database_check["compute_node_reachable"] == "not_required"
+    assert "SLURM_PREFLIGHT_DATABASE_URL_MISSING" not in {blocker["code"] for blocker in preflight["blockers"]}
     assert preflight["checks"]["storage_roots"]["object_store_root"]["path"] == "[local-path]"
     blocker = next(
         blocker

@@ -742,7 +742,7 @@ def _db_free_urlparse(value: str) -> Any:
     try:
         return urlparse(value)
     except ValueError:
-        if ":" in value:
+        if ":" in value or value.startswith("//"):
             raise
         return urlparse("")
 
