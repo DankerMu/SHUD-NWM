@@ -292,7 +292,7 @@ def stage_nfs_raw_manifest_to_object_store(
                 "source": NFS_RAW_MANIFEST_READY_SOURCE,
                 "source_object_store_root": "[local-path]",
                 "target_object_store_root": "[local-path]",
-                "manifest_uri": str(readiness.get("manifest_uri") or ""),
+                "manifest_uri": _object_uri_evidence(str(readiness.get("manifest_uri") or "")),
                 "manifest_key": manifest_key,
             }
     except OSError:
@@ -337,7 +337,7 @@ def stage_nfs_raw_manifest_to_object_store(
         "source_id": normalize_source_id(source_id),
         "cycle_id": str(readiness.get("cycle_id") or cycle_id_for(source_id, cycle_time)),
         "cycle_time": _format_time(cycle_time),
-        "manifest_uri": manifest_uri,
+        "manifest_uri": _object_uri_evidence(manifest_uri),
         "manifest_key": manifest_key,
         "source_object_store_root": "[local-path]",
         "target_object_store_root": "[local-path]",
@@ -568,6 +568,15 @@ def _env_flag(name: str) -> bool:
 def _absolute_path(path: str | Path) -> Path:
     root = Path(path).expanduser()
     return root if root.is_absolute() else Path.cwd() / root
+
+
+def _object_uri_evidence(value: str) -> str:
+    parsed = urlparse(str(value or ""))
+    if parsed.scheme in {"s3", "published"}:
+        return "[object-uri]"
+    if parsed.scheme:
+        return "[uri]"
+    return str(value or "")
 
 
 def _format_time(value: datetime) -> str:

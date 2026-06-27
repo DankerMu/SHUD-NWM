@@ -2124,7 +2124,9 @@ def test_nfs_raw_ready_candidate_stages_raw_before_convert_submit(
         item for item in result.evidence["model_run_evidence"] if item.get("type") == "nfs_raw_manifest_staging"
     ]
     assert staging and staging[0]["status"] == "staged"
+    assert staging[0]["manifest_uri"] == "[object-uri]"
     assert orchestrator.calls[0]["basins"][0]["restart_stage"] == "convert"
+    assert "s3://nhms/raw" not in json.dumps(staging, sort_keys=True)
 
 
 def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_path: Path) -> None:

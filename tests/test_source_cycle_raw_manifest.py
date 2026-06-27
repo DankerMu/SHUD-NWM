@@ -156,6 +156,7 @@ def test_stage_nfs_raw_manifest_to_compute_visible_object_store(tmp_path: Path) 
 
     assert staged["status"] == "staged"
     assert staged["staged_file_count"] == 1
+    assert staged["manifest_uri"] == "[object-uri]"
     assert staged["source_object_store_root"] == "[local-path]"
     assert staged["target_object_store_root"] == "[local-path]"
     assert (target_root / "raw/gfs/2026062612/file-a.grib2").read_bytes() == b"grib-bytes"
