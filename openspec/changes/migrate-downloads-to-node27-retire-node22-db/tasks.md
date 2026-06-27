@@ -132,11 +132,12 @@
   user `nwm`, a live summary JSON exists under the retention log root, and the
   first live run records planned/deleted/skipped/failed counts.
   Evidence: `docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md`.
-- [ ] 5.3 Upgrade the node-27 raw retention timer to production execute-only
+- [x] 5.3 Upgrade the node-27 raw retention timer to production execute-only
   semantics.
   Evidence floor: repo and node-27 runtime no longer expose
   `NODE27_RAW_RETENTION_DRY_RUN`, retention summaries use production execution
   mode, and a live node-27 run records planned/deleted/skipped/failed counts.
+  Evidence: `docs/runbooks/receipts/2026-06-27-node27-raw-retention-production-proof.md`.
 
 ## 6. Later Node-22 Scheduler-State Reduction
 
