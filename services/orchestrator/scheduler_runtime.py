@@ -750,6 +750,25 @@ def run_once(self) -> SchedulerPassResult:
             }
             if execution_boundary == "planning_only":
                 execution_boundary = "restart_reconcile"
+            if pass_status == "planned":
+                pass_status = "restart_reconciled"
+        elif restart_reconcile_proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+            no_mutation_proof = {
+                **_no_mutation_proof(),
+                "pipeline_status_writes": restart_reconcile_proof.get(
+                    "pipeline_status_writes",
+                    UNKNOWN_AFTER_ATTEMPT,
+                ),
+                "pipeline_event_writes": restart_reconcile_proof.get(
+                    "pipeline_event_writes",
+                    UNKNOWN_AFTER_ATTEMPT,
+                ),
+                "restart_reconcile_writes": UNKNOWN_AFTER_ATTEMPT,
+            }
+            if execution_boundary == "planning_only":
+                execution_boundary = "restart_reconcile"
+            if pass_status == "planned":
+                pass_status = "restart_reconcile_unknown"
         finished_at = _now(self.config)
         evidence = self._base_evidence(pass_id, started_at)
         evidence["operator_filters"].update(model_evidence["operator_filters"])

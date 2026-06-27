@@ -457,21 +457,53 @@ def restart_reconcile_proof(restart_reconcile_evidence: Mapping[str, Any] | None
     )
     pipeline_status_write_count = bind_count + reserved_status_update_count + inflight_status_update_count
     mutation_occurred = pipeline_status_write_count > 0
-    return {
-        "status": "mutated" if mutation_occurred else str(restart_reconcile_evidence.get("status") or "completed"),
-        "mutation_occurred": mutation_occurred,
+    error_fields = [
+        field_name
+        for field_name in ("reserved_unbound_error", "inflight_error")
+        if restart_reconcile_evidence.get(field_name) not in (None, "")
+    ]
+    unknown_after_attempt = (
+        not mutation_occurred
+        and (
+            str(restart_reconcile_evidence.get("status") or "") == "error"
+            or bool(error_fields)
+        )
+    )
+    mutation_value: bool | str = (
+        _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else mutation_occurred
+    )
+    pipeline_status_writes: bool | str = (
+        _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else mutation_occurred
+    )
+    pipeline_event_writes: bool | str = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT if unknown_after_attempt else False
+    proof: dict[str, Any] = {
+        "status": (
+            "mutated"
+            if mutation_occurred
+            else _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+            if unknown_after_attempt
+            else str(restart_reconcile_evidence.get("status") or "completed")
+        ),
+        "mutation_occurred": mutation_value,
         "bind_reservation_count": bind_count,
         "update_job_status_count": reserved_status_update_count + inflight_status_update_count,
         "reserved_unbound_mutation_count": bind_count + reserved_status_update_count,
         "inflight_mutation_count": inflight_status_update_count,
-        "pipeline_status_writes": mutation_occurred,
-        "pipeline_event_writes": False,
+        "pipeline_status_writes": pipeline_status_writes,
+        "pipeline_event_writes": pipeline_event_writes,
         "pipeline_status_write_count": pipeline_status_write_count,
         "pipeline_event_write_count": 0,
-        "pipeline_status_writes_proven_absent": not mutation_occurred,
-        "pipeline_event_writes_proven_absent": True,
+        "pipeline_status_writes_proven_absent": not mutation_occurred and not unknown_after_attempt,
+        "pipeline_event_writes_proven_absent": not unknown_after_attempt,
         "protected_by_pre_execution_evidence": False,
     }
+    if unknown_after_attempt:
+        proof["mutation_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        proof["pipeline_status_write_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        proof["pipeline_event_write_outcome"] = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+    if error_fields:
+        proof["error_fields"] = error_fields
+    return proof
 
 
 def proof_mutation_value(proof: Mapping[str, Any]) -> bool | str:

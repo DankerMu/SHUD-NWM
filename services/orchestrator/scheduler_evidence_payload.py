@@ -92,9 +92,6 @@ def _fit_bounded_evidence_payload(
     max_evidence_bytes: int,
 ) -> dict[str, Any]:
     bounded_payload = dict(payload)
-    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
-        return bounded_payload
-
     _compact_required_bounded_fields(bounded_payload)
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
@@ -215,32 +212,7 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
         "slurm_cancellation_proof",
         "restart_reconcile_proof",
     }:
-        return _compact_mapping(
-            value,
-            (
-                "status",
-                "protected_by_pre_execution_evidence",
-                "evidence_pre_execution_status",
-                "submitted_count",
-                "slurm_submit_called",
-                "slurm_submit_count",
-                "slurm_submit_proven_absent",
-                "sync_called",
-                "updated_job_count",
-                "cancellation_required",
-                "cancel_called",
-                "cancelled_job_count",
-                "mutation_occurred",
-                "bind_reservation_count",
-                "update_job_status_count",
-                "reserved_unbound_mutation_count",
-                "inflight_mutation_count",
-                "pipeline_status_writes",
-                "pipeline_event_writes",
-                "pipeline_status_write_count",
-                "pipeline_event_write_count",
-            ),
-        )
+        return _compact_write_proof(field_name, value)
     if field_name == "no_mutation_proof":
         return _compact_mapping(
             value,
@@ -508,32 +480,7 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
         "slurm_cancellation_proof",
         "restart_reconcile_proof",
     }:
-        return _compact_mapping(
-            value,
-            (
-                "status",
-                "protected_by_pre_execution_evidence",
-                "evidence_pre_execution_status",
-                "submitted_count",
-                "slurm_submit_called",
-                "slurm_submit_count",
-                "slurm_submit_proven_absent",
-                "sync_called",
-                "updated_job_count",
-                "cancellation_required",
-                "cancel_called",
-                "cancelled_job_count",
-                "mutation_occurred",
-                "bind_reservation_count",
-                "update_job_status_count",
-                "reserved_unbound_mutation_count",
-                "inflight_mutation_count",
-                "pipeline_status_writes",
-                "pipeline_event_writes",
-                "pipeline_status_write_count",
-                "pipeline_event_write_count",
-            ),
-        )
+        return _compact_write_proof(field_name, value)
     if field_name == "no_mutation_proof":
         return _compact_mapping(
             value,
@@ -571,6 +518,86 @@ def _compact_mapping(value: Any, keys: Sequence[str]) -> Any:
     if not isinstance(value, Mapping):
         return _bounded_retained_field_summary("", value)
     return {key: value[key] for key in keys if key in value}
+
+
+def _compact_write_proof(field_name: str, value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary(field_name, value)
+    if (
+        field_name == "restart_reconcile_proof"
+        and value.get("mutation_occurred") is not True
+        and value.get("mutation_outcome") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_status_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_event_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+    ):
+        return _compact_mapping(value, ("status", "mutation_occurred"))
+    if (
+        field_name == "execution_write_proof"
+        and value.get("mutation_outcome") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("slurm_submit_called") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_status_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_event_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+    ):
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "protected_by_pre_execution_evidence",
+                "submitted_count",
+                "slurm_submit_called",
+                "mutation_occurred",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+            ),
+        )
+    if (
+        field_name == "slurm_cancellation_proof"
+        and value.get("mutation_occurred") is not True
+        and value.get("mutation_outcome") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_status_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+        and value.get("pipeline_event_writes") != _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
+    ):
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "cancellation_required",
+                "cancel_called",
+                "mutation_occurred",
+            ),
+        )
+    return _compact_mapping(
+        value,
+        (
+            "status",
+            "protected_by_pre_execution_evidence",
+            "evidence_pre_execution_status",
+            "submitted_count",
+            "slurm_submit_called",
+            "slurm_submit_count",
+            "slurm_submit_proven_absent",
+            "sync_called",
+            "updated_job_count",
+            "cancellation_required",
+            "cancel_called",
+            "cancelled_job_count",
+            "mutation_outcome",
+            "mutation_occurred",
+            "bind_reservation_count",
+            "update_job_status_count",
+            "reserved_unbound_mutation_count",
+            "inflight_mutation_count",
+            "pipeline_status_writes",
+            "pipeline_event_writes",
+            "pipeline_status_write_outcome",
+            "pipeline_event_write_outcome",
+            "pipeline_status_write_count",
+            "pipeline_event_write_count",
+            "pipeline_status_writes_proven_absent",
+            "pipeline_event_writes_proven_absent",
+            "error_fields",
+        ),
+    )
 
 
 def _compact_resolved_runtime_roots(value: Any) -> Any:

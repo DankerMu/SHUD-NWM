@@ -1478,6 +1478,11 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
     assert calls[-1]["args"] == (cancellation_evidence,)
     assert scheduler_module._slurm_cancellation_unknown_count(proof)["owner"] == "slurm_cancellation_unknown_count"
     assert calls[-1]["args"] == (proof,)
+    restart_reconcile_evidence = {"status": "completed", "reserved_unbound": {"outcomes": []}}
+    assert scheduler_module._restart_reconcile_proof(restart_reconcile_evidence)["owner"] == (
+        "restart_reconcile_proof"
+    )
+    assert calls[-1]["args"] == (restart_reconcile_evidence,)
     assert (
         scheduler_module._scheduler_mutation_proof(
             execution_write_proof=execution_write_proof,
@@ -1514,6 +1519,35 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
     assert set(call["owner"] for call in calls) == set(
         scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values()
     )
+
+
+def test_restart_reconcile_proof_treats_errors_as_unknown_after_attempt() -> None:
+    proof = scheduler_module._restart_reconcile_proof(
+        {
+            "status": "error",
+            "reserved_unbound_error": "durable bind failed",
+        }
+    )
+    mutation = scheduler_module._scheduler_mutation_proof(
+        execution_write_proof=scheduler_module._execution_write_proof(),
+        slurm_status_sync_proof=scheduler_module._slurm_status_sync_proof(),
+        slurm_cancellation_proof=scheduler_module._slurm_cancellation_proof(),
+        restart_reconcile_proof=proof,
+    )
+
+    assert proof["status"] == "unknown_after_attempt"
+    assert proof["mutation_outcome"] == "unknown_after_attempt"
+    assert proof["mutation_occurred"] == "unknown_after_attempt"
+    assert proof["pipeline_status_writes"] == "unknown_after_attempt"
+    assert proof["pipeline_event_writes"] == "unknown_after_attempt"
+    assert proof["pipeline_status_writes_proven_absent"] is False
+    assert proof["pipeline_event_writes_proven_absent"] is False
+    assert proof["error_fields"] == ["reserved_unbound_error"]
+    assert scheduler_module._pipeline_status_write_proof_value(proof) == "unknown_after_attempt"
+    assert scheduler_module._pipeline_event_write_proof_value(proof) == "unknown_after_attempt"
+    assert mutation["pipeline_status_writes"] == "unknown_after_attempt"
+    assert mutation["pipeline_event_writes"] == "unknown_after_attempt"
+    assert mutation["restart_reconcile_writes"] == "unknown_after_attempt"
 
 
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
@@ -6039,6 +6073,41 @@ def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_pat
     assert "planned" not in retention
     assert "deleted" not in retention
     assert "secret-token-file" not in rendered
+    assert "/private" not in rendered
+
+
+def test_retention_bounded_evidence_compacts_paths_before_initial_fit() -> None:
+    payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_initial_fit")
+    payload["retention"] = {
+        "schema_version": "nhms.production_scheduler.retention.v1",
+        "status": "completed",
+        "enabled": True,
+        "dry_run": True,
+        "forced_dry_run_by_scheduler": True,
+        "forced_dry_run_reason": "evidence_preflight_blocked",
+        "retention_days": 14,
+        "counts": {"planned": 1, "deleted": 0, "skipped": 0, "failed": 0},
+        "planned": [{"key": "raw/gfs/secret-token-cycle", "path": "/private/secret-token-cycle"}],
+        "deleted": [],
+        "skipped": [],
+        "failed": [],
+        "freed_bytes": 0,
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=scheduler_module.MAX_EVIDENCE_BYTES,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    retention = bounded["retention"]
+    assert retention["forced_dry_run_reason"] == "evidence_preflight_blocked"
+    assert retention["planned_count"] == 1
+    assert retention["deleted_count"] == 0
+    assert "planned" not in retention
+    assert "deleted" not in retention
+    assert "secret-token-cycle" not in rendered
     assert "/private" not in rendered
 
 
@@ -17818,6 +17887,9 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
     result = scheduler.run_once()
 
     # The crashed reservation was bound back by idempotency comment at pass start.
+    assert result.status == "restart_reconciled"
+    assert result.evidence["status"] == "restart_reconciled"
+    assert result.evidence["execution_boundary"] == "restart_reconcile"
     assert bound_calls == [{"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}]
     reconcile_evidence = result.evidence["restart_reconcile"]
     assert reconcile_evidence["status"] == "completed"
@@ -17826,6 +17898,85 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
     assert reserved["outcomes"][0]["action"] == "bound"
     assert reserved["outcomes"][0]["slurm_job_id"] == "88123"
     assert reserved["outcomes"][0]["idempotency_key"] == key
+    proof = result.evidence["restart_reconcile_proof"]
+    assert proof["mutation_occurred"] is True
+    assert proof["pipeline_status_writes"] is True
+    assert proof["pipeline_event_writes"] is False
+    no_mutation = result.evidence["no_mutation_proof"]
+    assert no_mutation["pipeline_status_writes"] is True
+    assert no_mutation["pipeline_event_writes"] is False
+    assert no_mutation["restart_reconcile_writes"] is True
+
+
+def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path) -> None:
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    key = "fcst_gfs_2026052106_model_a:forcing"
+
+    class _ReservedUnboundJob:
+        job_id = "job_reserved_crash"
+        idempotency_key = key
+        status = "reserved"
+        slurm_job_id = None
+        stage = "forcing"
+        job_type = "produce_forcing_array"
+
+    class _FailingReconcileStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            return [_ReservedUnboundJob()]
+
+        def query_inflight_jobs(self) -> list[Any]:
+            return []
+
+        def bind_reservation(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("durable bind failed")
+
+        def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="88123",
+                raw_state="RUNNING",
+                job_name="nhms_forcing",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=_FailingReconcileStore(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=lambda _slurm_job_id: None,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "restart_reconcile_unknown"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "restart_reconcile_unknown"
+        assert evidence["execution_boundary"] == "restart_reconcile"
+        assert evidence["restart_reconcile"]["status"] == "error"
+        assert "durable bind failed" in evidence["restart_reconcile"]["reserved_unbound_error"]
+        proof = evidence["restart_reconcile_proof"]
+        assert proof["status"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["pipeline_status_writes"] == "unknown_after_attempt"
+        assert proof["pipeline_event_writes"] == "unknown_after_attempt"
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        no_mutation = evidence["no_mutation_proof"]
+        assert no_mutation["pipeline_status_writes"] == "unknown_after_attempt"
+        assert no_mutation["pipeline_event_writes"] == "unknown_after_attempt"
+        assert no_mutation["restart_reconcile_writes"] == "unknown_after_attempt"
 
 
 def test_restart_reconcile_mutation_is_recorded_when_later_reservation_blocks(
