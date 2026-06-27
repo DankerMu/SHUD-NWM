@@ -57,6 +57,11 @@ The committed runner now injects `NHMS_GRIB_ENV_ROOT/bin` into subprocess PATH,
 so the explicit PATH export above is no longer required after `af4ad23b` plus
 the follow-up PATH-injection commit are deployed.
 
+Post-deploy rerun on node-27 at `546af563` omitted the explicit PATH export and
+kept only `NHMS_GRIB_ENV_ROOT=/home/nwm/nhms-grib`; the runner completed with
+`result.status=already_done`, `files=397`, `total_bytes_written=0`, and
+`return_code=0`.
+
 ## Preflight
 
 Initial blocker:
@@ -184,4 +189,3 @@ Phase 2 can now build on a proven node-27 download substrate. The remaining
 production cutover work is to make 27 select cycles automatically, run IFS live
 proof, and disable node-22 production `download_source_cycle` only after 27
 owns source-cycle truth for both sources.
-
