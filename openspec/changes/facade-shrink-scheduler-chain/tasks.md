@@ -51,6 +51,24 @@
     `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
     `git diff --check`.
 
+- [x] 1.4 Extract scheduler candidate execution evidence owner slice.
+  - Module/Scope: move candidate execution attempted checks, pipeline result
+    write proofs, forcing ready/blocked evidence, Slurm preflight and secret
+    manifest blocked evidence, resource profile evidence, candidate execution
+    evidence, model-run review evidence, stage/task evidence, and resource
+    metric helpers from `services/orchestrator/scheduler.py` to
+    `services/orchestrator/scheduler_candidate_execution_evidence.py`.
+  - Stable Facade: keep legacy scheduler private helper names importable from
+    `services.orchestrator.scheduler`, forwarding lazily to the owner module
+    while preserving production contract and evidence schema semantics.
+  - Inventory/Evidence Update: refresh structural line-count inventory and
+    record `scheduler_candidate_execution_evidence.py` as the candidate
+    execution/model-run evidence owner.
+  - Verification: `uv run pytest -q tests/test_production_scheduler.py -k "model_run_evidence or candidate_evidence or preflight_blocked or resource_profile or partial_cycle or forcing_ready or forcing_blocked or evidence_write"`;
+    `uv run ruff check services/orchestrator/scheduler.py services/orchestrator/scheduler_candidate_execution_evidence.py`;
+    `openspec validate facade-shrink-scheduler-chain --strict --no-interactive`;
+    `git diff --check`.
+
 ## 2. Chain Facade Shrink
 
 - [x] 2.1 Extract chain source-cycle repair owner slice.
