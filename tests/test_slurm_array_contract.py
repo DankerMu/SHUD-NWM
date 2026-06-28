@@ -668,6 +668,24 @@ def test_state_save_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     assert captured["run_id"] == "run_001"
 
 
+def test_state_save_array_cli_accepts_legacy_run_id_only_manifest_index(monkeypatch, tmp_path):
+    captured: dict[str, str] = {}
+    path = tmp_path / "legacy_manifest_index.json"
+    path.write_text(json.dumps([{"task_id": 0, "run_id": "run_legacy_001"}]), encoding="utf-8")
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", raising=False)
+
+    def fake_save_state_for_run(run_id: str) -> dict[str, object]:
+        captured["run_id"] = run_id
+        return {"run_id": run_id, "status": "saved"}
+
+    monkeypatch.setattr(state_cli, "save_state_for_run", fake_save_state_for_run)
+
+    _invoke_main(state_cli.main, ["save", "--manifest-index", str(path), "--task-id", "0"])
+
+    assert captured["run_id"] == "run_legacy_001"
+
+
 def test_compute_frequency_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
 

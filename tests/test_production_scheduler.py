@@ -17391,6 +17391,140 @@ def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_lates
     assert "latest" not in json.dumps(state_evidence, sort_keys=True).lower()
 
 
+def test_db_free_strict_warm_start_run_once_submits_basin_manifest_init_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, dry_run=False),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"]),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    state_entry = state_fixture["entries"][0]
+    assert submitted_basin["init_state_id"] == state_entry["state_id"]
+    assert submitted_basin["init_state_uri"] == state_entry["state_uri"]
+    assert submitted_basin["init_state_checksum"] == state_entry["checksum"]
+    assert submitted_basin["init_state_valid_time"] == state_entry["valid_time"]
+    assert submitted_basin["init_state_quality"] == "fresh"
+    assert submitted_basin["init_state_lineage"]["source_id"] == "gfs"
+    assert submitted_basin["init_state_lineage"]["lead_hours"] == 12
+    assert submitted_basin["init_state_lineage"]["model_package_checksum"] == fixture["package_checksum"]
+    assert submitted_basin["state_evidence"]["candidate_state"]["init_state_id"] == state_entry["state_id"]
+    assert result.evidence["candidates"][0]["state_evidence"]["state_snapshot_index"]["entry_status"] == "ready"
+
+
+def test_db_free_strict_warm_start_blocks_active_slurm_before_status_sync(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    repository = CandidateAndActiveRepository(
+        {
+            "pipeline_status": "running",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_forcing",
+                    "status": "running",
+                    "stage": "forcing",
+                    "slurm_job_id": "7777",
+                }
+            ],
+        },
+        [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+    )
+    factory_calls: list[str] = []
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    class SyncMustNotRunOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            del cycle_id
+            raise AssertionError("sync_cycle_statuses must not run before strict warm-start gate")
+
+    def factory(source_id: str) -> SyncMustNotRunOrchestrator:
+        factory_calls.append(source_id)
+        return SyncMustNotRunOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, dry_run=False),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=factory,
+    )
+
+    result = scheduler.run_once()
+
+    assert factory_calls == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["slurm_status_sync_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
+    assert result.evidence["blocked_candidates"][0]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert result.evidence["blocked_candidates"][0]["state_evidence"]["reason"] == (
+        "state_snapshot_index_exact_checkpoint_missing"
+    )
+
+
 def test_db_free_orchestrator_uses_slurm_gateway_retry_config(
     monkeypatch: Any,
     tmp_path: Path,

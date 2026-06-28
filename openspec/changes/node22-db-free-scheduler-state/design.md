@@ -683,6 +683,9 @@ Must add/change:
 - Index validation checks schema version, generated time, checksum, entry
   count, JSON complexity, usable flag, object existence, object checksum,
   source/model/time identity, and model package identity.
+- State object references are supported object URIs (`s3` or `published`) with
+  configured object-store boundaries; legacy relative object-store keys remain
+  accepted only after safe containment validation under `OBJECT_STORE_ROOT`.
 - DB-free `state_save_qc` obtains run context from manifest-index or explicit
   `NHMS_*` runtime env and writes state-index entries without constructing DB
   repositories.
@@ -744,7 +747,10 @@ Boundary-surface checklist:
 - Read surfaces: `NHMS_SCHEDULER_STATE_INDEX`, object-store state URI, manifest
   index rows, `NHMS_*` runtime env, and existing file journal candidate state.
 - Write/delete/overwrite surfaces: state-index publish/update only; no delete
-  or cleanup behavior is introduced by #835.
+  or cleanup behavior is introduced by #835. File-backed state-index
+  read/modify/publish is serialized by an adjacent local lock for local and
+  LocalObjectStore-backed object indexes; unsafe/unlockable backends fail
+  closed.
 - Staging/publish/rollback surfaces: state-index publisher validates referenced
   state objects before publishing the index as the last artifact.
 - Producer/consumer evidence boundaries: `state_save_qc` produces state-index
@@ -797,6 +803,12 @@ Invariant Matrix:
     `state_snapshot_index_object_checksum_mismatch`.
   - `usable_flag=false` -> blocks
     `state_snapshot_index_checkpoint_unusable`.
+  - Non-boolean `usable_flag` -> fail-closed
+    `state_snapshot_index_usable_flag_invalid` with no `candidate_state`.
+  - Unsafe or cross-prefix state object URI -> fail-closed
+    state-index object URI blocker with no local root leakage.
+  - Concurrent DB-free state-index upserts for distinct keys -> serialized
+    update preserves both entries.
   - Wrong source/model/time/package or stale/unsupported index -> fail-closed
     state-index blocker, no DB fallback.
   - DB-free `state_cli save` with manifest-index and no `DATABASE_URL` ->

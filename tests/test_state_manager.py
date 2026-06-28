@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -324,6 +326,274 @@ def test_file_state_snapshot_index_fail_closed_cases(
     assert "latest" not in json.dumps(evidence).lower()
 
 
+@pytest.mark.parametrize("usable_flag", ["false", "0", 1, None])
+def test_file_state_snapshot_index_rejects_non_boolean_usable_flag(
+    tmp_path: Path,
+    usable_flag: Any,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"typed-usable")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    entry = {
+        "state_id": "state_gfs_model_a_2026052106",
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026052018_model_a",
+        "source_id": "gfs",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": usable_flag,
+        "lead_hours": 12,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": "package-sha",
+    }
+    _write_state_index_payload(index_path, [entry], generated_at="2026-05-21T12:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "state_snapshot_index_usable_flag_invalid"
+    assert "candidate_state" not in evidence
+
+
+@pytest.mark.parametrize(
+    ("state_uri", "expected_reason"),
+    [
+        ("s3://other-bucket/states/gfs/model_a/2026052106/state.cfg.ic", "state_snapshot_index_object_unsafe_uri"),
+        ("s3://nhms/states/gfs/model_a/2026052106/state.cfg.ic?token=secret", "state_snapshot_index_object_unsafe_uri"),
+        ("s3://nhms/states/gfs/%2e%2e/model_a/state.cfg.ic", "state_snapshot_index_object_unsafe_uri"),
+        ("/tmp/state.cfg.ic", "state_snapshot_index_object_unsafe_uri"),
+        ("file:///tmp/state.cfg.ic", "state_snapshot_index_object_unsupported_uri"),
+    ],
+)
+def test_file_state_snapshot_index_rejects_unsafe_state_object_uris(
+    tmp_path: Path,
+    state_uri: str,
+    expected_reason: str,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"unsafe-uri")
+    object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    entry = {
+        "state_id": "state_gfs_model_a_2026052106",
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026052018_model_a",
+        "source_id": "gfs",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "lead_hours": 12,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": "package-sha",
+    }
+    _write_state_index_payload(index_path, [entry], generated_at="2026-05-21T12:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == expected_reason
+    assert "candidate_state" not in evidence
+    assert str(object_root) not in json.dumps(evidence, sort_keys=True)
+
+
+def test_file_state_snapshot_index_accepts_relative_object_key_compatibility(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"relative-key")
+    object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    entry = {
+        "state_id": "state_gfs_model_a_2026052106",
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026052018_model_a",
+        "source_id": "gfs",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "state_uri": "states/gfs/model_a/2026052106/state.cfg.ic",
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "lead_hours": 12,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": "package-sha",
+    }
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert evidence["ready"] is True
+    assert evidence["candidate_state"]["init_state_uri"] == "states/gfs/model_a/2026052106/state.cfg.ic"
+
+
+def test_strict_warm_start_evidence_uses_one_index_snapshot(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    first_content = _valid_ic_bytes(b"first-snapshot")
+    second_content = _valid_ic_bytes(b"second-snapshot")
+    first_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/first.cfg.ic", first_content)
+    second_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/second.cfg.ic", second_content)
+    first_path = tmp_path / "first-index.json"
+    second_path = tmp_path / "second-index.json"
+    first_entry = _state_index_test_entry(first_uri, first_content, state_id="state_first")
+    second_entry = _state_index_test_entry(second_uri, second_content, state_id="state_second")
+    publish_state_snapshot_index(
+        [first_entry],
+        first_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    publish_state_snapshot_index(
+        [second_entry],
+        second_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    payloads = [
+        (json.loads(first_path.read_text(encoding="utf-8")), first_path.read_bytes()),
+        (json.loads(second_path.read_text(encoding="utf-8")), second_path.read_bytes()),
+    ]
+    reads = {"count": 0}
+
+    def flipping_read_payload(
+        self: FileStateSnapshotIndexRepository,
+        *,
+        allow_empty: bool,
+    ) -> tuple[dict[str, Any], bytes]:
+        del self, allow_empty
+        index = min(reads["count"], len(payloads) - 1)
+        reads["count"] += 1
+        payload, content = payloads[index]
+        return dict(payload), bytes(content)
+
+    monkeypatch.setattr(FileStateSnapshotIndexRepository, "_read_payload", flipping_read_payload)
+    repository = FileStateSnapshotIndexRepository(
+        str(first_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert reads["count"] == 1
+    assert evidence["ready"] is True
+    assert evidence["candidate_state"]["init_state_id"] == "state_first"
+    assert evidence["state_snapshot_index"]["object_evidence"]["checksum_verified"] is True
+
+
+def test_file_state_snapshot_index_concurrent_upserts_preserve_distinct_entries(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    index_path = tmp_path / "state-index.json"
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    snapshots: list[StateSnapshot] = []
+    for source_id, hour in (("gfs", "06"), ("ifs", "12")):
+        content = _valid_ic_bytes(f"{source_id}-state".encode("utf-8"))
+        state_uri = object_store.write_bytes_atomic(
+            f"states/{source_id}/model_a/20260521{hour}/state.cfg.ic",
+            content,
+        )
+        snapshots.append(
+            StateSnapshot(
+                state_id=f"state_{source_id}_model_a_20260521{hour}",
+                model_id="model_a",
+                run_id=f"analysis_{source_id}_20260521{hour}_model_a",
+                valid_time=_dt(f"2026-05-21T{hour}:00:00Z"),
+                state_uri=state_uri,
+                checksum=f"sha256:{sha256_bytes(content)}",
+                usable_flag=True,
+                source_id=source_id,
+                cycle_id=f"{source_id}_20260521{hour}",
+                lead_hours=12,
+                model_package_version="s3://nhms/models/model_a/package/",
+                model_package_checksum="package-sha",
+            )
+        )
+    barrier = threading.Barrier(len(snapshots))
+
+    def upsert(snapshot: StateSnapshot) -> None:
+        repository = FileStateSnapshotIndexRepository(
+            str(index_path),
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            now=generated_at,
+            create_missing=True,
+        )
+        barrier.wait(timeout=5)
+        repository.upsert_state_snapshot(snapshot)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for result in [executor.submit(upsert, snapshot) for snapshot in snapshots]:
+            result.result(timeout=10)
+
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+    )
+    listed = repository.list_state_snapshots(model_id="model_a", usable=True, limit=10, offset=0)
+
+    assert listed["total_count"] == 2
+    assert {item["state_id"] for item in listed["items"]} == {snapshot.state_id for snapshot in snapshots}
+
+
 def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatch: Any, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
@@ -373,8 +643,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
         lambda: pytest.fail("DB-free state save must not construct PsycopgStateSnapshotRepository"),
     )
 
-    resolved_run_id, run_context = state_cli.resolve_run_context(None, str(manifest_index), 0)
-    result = state_cli.save_state_for_run(resolved_run_id, run_context=run_context)
+    result_code = _state_cli_exit_code(["save", "--manifest-index", str(manifest_index), "--task-id", "0"])
     repository = FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,
@@ -386,7 +655,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
         valid_time=_dt("2026-05-21T18:00:00Z"),
     )
 
-    assert result["qc_passed"] is True
+    assert result_code == 0
     assert snapshot is not None
     assert snapshot.usable_flag is True
     assert snapshot.model_package_checksum == "package-sha"
@@ -566,6 +835,50 @@ def _valid_ic_bytes(content: bytes) -> bytes:
         "1\t0.5",
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _write_state_index_payload(path: Path, entries: list[dict[str, Any]], *, generated_at: str) -> None:
+    payload: dict[str, Any] = {
+        "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "entries": entries,
+    }
+    payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _payload_checksum(payload: Mapping[str, Any]) -> str:
+    content = json.dumps(
+        {key: value for key, value in payload.items() if key != "checksum"},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return sha256_bytes(content)
+
+
+def _state_index_test_entry(state_uri: str, content: bytes, *, state_id: str) -> dict[str, Any]:
+    return {
+        "state_id": state_id,
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026052018_model_a",
+        "source_id": "gfs",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "cycle_id": "gfs_2026052018",
+        "lead_hours": 12,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": "package-sha",
+    }
+
+
+def _state_cli_exit_code(argv: list[str]) -> int:
+    try:
+        return state_cli.main(argv)
+    except SystemExit as error:
+        return int(error.code or 0)
 
 
 def _save_ic(

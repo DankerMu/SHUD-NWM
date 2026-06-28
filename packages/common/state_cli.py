@@ -10,8 +10,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
+from packages.common.manifest_index import (
+    MAX_MANIFEST_INDEX_BYTES,
+    MAX_MANIFEST_INDEX_ENTRIES,
+    SAFE_IDENTIFIER_RE,
+    ManifestValidationError,
+    load_manifest_entry,
+    resolve_task_id,
+    validate_manifest_index_entry_count,
+)
 from packages.common.object_store import LocalObjectStore
+from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
     PsycopgStateSnapshotRepository,
@@ -209,7 +218,7 @@ def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
 def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
-        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        entry = _load_state_save_manifest_entry(manifest_index, resolved_task_id)
         return str(entry["run_id"])
     if not run_id:
         raise ManifestValidationError(
@@ -226,7 +235,7 @@ def resolve_run_context(
 ) -> tuple[str, StateRunContext | None]:
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
-        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        entry = _load_state_save_manifest_entry(manifest_index, resolved_task_id)
         resolved_run_id = str(entry["run_id"])
         if _db_free_state_save_enabled():
             return resolved_run_id, _state_run_context_from_manifest_entry(entry)
@@ -262,6 +271,53 @@ def _db_free_state_save_enabled() -> bool:
     return _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED") and os.getenv(
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""
     ).strip().lower() == "file"
+
+
+def _load_state_save_manifest_entry(manifest_index: str, task_id: int) -> dict[str, Any]:
+    if _db_free_state_save_enabled():
+        return load_manifest_entry(manifest_index, task_id)
+    try:
+        return load_manifest_entry(manifest_index, task_id)
+    except ManifestValidationError as strict_error:
+        legacy = _load_legacy_state_save_manifest_entry(manifest_index, task_id)
+        if legacy is not None:
+            return legacy
+        raise strict_error
+
+
+def _load_legacy_state_save_manifest_entry(manifest_index: str, task_id: int) -> dict[str, Any] | None:
+    try:
+        raw = read_bytes_limited_no_follow(Path(manifest_index), max_bytes=MAX_MANIFEST_INDEX_BYTES)
+        if len(raw) > MAX_MANIFEST_INDEX_BYTES:
+            raise ManifestValidationError(
+                "Manifest index file exceeds size limit",
+                {"manifest_index_path": manifest_index, "size_limit": MAX_MANIFEST_INDEX_BYTES},
+            )
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManifestValidationError(
+            f"Unable to safely read legacy state-save manifest index: {error}",
+            {"manifest_index_path": manifest_index, "task_id": task_id, "error": str(error)},
+        ) from error
+    if not isinstance(data, list):
+        return None
+    validate_manifest_index_entry_count(len(data), max_entries=MAX_MANIFEST_INDEX_ENTRIES)
+    if task_id < 0 or task_id >= len(data):
+        return None
+    entry = data[task_id]
+    if not isinstance(entry, Mapping):
+        return None
+    result = dict(entry)
+    if set(result).difference({"task_id", "run_id"}):
+        return None
+    try:
+        stored_task_id = int(result.get("task_id"))
+    except (TypeError, ValueError):
+        return None
+    run_id = str(result.get("run_id") or "")
+    if stored_task_id != task_id or not run_id or SAFE_IDENTIFIER_RE.fullmatch(run_id) is None:
+        return None
+    return {"task_id": stored_task_id, "run_id": run_id}
 
 
 def _state_run_context_from_manifest_entry(entry: Mapping[str, Any]) -> StateRunContext:

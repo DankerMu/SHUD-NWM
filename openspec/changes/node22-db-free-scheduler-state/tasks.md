@@ -187,6 +187,13 @@ Scenario evidence rows for section 5:
   `state_snapshot_index_object_checksum_mismatch`.
 - `usable_flag=false` -> lookup blocks with
   `state_snapshot_index_checkpoint_unusable`.
+- Non-boolean `usable_flag` -> lookup fails closed with
+  `state_snapshot_index_usable_flag_invalid`.
+- Unsafe, encoded traversal, cross-prefix, or local absolute state object URI
+  -> lookup fails closed with state-index object URI evidence and no local root
+  leakage.
+- Concurrent DB-free file-index upserts for distinct state identities ->
+  serialized update preserves both entries.
 - Wrong model/source/time/package or stale/unsupported/malformed index ->
   lookup fails closed with state-index evidence and no
   `PsycopgStateSnapshotRepository`.
