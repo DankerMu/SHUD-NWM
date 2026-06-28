@@ -20,14 +20,14 @@ from packages.common.manifest_index import (
     validate_manifest_index_entry_count,
 )
 from packages.common.object_store import LocalObjectStore
-from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, read_bytes_limited_no_follow
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
     PsycopgStateSnapshotRepository,
     StateManager,
     StateManagerError,
 )
-from packages.common.state_qc import cfg_ic_header_minute_index
+from packages.common.state_qc import MAX_STATE_IC_BYTES, cfg_ic_header_minute_index
 from workers.data_adapters.base import cycle_id_for, parse_cycle_time
 
 
@@ -49,6 +49,10 @@ class StateCheckpoint:
     ic_file: Path
     original_shud_filename: str
     lead_hours: int | None = None
+
+
+MAX_STATE_CHECKPOINT_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES = 10_000
 
 
 class StateRunRepository:
@@ -193,7 +197,11 @@ def save_state_for_run(
 def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
     """Return an IC file whose header minute-time is absolute at valid_time."""
 
-    content = checkpoint.ic_file.read_text(encoding="utf-8")
+    content = _read_limited_text_no_follow(
+        checkpoint.ic_file,
+        max_bytes=MAX_STATE_IC_BYTES,
+        label="state checkpoint IC file",
+    )
     lines = content.splitlines()
     if not lines:
         return checkpoint.ic_file
@@ -211,7 +219,7 @@ def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
     normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
     header[minute_index] = f"{expected_minute:.6f}"
     lines[0] = "\t".join(header)
-    normalized.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
     return normalized
 
 
@@ -445,12 +453,23 @@ def _find_state_checkpoints(
 
 def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint]:
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        payload = json.loads(
+            _read_limited_text_no_follow(
+                manifest_path,
+                max_bytes=MAX_STATE_CHECKPOINT_MANIFEST_BYTES,
+                label="state checkpoint manifest",
+            )
+        )
+    except (OSError, json.JSONDecodeError, StateManagerError) as error:
         raise StateManagerError(f"Invalid state checkpoint manifest {manifest_path}: {error}") from error
     raw_checkpoints = payload.get("checkpoints") if isinstance(payload, dict) else None
     if not isinstance(raw_checkpoints, Sequence) or isinstance(raw_checkpoints, str | bytes):
         return []
+    if len(raw_checkpoints) > MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES:
+        raise StateManagerError(
+            "State checkpoint manifest exceeds maximum entry count: "
+            f"{len(raw_checkpoints)} > {MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES}"
+        )
     output_root = manifest_path.parent.parent
     checkpoints: list[StateCheckpoint] = []
     for raw in raw_checkpoints:
@@ -477,6 +496,18 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
         )
     checkpoints.sort(key=lambda item: item.valid_time)
     return checkpoints
+
+
+def _read_limited_text_no_follow(path: Path, *, max_bytes: int, label: str) -> str:
+    try:
+        raw = read_bytes_limited_no_follow(path, max_bytes=max_bytes)
+        if len(raw) > max_bytes:
+            raise StateManagerError(f"{label} exceeds size limit of {max_bytes} bytes: {path}")
+        return raw.decode("utf-8")
+    except StateManagerError:
+        raise
+    except (OSError, SafeFilesystemError, UnicodeDecodeError) as error:
+        raise StateManagerError(f"Unable to safely read {label} {path}: {error}") from error
 
 
 def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStore) -> Path:

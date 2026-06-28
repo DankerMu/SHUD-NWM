@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 
@@ -37,6 +37,9 @@ MAX_STATE_SNAPSHOT_INDEX_ENTRIES = 100_000
 DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS = 168
 MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH = 64
 MAX_STATE_SNAPSHOT_INDEX_JSON_NODES = 300_000
+STATE_INDEX_CONTROL_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products", "runs"})
+STATE_INDEX_CONTROL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 
 
 def default_database_url() -> str:
@@ -152,8 +155,14 @@ class StateManager:
         state_id = state_snapshot_id(model_id, parsed_valid_time, source_id=source_id)
         path = Path(ic_file_path)
         try:
-            content = path.read_bytes()
-        except OSError as error:
+            content = read_bytes_limited_no_follow(path, max_bytes=MAX_STATE_IC_BYTES)
+            if len(content) > MAX_STATE_IC_BYTES:
+                raise StateManagerError(
+                    f"State snapshot file {path} exceeds size limit of {MAX_STATE_IC_BYTES} bytes."
+                )
+        except StateManagerError:
+            raise
+        except (OSError, SafeFilesystemError) as error:
             raise StateManagerError(f"Failed to read state snapshot file {path}: {error}") from error
 
         checksum = sha256_bytes(content)
@@ -1368,12 +1377,17 @@ def _read_state_index_bytes(
 ) -> bytes:
     parsed = urlparse(str(uri))
     if parsed.scheme in {"s3", "published"}:
-        return _state_index_object_store(
+        path, containment_root = _state_index_control_object_path(
             str(uri),
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
-        ).read_bytes_limited(_state_index_object_key(str(uri)), max_bytes=max_bytes)
+            field="index",
+        )
+        content = read_bytes_limited_no_follow(path, max_bytes=max_bytes, containment_root=containment_root)
+        if len(content) > max_bytes:
+            raise _state_index_error("state_snapshot_index_size_limit_exceeded", field="index")
+        return content
     return read_bytes_limited_no_follow(Path(uri).expanduser(), max_bytes=max_bytes)
 
 
@@ -1387,12 +1401,14 @@ def _write_state_index_bytes(
 ) -> None:
     parsed = urlparse(str(uri))
     if parsed.scheme in {"s3", "published"}:
-        _state_index_object_store(
+        path, containment_root = _state_index_control_object_path(
             str(uri),
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
-        ).write_bytes_atomic(_state_index_object_key(str(uri)), content)
+            field="index",
+        )
+        atomic_write_bytes_no_follow(path, content, containment_root=containment_root, temp_suffix="part")
         return
     atomic_write_bytes_no_follow(Path(uri).expanduser(), content)
 
@@ -1447,6 +1463,103 @@ def _state_index_object_store(
     return LocalObjectStore(root, object_store_prefix=prefix or "")
 
 
+def _state_index_control_object_path(
+    uri: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+    field: str,
+) -> tuple[Path, Path]:
+    parsed = urlparse(str(uri))
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    if parsed.scheme == "published":
+        root = published_artifact_root or os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT") or object_store_root
+        key = _validate_state_index_control_key(_state_index_object_key(uri), field=field, require_public_prefix=True)
+    elif parsed.scheme == "s3":
+        root = object_store_root or os.getenv("OBJECT_STORE_ROOT")
+        key = _state_index_s3_control_key(
+            uri,
+            object_store_prefix=object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", ""),
+            field=field,
+        )
+    else:
+        raise _state_index_error("state_snapshot_index_object_unsupported_uri", field=field)
+    if root in (None, ""):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    root_path = Path(root).expanduser()
+    root_path = root_path if root_path.is_absolute() else Path.cwd() / root_path
+    try:
+        ensure_directory_no_follow(root_path)
+        target = root_path / key
+        target.relative_to(root_path)
+    except (OSError, SafeFilesystemError, ValueError) as error:
+        raise _state_index_error(
+            "state_snapshot_index_object_unsafe_uri",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+    return target, root_path
+
+
+def _state_index_s3_control_key(
+    uri: str,
+    *,
+    object_store_prefix: str,
+    field: str,
+) -> str:
+    parsed = urlparse(str(uri))
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    raw_key = str(parsed.path or "").lstrip("/")
+    target_key = _validate_state_index_control_key(raw_key, field=field, require_public_prefix=False)
+    prefix = str(object_store_prefix or "").strip().rstrip("/")
+    if not prefix:
+        return _validate_state_index_control_key(raw_key, field=field, require_public_prefix=True)
+    try:
+        prefix_parsed = urlparse(prefix)
+    except ValueError as error:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field) from error
+    if (
+        prefix_parsed.scheme != "s3"
+        or not prefix_parsed.netloc
+        or prefix_parsed.username
+        or prefix_parsed.password
+        or prefix_parsed.query
+        or prefix_parsed.fragment
+        or prefix_parsed.netloc != parsed.netloc
+    ):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    prefix_key = str(prefix_parsed.path or "").lstrip("/")
+    if not prefix_key:
+        return _validate_state_index_control_key(raw_key, field=field, require_public_prefix=True)
+    normalized_prefix = _validate_state_index_control_key(prefix_key, field=field, require_public_prefix=False)
+    if target_key == normalized_prefix or not target_key.startswith(f"{normalized_prefix}/"):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    return _validate_state_index_control_key(
+        target_key[len(normalized_prefix) + 1 :],
+        field=field,
+        require_public_prefix=False,
+    )
+
+
+def _validate_state_index_control_key(raw_key: str, *, field: str, require_public_prefix: bool) -> str:
+    if STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE.search(raw_key):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    decoded = unquote(str(raw_key or "").strip("/"))
+    if not decoded or "\\" in decoded or any(ord(character) < 32 or ord(character) == 127 for character in decoded):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    parts = PurePosixPath(decoded).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    if require_public_prefix and parts[0] not in STATE_INDEX_CONTROL_OBJECT_PREFIXES:
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    if any(not STATE_INDEX_CONTROL_SEGMENT_RE.fullmatch(part) for part in parts):
+        raise _state_index_error("state_snapshot_index_object_unsafe_uri", field=field)
+    return "/".join(parts)
+
+
 def _state_index_object_key(uri: str) -> str:
     parsed = urlparse(str(uri))
     if parsed.scheme == "published":
@@ -1464,20 +1577,20 @@ def _state_index_lock_path(
     parsed = urlparse(str(uri))
     if parsed.scheme in {"s3", "published"}:
         try:
-            store = _state_index_object_store(
+            index_path, containment_root = _state_index_control_object_path(
                 str(uri),
                 object_store_root=object_store_root,
                 object_store_prefix=object_store_prefix,
                 published_artifact_root=published_artifact_root,
+                field="index",
             )
-            index_path = store.resolve_path(_state_index_object_key(str(uri)))
-        except (ObjectStoreError, ValueError) as error:
+        except StateManagerError as error:
             raise _state_index_error(
                 "state_snapshot_index_lock_unavailable",
                 field="index",
                 evidence={"error_type": type(error).__name__},
             ) from error
-        return index_path.with_name(f".{index_path.name}.lock"), Path(store.root)
+        return index_path.with_name(f".{index_path.name}.lock"), containment_root
     if parsed.scheme:
         raise _state_index_error("state_snapshot_index_lock_unavailable", field="index")
     return Path(uri).expanduser().with_name(f".{Path(uri).expanduser().name}.lock"), None
