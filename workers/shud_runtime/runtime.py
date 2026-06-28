@@ -831,7 +831,9 @@ class SHUDRuntime:
 
             self._clear_staged_initial_states(input_dir)
             staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(state_uri, input_dir)
-            if staged_path is not None and (expected_checksum is None or actual_checksum == expected_checksum):
+            if staged_path is not None and (
+                expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
+            ):
                 self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
                 _set_runtime_init_mode(manifest, 3)
                 self._sync_init_state_id(manifest)
@@ -2656,6 +2658,19 @@ def _initial_state_checksum(manifest: dict[str, Any]) -> str | None:
     initial_state = manifest.get("initial_state") or {}
     checksum = initial_state.get("checksum")
     return str(checksum) if checksum else None
+
+
+def _checksum_matches(expected: str | None, actual: str | None) -> bool:
+    if expected in (None, "") or actual in (None, ""):
+        return False
+    return _checksum_value(expected) == _checksum_value(actual)
+
+
+def _checksum_value(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("sha256:"):
+        return text.split(":", 1)[1]
+    return text
 
 
 def _initial_state_quality(manifest: dict[str, Any]) -> str | None:

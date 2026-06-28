@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Protocol
@@ -634,6 +635,12 @@ class FileStateSnapshotIndexRepository:
     now: datetime | None = None
     max_age_hours: int = DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS
     create_missing: bool = False
+    _index_snapshot_cache: _StateIndexSnapshot | None = dataclass_field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_env(cls, *, create_missing: bool = False) -> FileStateSnapshotIndexRepository:
@@ -676,6 +683,7 @@ class FileStateSnapshotIndexRepository:
             )
             entries[key] = _state_index_entry_from_snapshot(snapshot)
             self._publish_entries(entries.values())
+            self._clear_index_snapshot_cache()
         return snapshot
 
     def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
@@ -696,6 +704,7 @@ class FileStateSnapshotIndexRepository:
             )
             entries[selected_key] = selected
             self._publish_entries(entries.values())
+            self._clear_index_snapshot_cache()
             return _state_snapshot_from_index_entry(selected)
 
     def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
@@ -759,6 +768,23 @@ class FileStateSnapshotIndexRepository:
                 source_id=source_id,
                 valid_time=valid_time,
             )
+        try:
+            entry = self._entry_with_verified_object(entry)
+        except StateManagerError as error:
+            index_evidence = {
+                **index_evidence,
+                "entry_status": "object_unavailable",
+                "entry_model_id": str(entry.get("model_id") or ""),
+                "entry_source_id": str(entry.get("source_id") or ""),
+                "entry_valid_time": str(entry.get("valid_time") or ""),
+            }
+            return _state_index_unavailable_evidence(
+                reason=str(getattr(error, "reason", "state_snapshot_index_object_unreadable")),
+                index_evidence=index_evidence,
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
         snapshot = _state_snapshot_from_index_entry(entry)
         if not snapshot.usable_flag:
             return _state_index_unavailable_evidence(
@@ -807,7 +833,10 @@ class FileStateSnapshotIndexRepository:
             return self._blocked_index_evidence(error)
 
     def refresh(self) -> None:
-        return None
+        self._clear_index_snapshot_cache()
+
+    def _clear_index_snapshot_cache(self) -> None:
+        object.__setattr__(self, "_index_snapshot_cache", None)
 
     def _snapshot_key(self, *, model_id: str, source_id: str | None, valid_time: datetime) -> tuple[str, str, str]:
         if source_id in (None, ""):
@@ -856,6 +885,9 @@ class FileStateSnapshotIndexRepository:
         )
 
     def _load_index_snapshot(self, *, allow_empty: bool) -> _StateIndexSnapshot:
+        cached = self._index_snapshot_cache
+        if not allow_empty and cached is not None:
+            return cached
         payload, content = self._read_payload(allow_empty=allow_empty)
         entries: dict[tuple[str, str, str], dict[str, Any]]
         if not payload and allow_empty:
@@ -868,6 +900,7 @@ class FileStateSnapshotIndexRepository:
                 published_artifact_root=self.published_artifact_root,
                 now=self.now,
                 max_age_hours=self.max_age_hours,
+                verify_objects=False,
             )
         evidence = _state_index_evidence_safe(
             {
@@ -883,7 +916,22 @@ class FileStateSnapshotIndexRepository:
                 "index_bytes": len(content),
             }
         )
-        return _StateIndexSnapshot(payload=dict(payload), content=content, entries=entries, evidence=evidence)
+        snapshot = _StateIndexSnapshot(payload=dict(payload), content=content, entries=entries, evidence=evidence)
+        if not allow_empty:
+            object.__setattr__(self, "_index_snapshot_cache", snapshot)
+        return snapshot
+
+    def _entry_with_verified_object(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        verified = dict(entry)
+        verified["object_evidence"] = _verify_state_index_object(
+            str(verified["state_uri"]),
+            str(verified["checksum"]),
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            field="entries[].state_uri",
+        )
+        return verified
 
     def _blocked_index_evidence(self, error: StateManagerError) -> dict[str, Any]:
         return _state_index_evidence_safe(
@@ -1001,6 +1049,7 @@ def _validate_state_snapshot_index(
     published_artifact_root: str | Path | None,
     now: datetime | None,
     max_age_hours: int,
+    verify_objects: bool = True,
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
     if payload.get("schema_version") != FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION:
         raise _state_index_error("state_snapshot_index_schema_unsupported", field="schema_version")
@@ -1026,6 +1075,7 @@ def _validate_state_snapshot_index(
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
+            verify_object=verify_objects,
         )
         key = (
             str(entry["model_id"]),
@@ -1050,6 +1100,7 @@ def _normalize_state_index_entry(
     object_store_root: str | Path | None,
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
+    verify_object: bool,
 ) -> dict[str, Any]:
     row = dict(item)
     required = ("state_id", "model_id", "run_id", "source_id", "valid_time", "state_uri", "checksum", "usable_flag")
@@ -1071,14 +1122,24 @@ def _normalize_state_index_entry(
     state_uri = str(row["state_uri"])
     checksum = str(row["checksum"])
     usable_flag = _require_state_index_bool(row.get("usable_flag"), field=f"entries[{index}].usable_flag")
-    object_evidence = _verify_state_index_object(
-        state_uri,
-        checksum,
-        object_store_root=object_store_root,
-        object_store_prefix=object_store_prefix,
-        published_artifact_root=published_artifact_root,
-        field=f"entries[{index}].state_uri",
-    )
+    if verify_object:
+        object_evidence = _verify_state_index_object(
+            state_uri,
+            checksum,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+            field=f"entries[{index}].state_uri",
+        )
+    else:
+        _require_supported_state_object_reference(
+            state_uri,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+            field=f"entries[{index}].state_uri",
+        )
+        object_evidence = None
     lead_hours = _optional_state_index_int(row.get("lead_hours"), field=f"entries[{index}].lead_hours")
     return {
         **row,
@@ -1408,9 +1469,23 @@ def _write_state_index_bytes(
             published_artifact_root=published_artifact_root,
             field="index",
         )
-        atomic_write_bytes_no_follow(path, content, containment_root=containment_root, temp_suffix="part")
+        try:
+            atomic_write_bytes_no_follow(path, content, containment_root=containment_root, temp_suffix="part")
+        except (OSError, SafeFilesystemError) as error:
+            raise _state_index_error(
+                "state_snapshot_index_write_failed",
+                field="index",
+                evidence={"error_type": type(error).__name__},
+            ) from error
         return
-    atomic_write_bytes_no_follow(Path(uri).expanduser(), content)
+    try:
+        atomic_write_bytes_no_follow(Path(uri).expanduser(), content)
+    except (OSError, SafeFilesystemError) as error:
+        raise _state_index_error(
+            "state_snapshot_index_write_failed",
+            field="index",
+            evidence={"error_type": type(error).__name__},
+        ) from error
 
 
 def _read_state_object_bytes(

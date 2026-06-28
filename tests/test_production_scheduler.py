@@ -17391,6 +17391,54 @@ def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_lates
     assert "latest" not in json.dumps(state_evidence, sort_keys=True).lower()
 
 
+def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_before_mutation(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    paths["NHMS_SCHEDULER_STATE_INDEX"].write_text("{not-json", encoding="utf-8")
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setattr(
+        scheduler_module.FileStateSnapshotIndexRepository,
+        "get_latest_usable_state",
+        lambda *_args, **_kwargs: pytest.fail("Strict file state lookup must not use latest fallback"),
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, dry_run=False),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"]),
+        orchestrator_factory=lambda _source_id: pytest.fail("blocked candidate must not build orchestrator"),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "state_snapshot_index_malformed_json"
+    assert blocked["state_evidence"]["reason"] == "state_snapshot_index_malformed_json"
+    assert "candidate_state" not in blocked["state_evidence"]
+    assert "latest" not in json.dumps(blocked["state_evidence"], sort_keys=True).lower()
+
+
 def test_db_free_strict_warm_start_run_once_submits_basin_manifest_init_state(
     monkeypatch: Any,
     tmp_path: Path,

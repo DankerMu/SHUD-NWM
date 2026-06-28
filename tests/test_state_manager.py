@@ -406,12 +406,17 @@ def test_file_state_snapshot_index_fail_closed_cases(
         ("stale", "state_snapshot_index_stale"),
         ("unsupported_schema", "state_snapshot_index_schema_unsupported"),
         ("malformed_json", "state_snapshot_index_malformed_json"),
+        ("checksum_missing", "state_snapshot_index_checksum_missing"),
+        ("checksum_mismatch", "state_snapshot_index_checksum_mismatch"),
+        ("generated_at_future", "state_snapshot_index_generated_at_future"),
+        ("entry_limit", "state_snapshot_index_entry_limit_exceeded"),
         ("wrong_model", "state_snapshot_index_exact_checkpoint_missing"),
         ("wrong_source", "state_snapshot_index_exact_checkpoint_missing"),
         ("wrong_time", "state_snapshot_index_exact_checkpoint_missing"),
     ],
 )
 def test_file_state_snapshot_index_fail_closed_index_matrix(
+    monkeypatch: Any,
     tmp_path: Path,
     case_name: str,
     expected_reason: str,
@@ -437,6 +442,10 @@ def test_file_state_snapshot_index_fail_closed_index_matrix(
         elif case_name == "stale":
             generated_at = "2026-05-01T00:00:00Z"
             repository_now = _dt("2026-05-21T12:00:00Z")
+        elif case_name == "generated_at_future":
+            generated_at = "2026-05-21T12:06:00Z"
+        elif case_name == "entry_limit":
+            monkeypatch.setattr(state_manager_module, "MAX_STATE_SNAPSHOT_INDEX_ENTRIES", 0)
         payload: dict[str, Any] = {
             "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
             "generated_at": generated_at,
@@ -444,7 +453,10 @@ def test_file_state_snapshot_index_fail_closed_index_matrix(
         }
         if case_name == "unsupported_schema":
             payload["schema_version"] = "nhms.scheduler.file_state_snapshot_index.v0"
-        payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+        if case_name != "checksum_missing":
+            payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+        if case_name == "checksum_mismatch":
+            payload["checksum"] = "sha256:bad"
         index_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
     repository = FileStateSnapshotIndexRepository(
@@ -466,6 +478,196 @@ def test_file_state_snapshot_index_fail_closed_index_matrix(
     assert evidence["reason"] == expected_reason
     assert "candidate_state" not in evidence
     assert "latest" not in json.dumps(evidence).lower()
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_reason"),
+    [
+        ("missing", "state_snapshot_index_missing"),
+        ("size", "state_snapshot_index_size_limit_exceeded"),
+        ("depth", "state_snapshot_index_json_depth_exceeded"),
+        ("nodes", "state_snapshot_index_json_node_limit_exceeded"),
+        ("symlink_read", "state_snapshot_index_unreadable"),
+    ],
+)
+def test_file_state_snapshot_index_fail_closed_file_boundaries(
+    monkeypatch: Any,
+    tmp_path: Path,
+    case_name: str,
+    expected_reason: str,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"index-boundaries")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    if case_name == "missing":
+        pass
+    elif case_name == "size":
+        monkeypatch.setattr(state_manager_module, "MAX_STATE_SNAPSHOT_INDEX_BYTES", 8)
+        index_path.write_text("012345678", encoding="utf-8")
+    elif case_name == "symlink_read":
+        target = tmp_path / "target-state-index.json"
+        _write_state_index_payload(
+            target,
+            [_state_index_test_entry(state_uri, content, state_id="state_gfs_model_a_2026052106")],
+            generated_at="2026-05-21T12:00:00Z",
+        )
+        index_path.symlink_to(target)
+    else:
+        entry = _state_index_test_entry(state_uri, content, state_id="state_gfs_model_a_2026052106")
+        payload: dict[str, Any] = {
+            "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+            "generated_at": "2026-05-21T12:00:00Z",
+            "entries": [entry],
+        }
+        if case_name == "depth":
+            monkeypatch.setattr(state_manager_module, "MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH", 2)
+        else:
+            monkeypatch.setattr(state_manager_module, "MAX_STATE_SNAPSHOT_INDEX_JSON_NODES", 2)
+        payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+        index_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == expected_reason
+    assert "candidate_state" not in evidence
+
+
+def test_file_state_snapshot_index_publish_refuses_symlink_index_target(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"publish-symlink")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    target = tmp_path / "target-state-index.json"
+    target.write_text("do-not-overwrite\n", encoding="utf-8")
+    index_path = tmp_path / "state-index.json"
+    index_path.symlink_to(target)
+
+    with pytest.raises(StateManagerError) as error_info:
+        publish_state_snapshot_index(
+            [_state_index_test_entry(state_uri, content, state_id="state_gfs_model_a_2026052106")],
+            index_path,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=_dt("2026-05-21T12:00:00Z"),
+        )
+
+    assert getattr(error_info.value, "reason", "") == "state_snapshot_index_write_failed"
+    assert target.read_text(encoding="utf-8") == "do-not-overwrite\n"
+
+
+def test_file_state_snapshot_index_published_uri_publish_refuses_symlink_target(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    published_root = tmp_path / "published"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"published-symlink")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    symlink_path = published_root / "manifests" / "scheduler" / "state-index.json"
+    symlink_path.parent.mkdir(parents=True)
+    target = tmp_path / "target-state-index.json"
+    target.write_text("do-not-overwrite\n", encoding="utf-8")
+    symlink_path.symlink_to(target)
+
+    with pytest.raises(StateManagerError) as error_info:
+        publish_state_snapshot_index(
+            [_state_index_test_entry(state_uri, content, state_id="state_gfs_model_a_2026052106")],
+            "published://manifests/scheduler/state-index.json",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            published_artifact_root=published_root,
+            generated_at=_dt("2026-05-21T12:00:00Z"),
+        )
+
+    assert getattr(error_info.value, "reason", "") == "state_snapshot_index_write_failed"
+    assert target.read_text(encoding="utf-8") == "do-not-overwrite\n"
+
+
+def test_strict_warm_start_evidence_caches_index_and_verifies_only_exact_objects(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    index_path = tmp_path / "state-index.json"
+    entries: list[dict[str, Any]] = []
+    for source_id, hour in (("gfs", "06"), ("ifs", "12"), ("era5", "18")):
+        content = _valid_ic_bytes(f"{source_id}-lazy-verify".encode("utf-8"))
+        state_uri = object_store.write_bytes_atomic(
+            f"states/{source_id}/model_a/20260521{hour}/state.cfg.ic",
+            content,
+        )
+        entry = _state_index_test_entry(state_uri, content, state_id=f"state_{source_id}_model_a_20260521{hour}")
+        entry["source_id"] = source_id
+        entry["valid_time"] = f"2026-05-21T{hour}:00:00Z"
+        entries.append(entry)
+    publish_state_snapshot_index(
+        entries,
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+    original_read_payload = FileStateSnapshotIndexRepository._read_payload
+    payload_reads = {"count": 0}
+    object_reads: list[str] = []
+    original_read_object = state_manager_module._read_state_object_bytes
+
+    def counting_read_payload(
+        self: FileStateSnapshotIndexRepository,
+        *,
+        allow_empty: bool,
+    ) -> tuple[dict[str, Any], bytes]:
+        payload_reads["count"] += 1
+        return original_read_payload(self, allow_empty=allow_empty)
+
+    def counting_read_object(uri: str, **kwargs: Any) -> bytes:
+        object_reads.append(uri)
+        return original_read_object(uri, **kwargs)
+
+    monkeypatch.setattr(FileStateSnapshotIndexRepository, "_read_payload", counting_read_payload)
+    monkeypatch.setattr(state_manager_module, "_read_state_object_bytes", counting_read_object)
+
+    first = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+    second = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="ifs",
+        valid_time=_dt("2026-05-21T12:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert first["ready"] is True
+    assert second["ready"] is True
+    assert payload_reads["count"] == 1
+    assert object_reads == [entries[0]["state_uri"], entries[1]["state_uri"]]
+    assert entries[2]["state_uri"] not in object_reads
 
 
 @pytest.mark.parametrize("usable_flag", ["false", "0", 1, None])
