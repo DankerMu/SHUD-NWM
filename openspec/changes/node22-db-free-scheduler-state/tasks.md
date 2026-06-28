@@ -239,12 +239,12 @@ Scenario evidence rows for section 5:
   Evidence floor: with `DATABASE_URL` absent, scheduler planning and fake
   submission use file lock, registry, readiness, raw handoff, journal, retry,
   and state index; static guardrails prove no psycopg factories are called.
-- [ ] 6.4 Freeze node-22 scheduler timer and deploy DB-free env with `:55433`
+- [x] 6.4 Freeze node-22 scheduler timer and deploy DB-free env with `:55433`
   still online.
   Evidence floor: receipt records stopped/frozen timer state, env/unit backup,
   DB-free env, migration artifacts, rollback commands, and a bounded scheduler
   pass with no scheduler `DATABASE_URL` and `lock_type=file`.
-- [ ] 6.5 Observe live GFS and IFS cycles through `convert-or-later`.
+- [x] 6.5 Observe live GFS and IFS cycles through `convert-or-later`.
   Evidence floor: one GFS and one IFS cycle use node-27 raw, node-22 file-backed
   scheduler state, downstream Slurm submission, no scheduler PostgreSQL, and no
   `download_source_cycle` submission.
