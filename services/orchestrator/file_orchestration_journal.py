@@ -57,6 +57,7 @@ from services.orchestrator.retry import (
     _has_runtime_root_field,
     _mapping_at,
     _resolve_runtime_root_candidate,
+    _retry_submission_error_code,
     _retry_submission_manifest,
     _RetryRuntimeRootResolutionError,
     _RetrySubmissionJob,
@@ -108,6 +109,7 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "exit_code",
     "retry_count",
     "manual_retry_marker",
+    "previous_job_id",
     "error_code",
     "error_message",
     "log_uri",
@@ -596,6 +598,7 @@ class FileOrchestrationJournalRepository:
             if existing is None:
                 raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
             row = dict(existing)
+            safe_error_message = _durable_error_message(error_message)
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
             for key, value in (
                 ("slurm_job_id", slurm_job_id),
@@ -604,12 +607,12 @@ class FileOrchestrationJournalRepository:
                     row[key] = value
             if status in {"pending", "created", "succeeded", "complete", "parsed", "frequency_done", "published"}:
                 row["error_code"] = error_code
-                row["error_message"] = error_message
+                row["error_message"] = safe_error_message
             else:
                 if error_code is not None:
                     row["error_code"] = error_code
                 if error_message is not None:
-                    row["error_message"] = error_message
+                    row["error_message"] = safe_error_message
             model_id = _required_safe_identity(row, "model_id")
             self._append_validated_record_unlocked(
                 "hydro_run",
@@ -782,6 +785,7 @@ class FileOrchestrationJournalRepository:
                 return previous_status, _public_scheduler_row(existing)
             row = dict(existing)
             row["status"] = status
+            safe_error_message = _durable_error_message(error_message)
             for key, value in (
                 ("started_at", started_at),
                 ("finished_at", finished_at),
@@ -797,7 +801,7 @@ class FileOrchestrationJournalRepository:
             if status in {"succeeded", "complete", "published"} and error_message is None:
                 row["error_message"] = None
             elif error_message is not None:
-                row["error_message"] = error_message
+                row["error_message"] = safe_error_message
             row["updated_at"] = _format_utc(_utcnow())
             model_id = _optional_safe_identity(row, "model_id")
             return previous_status, self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
@@ -915,7 +919,7 @@ class FileOrchestrationJournalRepository:
             "issue_time": _format_utc(cycle_time),
             "status": status,
             "error_code": error_code,
-            "error_message": error_message,
+            "error_message": _durable_error_message(error_message),
             "updated_at": _format_utc(_utcnow()),
         }
         self._append_validated_record("forecast_cycle", row, source_id=source_id, cycle_time=cycle_time)
@@ -1455,6 +1459,7 @@ class FileOrchestrationJournalRepository:
         return payload
 
     def _write_hydro_run(self, row: Mapping[str, Any], *, retriable_only: bool) -> dict[str, Any]:
+        row = _redact_durable_error_message_fields("hydro_run", row)
         source_id = _required_source_id(row, "source_id")
         cycle_time = _parse_cycle_time_field(row, "cycle_time")
         model_id = _required_safe_identity(row, "model_id")
@@ -1518,8 +1523,9 @@ class FileOrchestrationJournalRepository:
             "exit_code": record.get("exit_code"),
             "retry_count": record.get("retry_count", 0),
             "manual_retry_marker": bool(record.get("manual_retry_marker", False)),
+            "previous_job_id": _optional_safe_identity(record, "previous_job_id"),
             "error_code": record.get("error_code"),
-            "error_message": record.get("error_message"),
+            "error_message": _durable_error_message(record.get("error_message")),
             "log_uri": record.get("log_uri"),
             "created_at": _optional_format_datetime(record.get("created_at"), field="created_at") or now,
             "updated_at": _optional_format_datetime(record.get("updated_at"), field="updated_at") or now,
@@ -1546,6 +1552,7 @@ class FileOrchestrationJournalRepository:
         exclusive_direct: bool,
         model_id: str | None,
     ) -> dict[str, Any] | None:
+        row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         if exclusive_direct and self._pipeline_job_conflicts_unlocked(row):
@@ -1614,6 +1621,7 @@ class FileOrchestrationJournalRepository:
         materialize_model_id: str | None = None,
         sequence: int | None = None,
     ) -> None:
+        payload = _redact_durable_error_message_fields(record_type, payload)
         record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         record = _journal_record_for_write(
             record_type,
@@ -1664,7 +1672,20 @@ class FileOrchestrationJournalRepository:
     def _next_sequence_unlocked(self, *, source_id: str, cycle_time: datetime) -> int:
         records = self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time))
         sequences = [_optional_replay_sequence(record) or 0 for record in records]
+        sequences.extend(self._latest_replay_sequences_unlocked(source_id=source_id, cycle_time=cycle_time))
         return max(sequences, default=0) + 1
+
+    def _latest_replay_sequences_unlocked(self, *, source_id: str, cycle_time: datetime) -> list[int]:
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        sequences: list[int] = []
+        for path in self._latest_paths(_safe_segment(source_id), format_cycle_time(cycle_time), model_id=None):
+            payload = self._read_optional_json(path)
+            if payload is None:
+                continue
+            _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
+            _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
+            sequences.append(_latest_replay_sequence(payload) or 0)
+        return sequences
 
     def _next_event_id_unlocked(
         self,
@@ -2054,6 +2075,7 @@ class FileJournalRetryService:
                 "exit_code": None,
                 "retry_count": next_retry_count,
                 "manual_retry_marker": True,
+                "previous_job_id": failed_job["job_id"],
                 "idempotency_key": f"manual_retry:{run_id}:{next_retry_count}",
                 "candidate_id": None,
                 "error_code": None,
@@ -2478,7 +2500,7 @@ class FileJournalRetryService:
         self.repository.update_hydro_run_status(str(run_id), "pending", slurm_job_id=retry_job.get("slurm_job_id"))
 
     def _record_manual_retry_submission_failure(self, job_id: str, error: Exception) -> dict[str, Any]:
-        error_code = str(getattr(error, "code", None) or "RETRY_SUBMISSION_FAILED")
+        error_code = _retry_submission_error_code(error)
         error_message = _safe_error_message(str(getattr(error, "message", None) or error))
         _previous_status, written = self.repository.update_pipeline_job_status(
             job_id,
@@ -2553,6 +2575,7 @@ def _journal_record_for_write(
     model_id: str | None,
     sequence: int,
 ) -> dict[str, Any]:
+    payload = _redact_durable_error_message_fields(record_type, payload)
     record: dict[str, Any] = {
         "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
         "sequence": int(sequence),
@@ -2583,6 +2606,19 @@ def _strip_internal_fields(value: Any) -> Any:
     if isinstance(value, datetime):
         return _format_utc(value)
     return value
+
+
+def _durable_error_message(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _safe_error_message(str(value))
+
+
+def _redact_durable_error_message_fields(record_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    row = dict(payload)
+    if record_type in {"pipeline_job", "hydro_run", "forecast_cycle"} and "error_message" in row:
+        row["error_message"] = _durable_error_message(row.get("error_message"))
+    return row
 
 
 def _mapping_value(row: Mapping[str, Any], field: str) -> Mapping[str, Any]:
@@ -2656,6 +2692,7 @@ def _file_retry_job_record(job: Any) -> dict[str, Any]:
         "exit_code",
         "retry_count",
         "manual_retry_marker",
+        "previous_job_id",
         "error_code",
         "error_message",
         "log_uri",
@@ -2757,12 +2794,13 @@ def _mapping_has_runtime_root_fields(value: Mapping[str, Any]) -> bool:
 def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         _datetime_sort_key(
-            row.get("finished_at")
+            row.get("updated_at")
+            or row.get("finished_at")
             or row.get("submitted_at")
             or row.get("started_at")
-            or row.get("updated_at")
             or row.get("created_at")
         ),
+        _file_retry_job_int(row, "retry_count"),
         _datetime_sort_key(row.get("created_at")),
         str(row.get("job_id") or ""),
     )

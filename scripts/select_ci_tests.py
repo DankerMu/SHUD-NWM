@@ -96,6 +96,7 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
     "services/orchestrator/file_orchestration_journal.py",
     "services/orchestrator/file_orchestration_migration.py",
     "services/orchestrator/cli.py",
+    "services/orchestrator/scheduler.py",
     "services/orchestrator/scheduler_core.py",
     "services/orchestrator/scheduler_runtime.py",
 )
@@ -146,7 +147,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[3],
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
-        stop_on_match=True,
     ),
     PathTestRule(
         DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
@@ -190,6 +190,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[6],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[7],
         FILE_JOURNAL_READ_STATE_TESTS,
         stop_on_match=True,
     ),
