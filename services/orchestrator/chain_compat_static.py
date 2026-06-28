@@ -318,7 +318,7 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES = (
 )
 _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS = _chain.MappingProxyType(
     {
-        "services/orchestrator/scheduler.py": (
+        "services/orchestrator/scheduler_adapters.py": (
             "from services.orchestrator.chain import PsycopgOrchestratorRepository",
             "PsycopgOrchestratorRepository",
             "return PsycopgOrchestratorRepository.from_env()",
@@ -327,7 +327,7 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS = _chain.MappingProxyT
 )
 _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_FUNCTION_TOKENS = _chain.MappingProxyType(
     {
-        "services/orchestrator/scheduler.py": _chain.MappingProxyType(
+        "services/orchestrator/scheduler_adapters.py": _chain.MappingProxyType(
             {
                 "_active_repository_from_env": (
                     "from services.orchestrator.chain import PsycopgOrchestratorRepository",

@@ -67,6 +67,10 @@ def _validate_strict_state_lineage(*args, **kwargs):
     return getattr(_chain, "_validate_strict_state_lineage")(*args, **kwargs)
 
 
+def _package_checksum_matches(*args, **kwargs):
+    return getattr(_chain, "_package_checksum_matches")(*args, **kwargs)
+
+
 def _build_run_context(
     self,
     source_id: str,
@@ -283,11 +287,19 @@ def _validate_prefilled_forecast_initial_state(
     model_id = str(basin.get("model_id") or "")
     if not model_id:
         raise OrchestratorError("BASIN_MODEL_ID_MISSING", "Each basin entry requires model_id.")
-    state = self._resolve_prefilled_forecast_state(
+    lineage = _prefilled_state_lineage(basin, required=True)
+    required_lead_hours = _parse_prefilled_lineage_lead_hours(lineage, required=True)
+    required_cycle_id = _required_prefilled_lineage_text(lineage, "cycle_id")
+    _required_prefilled_lineage_text(lineage, "source_id")
+    _required_prefilled_lineage_text(lineage, "model_package_checksum")
+    state = _resolve_prefilled_forecast_state(
+        self,
         basin,
         model_id=model_id,
         cycle_time=cycle_time,
         source_id=source_id,
+        required_cycle_id=required_cycle_id,
+        required_lead_hours=required_lead_hours,
     )
     if state is None:
         raise OrchestratorError(
@@ -301,15 +313,18 @@ def _validate_prefilled_forecast_initial_state(
                 "init_state_uri": basin.get("init_state_uri"),
             },
         )
-    selection = self._validate_strict_forecast_state(
+    selection = _validate_strict_forecast_state(
+        self,
         state,
         model_id=model_id,
         cycle_time=cycle_time,
         source_id=source_id,
         model_package_version=model_package_version,
         model_package_checksum=model_package_checksum,
+        required_lead_hours=required_lead_hours,
+        required_cycle_id=required_cycle_id,
     )
-    self._validate_prefilled_state_identity(basin, selection)
+    _validate_prefilled_state_identity(self, basin, selection, parsed_lineage=lineage)
     return selection
 
 
@@ -320,6 +335,8 @@ def _resolve_prefilled_forecast_state(
     model_id: str,
     cycle_time: datetime,
     source_id: str | None,
+    required_cycle_id: str | None = None,
+    required_lead_hours: int | None = None,
 ) -> StateSnapshot | None:
     if self.state_manager is None:
         return None
@@ -335,13 +352,21 @@ def _resolve_prefilled_forecast_state(
             state = repository_provider(state_id)
             if state is not None:
                 return state
-    return self._get_exact_forecast_state(model_id=model_id, cycle_time=cycle_time, source_id=source_id)
+    return _get_exact_forecast_state(
+        self,
+        model_id=model_id,
+        cycle_time=cycle_time,
+        source_id=source_id,
+        required_cycle_id=required_cycle_id,
+        required_lead_hours=required_lead_hours,
+    )
 
 
 def _validate_prefilled_state_identity(
     self,
     basin: Mapping[str, Any],
     selection: InitialStateSelection,
+    parsed_lineage: Mapping[str, Any] | None = None,
 ) -> None:
     raw_valid_time = basin.get("init_state_valid_time")
     try:
@@ -358,17 +383,7 @@ def _validate_prefilled_state_identity(
             "Scheduler-prefilled warm-start valid_time is malformed.",
             {"field": "init_state_valid_time", "observed": raw_valid_time},
         )
-    raw_lineage = basin.get("init_state_lineage")
-    if raw_lineage in (None, ""):
-        lineage: dict[str, Any] = {}
-    elif isinstance(raw_lineage, Mapping):
-        lineage = dict(raw_lineage)
-    else:
-        raise OrchestratorError(
-            WARM_START_LINEAGE_MISMATCH,
-            "Scheduler-prefilled warm-start lineage is malformed.",
-            {"field": "init_state_lineage", "observed_type": type(raw_lineage).__name__},
-        )
+    lineage = dict(parsed_lineage) if parsed_lineage is not None else _prefilled_state_lineage(basin)
     checks = (
         ("init_state_id", selection.state_id),
         ("init_state_uri", selection.state_uri),
@@ -413,31 +428,20 @@ def _validate_prefilled_state_identity(
             )
     for key, expected in lineage_checks:
         observed = lineage.get(key)
-        if observed not in (None, "") and expected not in (None, "") and str(observed) != str(expected):
+        if observed in (None, "") or expected in (None, ""):
+            continue
+        matches = (
+            _package_checksum_matches(observed, expected)
+            if key == "model_package_checksum"
+            else str(observed) == str(expected)
+        )
+        if not matches:
             raise OrchestratorError(
                 WARM_START_LINEAGE_MISMATCH,
                 "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",
                 {"field": key, "observed": observed, "expected": expected},
             )
-    raw_lead_hours = lineage.get("lead_hours")
-    if raw_lead_hours in (None, ""):
-        lead_hours = None
-    elif isinstance(raw_lead_hours, bool):
-        raise OrchestratorError(
-            WARM_START_LINEAGE_MISMATCH,
-            "Scheduler-prefilled warm-start lead_hours is malformed.",
-            {"field": "lead_hours", "observed": raw_lead_hours},
-        )
-    elif isinstance(raw_lead_hours, int):
-        lead_hours = raw_lead_hours
-    elif isinstance(raw_lead_hours, str) and raw_lead_hours.strip().lstrip("+-").isdigit():
-        lead_hours = int(raw_lead_hours)
-    else:
-        raise OrchestratorError(
-            WARM_START_LINEAGE_MISMATCH,
-            "Scheduler-prefilled warm-start lead_hours is malformed.",
-            {"field": "lead_hours", "observed": raw_lead_hours},
-        )
+    lead_hours = _parse_prefilled_lineage_lead_hours(lineage)
     if lead_hours is not None and selection.lead_hours is not None and lead_hours != selection.lead_hours:
         raise OrchestratorError(
             WARM_START_LINEAGE_MISMATCH,
@@ -455,6 +459,8 @@ def _validate_strict_forecast_state(
     source_id: str | None,
     model_package_version: str | None,
     model_package_checksum: str | None,
+    required_lead_hours: int = 12,
+    required_cycle_id: str | None = None,
 ) -> InitialStateSelection:
     if state.model_id != model_id or _ensure_utc(state.valid_time) != _ensure_utc(cycle_time):
         raise OrchestratorError(
@@ -479,15 +485,18 @@ def _validate_strict_forecast_state(
         model_package_version=model_package_version,
         model_package_checksum=model_package_checksum,
     )
-    if rejection_code is not None or state.lead_hours != 12:
+    cycle_mismatch = required_cycle_id not in (None, "") and str(state.cycle_id or "") != str(required_cycle_id)
+    if rejection_code is not None or state.lead_hours != required_lead_hours or cycle_mismatch:
         raise OrchestratorError(
             WARM_START_LINEAGE_MISMATCH,
             "Exact successor checkpoint lineage is incompatible with strict forecast warm-start.",
             {
                 "state_id": state.state_id,
                 "lineage_rejection_code": rejection_code,
+                "cycle_id": state.cycle_id,
+                "required_cycle_id": required_cycle_id,
                 "lead_hours": state.lead_hours,
-                "required_lead_hours": 12,
+                "required_lead_hours": required_lead_hours,
             },
         )
     return InitialStateSelection(
@@ -511,6 +520,8 @@ def _get_exact_forecast_state(
     model_id: str,
     cycle_time: datetime,
     source_id: str | None,
+    required_cycle_id: str | None = None,
+    required_lead_hours: int | None = None,
 ) -> StateSnapshot | None:
     if self.state_manager is None:
         return None
@@ -521,10 +532,113 @@ def _get_exact_forecast_state(
     if not callable(exact_provider):
         return None
     if source_id is not None:
-        exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=source_id)
+        exact = _query_exact_forecast_state(
+            exact_provider,
+            model_id=model_id,
+            valid_time=_ensure_utc(cycle_time),
+            source_id=source_id,
+            required_cycle_id=required_cycle_id,
+            required_lead_hours=required_lead_hours,
+        )
         if exact is not None:
             return exact
-    return exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=None)
+        if required_cycle_id not in (None, "") or required_lead_hours is not None:
+            return None
+    return _query_exact_forecast_state(
+        exact_provider,
+        model_id=model_id,
+        valid_time=_ensure_utc(cycle_time),
+        source_id=None,
+        required_cycle_id=None,
+        required_lead_hours=None,
+    )
+
+
+def _query_exact_forecast_state(
+    exact_provider: Any,
+    *,
+    model_id: str,
+    valid_time: datetime,
+    source_id: str | None,
+    required_cycle_id: str | None,
+    required_lead_hours: int | None,
+) -> StateSnapshot | None:
+    lookup: dict[str, Any] = {"model_id": model_id, "valid_time": valid_time, "source_id": source_id}
+    if required_cycle_id not in (None, ""):
+        lookup["cycle_id"] = required_cycle_id
+    if required_lead_hours is not None:
+        lookup["lead_hours"] = required_lead_hours
+    try:
+        return exact_provider(**lookup)
+    except TypeError as exc:
+        if (
+            "unexpected keyword" not in str(exc)
+            or ("cycle_id" not in lookup and "lead_hours" not in lookup)
+        ):
+            raise
+        legacy_lookup = {key: value for key, value in lookup.items() if key not in {"cycle_id", "lead_hours"}}
+        return exact_provider(**legacy_lookup)
+
+
+def _prefilled_state_lineage(basin: Mapping[str, Any], *, required: bool = False) -> dict[str, Any]:
+    raw_lineage = basin.get("init_state_lineage")
+    if raw_lineage in (None, ""):
+        if required:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lineage is required.",
+                {"field": "init_state_lineage"},
+            )
+        return {}
+    if isinstance(raw_lineage, Mapping):
+        return dict(raw_lineage)
+    raise OrchestratorError(
+        WARM_START_LINEAGE_MISMATCH,
+        "Scheduler-prefilled warm-start lineage is malformed.",
+        {"field": "init_state_lineage", "observed_type": type(raw_lineage).__name__},
+    )
+
+
+def _required_prefilled_lineage_text(lineage: Mapping[str, Any], field_name: str) -> str:
+    raw_value = lineage.get(field_name)
+    if raw_value in (None, "") or isinstance(raw_value, bool) or not str(raw_value).strip():
+        raise OrchestratorError(
+            WARM_START_LINEAGE_MISMATCH,
+            "Scheduler-prefilled warm-start lineage is missing a required field.",
+            {"field": field_name, "observed": raw_value},
+        )
+    return str(raw_value)
+
+
+def _parse_prefilled_lineage_lead_hours(
+    lineage: Mapping[str, Any],
+    *,
+    required: bool = False,
+) -> int | None:
+    raw_lead_hours = lineage.get("lead_hours")
+    if raw_lead_hours in (None, ""):
+        if required:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lead_hours is required.",
+                {"field": "lead_hours", "observed": raw_lead_hours},
+            )
+        return None
+    if isinstance(raw_lead_hours, bool):
+        raise OrchestratorError(
+            WARM_START_LINEAGE_MISMATCH,
+            "Scheduler-prefilled warm-start lead_hours is malformed.",
+            {"field": "lead_hours", "observed": raw_lead_hours},
+        )
+    if isinstance(raw_lead_hours, int):
+        return raw_lead_hours
+    if isinstance(raw_lead_hours, str) and raw_lead_hours.strip().lstrip("+-").isdigit():
+        return int(raw_lead_hours)
+    raise OrchestratorError(
+        WARM_START_LINEAGE_MISMATCH,
+        "Scheduler-prefilled warm-start lead_hours is malformed.",
+        {"field": "lead_hours", "observed": raw_lead_hours},
+    )
 
 
 def _exact_or_latest_usable_state(

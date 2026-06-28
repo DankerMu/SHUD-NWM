@@ -175,7 +175,7 @@ idempotent replay status, and supersession evidence for stale
 The file-backed state index maps exact strict warm-start lookup keys:
 
 ```text
-model_id + source_id + valid_time -> state_uri + checksum + usable_flag
+model_id + source_id + valid_time + cycle_id + lead_hours -> state_uri + checksum + usable_flag
 ```
 
 The scheduler may not fall back to latest usable state when strict successor
@@ -641,6 +641,193 @@ Invariant Matrix:
     decision helpers.
   - DB-free scheduler from_env -> file journal repository is constructed and
     DB-backed active/orchestrator repository factories are not called.
+
+## Issue #835 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- File-backed state snapshot index is a versioned JSON evidence contract with
+  checksums, object existence checks, freshness, and bounded reads.
+- Strict forecast warm-start is a production scheduler state-machine gate; it
+  must fail closed before Slurm/orchestrator mutation when the exact successor
+  checkpoint is unavailable.
+- `state_save_qc` becomes a DB-free producer of state-index records while
+  preserving legacy non-DB-free CLI behavior.
+- Shared `packages/common.state_manager` and `state_cli` helper behavior is
+  consumed by scheduler candidate construction, Slurm array jobs, and existing
+  warm-start tests.
+
+Must preserve:
+
+- Non-DB-free scheduler and state-save paths may still use
+  `PsycopgStateSnapshotRepository` and `StateRunRepository.from_env()` where
+  existing tests intend that behavior.
+- Legacy `state_cli save --manifest-index --task-id` entries that only contain
+  `run_id` remain valid outside DB-free mode.
+- Strict warm-start never falls back to latest usable state when a keyed
+  successor checkpoint is missing or invalid.
+- Candidate state evidence still flows into basin manifests through the
+  existing `candidate_state` contract.
+- Evidence remains credential-safe and does not reveal local runtime roots,
+  raw object-store roots, or database connection details.
+
+Must add/change:
+
+- Add `FileStateSnapshotIndexRepository` and publisher behavior for
+  `nhms.scheduler.file_state_snapshot_index.v1`.
+- Strict exact lookups use `model_id + source_id + valid_time + expected
+  cycle_id + required lead_hours`; source-less, wrong-cycle, wrong-lead, or
+  latest-state lookup is not an accepted DB-free substitute.
+- Index validation checks schema version, generated time, checksum, entry
+  count, JSON complexity, usable flag, object existence, object checksum,
+  source/model/time identity, and model package identity.
+- State object references are supported object URIs (`s3` or `published`) with
+  configured object-store boundaries; legacy relative object-store keys remain
+  accepted only after safe containment validation under `OBJECT_STORE_ROOT`.
+- DB-free `state_save_qc` obtains run context from manifest-index or explicit
+  `NHMS_*` runtime env and writes state-index entries without constructing DB
+  repositories.
+- DB-free scheduler candidate construction attaches ready state-index evidence
+  or blocks the candidate with a stable state-index reason before submission.
+
+Risk packs considered for #835:
+
+- Public API / CLI / script entry: selected - `state_cli save`,
+  `ProductionScheduler.from_env()`, and scheduler candidate construction are
+  active entrypoints.
+- Config / project setup: selected - `NHMS_SCHEDULER_STATE_INDEX_BACKEND`,
+  `NHMS_SCHEDULER_STATE_INDEX`, `OBJECT_STORE_ROOT`, `OBJECT_STORE_PREFIX`, and
+  strict warm-start env decide runtime behavior.
+- File IO / path safety / overwrite: selected - index reads/writes and state
+  object verification cross local path and object URI boundaries.
+- Schema / columns / units / field names: selected - state-index schema,
+  evidence keys, source/model/time identity, checksum fields, and lineage fields
+  are public contracts.
+- Auth / permissions / secrets: selected - DB-free mode must avoid database
+  factories and redact local/object roots in evidence.
+- Concurrency / shared state / ordering: selected - state-index publish is
+  manifest-last and scheduler must block before mutation when evidence is not
+  ready.
+- Resource limits / large input / discovery: selected - index bytes, entry
+  count, JSON depth/node count, and state object reads are bounded.
+- Legacy compatibility / examples: selected - postgres-mode state save and old
+  manifest-index CLI entries remain compatible.
+- Error handling / rollback / partial outputs: selected - malformed, stale,
+  mismatched, missing, and unusable state evidence produce stable blockers
+  without partial scheduler mutation.
+- Release / packaging / dependency compatibility: not selected - no package or
+  dependency change in #835.
+- Documentation / migration notes: selected - OpenSpec records the operator
+  contract for later live node-22 deployment.
+- Geospatial / CRS / basin geometry: not selected - #835 does not inspect basin
+  geometry.
+- Hydro-met time series / forcing windows: selected - strict successor
+  checkpoint identity is tied to source/cycle/valid-time alignment.
+- SHUD numerical runtime / conservation / NaN: not selected - #835 verifies IC
+  file existence/checksum but does not change solver numerics.
+- PostGIS / TimescaleDB domain behavior: not selected - DB-free mode avoids DB
+  access rather than changing DB schema or query semantics.
+- Slurm production lifecycle / mock-vs-real parity: selected - strict
+  warm-start blocking occurs before Slurm/orchestrator mutation.
+- External hydro-met providers / snapshot reproducibility: selected - source
+  identity and package checksum prevent mixing stale provider/model snapshots.
+- Run manifest / QC provenance: selected - `state_save_qc` records checksum,
+  package, source, cycle, and valid-time lineage.
+- Published NHMS artifacts / display identity: not selected - display artifacts
+  are outside #835.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `packages/common/state_manager.py`,
+  `packages/common/state_cli.py`, and object-store/safe-fs helpers.
+- Public entrypoints: `state_cli save`, Slurm array `state_save_qc`, DB-free
+  `ProductionScheduler.from_env()`, and scheduler candidate construction.
+- Read surfaces: `NHMS_SCHEDULER_STATE_INDEX`, object-store state URI, manifest
+  index rows, `NHMS_*` runtime env, and existing file journal candidate state.
+- Write/delete/overwrite surfaces: state-index publish/update only; no delete
+  or cleanup behavior is introduced by #835. File-backed state-index
+  read/modify/publish is serialized by an adjacent local lock for local and
+  LocalObjectStore-backed object indexes; unsafe/unlockable backends fail
+  closed.
+- Staging/publish/rollback surfaces: state-index publisher validates referenced
+  state objects before publishing the index as the last artifact.
+- Producer/consumer evidence boundaries: `state_save_qc` produces state-index
+  entries; scheduler strict warm-start consumes them and carries
+  `candidate_state` into basin manifests.
+- Stale-state/idempotency boundaries: stale generated time, wrong
+  source/model/time, unusable flag, package mismatch, checksum mismatch, and
+  missing object all block rather than falling back.
+- Unchanged downstream consumers: legacy state-manager tests, Slurm array CLI
+  manifest-index tests, postgres-mode scheduler/state paths, and basin manifest
+  warm-start field copying.
+
+Invariant Matrix:
+
+- Governing invariant: in DB-free strict warm-start mode, a scheduler candidate
+  may proceed only when the file state index proves the exact
+  `model_id + source_id + valid_time + expected cycle_id + required lead_hours`
+  checkpoint, its object checksum, usable flag, and model/source/package
+  lineage; otherwise the candidate blocks before any DB fallback, latest-state
+  fallback, Slurm submission, or orchestrator mutation.
+- Source-of-truth identity/contract: state-index schema version,
+  `model_id`, normalized `source_id`, `valid_time`, `state_uri`, state object
+  checksum, `usable_flag`, expected `cycle_id`, `lead_hours`, model package
+  URI/checksum, generated_at, and index checksum.
+- Producers: `state_cli.save_state_for_run()` and
+  `publish_state_snapshot_index()` write index records after QC/object evidence.
+- Validators/preflight: `FileStateSnapshotIndexRepository` schema/checksum/time
+  validation, object existence/checksum verification, safe/bounded reads, and
+  DB-free runtime preflight.
+- Storage/cache/query: file/object-backed state index, state object store, and
+  cached scheduler state-index repository per scheduler pass.
+- Public routes/entrypoints: `state_cli save`, `ProductionScheduler.run_once()`,
+  and scheduler candidate construction.
+- Frontend/downstream consumers: none directly - basin manifests and scheduler
+  evidence are the downstream contracts in #835.
+- Failure paths/rollback/stale state: missing index, malformed JSON, unsupported
+  schema, stale/future generated_at, checksum mismatch, missing object, object
+  checksum mismatch, unusable flag, wrong source/model/time/package, missing run
+  context, and legacy manifest-index compatibility.
+- Evidence/audit/readiness: focused state-manager/state-save tests, scheduler
+  strict warm-start ready/block tests, legacy Slurm array CLI compatibility test,
+  ruff, git diff check, and OpenSpec strict validation.
+- Regression rows:
+  - Valid exact entry and object checksum -> strict lookup returns ready
+    `candidate_state` evidence with lineage and no DB factory.
+  - Missing exact entry for the key -> scheduler blocks
+    `state_snapshot_index_exact_checkpoint_missing` and does not query latest
+    state.
+  - Missing object -> blocks `state_snapshot_index_object_missing`.
+  - Object checksum mismatch -> blocks
+    `state_snapshot_index_object_checksum_mismatch`.
+  - `usable_flag=false` -> blocks
+    `state_snapshot_index_checkpoint_unusable`.
+  - Non-boolean `usable_flag` -> fail-closed
+    `state_snapshot_index_usable_flag_invalid` with no `candidate_state`.
+  - Unsafe or cross-prefix state object URI -> fail-closed
+    state-index object URI blocker with no local root leakage.
+  - Concurrent DB-free state-index upserts for distinct keys -> serialized
+    update preserves both entries.
+  - Wrong source/model/time/package or stale/unsupported index -> fail-closed
+    state-index blocker, no DB fallback.
+  - Missing or wrong expected `cycle_id`, or wrong `lead_hours` for a matching
+    `valid_time` -> fail-closed lineage blocker, no DB/latest fallback.
+  - Two state checkpoints share `model_id + source_id + valid_time` but have
+    different producing cycles/leads -> strict lookup selects the checkpoint
+    matching the requested lead and expected producer cycle.
+  - Same-checksum DB-free state save rerun with missing older lineage/package
+    metadata -> repairs metadata before strict readiness can pass.
+  - DB-free `state_cli save` with manifest-index and no `DATABASE_URL` ->
+    writes usable state-index record without `StateRunRepository.from_env()` or
+    `PsycopgStateSnapshotRepository`.
+  - Legacy non-DB-free `state_cli save --manifest-index --task-id` with only
+    `run_id` -> still resolves the run ID and delegates to legacy repository
+    loading.
+  - Ready strict state evidence on scheduler candidate -> basin manifest can
+    receive `init_state_*` through the existing `candidate_state` contract.
 
 ## Migration Plan
 

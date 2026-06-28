@@ -256,7 +256,7 @@ def test_stage_failure_aborts_later_submissions_and_marks_run_failed(tmp_path: P
     result = orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert result.status == "failed"
-    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["download_gfs", "convert_canonical"]
+    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["convert_canonical"]
     assert repository.hydro_statuses[-1] == "failed"
     assert repository.cycle_statuses[-1] == "failed_convert"
     failed_events = [event for event in repository.events if event["status_to"] == "failed"]

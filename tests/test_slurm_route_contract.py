@@ -244,7 +244,7 @@ def test_object_store_roots_exported_to_template(monkeypatch, tmp_path):
     assert "export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://" in captured["script"]
 
 
-def test_download_source_cycle_retry_manifest_exports_object_store_root_not_workspace(monkeypatch, tmp_path):
+def test_retired_download_source_cycle_route_is_not_in_default_templates(monkeypatch, tmp_path):
     workspace_root = tmp_path / "workspace"
     object_store_root = tmp_path / "object-store"
     gateway = RealSlurmGateway(
@@ -283,11 +283,9 @@ def test_download_source_cycle_retry_manifest_exports_object_store_root_not_work
             },
         )
 
-    assert response.status_code == 201
-    assert f"export WORKSPACE_ROOT={workspace_root}" in captured["script"]
-    assert f"export OBJECT_STORE_ROOT={object_store_root}" in captured["script"]
-    assert f"export OBJECT_STORE_ROOT={workspace_root}" not in captured["script"]
-    assert "export OBJECT_STORE_PREFIX=s3://nhms-prod" in captured["script"]
+    assert response.status_code == 404
+    assert "download_source_cycle" not in DEFAULT_JOB_TYPE_TEMPLATES
+    assert "script" not in captured
 
 
 def test_route_object_store_prefix_quote_breakout_is_shell_quoted(monkeypatch, tmp_path):

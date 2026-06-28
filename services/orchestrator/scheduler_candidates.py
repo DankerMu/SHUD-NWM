@@ -22,6 +22,7 @@ from services.orchestrator.scheduler_state import (
     _candidate_state_decision,
     _candidate_state_has_identity_mismatch,
     _candidate_state_is_candidate_scoped_retry,
+    _ensure_utc,
     _evidence_safe,
     _format_utc,
 )
@@ -93,6 +94,10 @@ class SchedulerCandidateConstructionContext:
     config: SchedulerConfigLike
     active_repository: Any | None
     canonical_readiness_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycleLike],
+        Mapping[str, Any] | None,
+    ]
+    strict_warm_start_for_candidate: Callable[
         [SchedulerCandidateLike, SchedulerSourceCycleLike],
         Mapping[str, Any] | None,
     ]
@@ -275,6 +280,18 @@ def build_candidates(
                     }
                 )
                 continue
+            strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
+            if strict_warm_start is not None and not bool(strict_warm_start.get("ready")):
+                blocked.append(
+                    _blocked_candidate(
+                        candidate,
+                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
+                        state_evidence=strict_warm_start,
+                    )
+                )
+                continue
+            if strict_warm_start is not None:
+                candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
                 state_decision is not None
                 and state_decision.action == "skip"
@@ -464,9 +481,21 @@ def build_candidates(
                     )
                 )
                 continue
+            if (
+                nfs_raw_manifest_gate is not None
+                and nfs_raw_manifest_gate.get("status") == "ready"
+                and not _nfs_raw_manifest_matches_source_cycle(candidate, nfs_raw_manifest_gate)
+            ):
+                blocked.append(
+                    _blocked_candidate(
+                        candidate,
+                        "nfs_raw_manifest_identity_mismatch",
+                        state_evidence={"nfs_raw_manifest": nfs_raw_manifest_gate},
+                    )
+                )
+                continue
             raw_manifest_restart = _source_raw_manifest_restart_evidence(candidate, raw_candidate_state)
-            if raw_manifest_restart is not None and state_decision is None:
-                candidate = _candidate_with_state_evidence(candidate, raw_manifest_restart)
+            raw_manifest_restart_applied = False
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)
             if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
                 if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
@@ -474,8 +503,9 @@ def build_candidates(
                     if state_decision is not None and state_decision.action == "retry":
                         state_evidence.update(state_decision.evidence)
                     state_evidence["canonical_readiness"] = canonical_readiness
-                    if raw_manifest_restart is not None and state_decision is None:
+                    if raw_manifest_restart is not None:
                         state_evidence.update(raw_manifest_restart)
+                        raw_manifest_restart_applied = True
                     else:
                         state_evidence.update(_production_raw_manifest_missing_evidence(raw_candidate_state))
                         blocked.append(
@@ -508,6 +538,7 @@ def build_candidates(
                 state_decision is not None
                 and state_decision.action == "retry"
                 and not _candidate_is_fresh_full_chain(candidate)
+                and not raw_manifest_restart_applied
             ):
                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
             if state_decision is None:
@@ -915,6 +946,8 @@ def _source_raw_manifest_restart_evidence(
     source = "forecast_cycle"
     payload: dict[str, Any] = {}
     if nfs_evidence is not None and nfs_evidence.get("status") == "ready":
+        if not _nfs_raw_manifest_matches_source_cycle(candidate, nfs_evidence):
+            return None
         manifest_uri = nfs_evidence.get("manifest_uri")
         source = str(nfs_evidence.get("source") or "nfs_raw_manifest")
         payload["nfs_raw_manifest"] = nfs_evidence
@@ -945,6 +978,50 @@ def _source_raw_manifest_restart_evidence(
             "manifest_uri": str(manifest_uri),
         },
     }
+
+
+def _nfs_raw_manifest_matches_source_cycle(
+    candidate: SchedulerCandidateLike,
+    evidence: Mapping[str, Any],
+) -> bool:
+    manifest_uri = evidence.get("manifest_uri")
+    if manifest_uri in (None, ""):
+        return False
+    manifest_text = str(manifest_uri)
+    redacted_manifest_uri = manifest_text == "[object-uri]"
+    if redacted_manifest_uri:
+        for field_name in ("source_id", "cycle_id", "cycle_time"):
+            if evidence.get(field_name) in (None, ""):
+                return False
+    elif not _raw_manifest_uri_matches_source_cycle(
+        manifest_text,
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+    ):
+        return False
+    source_id = evidence.get("source_id")
+    if source_id not in (None, ""):
+        try:
+            if normalize_source_id(str(source_id)) != normalize_source_id(candidate.source_id):
+                return False
+        except ValueError:
+            return False
+    cycle_id = evidence.get("cycle_id")
+    if cycle_id not in (None, "") and str(cycle_id) != str(candidate.cycle_id):
+        return False
+    cycle_time = evidence.get("cycle_time")
+    if cycle_time not in (None, ""):
+        try:
+            parsed_cycle_time = _ensure_utc(
+                cycle_time
+                if isinstance(cycle_time, datetime)
+                else datetime.fromisoformat(str(cycle_time).replace("Z", "+00:00"))
+            )
+        except (TypeError, ValueError):
+            return False
+        if _format_utc(parsed_cycle_time) != _format_utc(candidate.cycle_time_utc):
+            return False
+    return True
 
 
 def _blocked_candidate(

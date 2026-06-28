@@ -19,7 +19,7 @@ from packages.common.slurm_env import (
     iter_secret_manifest_findings,
 )
 from packages.common.source_identity import normalize_source_id
-from packages.common.state_manager import StateManager
+from packages.common.state_manager import FileStateSnapshotIndexRepository, StateManager
 from services.orchestrator import scheduler_candidates as _scheduler_candidates
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence

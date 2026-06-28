@@ -3,17 +3,39 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
+from urllib.parse import urlparse
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
+from packages.common.manifest_index import (
+    MAX_MANIFEST_INDEX_BYTES,
+    MAX_MANIFEST_INDEX_ENTRIES,
+    SAFE_IDENTIFIER_RE,
+    ManifestValidationError,
+    load_manifest_entry,
+    resolve_task_id,
+    validate_manifest_index_entry_count,
+)
 from packages.common.object_store import LocalObjectStore
-from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateManagerError
-from packages.common.state_qc import cfg_ic_header_minute_index
-from workers.data_adapters.base import cycle_id_for
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+)
+from packages.common.state_manager import (
+    FileStateSnapshotIndexRepository,
+    PsycopgStateSnapshotRepository,
+    StateManager,
+    StateManagerError,
+)
+from packages.common.state_qc import MAX_STATE_IC_BYTES, cfg_ic_header_minute_index
+from workers.data_adapters.base import cycle_id_for, parse_cycle_time
 
 
 @dataclass(frozen=True)
@@ -34,6 +56,10 @@ class StateCheckpoint:
     ic_file: Path
     original_shud_filename: str
     lead_hours: int | None = None
+
+
+MAX_STATE_CHECKPOINT_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES = 10_000
 
 
 class StateRunRepository:
@@ -100,18 +126,22 @@ def save_state_for_run(
     *,
     manager: StateManager | None = None,
     repository: StateRunRepository | None = None,
+    run_context: StateRunContext | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict[str, Any]:
+    _db_free_state_save_enabled()
     workspace = Path(workspace_root or os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
     object_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace))).expanduser().resolve()
     object_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
     state_object_store = LocalObjectStore(object_root, object_prefix)
-    state_manager = manager or StateManager(
-        repository=PsycopgStateSnapshotRepository.from_env(),
-        object_store=state_object_store,
-    )
-    run_repository = repository or StateRunRepository.from_env()
-    run = run_repository.load_run_context(run_id)
+    state_manager = manager or _state_manager_from_env_for_save(state_object_store)
+    if run_context is not None:
+        run = run_context
+        if run.run_id != run_id:
+            raise StateManagerError(f"State save run context mismatch: {run.run_id} != {run_id}")
+    else:
+        run_repository = repository or _state_run_repository_from_env_for_save()
+        run = run_repository.load_run_context(run_id)
     checkpoints = _find_state_checkpoints(run, workspace, state_manager.object_store)
     if not checkpoints:
         ic_file = _find_ic_file(run, workspace, state_manager.object_store)
@@ -175,7 +205,11 @@ def save_state_for_run(
 def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
     """Return an IC file whose header minute-time is absolute at valid_time."""
 
-    content = checkpoint.ic_file.read_text(encoding="utf-8")
+    content = _read_limited_text_no_follow(
+        checkpoint.ic_file,
+        max_bytes=MAX_STATE_IC_BYTES,
+        label="state checkpoint IC file",
+    )
     lines = content.splitlines()
     if not lines:
         return checkpoint.ic_file
@@ -193,14 +227,14 @@ def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
     normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
     header[minute_index] = f"{expected_minute:.6f}"
     lines[0] = "\t".join(header)
-    normalized.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
     return normalized
 
 
 def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
-        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        entry = _load_state_save_manifest_entry(manifest_index, resolved_task_id)
         return str(entry["run_id"])
     if not run_id:
         raise ManifestValidationError(
@@ -208,6 +242,244 @@ def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int 
             {"missing_fields": ["run_id"]},
         )
     return run_id
+
+
+def resolve_run_context(
+    run_id: str | None,
+    manifest_index: str | None,
+    task_id: int | None,
+) -> tuple[str, StateRunContext | None]:
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = _load_state_save_manifest_entry(manifest_index, resolved_task_id)
+        resolved_run_id = str(entry["run_id"])
+        if _db_free_state_save_enabled():
+            return resolved_run_id, _state_run_context_from_manifest_entry(entry)
+        return resolved_run_id, None
+    resolved_run_id = resolve_run_id(run_id, manifest_index, task_id)
+    if _db_free_state_save_enabled():
+        return resolved_run_id, _state_run_context_from_env(resolved_run_id)
+    return resolved_run_id, None
+
+
+def _state_manager_from_env_for_save(object_store: LocalObjectStore) -> StateManager:
+    if _db_free_state_save_enabled():
+        _require_db_free_state_index_destination()
+        return StateManager(
+            repository=FileStateSnapshotIndexRepository.from_env(create_missing=True),
+            object_store=object_store,
+        )
+    return StateManager(
+        repository=PsycopgStateSnapshotRepository.from_env(),
+        object_store=object_store,
+    )
+
+
+def _state_run_repository_from_env_for_save() -> StateRunRepository:
+    if _db_free_state_save_enabled():
+        raise StateManagerError(
+            "DB-free state save requires run context from --manifest-index or NHMS_* runtime env; "
+            "StateRunRepository.from_env() is not allowed."
+        )
+    return StateRunRepository.from_env()
+
+
+def _db_free_state_save_enabled() -> bool:
+    if not _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED"):
+        return False
+    backend = os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "").strip().lower()
+    if backend != "file":
+        raise StateManagerError("DB-free state save requires NHMS_SCHEDULER_STATE_INDEX_BACKEND=file.")
+    return True
+
+
+def _require_db_free_state_index_destination() -> None:
+    index_uri = os.getenv("NHMS_SCHEDULER_STATE_INDEX", "").strip()
+    if not index_uri:
+        raise StateManagerError("NHMS_SCHEDULER_STATE_INDEX is required for DB-free state save.")
+    parsed = urlparse(index_uri)
+    if parsed.scheme in {"s3", "published"}:
+        return
+    if parsed.scheme:
+        raise StateManagerError("DB-free state save NHMS_SCHEDULER_STATE_INDEX uses an unsupported URI scheme.")
+    destination = Path(index_uri).expanduser()
+    destination = destination if destination.is_absolute() else Path.cwd() / destination
+    destination = destination.resolve(strict=False)
+    allowed_roots = _db_free_state_index_allowed_roots()
+    if not allowed_roots:
+        raise StateManagerError("DB-free state save requires an allowed root for NHMS_SCHEDULER_STATE_INDEX.")
+    if not any(_path_is_relative_to(destination, root) for root in allowed_roots):
+        raise StateManagerError("DB-free state save NHMS_SCHEDULER_STATE_INDEX local path is outside allowed roots.")
+
+
+def _db_free_state_index_allowed_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    raw_values = [value for value in os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "").split(os.pathsep) if value.strip()]
+    for value in raw_values:
+        if value in (None, ""):
+            continue
+        root = Path(str(value)).expanduser()
+        root = root if root.is_absolute() else Path.cwd() / root
+        resolved = root.resolve(strict=False)
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _load_state_save_manifest_entry(manifest_index: str, task_id: int) -> dict[str, Any]:
+    if _db_free_state_save_enabled():
+        return load_manifest_entry(manifest_index, task_id)
+    try:
+        return load_manifest_entry(manifest_index, task_id)
+    except ManifestValidationError as strict_error:
+        legacy = _load_legacy_state_save_manifest_entry(manifest_index, task_id)
+        if legacy is not None:
+            return legacy
+        raise strict_error
+
+
+def _load_legacy_state_save_manifest_entry(manifest_index: str, task_id: int) -> dict[str, Any] | None:
+    try:
+        raw = read_bytes_limited_no_follow(Path(manifest_index), max_bytes=MAX_MANIFEST_INDEX_BYTES)
+        if len(raw) > MAX_MANIFEST_INDEX_BYTES:
+            raise ManifestValidationError(
+                "Manifest index file exceeds size limit",
+                {"manifest_index_path": manifest_index, "size_limit": MAX_MANIFEST_INDEX_BYTES},
+            )
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManifestValidationError(
+            f"Unable to safely read legacy state-save manifest index: {error}",
+            {"manifest_index_path": manifest_index, "task_id": task_id, "error": str(error)},
+        ) from error
+    if not isinstance(data, list):
+        return None
+    validate_manifest_index_entry_count(len(data), max_entries=MAX_MANIFEST_INDEX_ENTRIES)
+    if task_id < 0 or task_id >= len(data):
+        return None
+    entry = data[task_id]
+    if not isinstance(entry, Mapping):
+        return None
+    result = dict(entry)
+    if set(result).difference({"task_id", "run_id"}):
+        return None
+    try:
+        stored_task_id = int(result.get("task_id"))
+    except (TypeError, ValueError):
+        return None
+    run_id = str(result.get("run_id") or "")
+    if stored_task_id != task_id or not run_id or SAFE_IDENTIFIER_RE.fullmatch(run_id) is None:
+        return None
+    return {"task_id": stored_task_id, "run_id": run_id}
+
+
+def _state_run_context_from_manifest_entry(entry: Mapping[str, Any]) -> StateRunContext:
+    assembly = entry.get("model_run_assembly") if isinstance(entry.get("model_run_assembly"), Mapping) else {}
+    identity = assembly.get("identity") if isinstance(assembly.get("identity"), Mapping) else {}
+    outputs = assembly.get("outputs") if isinstance(assembly.get("outputs"), Mapping) else {}
+    model = assembly.get("model") if isinstance(assembly.get("model"), Mapping) else {}
+    resource_profile = entry.get("resource_profile") if isinstance(entry.get("resource_profile"), Mapping) else {}
+    run_id = str(entry["run_id"])
+    end_time_value = (
+        identity.get("end_time")
+        or entry.get("end_time")
+        or os.getenv("NHMS_END_TIME")
+    )
+    if end_time_value in (None, ""):
+        raise StateManagerError("DB-free state save manifest entry is missing end_time.")
+    model_id = str(entry.get("model_id") or identity.get("model_id") or "")
+    if not model_id:
+        raise StateManagerError("DB-free state save manifest entry is missing model_id.")
+    source_id = _optional_str(entry.get("source_id") or identity.get("source_id"))
+    cycle_time_value = entry.get("cycle_time") or identity.get("cycle_time")
+    cycle_time = _parse_time_flexible(cycle_time_value) if cycle_time_value not in (None, "") else None
+    model_package_version = _optional_str(
+        entry.get("model_package_uri")
+        or identity.get("model_package_uri")
+        or model.get("model_package_uri")
+    )
+    model_package_checksum = _optional_str(
+        entry.get("model_package_checksum")
+        or entry.get("package_checksum")
+        or identity.get("model_package_checksum")
+        or model.get("model_package_checksum")
+        or resource_profile.get("package_checksum")
+    )
+    _require_db_free_state_save_lineage(
+        {
+            "source_id": source_id,
+            "cycle_time": cycle_time,
+            "model_package_uri": model_package_version,
+            "model_package_checksum": model_package_checksum,
+        },
+        source="manifest entry",
+    )
+    return StateRunContext(
+        run_id=run_id,
+        model_id=model_id,
+        end_time=_parse_time_flexible(end_time_value),
+        output_uri=_optional_str(entry.get("output_uri") or outputs.get("output_uri")),
+        source_id=source_id,
+        cycle_time=cycle_time,
+        model_package_version=model_package_version,
+        model_package_checksum=model_package_checksum,
+    )
+
+
+def _state_run_context_from_env(run_id: str) -> StateRunContext:
+    model_id = os.getenv("NHMS_MODEL_ID", "").strip()
+    end_time = os.getenv("NHMS_END_TIME", "").strip()
+    if not model_id or not end_time:
+        raise StateManagerError("DB-free state save requires NHMS_MODEL_ID and NHMS_END_TIME.")
+    source_id = _optional_str(os.getenv("NHMS_SOURCE_ID"))
+    cycle_time = os.getenv("NHMS_CYCLE_TIME", "").strip()
+    parsed_cycle_time = _parse_time_flexible(cycle_time) if cycle_time else None
+    model_package_version = _optional_str(os.getenv("NHMS_MODEL_PACKAGE_URI"))
+    model_package_checksum = _optional_str(os.getenv("NHMS_MODEL_PACKAGE_CHECKSUM"))
+    _require_db_free_state_save_lineage(
+        {
+            "source_id": source_id,
+            "cycle_time": parsed_cycle_time,
+            "model_package_uri": model_package_version,
+            "model_package_checksum": model_package_checksum,
+        },
+        source="NHMS_* runtime env",
+    )
+    return StateRunContext(
+        run_id=run_id,
+        model_id=model_id,
+        end_time=_parse_time_flexible(end_time),
+        output_uri=None,
+        source_id=source_id,
+        cycle_time=parsed_cycle_time,
+        model_package_version=model_package_version,
+        model_package_checksum=model_package_checksum,
+    )
+
+
+def _require_db_free_state_save_lineage(fields: Mapping[str, Any], *, source: str) -> None:
+    required = {
+        "source_id": "NHMS_SOURCE_ID",
+        "cycle_time": "NHMS_CYCLE_TIME",
+        "model_package_uri": "NHMS_MODEL_PACKAGE_URI",
+        "model_package_checksum": "NHMS_MODEL_PACKAGE_CHECKSUM",
+    }
+    missing = [env for key, env in required.items() if fields.get(key) in (None, "")]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise StateManagerError(f"DB-free state save {source} is missing required lineage fields: {missing_text}.")
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: LocalObjectStore) -> Path:
@@ -272,12 +544,23 @@ def _find_state_checkpoints(
 
 def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint]:
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        payload = json.loads(
+            _read_limited_text_no_follow(
+                manifest_path,
+                max_bytes=MAX_STATE_CHECKPOINT_MANIFEST_BYTES,
+                label="state checkpoint manifest",
+            )
+        )
+    except (OSError, json.JSONDecodeError, StateManagerError) as error:
         raise StateManagerError(f"Invalid state checkpoint manifest {manifest_path}: {error}") from error
     raw_checkpoints = payload.get("checkpoints") if isinstance(payload, dict) else None
     if not isinstance(raw_checkpoints, Sequence) or isinstance(raw_checkpoints, str | bytes):
         return []
+    if len(raw_checkpoints) > MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES:
+        raise StateManagerError(
+            "State checkpoint manifest exceeds maximum entry count: "
+            f"{len(raw_checkpoints)} > {MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES}"
+        )
     output_root = manifest_path.parent.parent
     checkpoints: list[StateCheckpoint] = []
     for raw in raw_checkpoints:
@@ -287,12 +570,17 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
         valid_time = raw.get("valid_time")
         if not relative_path or not valid_time:
             continue
-        path = (output_root / relative_path).resolve(strict=False)
+        relative_candidate = Path(relative_path)
+        if relative_candidate.is_absolute() or ".." in relative_candidate.parts:
+            raise StateManagerError(f"State checkpoint path escapes output directory: {relative_path}")
+        path = output_root / relative_candidate
         try:
-            path.relative_to(output_root.resolve(strict=False))
-        except ValueError as error:
-            raise StateManagerError(f"State checkpoint path escapes output directory: {relative_path}") from error
-        if not path.is_file():
+            entry_stat = stat_no_follow(path, containment_root=output_root)
+        except FileNotFoundError:
+            continue
+        except SafeFilesystemError as error:
+            raise StateManagerError(f"State checkpoint path is unsafe: {relative_path}") from error
+        if not stat.S_ISREG(entry_stat.st_mode):
             continue
         checkpoints.append(
             StateCheckpoint(
@@ -304,6 +592,18 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
         )
     checkpoints.sort(key=lambda item: item.valid_time)
     return checkpoints
+
+
+def _read_limited_text_no_follow(path: Path, *, max_bytes: int, label: str) -> str:
+    try:
+        raw = read_bytes_limited_no_follow(path, max_bytes=max_bytes)
+        if len(raw) > max_bytes:
+            raise StateManagerError(f"{label} exceeds size limit of {max_bytes} bytes: {path}")
+        return raw.decode("utf-8")
+    except StateManagerError:
+        raise
+    except (OSError, SafeFilesystemError, UnicodeDecodeError) as error:
+        raise StateManagerError(f"Unable to safely read {label} {path}: {error}") from error
 
 
 def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStore) -> Path:
@@ -352,8 +652,17 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--task-id", type=int, default=None)
     def save(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
+            resolved_run_id, run_context = resolve_run_context(run_id, manifest_index, task_id)
+            result = (
+                save_state_for_run(resolved_run_id, run_context=run_context)
+                if run_context is not None
+                else save_state_for_run(resolved_run_id)
+            )
             click.echo(
-                json.dumps(save_state_for_run(resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True)
+                json.dumps(
+                    result,
+                    sort_keys=True,
+                )
             )
         except ManifestValidationError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
@@ -377,8 +686,13 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "save":
         try:
-            resolved_run_id = resolve_run_id(args.run_id, args.manifest_index, args.task_id)
-            print(json.dumps(save_state_for_run(resolved_run_id), sort_keys=True))
+            resolved_run_id, run_context = resolve_run_context(args.run_id, args.manifest_index, args.task_id)
+            result = (
+                save_state_for_run(resolved_run_id, run_context=run_context)
+                if run_context is not None
+                else save_state_for_run(resolved_run_id)
+            )
+            print(json.dumps(result, sort_keys=True))
         except ManifestValidationError as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
@@ -403,6 +717,16 @@ def _parse_time(value: str | datetime) -> datetime:
         return _ensure_utc(value)
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return _ensure_utc(parsed)
+
+
+def _parse_time_flexible(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    text = str(value)
+    try:
+        return _ensure_utc(parse_cycle_time(text))
+    except ValueError:
+        return _parse_time(text)
 
 
 def _format_time(value: datetime) -> str:

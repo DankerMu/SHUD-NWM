@@ -91,9 +91,9 @@ def produce_forcing_for_candidates(
     blocked: list[SchedulerExecutionCandidate] = []
     evidence: list[dict[str, Any]] = []
     for candidate in candidates:
-        # Fresh full-chain ingestion has no canonical to drive in-process
-        # forcing; the Slurm chain's forcing stage produces it.
-        if context.candidate_is_fresh_full_chain(candidate):
+        # Fresh/full-chain and raw-manifest reuse candidates have no canonical
+        # forcing package yet; the Slurm chain produces it after convert.
+        if _candidate_skips_pre_orchestration_forcing(context, candidate):
             ready.append(candidate)
             continue
         try:
@@ -124,6 +124,25 @@ def produce_forcing_for_candidates(
         evidence.append(item)
         ready.append(context.candidate_with_state_evidence(produced_candidate, {"forcing_production": item}))
     return ready, blocked, evidence
+
+
+def _candidate_skips_pre_orchestration_forcing(
+    context: SchedulerExecutionContext,
+    candidate: SchedulerExecutionCandidate,
+) -> bool:
+    if context.candidate_is_fresh_full_chain(candidate):
+        return True
+    state_evidence = candidate.state_evidence
+    if not isinstance(state_evidence, Mapping):
+        return False
+    fresh_ingestion = state_evidence.get("fresh_ingestion")
+    raw_manifest_reuse = state_evidence.get("raw_manifest_reuse")
+    return (
+        isinstance(fresh_ingestion, Mapping)
+        and str(fresh_ingestion.get("mode") or "") == "reuse_raw_then_convert"
+        and isinstance(raw_manifest_reuse, Mapping)
+        and str(raw_manifest_reuse.get("status") or "") == "ready"
+    )
 
 
 @dataclass(frozen=True)

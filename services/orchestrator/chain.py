@@ -304,7 +304,7 @@ def _validate_state_lineage(
         if state.model_package_version != model_package_version:
             return LINEAGE_PACKAGE_VERSION_MISMATCH
     if state.model_package_checksum is not None and model_package_checksum is not None:
-        if state.model_package_checksum != model_package_checksum:
+        if not _package_checksum_matches(state.model_package_checksum, model_package_checksum):
             return LINEAGE_PACKAGE_VERSION_MISMATCH
 
     if max_lead_hours is not None and state.lead_hours is not None:
@@ -338,11 +338,24 @@ def _validate_strict_state_lineage(
     if (
         state.model_package_checksum in (None, "")
         or model_package_checksum in (None, "")
-        or state.model_package_checksum != model_package_checksum
+        or not _package_checksum_matches(state.model_package_checksum, model_package_checksum)
     ):
         return LINEAGE_PACKAGE_VERSION_MISMATCH
 
     return None
+
+
+def _package_checksum_matches(expected: Any, actual: Any) -> bool:
+    if expected in (None, "") or actual in (None, ""):
+        return False
+    return _package_checksum_value(expected) == _package_checksum_value(actual)
+
+
+def _package_checksum_value(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text.startswith("sha256:"):
+        return text.split(":", 1)[1]
+    return text
 
 
 class SlurmGatewayClient(Protocol):

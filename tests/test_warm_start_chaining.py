@@ -174,8 +174,15 @@ def test_saved_state_valid_time_equals_next_cycle_init(tmp_path: Path) -> None:
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
+            del cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -241,8 +248,15 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
+            del cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -328,9 +342,15 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
-            del model_id, valid_time
+            del model_id, valid_time, cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -385,8 +405,26 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
     ]
     assert [item["lead_hours"] for item in result["checkpoints"]] == [6, 12]
     assert result["state_uri"].endswith("state.cfg.ic")
-    saved_t6 = object_root / "states" / "GFS" / "demo_model" / "2026050106" / "state.cfg.ic"
-    saved_t12 = object_root / "states" / "GFS" / "demo_model" / "2026050112" / "state.cfg.ic"
+    saved_t6 = (
+        object_root
+        / "states"
+        / "GFS"
+        / "demo_model"
+        / "2026050106"
+        / "gfs_2026050100"
+        / "f006"
+        / "state.cfg.ic"
+    )
+    saved_t12 = (
+        object_root
+        / "states"
+        / "GFS"
+        / "demo_model"
+        / "2026050112"
+        / "gfs_2026050100"
+        / "f012"
+        / "state.cfg.ic"
+    )
     assert round(_read_cfg_ic_header_minute(saved_t6)) == round(_minute_time("2026-05-01T06:00:00Z"))
     assert round(_read_cfg_ic_header_minute(saved_t12)) == round(_minute_time("2026-05-01T12:00:00Z"))
 
@@ -589,6 +627,43 @@ def _cohort_orchestrator(
     )
 
 
+class LineageAwareFakeStateManager(FakeStateManager):
+    def __init__(self, snapshots: list[StateSnapshot]) -> None:
+        super().__init__(snapshots)
+        self.exact_queries: list[dict[str, Any]] = []
+
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
+    ) -> StateSnapshot | None:
+        parsed_valid_time = valid_time if valid_time.tzinfo is not None else valid_time.replace(tzinfo=UTC)
+        self.exact_queries.append(
+            {
+                "model_id": model_id,
+                "valid_time": parsed_valid_time,
+                "source_id": source_id,
+                "cycle_id": cycle_id,
+                "lead_hours": lead_hours,
+            }
+        )
+        for snapshot in self.snapshots.values():
+            if snapshot.model_id != model_id or snapshot.valid_time != parsed_valid_time:
+                continue
+            if source_id is not None and snapshot.source_id != source_id:
+                continue
+            if cycle_id not in (None, "") and snapshot.cycle_id != cycle_id:
+                continue
+            if lead_hours is not None and snapshot.lead_hours != lead_hours:
+                continue
+            return snapshot
+        return None
+
+
 def test_cycle_cohort_forecast_manifest_uses_prior_cycle_saved_state(tmp_path: Path) -> None:
     # Cycle N saved a snapshot valid at T_{N+1}; cycle N+1 (init == T_{N+1}) selects it.
     t_next = "2026-05-02T00:00:00Z"
@@ -696,8 +771,7 @@ def test_strict_cycle_prefilled_exact_successor_is_validated_and_preserved(tmp_p
         "model_package_uri": "models/demo_model/package/",
         "model_package_checksum": "package-sha",
         "source_id": "gfs",
-        "init_state_id": prior_state.state_id,
-        "init_state_uri": prior_state.state_uri,
+        **_prefilled_state_fields(prior_state, t_next),
     }
     basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt(t_next))
     orchestrator._apply_cohort_warm_start(basins, "gfs", _dt(t_next))
@@ -737,6 +811,188 @@ def test_strict_cycle_prefilled_exact_successor_is_validated_and_preserved(tmp_p
     assert runtime_manifest["initial_state"]["quality"] != "cold_start_no_state"
     assert entry["init_state_uri"] == prior_state.state_uri
     assert entry["init_state_checksum"] == prior_state.checksum
+
+
+def test_strict_cycle_prefilled_required_f006_succeeds_through_chain_warm_start(tmp_path: Path) -> None:
+    t_next = "2026-05-01T06:00:00Z"
+    stale_f012 = StateSnapshot(
+        state_id="state_demo_model_2026050106_gfs_2026043018_f012",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026043018_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050106/gfs_2026043018/f012/state.cfg.ic",
+        checksum="csum-stale-f012",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026043018",
+        lead_hours=12,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    selected_f006 = StateSnapshot(
+        state_id="state_demo_model_2026050106_gfs_2026050100_f006",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050100_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050106/gfs_2026050100/f006/state.cfg.ic",
+        checksum="csum-selected-f006",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        lead_hours=6,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    state_manager = LineageAwareFakeStateManager([stale_f012, selected_f006])
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        state_manager,
+        require_forecast_warm_start=True,
+    )
+    prefilled = _prefilled_state_fields(
+        selected_f006,
+        t_next,
+        cycle_id="gfs_2026050100",
+        lead_hours=6,
+    )
+    prefilled.pop("init_state_id")
+    basin = {
+        **_strict_basin(model_package_checksum="package-sha"),
+        **prefilled,
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt(t_next))
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", _dt(t_next))
+
+    record = basins[0]
+    assert state_manager.exact_queries[0]["cycle_id"] == "gfs_2026050100"
+    assert state_manager.exact_queries[0]["lead_hours"] == 6
+    assert record["init_state_id"] == selected_f006.state_id
+    assert record["init_state_uri"] == selected_f006.state_uri
+    assert record["init_state_lineage"]["cycle_id"] == "gfs_2026050100"
+    assert record["init_state_lineage"]["lead_hours"] == 6
+
+
+@pytest.mark.parametrize(
+    ("state_cycle_id", "state_lead_hours"),
+    [
+        ("gfs_2026043018", 12),
+        ("gfs_2026043018", 6),
+    ],
+)
+def test_strict_cycle_prefilled_required_f006_rejects_stale_or_wrong_cycle_same_valid_time(
+    tmp_path: Path,
+    state_cycle_id: str,
+    state_lead_hours: int,
+) -> None:
+    t_next = "2026-05-01T06:00:00Z"
+    state = StateSnapshot(
+        state_id=f"state_demo_model_2026050106_{state_cycle_id}_f{state_lead_hours:03d}",
+        model_id="demo_model",
+        run_id=f"fcst_{state_cycle_id}_demo_model",
+        valid_time=_dt(t_next),
+        state_uri=f"states/gfs/demo_model/2026050106/{state_cycle_id}/f{state_lead_hours:03d}/state.cfg.ic",
+        checksum="csum-wrong-lineage",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id=state_cycle_id,
+        lead_hours=state_lead_hours,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    repository = FakeOrchestratorRepository()
+    client = FakeSlurmClient()
+    object_root = tmp_path / "object-store"
+    orchestrator = ForecastOrchestrator(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            poll_interval_seconds=0,
+            job_timeout_seconds=5,
+            require_forecast_warm_start=True,
+        ),
+        repository=repository,
+        state_manager=LineageAwareFakeStateManager([state]),
+        slurm_client=client,
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+    basin = {
+        **_strict_basin(model_package_checksum="package-sha"),
+        **_prefilled_state_fields(
+            state,
+            t_next,
+            cycle_id="gfs_2026050100",
+            lead_hours=6,
+        ),
+    }
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", _dt(t_next), [basin])
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_cycle_mutation(tmp_path, repository, client, run_id="fcst_gfs_2026050106_demo_model")
+
+
+@pytest.mark.parametrize(
+    ("state_checksum", "prefilled_checksum"),
+    [
+        ("sha256:package-sha", "package-sha"),
+        ("package-sha", "sha256:package-sha"),
+    ],
+)
+def test_strict_cycle_prefilled_package_checksum_alias_is_validated_and_preserved(
+    tmp_path: Path,
+    state_checksum: str,
+    prefilled_checksum: str,
+) -> None:
+    t_next = "2026-05-01T12:00:00Z"
+    prior_state = StateSnapshot(
+        state_id="state_demo_model_2026050112",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050100_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050112/state.cfg.ic",
+        checksum="csum-next",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        lead_hours=12,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum=state_checksum,
+    )
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        FakeStateManager([prior_state]),
+        require_forecast_warm_start=True,
+    )
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "demo_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "model_package_checksum": "package-sha",
+        "source_id": "gfs",
+        "init_state_id": prior_state.state_id,
+        "init_state_uri": prior_state.state_uri,
+        "init_state_checksum": prior_state.checksum,
+        "init_state_valid_time": t_next,
+        "init_state_lineage": {
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026050100",
+            "lead_hours": 12,
+            "model_package_version": "models/demo_model/package/",
+            "model_package_checksum": prefilled_checksum,
+        },
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt(t_next))
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", _dt(t_next))
+
+    assert basins[0]["init_state_id"] == prior_state.state_id
+    assert basins[0]["init_state_lineage"]["model_package_checksum"] == state_checksum
 
 
 def test_strict_cycle_prefilled_invalid_state_blocks_before_side_effects(tmp_path: Path) -> None:
@@ -780,8 +1036,12 @@ def test_strict_cycle_prefilled_invalid_state_blocks_before_side_effects(tmp_pat
         "segment_count": 2,
         "model_package_uri": "models/demo_model/package/",
         "source_id": "gfs",
-        "init_state_id": invalid_state.state_id,
-        "init_state_uri": invalid_state.state_uri,
+        **_prefilled_state_fields(
+            invalid_state,
+            t_next,
+            cycle_id="gfs_2026050100",
+            lead_hours=12,
+        ),
     }
 
     with pytest.raises(OrchestratorError) as exc_info:
@@ -889,8 +1149,14 @@ def test_strict_cycle_invalid_successor_blocks_before_side_effects(
         object_store=LocalObjectStore(object_root, "s3://nhms"),
     )
     basin = _strict_basin(package_checksum="package-sha")
-    basin["init_state_id"] = state.state_id
-    basin["init_state_uri"] = state.state_uri
+    basin.update(
+        _prefilled_state_fields(
+            state,
+            t_next,
+            cycle_id="gfs_2026050100",
+            lead_hours=12,
+        )
+    )
 
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", _dt(t_next), [basin])
@@ -933,8 +1199,7 @@ def test_strict_cycle_malformed_persisted_source_blocks_before_side_effects(tmp_
         object_store=LocalObjectStore(object_root, "s3://nhms"),
     )
     basin = _strict_basin(package_checksum="package-sha")
-    basin["init_state_id"] = state.state_id
-    basin["init_state_uri"] = state.state_uri
+    basin.update(_prefilled_state_fields(state, t_next))
 
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", _dt(t_next), [basin])
@@ -978,6 +1243,7 @@ def test_strict_cycle_prefilled_uri_only_mismatch_blocks_before_side_effects(tmp
     )
     basin = {
         **_strict_basin(model_package_checksum="package-sha"),
+        **_prefilled_state_fields(state, t_next),
         "init_state_uri": "states/gfs/demo_model/wrong/state.cfg.ic",
     }
 
@@ -1118,6 +1384,14 @@ def test_strict_cycle_missing_target_and_state_checksum_blocks_before_side_effec
     [
         {"init_state_valid_time": "not-a-time"},
         {"init_state_lineage": ["not", "a", "mapping"]},
+        {"init_state_lineage": {}},
+        {
+            "init_state_lineage": {
+                "source_id": "gfs",
+                "cycle_id": "gfs_2026050100",
+                "model_package_checksum": "package-sha",
+            }
+        },
         {"init_state_lineage": {"lead_hours": "twelve"}},
     ],
 )
@@ -1199,6 +1473,32 @@ def _strict_basin(
     if model_package_checksum is not None:
         basin["model_package_checksum"] = model_package_checksum
     return basin
+
+
+def _prefilled_state_fields(
+    state: StateSnapshot,
+    valid_time: str,
+    *,
+    source_id: str = "gfs",
+    cycle_id: str | None = None,
+    lead_hours: int | None = None,
+    model_package_version: str | None = "models/demo_model/package/",
+    model_package_checksum: str = "package-sha",
+) -> dict[str, Any]:
+    lineage = {
+        "source_id": source_id,
+        "cycle_id": cycle_id if cycle_id is not None else state.cycle_id,
+        "lead_hours": lead_hours if lead_hours is not None else state.lead_hours,
+        "model_package_version": model_package_version,
+        "model_package_checksum": model_package_checksum,
+    }
+    return {
+        "init_state_id": state.state_id,
+        "init_state_uri": state.state_uri,
+        "init_state_checksum": state.checksum,
+        "init_state_valid_time": valid_time,
+        "init_state_lineage": lineage,
+    }
 
 
 def _assert_no_cycle_mutation(
