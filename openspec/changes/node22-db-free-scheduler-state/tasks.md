@@ -61,29 +61,29 @@
 
 ## 2. File Model Registry And Canonical Readiness
 
-- [ ] 2.1 Define the production scheduler registry manifest schema.
+- [x] 2.1 Define the production scheduler registry manifest schema.
   Evidence floor: schema validates version, model identity, basin identity,
   package URI, checksum, resource profile, capabilities, segment counts, source
   policy, duplicate IDs, and bounded evidence.
-- [ ] 2.2 Add a registry publisher for production scheduler manifests.
+- [x] 2.2 Add a registry publisher for production scheduler manifests.
   Evidence floor: publisher verifies referenced model manifests/checksums,
   writes manifest-last, records checksum/generated_at/source evidence, and can
   produce a real node-22-consumable registry fixture.
-- [ ] 2.3 Wire scheduler model discovery to file registry in DB-free mode.
+- [x] 2.3 Wire scheduler model discovery to file registry in DB-free mode.
   Evidence floor: `ProductionScheduler.from_env()` does not call
   `PsycopgModelRegistryStore.from_env()` in DB-free mode; discovery evidence
   lists selected model IDs and registry checksum.
-- [ ] 2.4 Define the canonical readiness index schema and publisher.
+- [x] 2.4 Define the canonical readiness index schema and publisher.
   Evidence floor: publisher produces schema version, checksum, generated_at,
   source/cycle/model/basin identity, forecast-hour coverage, product counts,
   product URIs, and object existence evidence using authoritative canonical
   product artifacts or node-27 data-plane state.
-- [ ] 2.5 Wire scheduler canonical readiness to file index in DB-free mode.
+- [x] 2.5 Wire scheduler canonical readiness to file index in DB-free mode.
   Evidence floor: scheduler uses file/object-store product evidence and
   existing canonical readiness semantics without `PsycopgMetStore`; missing,
   stale, checksum mismatch, object-missing, and identity mismatch cases fail
   closed.
-- [ ] 2.6 Preserve node-27 raw handoff and no-download fallback semantics.
+- [x] 2.6 Preserve node-27 raw handoff and no-download fallback semantics.
   Evidence floor: focused tests prove missing/invalid NFS raw blocks, ready raw
   plus canonical-zero starts at `restart_stage=convert`, staging is
   manifest-last, and Slurm requests do not include `download_source_cycle`.

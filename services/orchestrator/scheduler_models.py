@@ -112,6 +112,12 @@ def discover_models(scheduler: Any) -> tuple[list[Any], dict[str, Any]]:
         "expression": _scheduler._filter_expression(scheduler.config.model_ids, scheduler.config.basin_ids),
         "excluded_runnable_count": filter_excluded,
     }
+    registry_evidence_provider = getattr(scheduler.registry, "scheduler_registry_evidence", None)
+    if callable(registry_evidence_provider):
+        registry_evidence = dict(registry_evidence_provider())
+        registry_evidence["selected_model_ids"] = [model.model_id for model in selected]
+        registry_evidence["selected_model_count"] = len(selected)
+        evidence["registry"] = _scheduler._evidence_safe(registry_evidence)
     return selected, evidence
 
 

@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from services.orchestrator.source_cycle_raw_manifest import (
+    NfsRawManifestStagingError,
     forecast_cycle_from_raw_manifest_readiness,
     nfs_raw_manifest_readiness,
     stage_nfs_raw_manifest_to_object_store,
@@ -153,7 +156,42 @@ def test_stage_nfs_raw_manifest_to_compute_visible_object_store(tmp_path: Path) 
 
     assert staged["status"] == "staged"
     assert staged["staged_file_count"] == 1
+    assert staged["manifest_uri"] == "[object-uri]"
+    assert staged["source_object_store_root"] == "[local-path]"
+    assert staged["target_object_store_root"] == "[local-path]"
     assert (target_root / "raw/gfs/2026062612/file-a.grib2").read_bytes() == b"grib-bytes"
     assert json.loads((target_root / "raw/gfs/2026062612/manifest.json").read_text(encoding="utf-8"))[
         "source_id"
     ] == "gfs"
+
+
+def test_stage_nfs_raw_manifest_does_not_publish_manifest_when_raw_copy_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "nfs"
+    target_root = tmp_path / "scratch-object-store"
+    _write_manifest(source_root)
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 26, 12, tzinfo=UTC),
+        object_store_root=source_root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+
+    def fail_copyfile(src: Path, dst: Path, *, follow_symlinks: bool = True) -> None:
+        del dst, follow_symlinks
+        if str(src).endswith("file-a.grib2"):
+            raise OSError("raw copy failed")
+
+    monkeypatch.setattr("services.orchestrator.source_cycle_raw_manifest.shutil.copyfile", fail_copyfile)
+
+    with pytest.raises(NfsRawManifestStagingError):
+        stage_nfs_raw_manifest_to_object_store(
+            readiness,
+            target_object_store_root=target_root,
+            target_object_store_prefix="s3://nhms",
+        )
+
+    assert not (target_root / "raw/gfs/2026062612/manifest.json").exists()
