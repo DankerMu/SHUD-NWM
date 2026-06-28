@@ -17187,6 +17187,47 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
     assert str(config.lock_path) not in rendered
 
 
+def test_db_free_orchestrator_uses_slurm_gateway_retry_config(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("SLURM_GATEWAY_MAX_RETRIES", "9")
+    monkeypatch.setenv("SLURM_GATEWAY_RETRY_BACKOFF_SECONDS", "[7,11]")
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingFileRetryService:
+        def __init__(self, repository_arg: Any, config: Any | None = None) -> None:
+            captured["retry_repository"] = repository_arg
+            captured["retry_config"] = config
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["orchestrator_kwargs"] = kwargs
+
+    monkeypatch.setattr(scheduler_module, "FileJournalRetryService", CapturingFileRetryService)
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._retry_service_from_env",
+        lambda: pytest.fail("DB-free orchestrator must not construct DB retry service"),
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z")),
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    orchestrator = scheduler._default_orchestrator_for("gfs", state_manager=None)
+
+    assert isinstance(orchestrator, CapturingForecastOrchestrator)
+    assert captured["retry_repository"] is repository
+    assert captured["orchestrator_kwargs"]["retry_service"] is not None
+    assert captured["retry_config"].max_retries == 9
+    assert captured["retry_config"].backoff_schedule == [7, 11]
+
+
 def test_db_free_file_providers_refresh_between_scheduler_passes(
     monkeypatch: Any,
     tmp_path: Path,

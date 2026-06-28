@@ -37,6 +37,13 @@ def _db_free_orchestration_repository_from_config(
     return FileOrchestrationJournalRepository(str(config.scheduler_journal_root))
 
 
+def _db_free_file_retry_service_from_env(repository: _scheduler.FileOrchestrationJournalRepository) -> _scheduler.Any:
+    from services.orchestrator.retry import RetryConfig
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    return _scheduler.FileJournalRetryService(repository, RetryConfig.from_settings(SlurmGatewaySettings()))
+
+
 class ProductionScheduler:
     def __init__(
         self,
@@ -394,7 +401,7 @@ class ProductionScheduler:
             ),
             state_manager=state_manager,
             retry_service=(
-                _scheduler.FileJournalRetryService(self.active_repository)
+                _db_free_file_retry_service_from_env(self.active_repository)
                 if self.config.db_free_required
                 and isinstance(self.active_repository, _scheduler.FileOrchestrationJournalRepository)
                 else None

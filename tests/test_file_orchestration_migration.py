@@ -10,13 +10,14 @@ import pytest
 
 from services.orchestrator import cli as cli_module
 from services.orchestrator import scheduler as scheduler_module
-from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
 from services.orchestrator.file_orchestration_migration import (
     MIGRATION_RECEIPT_SCHEMA_VERSION,
     export_scheduler_state_from_postgres,
     import_historical_scheduler_state,
     write_migration_receipt,
 )
+from services.orchestrator.retry import RetryConfig
 from tests.test_production_scheduler import _dt
 from workers.data_adapters.base import cycle_id_for
 
@@ -311,6 +312,72 @@ def test_historical_event_ids_do_not_collide_across_models(tmp_path: Path) -> No
 
     assert inserted["event_id"] > 8
     assert {event["event_id"] for event in cycle_rows.pipeline_events} >= {3, 8, inserted["event_id"]}
+
+
+def test_historical_pipeline_event_runtime_roots_are_redacted_but_retry_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "historical-workspace"
+    object_store_root = tmp_path / "historical-object-store"
+    object_store_prefix = "s3://nhms-historical"
+    for name in (
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    rows = _historical_rows(cycle_time)
+    rows["pipeline_events"].append(
+        {
+            "event_id": 99,
+            "entity_type": "pipeline_job",
+            "entity_id": "job_download_failed",
+            "event_type": "submission",
+            "status_from": "reserved",
+            "status_to": "submitted",
+            "details": {
+                "runtime_root_contract": {
+                    "workspace_dir": str(workspace_root),
+                    "object_store_root": str(object_store_root),
+                    "object_store_prefix": object_store_prefix,
+                }
+            },
+            "created_at": "2026-06-28T00:01:00Z",
+        }
+    )
+    journal_root = tmp_path / "journal"
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    state = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7010", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+
+    assert str(workspace_root) not in raw_journal
+    assert str(object_store_root) not in raw_journal
+    assert object_store_prefix not in raw_journal
+    assert "[local-path]" in raw_journal
+    assert "[object-uri]" in raw_journal
+    assert str(workspace_root) not in json.dumps(state, sort_keys=True)
+    assert retried.status == "submitted"
+    assert gateway.requests[0].manifest["workspace_dir"] == str(workspace_root)
+    assert gateway.requests[0].manifest["object_store_root"] == str(object_store_root)
+    assert gateway.requests[0].manifest["object_store_prefix"] == object_store_prefix
 
 
 def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_path: Path) -> None:

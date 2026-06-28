@@ -81,6 +81,7 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 
 FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_journal.v1"
 FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_latest.v1"
+FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
 MAX_FILE_JOURNAL_JSON_BYTES = 16 * 1024 * 1024
 MAX_FILE_JOURNAL_RECORDS = 100_000
 MAX_FILE_JOURNAL_DISCOVERED_FILES = 100_000
@@ -124,6 +125,7 @@ _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
     ("gateway_response", "manifest"),
     ("slurm", "manifest"),
 )
+_PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE = "pipeline_event_runtime_root_recovery"
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -1622,6 +1624,9 @@ class FileOrchestrationJournalRepository:
         sequence: int | None = None,
     ) -> None:
         payload = _redact_durable_error_message_fields(record_type, payload)
+        private_recovery_payload = dict(payload) if record_type == "pipeline_event" else None
+        if record_type == "pipeline_event":
+            payload = _public_pipeline_event_payload(payload)
         record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         record = _journal_record_for_write(
             record_type,
@@ -1638,6 +1643,13 @@ class FileOrchestrationJournalRepository:
             record_type=record_type,
             model_id=model_id,
         )
+        if private_recovery_payload is not None:
+            self._write_pipeline_event_private_recovery_unlocked(
+                private_recovery_payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
         self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
         if materialize_model_id is not None:
             self._materialize_latest_unlocked(
@@ -1645,6 +1657,97 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=materialize_model_id,
             )
+
+    def _write_pipeline_event_private_recovery_unlocked(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+    ) -> None:
+        record = _private_runtime_root_recovery_record(
+            payload,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+        )
+        if record is None:
+            return
+        path = _private_runtime_root_recovery_path(
+            self.root,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            entity_id=str(record["entity_id"]),
+            event_id=str(record["event_id"]),
+        )
+        content = _json_bytes(record)
+        self._require_within_byte_limit(content, path)
+        self._atomic_write_bytes_unlocked(path, content)
+
+    def _pipeline_event_private_runtime_root_candidates(
+        self,
+        job: Mapping[str, Any],
+        event: Mapping[str, Any],
+        *,
+        candidate_budget: int,
+    ) -> _RuntimeRootCandidateBatch | None:
+        event_id = event.get("event_id")
+        if event_id in (None, ""):
+            return None
+        source_id = _source_id_from_job(job)
+        cycle_time = _cycle_time_from_job(job)
+        path = _private_runtime_root_recovery_path(
+            self.root,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            entity_id=str(event.get("entity_id") or ""),
+            event_id=str(event_id),
+        )
+        payload = self._read_optional_json(path)
+        if payload is None:
+            return None
+        try:
+            _validate_private_runtime_root_recovery_record(
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=_optional_safe_identity(job, "model_id"),
+                event=event,
+            )
+        except FileOrchestrationJournalError:
+            return None
+        candidates_payload = payload.get("candidates")
+        if not isinstance(candidates_payload, Sequence) or isinstance(candidates_payload, str | bytes | bytearray):
+            return None
+        candidates: list[_RuntimeRootCandidate] = []
+        total_count = 0
+        for item in candidates_payload:
+            if not isinstance(item, Mapping):
+                return None
+            raw_path = item.get("path")
+            value = item.get("value")
+            if not isinstance(raw_path, Sequence) or isinstance(raw_path, str | bytes | bytearray):
+                return None
+            if not isinstance(value, Mapping) or not _has_runtime_root_field(value):
+                continue
+            candidate_path = tuple(str(part) for part in raw_path)
+            if not candidate_path:
+                return None
+            total_count += 1
+            if len(candidates) < candidate_budget:
+                candidates.append(
+                    _RuntimeRootCandidate(
+                        f"file_journal_event:{event.get('entity_id')}:{event_id}:{'.'.join(candidate_path)}",
+                        dict(value),
+                    )
+                )
+        return _RuntimeRootCandidateBatch(
+            candidates=candidates,
+            event_candidate_returned_count=len(candidates),
+            event_candidate_total_count=total_count,
+            event_candidate_omitted_count=max(total_count - len(candidates), 0),
+        )
 
     def _validate_outgoing_record(
         self,
@@ -2306,8 +2409,7 @@ class FileJournalRetryService:
 
     def _file_retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> _RuntimeRootCandidateBatch:
         candidates: list[_RuntimeRootCandidate] = []
-        seen_job_ids: set[str] = set()
-        job_ids: list[str] = []
+        provenance_job_ids: list[str] = []
         event_candidate_returned_count = 0
         event_candidate_total_count = 0
         event_candidate_omitted_count = 0
@@ -2316,8 +2418,23 @@ class FileJournalRetryService:
         event_rows_omitted_count = 0
         manual_retry_event_rows_ignored = 0
         if retry_job.previous_job_id:
-            job_ids.append(str(retry_job.previous_job_id))
-        excluded = set(job_ids)
+            provenance_job_ids = self._file_retry_provenance_job_ids(str(retry_job.previous_job_id))
+        for job_id in provenance_job_ids:
+            if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
+                break
+            event_batch = self._file_retry_event_runtime_root_candidates(
+                job_id,
+                candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
+            )
+            candidates.extend(event_batch.candidates)
+            event_candidate_returned_count += event_batch.event_candidate_returned_count
+            event_candidate_total_count += event_batch.event_candidate_total_count
+            event_candidate_omitted_count += event_batch.event_candidate_omitted_count
+            event_rows_scanned_count += event_batch.event_rows_scanned_count
+            event_rows_total_count += event_batch.event_rows_total_count
+            event_rows_omitted_count += event_batch.event_rows_omitted_count
+            manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
+        excluded = set(provenance_job_ids)
         if retry_job.run_id:
             same_run_jobs = sorted(
                 self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id)),
@@ -2337,25 +2454,20 @@ class FileJournalRetryService:
                     continue
                 if job.get("manual_retry_marker") is True:
                     continue
-                job_ids.append(job_id)
-        for job_id in job_ids:
-            if job_id in seen_job_ids:
-                continue
-            if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
-                break
-            seen_job_ids.add(job_id)
-            event_batch = self._file_retry_event_runtime_root_candidates(
-                job_id,
-                candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
-            )
-            candidates.extend(event_batch.candidates)
-            event_candidate_returned_count += event_batch.event_candidate_returned_count
-            event_candidate_total_count += event_batch.event_candidate_total_count
-            event_candidate_omitted_count += event_batch.event_candidate_omitted_count
-            event_rows_scanned_count += event_batch.event_rows_scanned_count
-            event_rows_total_count += event_batch.event_rows_total_count
-            event_rows_omitted_count += event_batch.event_rows_omitted_count
-            manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
+                if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
+                    break
+                event_batch = self._file_retry_event_runtime_root_candidates(
+                    job_id,
+                    candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
+                )
+                candidates.extend(event_batch.candidates)
+                event_candidate_returned_count += event_batch.event_candidate_returned_count
+                event_candidate_total_count += event_batch.event_candidate_total_count
+                event_candidate_omitted_count += event_batch.event_candidate_omitted_count
+                event_rows_scanned_count += event_batch.event_rows_scanned_count
+                event_rows_total_count += event_batch.event_rows_total_count
+                event_rows_omitted_count += event_batch.event_rows_omitted_count
+                manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
         env_candidate = _runtime_root_env_candidate()
         if env_candidate:
             candidates.append(_RuntimeRootCandidate("runtime_config:environment", env_candidate))
@@ -2369,6 +2481,43 @@ class FileJournalRetryService:
             event_rows_omitted_count=event_rows_omitted_count,
             manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
         )
+
+    def _file_retry_provenance_job_ids(self, job_id: str) -> list[str]:
+        job_ids: list[str] = []
+        seen: set[str] = set()
+        current: str | None = job_id
+        for _ in range(16):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            job_ids.append(current)
+            current = self._file_retry_previous_job_id(current)
+        return job_ids
+
+    def _file_retry_previous_job_id(self, job_id: str) -> str | None:
+        job = self.repository.get_pipeline_job(job_id)
+        if job is None:
+            return None
+        source_id = _source_id_from_job(job)
+        cycle_time = _cycle_time_from_job(job)
+        model_id = _optional_safe_identity(job, "model_id")
+        rows = self.repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        retry_events = sorted(
+            (
+                event
+                for event in rows.pipeline_events
+                if str(event.get("entity_id") or "") == job_id
+                and str(event.get("event_type") or "") == "retry"
+            ),
+            key=lambda event: _optional_positive_int(event.get("event_id")) or 0,
+            reverse=True,
+        )
+        for event in retry_events:
+            details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+            previous_job_id = details.get("previous_job_id")
+            if isinstance(previous_job_id, str) and previous_job_id.strip():
+                return previous_job_id.strip()
+        return None
 
     def _file_retry_event_runtime_root_candidates(
         self,
@@ -2412,6 +2561,15 @@ class FileJournalRetryService:
 
             event_id = event.get("event_id")
             event_source = f"file_journal_event:{job_id}:{event_id}"
+            private_batch = self.repository._pipeline_event_private_runtime_root_candidates(
+                job,
+                event,
+                candidate_budget=candidate_budget - len(candidates),
+            )
+            if private_batch is not None:
+                candidates.extend(private_batch.candidates)
+                event_candidate_total_count += private_batch.event_candidate_total_count
+                continue
             for path in _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS:
                 candidate = _mapping_at(details, path)
                 if candidate and _has_runtime_root_field(candidate):
@@ -2592,6 +2750,123 @@ def _journal_record_for_write(
         if value not in (None, ""):
             record[payload_field] = value
     return record
+
+
+def _public_pipeline_event_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    row = dict(payload)
+    details = row.get("details")
+    row["details"] = _public_evidence(details) if isinstance(details, Mapping) else _public_evidence(details or {})
+    return row
+
+
+def _private_runtime_root_recovery_record(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str | None,
+) -> dict[str, Any] | None:
+    details = payload.get("details") if isinstance(payload.get("details"), Mapping) else {}
+    candidates = _runtime_root_recovery_candidate_records(details)
+    if not candidates:
+        return None
+    event_id = payload.get("event_id")
+    if event_id in (None, ""):
+        return None
+    entity_id = _required_safe_identity(payload, "entity_id")
+    record: dict[str, Any] = {
+        "schema_version": FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION,
+        "record_type": _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE,
+        "source_id": _normalize_file_source_id(source_id, field="source_id"),
+        "cycle_time": _format_utc(cycle_time),
+        "entity_type": str(payload.get("entity_type") or "pipeline_job"),
+        "entity_id": entity_id,
+        "event_type": str(payload.get("event_type") or ""),
+        "event_id": str(event_id),
+        "status_from": payload.get("status_from"),
+        "status_to": payload.get("status_to"),
+        "event_created_at": payload.get("created_at"),
+        "created_at": _format_utc(_utcnow()),
+        "candidates": candidates,
+    }
+    if model_id not in (None, ""):
+        record["model_id"] = _safe_identity_text(str(model_id), field="model_id")
+    _validate_json_complexity(
+        record,
+        field="private_runtime_root_recovery",
+        max_nodes=MAX_FILE_JOURNAL_JSON_NODES,
+        max_depth=MAX_FILE_JOURNAL_JSON_DEPTH,
+    )
+    return record
+
+
+def _runtime_root_recovery_candidate_records(details: Mapping[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for path in _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS:
+        candidate = _mapping_at(details, path)
+        if candidate and _has_runtime_root_field(candidate):
+            candidates.append({"path": list(path), "value": _runtime_root_recovery_candidate_value(candidate)})
+    if _has_runtime_root_field(details):
+        candidates.append({"path": ["details"], "value": _runtime_root_recovery_candidate_value(details)})
+    return candidates
+
+
+def _runtime_root_recovery_candidate_value(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: _strip_internal_fields(candidate[field]) for field in _RUNTIME_ROOT_FIELDS if field in candidate}
+
+
+def _private_runtime_root_recovery_path(
+    root: Path,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    entity_id: str,
+    event_id: str,
+) -> Path:
+    return (
+        root
+        / "private"
+        / "runtime-root-recovery"
+        / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+        / format_cycle_time(cycle_time)
+        / _safe_segment(entity_id)
+        / f"{_safe_segment(event_id)}.json"
+    )
+
+
+def _validate_private_runtime_root_recovery_record(
+    row: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str | None,
+    event: Mapping[str, Any],
+) -> None:
+    _require_schema(row, FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION)
+    if row.get("record_type") != _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE:
+        raise FileOrchestrationJournalError("file_journal_record_type_mismatch", field="record_type")
+    _require_source_cycle(row, source_id=source_id, cycle_time=cycle_time)
+    if model_id not in (None, ""):
+        _require_model_id(row, str(model_id), required=False)
+    for identity_field in ("entity_type", "entity_id", "event_type", "event_id", "status_from", "status_to"):
+        if _private_event_identity_value(row.get(identity_field)) != _private_event_identity_value(
+            event.get(identity_field)
+        ):
+            raise FileOrchestrationJournalError(
+                "file_journal_event_mismatch",
+                field=identity_field,
+                evidence={
+                    "expected": _private_event_identity_value(event.get(identity_field))[:80],
+                    "actual": _private_event_identity_value(row.get(identity_field))[:80],
+                },
+            )
+    event_created_at = _private_event_identity_value(event.get("created_at"))
+    if event_created_at and _private_event_identity_value(row.get("event_created_at")) != event_created_at:
+        raise FileOrchestrationJournalError("file_journal_event_mismatch", field="event_created_at")
+
+
+def _private_event_identity_value(value: Any) -> str:
+    return "" if value in (None, "") else str(value)
 
 
 def _strip_internal_fields(value: Any) -> Any:
@@ -2800,7 +3075,6 @@ def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
             or row.get("started_at")
             or row.get("created_at")
         ),
-        _file_retry_job_int(row, "retry_count"),
         _datetime_sort_key(row.get("created_at")),
         str(row.get("job_id") or ""),
     )

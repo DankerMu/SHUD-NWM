@@ -869,6 +869,65 @@ def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal
     assert state["pipeline_events"][0]["status_to"] == "succeeded"
 
 
+def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    workspace_root = tmp_path / "runtime" / "workspace"
+    object_store_root = tmp_path / "runtime" / "object-store"
+    manifest_index_path = tmp_path / "runtime" / "manifest-index.json"
+    object_store_prefix = "s3://nhms-prod/private-root"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_public_event_redaction")
+    repository.reserve_pipeline_job(record)
+
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_public_event_redaction",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "manifest_index_path": str(manifest_index_path),
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+                "object_store_prefix": object_store_prefix,
+            },
+            "slurm": {
+                "manifest": {
+                    "workspace_dir": str(workspace_root),
+                    "object_store_root": str(object_store_root),
+                    "object_store_prefix": object_store_prefix,
+                }
+            },
+        },
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_rendered = "\n".join(path.read_text(encoding="utf-8") for path in (journal_root / "latest").rglob("*.json"))
+    public_rendered = "\n".join(
+        [
+            raw_journal,
+            latest_rendered,
+            json.dumps(inserted, sort_keys=True),
+            json.dumps(state, sort_keys=True),
+        ]
+    )
+    private_rendered = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (journal_root / "private/runtime-root-recovery").rglob("*.json")
+    )
+
+    assert state is not None
+    for raw in (str(workspace_root), str(object_store_root), str(manifest_index_path), object_store_prefix):
+        assert raw not in public_rendered
+    assert "[local-path]" in public_rendered
+    assert "[object-uri]" in public_rendered
+    assert str(workspace_root) in private_rendered
+    assert str(object_store_root) in private_rendered
+    assert object_store_prefix in private_rendered
+
+
 def test_file_orchestration_journal_reservation_append_failure_leaves_no_direct_only_blocker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1168,6 +1227,54 @@ def test_file_journal_manual_retry_refuses_old_failure_after_later_success(tmp_p
         def submit_job(self, request: Any) -> dict[str, Any]:
             self.requests.append(request)
             return {"job_id": "7003", "status": "submitted"}
+
+    gateway = Gateway()
+
+    with pytest.raises(RetryNotFoundError):
+        service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+
+    assert gateway.requests == []
+
+
+def test_file_journal_manual_retry_truth_sort_uses_created_at_before_retry_count(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_equal_truth_failed")
+    failed.update(
+        {
+            "status": "failed",
+            "retry_count": 7,
+            "error_code": "SLURM_TIMEOUT",
+            "created_at": "2026-06-28T00:00:00Z",
+            "updated_at": "2026-06-28T00:30:00Z",
+            "finished_at": "2026-06-28T00:30:00Z",
+        }
+    )
+    success = _pipeline_reservation_record(cycle_time, job_id="job_equal_truth_success")
+    success.update(
+        {
+            "idempotency_key": "gfs:gfs_2026062800:basin_a:forecast_equal_truth_success",
+            "status": "succeeded",
+            "retry_count": 1,
+            "created_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:30:00Z",
+            "finished_at": "2026-06-28T00:20:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(failed)
+    repository.upsert_pipeline_job(success)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    with pytest.raises(RetryNotFoundError):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7006", "status": "submitted"}
 
     gateway = Gateway()
 
@@ -1675,6 +1782,124 @@ def test_file_journal_download_retry_ignores_stale_manual_retry_runtime_roots(
     assert retried.status == "submission_failed"
     assert retried.error_code == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
     assert gateway.requests == []
+
+
+def test_file_journal_download_retry_recovers_original_contract_through_stale_retry_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    original_workspace_root = tmp_path / "original-workspace"
+    original_object_store_root = tmp_path / "original-object-store"
+    stale_workspace_root = tmp_path / "stale-workspace"
+    stale_object_store_root = tmp_path / "stale-object-store"
+    for name in (
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    original = _pipeline_reservation_record(cycle_time, job_id="job_download_original")
+    original.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "status": "failed",
+            "retry_count": 1,
+            "idempotency_key": "gfs:gfs_2026062800:download-original",
+            "error_code": "SOURCE_CYCLE_UNAVAILABLE",
+            "created_at": "2026-06-28T00:00:00Z",
+            "updated_at": "2026-06-28T00:05:00Z",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    stale_retry = _pipeline_reservation_record(cycle_time, job_id="cycle_gfs_2026062800_retry_active")
+    stale_retry.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "status": "submission_failed",
+            "retry_count": 2,
+            "manual_retry_marker": True,
+            "idempotency_key": "manual_retry:cycle_gfs_2026062800:2",
+            "created_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:12:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(original)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_download_original",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": str(original_workspace_root),
+                "object_store_root": str(original_object_store_root),
+                "object_store_prefix": "s3://nhms-original",
+            }
+        },
+    )
+    repository.upsert_pipeline_job(stale_retry)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="cycle_gfs_2026062800_retry_active",
+        event_type="retry",
+        status_from="failed",
+        status_to="pending",
+        details={"trigger": "manual", "previous_job_id": "job_download_original"},
+    )
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="cycle_gfs_2026062800_retry_active",
+        event_type="submission",
+        status_from="pending",
+        status_to="submission_failed",
+        details={
+            "trigger": "manual",
+            "runtime_root_contract": {
+                "workspace_dir": str(stale_workspace_root),
+                "object_store_root": str(stale_object_store_root),
+                "object_store_prefix": "s3://nhms-stale",
+            },
+        },
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7007", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+
+    assert retried.status == "submitted"
+    assert retried.job_id == "cycle_gfs_2026062800_retry_2"
+    assert gateway.requests[0].manifest["workspace_dir"] == str(original_workspace_root)
+    assert gateway.requests[0].manifest["object_store_root"] == str(original_object_store_root)
+    assert gateway.requests[0].manifest["object_store_prefix"] == "s3://nhms-original"
+    assert "stale" not in json.dumps(gateway.requests[0].manifest, sort_keys=True)
+    submission_event = next(
+        event
+        for event in repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    evidence = submission_event["details"]["runtime_root_resolution"]
+    assert "job_download_original" in evidence["resolved"]["workspace_dir"]["source"]
+    assert evidence["candidate_counts"]["manual_retry_event_rows_ignored"] == 1
 
 
 def test_file_journal_download_retry_failure_persists_only_redacted_runtime_roots(
