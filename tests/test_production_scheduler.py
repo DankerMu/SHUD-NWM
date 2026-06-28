@@ -17262,6 +17262,7 @@ def test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_
 ) -> None:
     _set_db_free_scheduler_env(monkeypatch, tmp_path)
     factory_calls: list[str] = []
+    forcing_producer = FakeForcingProducer()
 
     def _factory(source_id: str) -> FakeProductionOrchestrator:
         factory_calls.append(source_id)
@@ -17273,12 +17274,14 @@ def test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeActiveRepository(active=False),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
         orchestrator_factory=_factory,
     )
 
     result = scheduler.run_once()
 
     assert factory_calls == []
+    assert forcing_producer.calls == []
     assert result.status == "preflight_blocked"
     assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
     assert result.evidence["counts"]["submitted_count"] == 0
@@ -17286,6 +17289,44 @@ def test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_
         "db_free_file_journal_write_not_implemented"
     )
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_journal_write_block_forces_retention_dry_run_before_deletion(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    old_cycle = format_cycle_time(now - timedelta(days=30))
+    expired_file = roots["object_store_root"] / "raw" / "gfs" / old_cycle / "gfs.f000.nc"
+    expired_file.parent.mkdir(parents=True)
+    expired_file.write_text("expired\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    orchestrator = FakeProductionOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(dry_run=False, now=now),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert expired_file.exists()
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["retention"]["status"] == "completed"
+    assert result.evidence["retention"]["dry_run"] is True
+    assert result.evidence["retention"]["forced_dry_run_by_scheduler"] is True
+    assert result.evidence["retention"]["forced_dry_run_reason"] == "db_free_journal_write_blocked"
+    assert result.evidence["retention"]["planned"]
+    assert result.evidence["retention"]["deleted"] == []
 
 
 def test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call(

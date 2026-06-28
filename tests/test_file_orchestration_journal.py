@@ -569,6 +569,39 @@ def test_file_orchestration_journal_valid_direct_context_records_are_read(tmp_pa
     assert forcing.max_lead_hours == 9
 
 
+def test_file_orchestration_journal_forcing_context_reads_db_lineage_json_fallback(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        _direct_forcing_context_record(
+            cycle_time=cycle_time,
+            payload_overrides={
+                "max_lead_hours": None,
+                "forcing_package_manifest_uri": None,
+                "forcing_package_manifest_checksum": None,
+                "lineage_json": {
+                    "max_lead_hours": 72,
+                    "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/model_a/forcing_package.json",
+                    "forcing_package_manifest_checksum": "sha256:forcing-package",
+                },
+            },
+        ),
+    )
+
+    forcing = FileOrchestrationJournalRepository(journal_root).find_forcing_context(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert forcing.max_lead_hours == 72
+    assert forcing.forcing_package_manifest_uri == "s3://nhms/forcing/gfs/model_a/forcing_package.json"
+    assert forcing.forcing_package_manifest_checksum == "sha256:forcing-package"
+
+
 @pytest.mark.parametrize(
     "method_name",
     [
@@ -1047,6 +1080,50 @@ def test_file_orchestration_journal_later_journal_sequence_overrides_stale_lates
     assert state is not None
     assert state["pipeline_status"] == "running"
     assert state["pipeline_jobs"][0]["slurm_job_id"] == "3001"
+
+
+def test_file_orchestration_journal_newer_latest_view_overrides_older_journal_sequence(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    terminal_latest_job = _active_job(cycle_time)
+    terminal_latest_job.update(
+        {
+            "status": "succeeded",
+            "slurm_job_id": "9009",
+            "submitted_at": "2026-06-28T00:01:00Z",
+            "finished_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:10:00Z",
+        }
+    )
+    older_journal_job = dict(terminal_latest_job)
+    older_journal_job.update({"status": "running", "slurm_job_id": "3001"})
+    latest = _latest_view(cycle_time=cycle_time, jobs=[terminal_latest_job])
+    latest["replay"]["latest_sequence"] = 10
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    _write_jsonl(
+        journal_root / "journal/gfs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=older_journal_job,
+                sequence=5,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a") == []
+    assert repository.get_pipeline_job(terminal_latest_job["job_id"])["status"] == "succeeded"
+    assert repository.query_candidate_state(terminal_latest_job["idempotency_key"])["slurm_job_id"] == "9009"
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_jobs"][0]["status"] == "succeeded"
+    assert state["pipeline_status"] != "running"
 
 
 @pytest.mark.parametrize(
@@ -1874,6 +1951,43 @@ def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_
     assert consumed_entries == max_files + 1
     assert query[0]["error_code"] == "file_journal_file_limit_exceeded"
     assert query[0]["file_journal"]["field"] == "latest"
+
+
+def test_file_orchestration_journal_pipeline_query_has_aggregate_record_budget(
+    tmp_path: Path,
+) -> None:
+    first_cycle_time = _dt("2026-06-28T00:00:00Z")
+    second_cycle_time = _dt("2026-06-28T12:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_jsonl(
+        journal_root / "journal/gfs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=first_cycle_time,
+                payload=_active_job(first_cycle_time),
+            )
+        ],
+    )
+    _write_jsonl(
+        journal_root / "journal/gfs/2026062812.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=second_cycle_time,
+                payload=_active_job(second_cycle_time),
+            )
+        ],
+    )
+
+    query = FileOrchestrationJournalRepository(journal_root, max_records=1).query_pipeline_jobs_by_cycle(
+        cycle_id_for("gfs", first_cycle_time)
+    )
+
+    assert query[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert query[0]["file_journal"]["field"] == "pipeline_job_records"
 
 
 def test_file_orchestration_journal_equal_timestamp_tiebreak_matches_db_ordering(tmp_path: Path) -> None:

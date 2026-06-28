@@ -41,6 +41,7 @@ MAX_FILE_JOURNAL_SCAN_DEPTH = 32
 MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
 MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
+_LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
@@ -83,6 +84,18 @@ class _CycleRows:
     replay: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _RecordBudget:
+    limit: int
+    field: str
+    count: int = 0
+
+    def consume(self, amount: int = 1) -> None:
+        self.count += amount
+        if self.count > self.limit:
+            raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field=self.field)
+
+
 class FileOrchestrationJournalRepository:
     """Read-side file implementation for scheduler orchestration state."""
 
@@ -95,6 +108,7 @@ class FileOrchestrationJournalRepository:
         max_depth: int = MAX_FILE_JOURNAL_SCAN_DEPTH,
         max_json_nodes: int = MAX_FILE_JOURNAL_JSON_NODES,
         max_json_depth: int = MAX_FILE_JOURNAL_JSON_DEPTH,
+        max_records: int = MAX_FILE_JOURNAL_RECORDS,
     ) -> None:
         self.root = Path(journal_root)
         self.max_bytes = int(max_bytes)
@@ -102,6 +116,7 @@ class FileOrchestrationJournalRepository:
         self.max_depth = int(max_depth)
         self.max_json_nodes = int(max_json_nodes)
         self.max_json_depth = int(max_json_depth)
+        self.max_records = int(max_records)
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
@@ -477,6 +492,7 @@ class FileOrchestrationJournalRepository:
         _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
         _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
         _require_model_id(payload, expected_model_id, required=True)
+        latest_replay_sequence = _latest_replay_sequence(payload)
         hydro_run = _first_mapping(payload, "hydro_run", "hydro")
         if hydro_run is not None:
             _validate_hydro_run_identity(
@@ -485,9 +501,11 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=expected_model_id,
             )
+            hydro_run = _with_latest_replay_order(hydro_run, latest_replay_sequence)
         forecast_cycle = _first_mapping(payload, "forecast_cycle")
         if forecast_cycle is not None:
             _validate_forecast_cycle_identity(forecast_cycle, source_id=source_id, cycle_time=cycle_time)
+            forecast_cycle = _with_latest_replay_order(forecast_cycle, latest_replay_sequence)
         forcing_version = _first_mapping(payload, "forcing_version", "forcing_context")
         if forcing_version is not None:
             _validate_forcing_version_identity(
@@ -496,9 +514,11 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=expected_model_id,
             )
+            forcing_version = _with_latest_replay_order(forcing_version, latest_replay_sequence)
         model_context = _first_mapping(payload, "model_context")
         if model_context is not None:
             _validate_model_context_identity(model_context, model_id=expected_model_id)
+            model_context = _with_latest_replay_order(model_context, latest_replay_sequence)
         rows.hydro_run = _latest_mapping(rows.hydro_run, hydro_run)
         rows.forecast_cycle = _latest_mapping(rows.forecast_cycle, forecast_cycle)
         rows.forcing_version = _latest_mapping(
@@ -513,9 +533,11 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=expected_model_id,
             )
+            job = _with_latest_replay_order(job, latest_replay_sequence)
             _upsert_by_key(rows.pipeline_jobs, job, key="job_id")
         for event in _record_list(payload, "pipeline_events", "events", single_key="pipeline_event"):
             _validate_event_identity(event)
+            event = _with_latest_replay_order(event, latest_replay_sequence)
             rows.pipeline_events.append(event)
         replay = payload.get("replay")
         if isinstance(replay, Mapping):
@@ -697,6 +719,7 @@ class FileOrchestrationJournalRepository:
 
     def _iter_pipeline_job_records(self, *, include_direct: bool = True) -> Iterable[dict[str, Any]]:
         jobs: dict[str, dict[str, Any]] = {}
+        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records")
         for path in sorted(
             _iter_regular_json_files(
                 self.root / "latest",
@@ -719,6 +742,7 @@ class FileOrchestrationJournalRepository:
                 expected_model_id=model_id,
             )
             for job in rows.pipeline_jobs.values():
+                budget.consume()
                 _upsert_by_key(jobs, job, key="job_id")
         for path in sorted(
             _iter_jsonl_files(
@@ -730,12 +754,14 @@ class FileOrchestrationJournalRepository:
         ):
             source_id, cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
             for record in self._read_jsonl(path):
+                budget.consume()
                 rows = _CycleRows()
                 self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
                 for job in rows.pipeline_jobs.values():
                     _upsert_by_key(jobs, job, key="job_id")
         if include_direct:
             for job in self._iter_direct_pipeline_job_records():
+                budget.consume()
                 _insert_missing_by_key(jobs, job, key="job_id")
         yield from jobs.values()
 
@@ -1167,6 +1193,33 @@ def _with_replay_order(payload: Mapping[str, Any], record: Mapping[str, Any]) ->
     if isinstance(line_order, int):
         row[_REPLAY_ORDER_FIELD] = line_order
     return row
+
+
+def _with_latest_replay_order(row: Mapping[str, Any], latest_replay_sequence: int | None) -> dict[str, Any]:
+    if latest_replay_sequence is None:
+        return dict(row)
+    payload = dict(row)
+    payload[_REPLAY_SEQUENCE_FIELD] = latest_replay_sequence
+    payload[_REPLAY_ORDER_FIELD] = _LATEST_REPLAY_ORDER_SENTINEL
+    return payload
+
+
+def _latest_replay_sequence(payload: Mapping[str, Any]) -> int | None:
+    replay = payload.get("replay")
+    if not isinstance(replay, Mapping):
+        return None
+    value = replay.get("latest_sequence")
+    if value in (None, ""):
+        return None
+    text = _scalar_text(
+        value,
+        field="replay.latest_sequence",
+        invalid_reason="file_journal_invalid_field",
+    )
+    try:
+        return int(text)
+    except ValueError as error:
+        raise FileOrchestrationJournalError("file_journal_invalid_field", field="replay.latest_sequence") from error
 
 
 def _optional_replay_sequence(record: Mapping[str, Any]) -> int | None:
@@ -1947,16 +2000,47 @@ def _model_context_from_mapping(row: Mapping[str, Any], *, model_id: str) -> Mod
 
 
 def _forcing_context_from_mapping(row: Mapping[str, Any]) -> ForcingContext:
+    lineage = _lineage_mapping(row.get("lineage_json"))
     return ForcingContext(
         _optional_str(row.get("forcing_version_id"), field="forcing_version_id"),
         _optional_str(row.get("forcing_package_uri"), field="forcing_package_uri"),
         _optional_datetime(row.get("start_time"), field="start_time"),
         _optional_datetime(row.get("end_time"), field="end_time"),
         _optional_str(row.get("source_id"), field="source_id"),
-        _optional_int(row.get("max_lead_hours"), field="max_lead_hours"),
-        _optional_str(row.get("forcing_package_manifest_uri"), field="forcing_package_manifest_uri"),
-        _optional_str(row.get("forcing_package_manifest_checksum"), field="forcing_package_manifest_checksum"),
+        _optional_int(
+            _fallback_value(row.get("max_lead_hours"), lineage.get("max_lead_hours")),
+            field="max_lead_hours",
+        ),
+        _optional_str(
+            _fallback_value(
+                row.get("forcing_package_manifest_uri"),
+                lineage.get("forcing_package_manifest_uri"),
+            ),
+            field="forcing_package_manifest_uri",
+        ),
+        _optional_str(
+            _fallback_value(
+                row.get("forcing_package_manifest_checksum"),
+                lineage.get("forcing_package_manifest_checksum"),
+            ),
+            field="forcing_package_manifest_checksum",
+        ),
     )
+
+
+def _fallback_value(primary: Any, fallback: Any) -> Any:
+    return fallback if primary in (None, "") else primary
+
+
+def _lineage_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(value, Mapping):
+        return value
+    return {}
 
 
 def _optional_str(value: Any, *, field: str = "value") -> str | None:

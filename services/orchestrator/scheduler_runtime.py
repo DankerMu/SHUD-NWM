@@ -745,14 +745,6 @@ def run_once(self) -> SchedulerPassResult:
                             cancellation_evidence,
                             reservation=evidence_reservation,
                         )
-                    if candidates and self.forcing_producer is not None:
-                        (
-                            candidates,
-                            forcing_blocked_candidates,
-                            forcing_evidence,
-                        ) = self._produce_forcing_for_candidates(candidates)
-                        blocked_candidates.extend(forcing_blocked_candidates)
-                        execution_evidence.extend(forcing_evidence)
                     if candidates:
                         if _db_free_journal_mutation_blocked(self.config, mutation_requested=bool(candidates)):
                             db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
@@ -773,6 +765,18 @@ def run_once(self) -> SchedulerPassResult:
                             pass_status = "preflight_blocked"
                             no_mutation_proof = _no_mutation_proof()
                         else:
+                            if self.forcing_producer is not None:
+                                (
+                                    candidates,
+                                    forcing_blocked_candidates,
+                                    forcing_evidence,
+                                ) = self._produce_forcing_for_candidates(candidates)
+                                blocked_candidates.extend(forcing_blocked_candidates)
+                                execution_evidence.extend(forcing_evidence)
+                        if candidates and not _db_free_journal_mutation_blocked(
+                            self.config,
+                            mutation_requested=bool(candidates),
+                        ):
                             slurm_preflight = _slurm_preflight(self.config)
                             if slurm_preflight["status"] != "not_required":
                                 slurm_preflight_evidence = redact_payload(slurm_preflight)
@@ -957,9 +961,11 @@ def run_once(self) -> SchedulerPassResult:
             }
         else:
             evidence["backfill"] = {"enabled": False}
-        retention_force_reason = (
-            "evidence_preflight_blocked" if evidence_reservation.get("status") == "blocked" else None
-        )
+        retention_force_reason = None
+        if evidence_reservation.get("status") == "blocked":
+            retention_force_reason = "evidence_preflight_blocked"
+        elif execution_boundary == "db_free_journal_write_blocked":
+            retention_force_reason = "db_free_journal_write_blocked"
         evidence["retention"] = self._run_retention(
             started_at,
             force_dry_run_reason=retention_force_reason,
@@ -1180,8 +1186,8 @@ def _run_retention(
     dry-run too, regardless of NHMS_RETENTION_DRY_RUN. This preserves the
     "dry_run => no side effects" contract so a planning pass never deletes
     aged artifacts even when the env enables real deletion. Evidence
-    preflight failures use the same boundary because they claim no production
-    mutation has happened yet.
+    preflight failures and DB-free write blockers use the same boundary
+    because they claim no production mutation has happened yet.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
