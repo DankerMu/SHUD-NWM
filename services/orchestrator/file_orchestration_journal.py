@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import threading
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +21,6 @@ from packages.common.safe_fs import (
     list_directory_no_follow_limited,
     read_bytes_limited_no_follow,
     stat_no_follow,
-    write_bytes_no_follow_exclusive,
 )
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
@@ -32,13 +33,34 @@ from services.orchestrator.chain_repository import (
 from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
 from services.orchestrator.retry import (
+    _REQUIRED_RUNTIME_ROOT_FIELDS,
+    _RUNTIME_ROOT_FIELDS,
+    _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT,
     ACTIVE_RETRY_STATUSES,
-    FAILED_RETRY_STATUSES,
+    DOWNLOAD_SOURCE_CYCLE_JOB_TYPE,
+    DURABLE_HYDRO_SUCCESS_STATUSES,
     MANUAL_RETRY_SOURCE_STATUSES,
+    PARTIAL_OR_FAILED_HYDRO_STATUSES,
+    RETRY_RUNTIME_ROOTS_SECRET_BEARING,
+    RETRY_RUNTIME_ROOTS_UNRESOLVED,
+    RETRY_RUNTIME_ROOTS_UNSAFE,
+    TERMINAL_SUCCESS_RETRY_STATUSES,
     RetryConfig,
     RetryConflictError,
     RetryError,
     RetryNotFoundError,
+    _attach_retry_runtime_root_contract,
+    _attach_retry_runtime_root_resolution,
+    _resolve_runtime_root_candidate,
+    _retry_submission_manifest,
+    _RetryRuntimeRootResolutionError,
+    _RetrySubmissionJob,
+    _runtime_root_contract_from_error,
+    _runtime_root_env_candidate,
+    _runtime_root_resolution_evidence,
+    _runtime_root_resolution_from_error,
+    _RuntimeRootCandidate,
+    _RuntimeRootCandidateBatch,
     classify_failure,
     compute_backoff_seconds,
 )
@@ -374,6 +396,24 @@ class FileOrchestrationJournalRepository:
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
+        existing = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None).forecast_cycle
+        if existing is not None:
+            row = dict(existing)
+            changed = False
+            for key, value in (
+                ("cycle_id", _cycle_id_for_file_source(source_id, cycle_time)),
+                ("source_id", source_id),
+                ("cycle_time", _format_utc(cycle_time)),
+                ("issue_time", _format_utc(cycle_time)),
+            ):
+                if row.get(key) in (None, ""):
+                    row[key] = value
+                    changed = True
+            if not changed:
+                return _public_scheduler_row(row)
+            row["updated_at"] = _format_utc(_utcnow())
+            self._append_validated_record("forecast_cycle", row, source_id=source_id, cycle_time=cycle_time)
+            return _public_scheduler_row(row)
         row = {
             "cycle_id": _cycle_id_for_file_source(source_id, cycle_time),
             "source_id": source_id,
@@ -466,11 +506,17 @@ class FileOrchestrationJournalRepository:
         row.update({"status": status, "updated_at": _format_utc(_utcnow())})
         for key, value in (
             ("slurm_job_id", slurm_job_id),
-            ("error_code", error_code),
-            ("error_message", error_message),
         ):
             if value is not None:
                 row[key] = value
+        if status in {"pending", "created", "succeeded", "complete", "parsed", "frequency_done", "published"}:
+            row["error_code"] = error_code
+            row["error_message"] = error_message
+        else:
+            if error_code is not None:
+                row["error_code"] = error_code
+            if error_message is not None:
+                row["error_message"] = error_message
         source_id = _required_source_id(row, "source_id")
         cycle_time = _parse_cycle_time_field(row, "cycle_time")
         model_id = _required_safe_identity(row, "model_id")
@@ -630,9 +676,7 @@ class FileOrchestrationJournalRepository:
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")
-        event_id = self._next_sequence(source_id=source_id, cycle_time=cycle_time)
         row = {
-            "event_id": event_id,
             "entity_type": entity_type,
             "entity_id": entity_id,
             "event_type": event_type,
@@ -642,15 +686,65 @@ class FileOrchestrationJournalRepository:
             "details": details or {},
             "created_at": _format_utc(_utcnow()),
         }
-        self._append_validated_record(
-            "pipeline_event",
-            row,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            model_id=model_id,
-            materialize_model_id=model_id,
-            sequence=event_id,
-        )
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            event_id = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            row["event_id"] = event_id
+            self._append_validated_record_unlocked(
+                "pipeline_event",
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                materialize_model_id=model_id,
+                sequence=event_id,
+            )
+        return _public_scheduler_row(row)
+
+    def append_historical_pipeline_event(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        entity_id = _required_safe_identity(record, "entity_id")
+        job = self.get_pipeline_job(entity_id)
+        if job is None:
+            return None
+        source_id = _source_id_from_job(job)
+        cycle_time = _cycle_time_from_job(job)
+        model_id = _optional_safe_identity(job, "model_id")
+        row = {
+            "event_id": record.get("event_id"),
+            "entity_type": str(record.get("entity_type") or "pipeline_job"),
+            "entity_id": entity_id,
+            "event_type": str(record["event_type"]),
+            "status_from": record.get("status_from"),
+            "status_to": record.get("status_to"),
+            "message": record.get("message"),
+            "details": dict(record.get("details") or {}),
+            "created_at": _optional_format_datetime(record.get("created_at"), field="created_at")
+            or _format_utc(_utcnow()),
+        }
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            event_id = row.get("event_id")
+            if event_id in (None, ""):
+                event_id = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+                row["event_id"] = event_id
+            existing = next(
+                (
+                    event
+                    for event in rows.pipeline_events
+                    if str(event.get("event_id") or "") == str(event_id)
+                    and str(event.get("entity_id") or "") == entity_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return _public_scheduler_row(existing)
+            self._append_validated_record_unlocked(
+                "pipeline_event",
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                materialize_model_id=model_id,
+            )
         return _public_scheduler_row(row)
 
     def update_forecast_cycle_status(
@@ -1287,43 +1381,49 @@ class FileOrchestrationJournalRepository:
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
         model_id = _optional_safe_identity(row, "model_id")
-        with self._write_lock:
-            self._ensure_root_unlocked()
-            sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
-            record = _journal_record_for_write(
-                "pipeline_job",
-                row,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-                sequence=sequence,
-            )
-            self._validate_outgoing_record(
-                record,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                record_type="pipeline_job",
-                model_id=model_id,
-            )
-            direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(row, 'job_id')}.json"
-            direct_bytes = _json_bytes(record)
-            if exclusive_direct:
-                try:
-                    write_bytes_no_follow_exclusive(direct_path, direct_bytes, containment_root=self.root)
-                except FileExistsError:
-                    return None
-                except (OSError, SafeFilesystemError) as error:
-                    raise OrchestratorError(
-                        "FILE_JOURNAL_WRITE_FAILED",
-                        "failed to write file journal pipeline job reservation",
-                        {"error_type": type(error).__name__},
-                    ) from error
-            self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
-            if not exclusive_direct:
-                self._atomic_write_json_unlocked(direct_path, record)
-            if model_id is not None:
-                self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=exclusive_direct, model_id=model_id)
+
+    def _write_pipeline_job_unlocked(
+        self,
+        row: Mapping[str, Any],
+        *,
+        exclusive_direct: bool,
+        model_id: str | None,
+    ) -> dict[str, Any] | None:
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        if exclusive_direct and self._pipeline_job_conflicts_unlocked(row):
+            return None
+        sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+        record = _journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            sequence=sequence,
+        )
+        self._validate_outgoing_record(
+            record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=model_id,
+        )
+        self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
+        direct_path = self.root / "pipeline-jobs" / f"{_required_safe_identity(row, 'job_id')}.json"
+        self._atomic_write_json_unlocked(direct_path, record)
+        if model_id is not None:
+            self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         return _public_scheduler_row(row)
+
+    def _pipeline_job_conflicts_unlocked(self, row: Mapping[str, Any]) -> bool:
+        job_id = str(row.get("job_id") or "")
+        if job_id and self.get_pipeline_job(job_id) is not None:
+            return True
+        idempotency_key = row.get("idempotency_key")
+        return idempotency_key not in (None, "") and self.query_candidate_state(str(idempotency_key)) is not None
 
     def _append_validated_record(
         self,
@@ -1337,31 +1437,51 @@ class FileOrchestrationJournalRepository:
         sequence: int | None = None,
     ) -> None:
         source_id = _normalize_file_source_id(source_id, field="source_id")
-        with self._write_lock:
-            self._ensure_root_unlocked()
-            record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
-            record = _journal_record_for_write(
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            self._append_validated_record_unlocked(
                 record_type,
                 payload,
                 source_id=source_id,
                 cycle_time=cycle_time,
                 model_id=model_id,
-                sequence=record_sequence,
+                materialize_model_id=materialize_model_id,
+                sequence=sequence,
             )
-            self._validate_outgoing_record(
-                record,
+
+    def _append_validated_record_unlocked(
+        self,
+        record_type: str,
+        payload: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None = None,
+        materialize_model_id: str | None = None,
+        sequence: int | None = None,
+    ) -> None:
+        record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+        record = _journal_record_for_write(
+            record_type,
+            payload,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            sequence=record_sequence,
+        )
+        self._validate_outgoing_record(
+            record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type=record_type,
+            model_id=model_id,
+        )
+        self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
+        if materialize_model_id is not None:
+            self._materialize_latest_unlocked(
                 source_id=source_id,
                 cycle_time=cycle_time,
-                record_type=record_type,
-                model_id=model_id,
+                model_id=materialize_model_id,
             )
-            self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
-            if materialize_model_id is not None:
-                self._materialize_latest_unlocked(
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    model_id=materialize_model_id,
-                )
 
     def _validate_outgoing_record(
         self,
@@ -1459,6 +1579,58 @@ class FileOrchestrationJournalRepository:
                 "failed to atomically write file journal state",
                 {"error_type": type(error).__name__},
             ) from error
+
+    @contextmanager
+    def _locked_cycle_write(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
+        with self._write_lock:
+            self._ensure_root_unlocked()
+            with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
+                yield
+
+    @contextmanager
+    def _cycle_file_lock_unlocked(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
+        import fcntl
+
+        lock_path = (
+            self.root
+            / ".locks"
+            / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+            / f"{format_cycle_time(cycle_time)}.lock"
+        )
+        parent_fd: int | None = None
+        lock_fd: int | None = None
+        try:
+            lock_dir = ensure_directory_no_follow(lock_path.parent, containment_root=self.root)
+            parent_fd = os.open(
+                lock_dir,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            lock_fd = os.open(
+                lock_path.name,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                0o666,
+                dir_fd=parent_fd,
+            )
+            lock_stat = os.fstat(lock_fd)
+            if not stat.S_ISREG(lock_stat.st_mode):
+                raise SafeFilesystemError(f"Cycle lock target must be a regular file: {lock_path}")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            yield
+        except (OSError, SafeFilesystemError) as error:
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "failed to acquire file orchestration journal cycle lock",
+                {"error_type": type(error).__name__},
+            ) from error
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(lock_fd)
+            if parent_fd is not None:
+                os.close(parent_fd)
 
     def _journal_path(self, *, source_id: str, cycle_time: datetime) -> Path:
         return self.root / "journal" / _safe_segment(source_id) / f"{format_cycle_time(cycle_time)}.jsonl"
@@ -1610,7 +1782,29 @@ class FileJournalRetryService:
         requested_by: str | None = None,
         request_id: str | None = None,
         reason: str | None = None,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
     ) -> SimpleNamespace:
+        if trusted_internal:
+            policy_decision = trusted_internal_policy_decision(
+                "pipeline.retry_run",
+                target_type="pipeline_run",
+                target_id=run_id,
+                actor_id="trusted-internal:file-journal-retry-service",
+                roles=("sys_admin",),
+            )
+        decision = require_policy_evidence(
+            policy_decision,
+            action_id="pipeline.retry_run",
+            target_type="pipeline_run",
+            target_id=run_id,
+        )
+        if decision.decision != "allow":
+            raise RetryError(
+                decision.reason_code,
+                decision.reason,
+                {"run_id": run_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
+            )
         failed_job, active_job = self._manual_retry_source_for_run(run_id)
         if active_job is not None:
             raise RetryConflictError(run_id, _file_retry_namespace(active_job))
@@ -1642,6 +1836,7 @@ class FileJournalRetryService:
             details["request_id"] = request_id
         if reason not in (None, ""):
             details["reason"] = reason
+        details["policy_decision"] = decision.to_dict()
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=str(failed_job["job_id"]),
@@ -1689,14 +1884,18 @@ class FileJournalRetryService:
             "exit_code": None,
             "retry_count": next_retry_count,
             "manual_retry_marker": True,
-            "idempotency_key": None,
+            "idempotency_key": f"manual_retry:{run_id}:{next_retry_count}",
             "candidate_id": None,
             "error_code": None,
             "error_message": None,
             "log_uri": None,
             "updated_at": _format_utc(_utcnow()),
         }
-        written = self.repository.upsert_pipeline_job(retry_record)
+        written = self.repository.reserve_pipeline_job(retry_record)
+        if written is None:
+            _failed_job, active_job = self._manual_retry_source_for_run(run_id)
+            conflict = active_job or self.repository.get_pipeline_job(retry_job_id) or retry_record
+            raise RetryConflictError(run_id, _file_retry_namespace(conflict))
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=retry_job_id,
@@ -1757,30 +1956,176 @@ class FileJournalRetryService:
             )
 
         retry_job = self._create_pending_manual_retry_job(run_id)
-        request = SubmitJobRequest(
-            run_id=retry_job.run_id,
-            model_id=retry_job.model_id or _model_id_from_file_run_id(retry_job.run_id) or "unknown",
-            job_type=retry_job.job_type,
-            manifest={
-                "run_id": retry_job.run_id,
-                "model_id": retry_job.model_id or _model_id_from_file_run_id(retry_job.run_id) or "unknown",
-                "cycle_id": retry_job.cycle_id,
-                "job_type": retry_job.job_type,
-                "stage": retry_job.stage,
-                "pipeline_job_id": retry_job.job_id,
-                "retry_count": retry_job.retry_count,
-                "manual_retry_marker": True,
-            },
-        )
+        runtime_root_resolution: dict[str, Any] | None = None
+        runtime_root_contract: dict[str, str] | None = None
         try:
+            request, runtime_root_resolution, runtime_root_contract = self._manual_retry_submission_request(retry_job)
             submitted = gateway.submit_job(request)
         except Exception as error:
+            if runtime_root_resolution is not None:
+                _attach_retry_runtime_root_resolution(error, runtime_root_resolution)
+            if runtime_root_contract is not None:
+                _attach_retry_runtime_root_contract(error, runtime_root_contract)
             updated = self._record_manual_retry_submission_failure(retry_job.job_id, error)
             return _file_retry_namespace(updated)
-        updated = self._record_manual_retry_submission_success(retry_job.job_id, submitted)
+        updated = self._record_manual_retry_submission_success(
+            retry_job.job_id,
+            submitted,
+            runtime_root_resolution=runtime_root_resolution,
+            runtime_root_contract=runtime_root_contract,
+        )
         return _file_retry_namespace(updated)
 
-    def _record_manual_retry_submission_success(self, job_id: str, submitted: Any) -> dict[str, Any]:
+    def _manual_retry_submission_request(
+        self,
+        retry_job: SimpleNamespace,
+    ) -> tuple[SubmitJobRequest, dict[str, Any] | None, dict[str, str] | None]:
+        model_id = retry_job.model_id or _model_id_from_file_run_id(retry_job.run_id) or "unknown"
+        submission_job = _RetrySubmissionJob(
+            job_id=retry_job.job_id,
+            run_id=retry_job.run_id,
+            cycle_id=retry_job.cycle_id,
+            job_type=retry_job.job_type,
+            model_id=model_id,
+            stage=retry_job.stage,
+            retry_count=int(retry_job.retry_count or 0),
+            previous_job_id=getattr(retry_job, "previous_job_id", None),
+        )
+        runtime_root = self._resolve_file_retry_runtime_roots(submission_job)
+        runtime_root_contract = runtime_root.manifest_fields if runtime_root is not None else None
+        runtime_root_resolution = runtime_root.evidence if runtime_root is not None else None
+        manifest = _retry_submission_manifest(
+            submission_job,
+            model_id=model_id,
+            runtime_root_fields=runtime_root_contract,
+        )
+        return (
+            SubmitJobRequest(
+                run_id=retry_job.run_id,
+                model_id=model_id,
+                job_type=retry_job.job_type,
+                manifest=manifest,
+            ),
+            runtime_root_resolution,
+            runtime_root_contract,
+        )
+
+    def _resolve_file_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> SimpleNamespace | None:
+        if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
+            return None
+        candidate_batch = self._file_retry_runtime_root_candidates(retry_job)
+        rejected: list[dict[str, str]] = []
+        rejected_total_count = 0
+        best_resolved: dict[str, tuple[str, str]] = {}
+        best_missing = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
+        secret_rejected = False
+        unsafe_rejected = False
+        for candidate in candidate_batch.candidates:
+            resolution = _resolve_runtime_root_candidate(candidate.source, candidate.value)
+            rejected_total_count += len(resolution.rejected)
+            if len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
+                remaining = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
+                rejected.extend(resolution.rejected[:remaining])
+            secret_rejected = secret_rejected or resolution.secret_rejected
+            unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
+            if len(resolution.resolved) > len(best_resolved):
+                best_resolved = resolution.resolved
+                best_missing = resolution.missing
+            if not resolution.complete or secret_rejected:
+                continue
+            evidence = _runtime_root_resolution_evidence(
+                retry_job,
+                resolved=resolution.resolved,
+                missing=[],
+                rejected=rejected,
+                rejected_total_count=rejected_total_count,
+                candidate_batch=candidate_batch,
+            )
+            manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
+            return SimpleNamespace(manifest_fields=manifest_fields, evidence=evidence)
+        evidence = _runtime_root_resolution_evidence(
+            retry_job,
+            resolved=best_resolved,
+            missing=best_missing,
+            rejected=rejected,
+            rejected_total_count=rejected_total_count,
+            candidate_batch=candidate_batch,
+        )
+        if secret_rejected:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_SECRET_BEARING,
+                "Manual retry runtime-root evidence contains secret-bearing values.",
+                evidence,
+            )
+        if unsafe_rejected:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNSAFE,
+                "Manual retry runtime-root evidence contains unsafe local root values.",
+                evidence,
+            )
+        raise _RetryRuntimeRootResolutionError(
+            RETRY_RUNTIME_ROOTS_UNRESOLVED,
+            "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+            evidence,
+        )
+
+    def _file_retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> _RuntimeRootCandidateBatch:
+        candidates: list[_RuntimeRootCandidate] = []
+        seen_job_ids: set[str] = set()
+        job_ids: list[str] = []
+        if retry_job.previous_job_id:
+            job_ids.append(str(retry_job.previous_job_id))
+        if retry_job.run_id:
+            job_ids.extend(
+                str(job.get("job_id"))
+                for job in self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id))
+                if job.get("job_id") not in (None, "")
+            )
+        for job_id in job_ids:
+            if job_id in seen_job_ids:
+                continue
+            seen_job_ids.add(job_id)
+            candidates.extend(self._file_retry_event_runtime_root_candidates(job_id))
+        env_candidate = _runtime_root_env_candidate()
+        if env_candidate:
+            candidates.append(_RuntimeRootCandidate("runtime_config:environment", env_candidate))
+        return _RuntimeRootCandidateBatch(candidates=candidates)
+
+    def _file_retry_event_runtime_root_candidates(self, job_id: str) -> list[_RuntimeRootCandidate]:
+        job = self.repository.get_pipeline_job(job_id)
+        if job is None:
+            return []
+        source_id = _source_id_from_job(job)
+        cycle_time = _cycle_time_from_job(job)
+        model_id = _optional_safe_identity(job, "model_id")
+        rows = self.repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        candidates: list[_RuntimeRootCandidate] = []
+        for event in rows.pipeline_events:
+            if str(event.get("entity_id") or "") != job_id:
+                continue
+            details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+            for label, value in (
+                ("details.runtime_root_contract", details.get("runtime_root_contract")),
+                ("details", details),
+            ):
+                if isinstance(value, Mapping) and _mapping_has_runtime_root_fields(value):
+                    event_id = event.get("event_id")
+                    candidates.append(
+                        _RuntimeRootCandidate(
+                            f"file_journal_event:{job_id}:{event_id}:{label}",
+                            value,
+                        )
+                    )
+        return candidates
+
+    def _record_manual_retry_submission_success(
+        self,
+        job_id: str,
+        submitted: Any,
+        *,
+        runtime_root_resolution: dict[str, Any] | None = None,
+        runtime_root_contract: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         payload = _file_retry_gateway_payload(submitted)
         row = self.repository.get_pipeline_job(job_id)
         if row is None:
@@ -1799,6 +2144,16 @@ class FileJournalRetryService:
             }
         )
         written = self.repository.upsert_pipeline_job(row)
+        self._reset_hydro_run_after_retry_submission(written)
+        details: dict[str, Any] = {
+            "trigger": "manual",
+            "slurm_job_id": written.get("slurm_job_id"),
+            "gateway_status": str(payload.get("status")) if payload.get("status") is not None else None,
+        }
+        if runtime_root_resolution is not None:
+            details["runtime_root_resolution"] = runtime_root_resolution
+        if runtime_root_contract is not None:
+            details["runtime_root_contract"] = runtime_root_contract
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=job_id,
@@ -1806,13 +2161,18 @@ class FileJournalRetryService:
             status_from="pending",
             status_to="submitted",
             message=f"Manual retry submitted as Slurm job {written.get('slurm_job_id')}.",
-            details={
-                "trigger": "manual",
-                "slurm_job_id": written.get("slurm_job_id"),
-                "gateway_status": str(payload.get("status")) if payload.get("status") is not None else None,
-            },
+            details=details,
         )
         return written
+
+    def _reset_hydro_run_after_retry_submission(self, retry_job: Mapping[str, Any]) -> None:
+        run_id = retry_job.get("run_id")
+        if run_id in (None, ""):
+            return
+        existing = self.repository._hydro_run_for(str(run_id))
+        if existing is None or str(existing.get("status") or "") not in {"failed", "cancelled"}:
+            return
+        self.repository.update_hydro_run_status(str(run_id), "pending", slurm_job_id=retry_job.get("slurm_job_id"))
 
     def _record_manual_retry_submission_failure(self, job_id: str, error: Exception) -> dict[str, Any]:
         error_code = str(getattr(error, "code", None) or "RETRY_SUBMISSION_FAILED")
@@ -1831,26 +2191,40 @@ class FileJournalRetryService:
             status_from="pending",
             status_to="submission_failed",
             message=f"Manual retry submission failed: {error_message}",
-            details={"trigger": "manual", "error_code": error_code, "error_message": error_message},
+            details=_manual_retry_submission_failure_details(error, error_code=error_code, error_message=error_message),
         )
         return written
 
     def _manual_retry_source_for_run(self, run_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         jobs = self.repository.query_pipeline_jobs_by_run(run_id)
-        safe_jobs = [job for job in jobs if str(job.get("job_id") or "") != "file_journal_read_blocked"]
+        safe_jobs = sorted(
+            (job for job in jobs if str(job.get("job_id") or "") != "file_journal_read_blocked"),
+            key=_file_retry_job_truth_sort_key,
+        )
+        durable_run = self.repository._hydro_run_for(run_id)
+        durable_status = str(durable_run.get("status") or "") if durable_run is not None else None
+        if durable_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+            return None, None
         active_job = next((job for job in safe_jobs if str(job.get("status") or "") in ACTIVE_RETRY_STATUSES), None)
         if active_job is not None:
             return None, active_job
         if not safe_jobs:
             return None, None
         latest_job = safe_jobs[-1]
-        if str(latest_job.get("status") or "") in MANUAL_RETRY_SOURCE_STATUSES:
+        latest_status = str(latest_job.get("status") or "")
+        if latest_status in TERMINAL_SUCCESS_RETRY_STATUSES:
+            return None, None
+        if latest_status in MANUAL_RETRY_SOURCE_STATUSES:
             return latest_job, None
-        failed_job = next(
-            (job for job in reversed(safe_jobs) if str(job.get("status") or "") in FAILED_RETRY_STATUSES),
-            None,
-        )
-        return failed_job, None
+        if durable_status is not None and (
+            durable_status in PARTIAL_OR_FAILED_HYDRO_STATUSES or durable_status.startswith("failed")
+        ):
+            failed_job = next(
+                (job for job in reversed(safe_jobs) if str(job.get("status") or "") in MANUAL_RETRY_SOURCE_STATUSES),
+                None,
+            )
+            return failed_job, None
+        return None, None
 
 
 def _utcnow() -> datetime:
@@ -2051,6 +2425,44 @@ def _file_retry_gateway_time(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     return _coerce_datetime(value, field="gateway_time")
+
+
+def _manual_retry_submission_failure_details(
+    error: Exception,
+    *,
+    error_code: str,
+    error_message: str,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "trigger": "manual",
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+    runtime_root_resolution = _runtime_root_resolution_from_error(error)
+    if runtime_root_resolution is not None:
+        details["runtime_root_resolution"] = runtime_root_resolution
+    runtime_root_contract = _runtime_root_contract_from_error(error)
+    if runtime_root_contract is not None:
+        details["runtime_root_contract"] = runtime_root_contract
+    return details
+
+
+def _mapping_has_runtime_root_fields(value: Mapping[str, Any]) -> bool:
+    return any(field in value for field in _RUNTIME_ROOT_FIELDS)
+
+
+def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        _datetime_sort_key(
+            row.get("finished_at")
+            or row.get("submitted_at")
+            or row.get("started_at")
+            or row.get("updated_at")
+            or row.get("created_at")
+        ),
+        _datetime_sort_key(row.get("created_at")),
+        str(row.get("job_id") or ""),
+    )
 
 
 def _model_id_from_file_run_id(run_id: str | None) -> str | None:

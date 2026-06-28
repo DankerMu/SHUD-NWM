@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.scheduler_state import _format_utc
 from workers.data_adapters.base import parse_cycle_time
 
 HISTORICAL_NODE22_DB_PORT = 55433
 MIGRATION_RECEIPT_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_migration.v1"
+HISTORICAL_NODE22_DB_HOSTS = {"127.0.0.1", "::1", "localhost", "node22", "node-22", "210.77.77.22"}
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
 
@@ -55,18 +57,7 @@ def import_historical_scheduler_state(
         repository.upsert_pipeline_job(row)
 
     for row in events:
-        entity_id = str(row["entity_id"])
-        if repository.get_pipeline_job(entity_id) is None:
-            continue
-        repository.insert_pipeline_event(
-            entity_type=str(row.get("entity_type") or "pipeline_job"),
-            entity_id=entity_id,
-            event_type=str(row["event_type"]),
-            status_from=row.get("status_from"),
-            status_to=row.get("status_to"),
-            message=row.get("message"),
-            details=dict(row.get("details") or {}),
-        )
+        repository.append_historical_pipeline_event(row)
 
     replay_status = _migration_replay_status(repository, jobs)
     receipt = {
@@ -114,6 +105,7 @@ def export_scheduler_state_from_postgres(
                    retry_count, error_code, error_message, created_at
             FROM met.forecast_cycle
             WHERE created_at <= %(cutoff)s OR cycle_time <= %(cutoff)s
+            ORDER BY cycle_time ASC, cycle_id ASC
             """,
             {"cutoff": cutoff},
         )
@@ -126,6 +118,7 @@ def export_scheduler_state_from_postgres(
                    log_uri, slurm_job_id, error_code, error_message, created_at, updated_at
             FROM hydro.hydro_run
             WHERE created_at <= %(cutoff)s OR cycle_time <= %(cutoff)s
+            ORDER BY cycle_time ASC, run_id ASC
             """,
             {"cutoff": cutoff},
         )
@@ -141,6 +134,7 @@ def export_scheduler_state_from_postgres(
             WHERE created_at <= %(cutoff)s
                OR updated_at <= %(cutoff)s
                OR finished_at <= %(cutoff)s
+            ORDER BY created_at ASC NULLS FIRST, job_id ASC
             """,
             {"cutoff": cutoff},
         )
@@ -151,6 +145,7 @@ def export_scheduler_state_from_postgres(
                    status_to, message, details, created_at
             FROM ops.pipeline_event
             WHERE created_at <= %(cutoff)s
+            ORDER BY created_at ASC NULLS FIRST, event_id ASC
             """,
             {"cutoff": cutoff},
         )
@@ -161,14 +156,27 @@ def export_scheduler_state_from_postgres(
         pipeline_jobs=pipeline_jobs,
         pipeline_events=pipeline_events,
         cutoff_time=cutoff,
-        source="node22:55433",
+        source=_historical_source_label(database_url),
     )
 
 
-def write_migration_receipt(receipt: Mapping[str, Any], receipt_path: str | Path) -> None:
+def write_migration_receipt(
+    receipt: Mapping[str, Any],
+    receipt_path: str | Path,
+    *,
+    containment_root: str | Path | None = None,
+) -> None:
+    root = Path(containment_root) if containment_root is not None else None
     path = Path(receipt_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(receipt, sort_keys=True, indent=2, default=_json_default) + "\n", encoding="utf-8")
+    if root is not None and not path.is_absolute():
+        path = root / path
+    content = (json.dumps(receipt, sort_keys=True, indent=2, default=_json_default) + "\n").encode("utf-8")
+    try:
+        if root is not None:
+            ensure_directory_no_follow(root)
+        atomic_write_bytes_no_follow(path, content, containment_root=root)
+    except (OSError, SafeFilesystemError) as error:
+        raise ValueError(f"failed to write migration receipt safely: {error}") from error
 
 
 def _fetch_rows(connection: Any, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -185,6 +193,13 @@ def _validate_historical_node22_database_url(database_url: str, *, allow_histori
         raise ValueError("historical scheduler-state export requires a PostgreSQL URL")
     if parsed.port != HISTORICAL_NODE22_DB_PORT:
         raise ValueError(f"historical scheduler-state export must target port {HISTORICAL_NODE22_DB_PORT}")
+    if (parsed.hostname or "") not in HISTORICAL_NODE22_DB_HOSTS:
+        raise ValueError("historical scheduler-state export must target the node-22 historical PostgreSQL host")
+
+
+def _historical_source_label(database_url: str) -> str:
+    parsed = urlparse(database_url)
+    return f"{parsed.hostname or 'unknown'}:{parsed.port or HISTORICAL_NODE22_DB_PORT}"
 
 
 def _normalized_mapping(row: Mapping[str, Any]) -> dict[str, Any]:

@@ -132,21 +132,25 @@
   Evidence floor: file repository supports `ensure_forecast_cycle`,
   `create_hydro_run`, hydro/forecast status updates, reservation/bind,
   pipeline job upsert/status update, and pipeline event insertion with
-  atomic writes.
+  durable per-cycle locking, journal-first reservation writes, and atomic
+  materialization.
 - [x] 4.2 Replace DB-backed retry service in DB-free mode.
   Evidence floor: DB-free orchestrator construction does not call
   `_retry_service_from_env` or `PipelineStore`; retry attempts, retry-limit
   exhaustion, manual repair, and permanent-failure state are represented in the
-  file journal.
+  file journal with manual policy evidence, active-retry conflict guards, and
+  DB-compatible hydro-run reset semantics.
 - [x] 4.3 Add historical scheduler-state export/import migration.
   Evidence floor: exporter reads active/completed/candidate/job/event/retry and
   permanent-failure rows from node-22 `:55433`, writes append-only journal
-  events, records cutoff time, row counts, checksums, replay status, and stale
-  `download_source_cycle` supersession evidence.
+  events preserving historical event identity/order, records cutoff time, row
+  counts, checksums, replay status, stale `download_source_cycle` supersession
+  evidence, and writes no-follow receipts under the journal/evidence root.
 - [x] 4.4 Add write-side and migration contract tests.
   Evidence floor: fixtures for active, completed, permanent failure, manual
   repair, retry exhaustion, stale `download_source_cycle`, and migrated journal
-  replay produce decisions equivalent to DB-backed state.
+  replay produce decisions equivalent to DB-backed state, including repeated
+  migration idempotency and write-failure/concurrency guard regressions.
 - [x] 4.5 Wire scheduler submission path to file journal in DB-free mode.
   Evidence floor: fake Slurm submission with no `DATABASE_URL` writes file
   reservation/job/event evidence and does not call

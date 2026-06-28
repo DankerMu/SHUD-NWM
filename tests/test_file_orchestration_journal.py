@@ -17,7 +17,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileJournalRetryService,
     FileOrchestrationJournalRepository,
 )
-from services.orchestrator.retry import RetryConfig
+from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
 from tests.test_production_scheduler import (
     FakeAdapter,
@@ -670,6 +670,27 @@ def test_file_orchestration_journal_lifecycle_writes_materialize_latest_and_repl
     assert reloaded.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
+def test_file_orchestration_journal_ensure_forecast_cycle_preserves_existing_status(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.update_forecast_cycle_status(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        status="failed",
+        error_code="RAW_MISSING",
+        error_message="raw manifest missing",
+    )
+    ensured = repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert ensured["status"] == "failed"
+    assert ensured["error_code"] == "RAW_MISSING"
+    assert state is not None
+    assert state["forecast_cycle"]["status"] == "failed"
+
+
 def test_file_orchestration_journal_lifecycle_updates_cycle_cohort_run_ids(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
@@ -739,6 +760,55 @@ def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal
     assert state["pipeline_status"] == "succeeded"
     assert state["pipeline_jobs"][0]["status"] == "succeeded"
     assert state["pipeline_events"][0]["status_to"] == "succeeded"
+
+
+def test_file_orchestration_journal_reservation_append_failure_leaves_no_direct_only_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_append_fails")
+
+    def fail_append(*_args: Any, **_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "forced append failure")
+
+    monkeypatch.setattr(repository, "_append_journal_record_unlocked", fail_append)
+
+    with pytest.raises(OrchestratorError):
+        repository.reserve_pipeline_job(record)
+
+    assert not (journal_root / "pipeline-jobs/job_append_fails.json").exists()
+    assert FileOrchestrationJournalRepository(journal_root).reserve_pipeline_job(record) is not None
+
+
+def test_file_orchestration_journal_two_repositories_allocate_unique_event_ids(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_events")
+    assert repository.reserve_pipeline_job(record) is not None
+
+    first = FileOrchestrationJournalRepository(journal_root).insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_events",
+        event_type="status_change",
+        status_from="reserved",
+        status_to="submitted",
+    )
+    second = FileOrchestrationJournalRepository(journal_root).insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_events",
+        event_type="status_change",
+        status_from="submitted",
+        status_to="running",
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert first["event_id"] != second["event_id"]
+    assert state is not None
+    assert state["pipeline_events_total"] == 2
 
 
 def test_file_orchestration_journal_reclaims_dead_reservation_and_keeps_permanent_failure_sticky(
@@ -850,6 +920,7 @@ def test_file_journal_manual_repair_marker_allows_candidate_and_preserves_prior_
         requested_by="operator",
         request_id="manual-1",
         reason="manifest repaired",
+        trusted_internal=True,
     )
     state = _candidate_state(repository, cycle_time=cycle_time)
 
@@ -868,6 +939,150 @@ def test_file_journal_manual_repair_marker_allows_candidate_and_preserves_prior_
     assert event["details"]["manual_retry_marker"] is True
     assert event["details"]["requested_by"] == "operator"
     assert event["details"]["request_id"] == "manual-1"
+    assert event["details"]["policy_decision"]["decision"] == "allow"
+
+
+def test_file_journal_manual_repair_requires_policy_and_leaves_journal_unchanged(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_repair_denied")
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_manual_repair_denied",
+        "permanently_failed",
+        error_code="INVALID_MANIFEST",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    with pytest.raises(RetryError, match="Authentication is required"):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", requested_by="operator")
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert scheduler_module._manual_retry_requested(state) is False
+    assert state["pipeline_events_total"] == 0
+
+
+def test_file_journal_manual_retry_refuses_old_failure_after_later_success(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_old_failed")
+    retry_success = _pipeline_reservation_record(cycle_time, job_id="job_retry_success")
+    retry_success["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_retry_success"
+    retry_success["retry_count"] = 1
+    repository.reserve_pipeline_job(failed)
+    repository.update_pipeline_job_status(
+        "job_old_failed",
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        finished_at=_dt("2026-06-28T00:05:00Z"),
+    )
+    repository.reserve_pipeline_job(retry_success)
+    repository.update_pipeline_job_status(
+        "job_retry_success",
+        "succeeded",
+        finished_at=_dt("2026-06-28T00:10:00Z"),
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    with pytest.raises(RetryNotFoundError):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+
+
+def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status(
+        "cycle_gfs_2026062800",
+        "failed",
+        error_code="SOURCE_CYCLE_UNAVAILABLE",
+        error_message="source cycle unavailable",
+    )
+    record = _pipeline_reservation_record(cycle_time, job_id="job_download_failed")
+    record.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "retry_count": 3,
+            "idempotency_key": "gfs:gfs_2026062800:download",
+        }
+    )
+    repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_download_failed",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+            }
+        },
+    )
+    repository.update_pipeline_job_status(
+        "job_download_failed",
+        "permanently_failed",
+        error_code="SOURCE_CYCLE_UNAVAILABLE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7001", "status": "submitted", "submitted_at": "2026-06-28T00:15:00Z"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+    hydro_run = repository._hydro_run_for("cycle_gfs_2026062800")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert retried.status == "submitted"
+    assert gateway.requests[0].manifest["source_id"] == "gfs"
+    assert gateway.requests[0].manifest["cycle_time"] == "2026062800"
+    assert gateway.requests[0].manifest["workspace_dir"] == str(workspace_root)
+    assert gateway.requests[0].manifest["object_store_root"] == str(object_store_root)
+    assert hydro_run is not None
+    assert hydro_run["status"] == "pending"
+    assert hydro_run["error_code"] is None
+    assert state is not None
+    submission_event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    assert submission_event["details"]["runtime_root_resolution"]["resolved"]["workspace_dir"]["present"] is True
+    assert submission_event["details"]["runtime_root_contract"]["object_store_root"] == "[local-path]"
 
 
 def test_file_orchestration_journal_direct_model_context_must_match_path_model(tmp_path: Path) -> None:

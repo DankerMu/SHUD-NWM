@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from services.orchestrator import cli as cli_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.file_orchestration_migration import (
     MIGRATION_RECEIPT_SCHEMA_VERSION,
+    export_scheduler_state_from_postgres,
     import_historical_scheduler_state,
     write_migration_receipt,
 )
@@ -116,6 +122,7 @@ def _historical_rows(cycle_time: Any) -> dict[str, list[dict[str, Any]]]:
         ],
         "pipeline_events": [
             {
+                "event_id": 101,
                 "entity_type": "pipeline_job",
                 "entity_id": "job_model_a_permanent",
                 "event_type": "retry",
@@ -132,6 +139,7 @@ def _historical_rows(cycle_time: Any) -> dict[str, list[dict[str, Any]]]:
                 "created_at": "2026-06-28T00:06:00Z",
             },
             {
+                "event_id": 102,
                 "entity_type": "pipeline_job",
                 "entity_id": "job_download_failed",
                 "event_type": "retry",
@@ -185,6 +193,8 @@ def test_historical_scheduler_state_import_writes_receipt_and_replays_equivalent
         event["details"].get("prior_failure_reason") == "INVALID_MANIFEST"
         for event in permanent_state["pipeline_events"]
     )
+    assert permanent_state["pipeline_events"][0]["event_id"] == 101
+    assert permanent_state["pipeline_events"][0]["created_at"] == "2026-06-28T00:06:00Z"
     assert completed_state["pipeline_status"] == "succeeded"
     persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert persisted["checksums"] == receipt["checksums"]
@@ -210,4 +220,131 @@ def test_historical_scheduler_state_import_is_idempotent_for_replay_decisions(tm
     assert second["checksums"] == first["checksums"]
     assert second["row_counts"] == first["row_counts"]
     assert first_state["pipeline_status"] == second_state["pipeline_status"] == "permanently_failed"
+    assert first_state["pipeline_events_total"] == second_state["pipeline_events_total"]
     assert scheduler_module._manual_retry_payload(first_state) == scheduler_module._manual_retry_payload(second_state)
+
+
+def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_path: Path) -> None:
+    receipt = {"schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION}
+    journal_root = tmp_path / "journal"
+    outside = tmp_path / "outside.json"
+
+    with pytest.raises(ValueError, match="containment root"):
+        write_migration_receipt(receipt, outside, containment_root=journal_root)
+
+    journal_root.mkdir(exist_ok=True)
+    symlink_path = journal_root / "receipt.json"
+    symlink_path.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symlink"):
+        write_migration_receipt(receipt, "receipt.json", containment_root=journal_root)
+
+
+def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_sql: list[str] = []
+
+    class Cursor:
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, sql: str, _params: dict[str, Any]) -> None:
+            captured_sql.append(sql)
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    class Connection:
+        def __enter__(self) -> "Connection":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    fake_psycopg = types.SimpleNamespace(connect=lambda *_args, **_kwargs: Connection())
+    fake_rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+
+    with pytest.raises(ValueError, match="node-22"):
+        export_scheduler_state_from_postgres(
+            database_url="postgresql://nwm@db.internal:55433/nhms",
+            journal_root=tmp_path / "journal",
+            allow_historical_node22=True,
+        )
+
+    receipt = export_scheduler_state_from_postgres(
+        database_url="postgresql://nwm@localhost:55433/nhms",
+        journal_root=tmp_path / "journal",
+        allow_historical_node22=True,
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+    )
+
+    assert receipt["source"] == "localhost:55433"
+    assert len(captured_sql) == 4
+    assert "ORDER BY created_at ASC NULLS FIRST, event_id ASC" in captured_sql[-1]
+
+
+def test_migrate_scheduler_state_cli_writes_receipt_under_journal_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = {"schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION, "row_counts": {}}
+
+    def fake_export(**_kwargs: Any) -> dict[str, Any]:
+        return dict(receipt)
+
+    monkeypatch.setattr(cli_module, "export_scheduler_state_from_postgres", fake_export)
+    journal_root = tmp_path / "journal"
+
+    code = cli_module._argparse_main(
+        [
+            "migrate-scheduler-state",
+            "--database-url",
+            "postgresql://nwm@localhost:55433/nhms",
+            "--journal-root",
+            str(journal_root),
+            "--receipt-path",
+            "receipts/migration.json",
+            "--allow-historical-node22",
+        ]
+    )
+
+    assert code == 0
+    assert json.loads((journal_root / "receipts/migration.json").read_text(encoding="utf-8")) == receipt
+
+
+def test_migrate_scheduler_state_click_rejects_outside_receipt_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("click")
+
+    def fake_export(**_kwargs: Any) -> dict[str, Any]:
+        return {"schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION}
+
+    monkeypatch.setattr(cli_module, "export_scheduler_state_from_postgres", fake_export)
+
+    with pytest.raises(SystemExit) as error:
+        cli_module._click_main(
+            [
+                "migrate-scheduler-state",
+                "--database-url",
+                "postgresql://nwm@localhost:55433/nhms",
+                "--journal-root",
+                str(tmp_path / "journal"),
+                "--receipt-path",
+                str(tmp_path / "outside.json"),
+                "--allow-historical-node22",
+            ]
+        )
+
+    assert error.value.code == 2

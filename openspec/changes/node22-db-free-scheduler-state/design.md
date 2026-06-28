@@ -58,8 +58,8 @@ software work needed to satisfy that gate.
 4. **Journal is append-only with materialized latest views.** The file-backed
    orchestration state uses append-only JSONL records for auditability and
    atomic materialized `state.json` files for fast scheduler reads. Writes are
-   performed under the scheduler file lock and use temporary files plus atomic
-   rename.
+   performed under durable per-cycle file locks, commit journal truth before
+   direct cache snapshots, and use temporary files plus atomic rename.
 
 5. **Compatibility is contract-tested against existing repository semantics.**
    The file journal must preserve behavior currently supplied by

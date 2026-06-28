@@ -27,6 +27,12 @@ by `PsycopgOrchestratorRepository`.
 - **THEN** the file journal writes append-only records with atomic/no-clobber
   file behavior and materializes latest/query views for the same source/cycle
   identity
+- **AND** read-modify-write appends, event-id allocation, reservation duplicate
+  checks, direct snapshot materialization, and latest materialization are
+  linearized by a durable per-cycle file lock
+- **AND** direct pipeline-job snapshots are materialized only after the
+  append-only journal truth is committed, so append failure cannot leave a
+  direct-only reservation blocker
 - **AND** reservation, binding, job-status, event insertion, forecast/hydro
   status, retry, and permanent-failure writes preserve the existing DB-backed
   repository semantics.
@@ -94,6 +100,12 @@ by `PsycopgOrchestratorRepository`.
   `_retry_service_from_env()` or SQLAlchemy `PipelineStore`
 - **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
   permanent-failure state are represented in append-only file journal records.
+- **AND** manual repair markers that unblock scheduler retry decisions require
+  the same `pipeline.retry_run` policy evidence as manual retry execution
+- **AND** manual retry submission preserves DB-compatible source selection,
+  terminal-success guards, active-retry conflict guards, download-source-cycle
+  manifest fields, runtime-root evidence, and hydro-run reset-to-pending
+  semantics.
 
 #### Scenario: Historical scheduler state migrates into append-only journal
 
@@ -101,9 +113,14 @@ by `PsycopgOrchestratorRepository`.
   PostgreSQL `:55433`
 - **THEN** the importer writes active/completed/candidate/job/event/retry and
   permanent-failure rows into the file journal
+- **AND** migrated pipeline events preserve historical `event_id` and
+  `created_at` ordering and repeated imports do not duplicate visible replay
+  events
 - **AND** the migration receipt records cutoff time, row counts, input
   checksums, replay status, and stale `download_source_cycle` supersession
-  evidence.
+  evidence
+- **AND** receipt files are written with no-follow atomic writes under the
+  configured journal/evidence root.
 
 #### Scenario: Malformed file state fails closed
 

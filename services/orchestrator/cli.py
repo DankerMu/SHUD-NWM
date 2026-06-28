@@ -291,7 +291,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 allow_historical_node22=allow_historical_node22,
             )
             if receipt_path:
-                write_migration_receipt(receipt, receipt_path)
+                write_migration_receipt(receipt, receipt_path, containment_root=journal_root)
             click.echo(json.dumps(receipt, sort_keys=True))
         except (RuntimeError, ValueError) as error:
             click.echo(str(error), err=True)
@@ -448,7 +448,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 allow_historical_node22=args.allow_historical_node22,
             )
             if args.receipt_path:
-                write_migration_receipt(receipt, args.receipt_path)
+                write_migration_receipt(receipt, args.receipt_path, containment_root=args.journal_root)
             print(json.dumps(receipt, sort_keys=True))
             return 0
         except (RuntimeError, ValueError) as error:
