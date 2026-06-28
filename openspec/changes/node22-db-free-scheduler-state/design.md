@@ -603,15 +603,32 @@ Invariant Matrix:
 - Regression rows:
   - Active job in file latest or append-only journal -> scheduler sees active
     orchestration/pipeline and active Slurm evidence.
+  - Valid source alias/casing at caller or row boundary -> canonical file
+    source identity is used consistently for path lookup, cycle IDs, row
+    matching, and context reads; accepted rows cannot later disappear because
+    of raw source-string casing.
   - Active job in file latest or append-only journal plus newer terminal direct
     `pipeline-jobs` snapshot for the same `job_id` -> active replay remains
     authoritative for scheduler planning and query evidence.
+  - Append-only journal records for the same `job_id` with increasing sequence
+    -> the later valid sequence/replay row is authoritative even when timestamp
+    fields are absent or older.
+  - Journal envelope/payload/run identity disagreement -> file replay fails
+    closed for the affected model instead of treating the row as a sibling
+    absence.
+  - Valid direct-only `pipeline-jobs/<job_id>.json` snapshot with matching
+    payload identity -> scheduler active/candidate/Slurm/query reads can
+    consume it without relying on undocumented filename substrings.
   - Completed hydro run in file latest -> scheduler skips completed duplicate.
   - Candidate-state rows from file latest/journal -> existing candidate-state
     decision code sees the same row shape as DB-backed reads.
   - Model/forcing context file rows -> context methods return typed
     `ModelContext`/`ForcingContext` without PostgreSQL.
-  - Malformed latest view -> active detection and candidate state fail closed.
+  - Malformed latest view, unknown journal record type, JSONL record over-limit,
+    or over-limit non-matching directory entries -> active detection, query
+    helpers, and candidate state fail closed with bounded public evidence.
+  - Read-side lifecycle/write method call before #834 -> stable
+    `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
   - DB-free scheduler from_env -> file journal repository is constructed and
     DB-backed active/orchestrator repository factories are not called.
 

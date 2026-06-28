@@ -108,8 +108,10 @@
   methods remain out of scope for this slice and fail-not-implemented. Trusted
   replay also validates nested latest/journal identity, strict direct
   `pipeline-jobs` schema, sidecar `pipeline-events` source/cycle schema,
-  no-follow scanned entries, file/depth/JSON complexity limits, and blocked
-  query redaction before state is trusted.
+  no-follow scanned entries, file/depth/JSON complexity limits, source alias
+  canonicalization, envelope/payload/run identity consistency, append-only
+  sequence ordering, valid direct-only `pipeline-jobs` snapshots, directory
+  entry bounds, and blocked query redaction before state is trusted.
 - [x] 3.4 Add read-side repository contract tests.
   Evidence floor: shared fixtures cover duplicate prevention, active Slurm job
   skip/cancel evidence, completed skip, candidate identity filtering, and
@@ -117,8 +119,12 @@
   embedded rows, invalid cycle timestamps, newer terminal direct job masking,
   sidecar-event schema/cycle mismatch, resource limits, DB-compatible
   equal-timestamp job/event tie-breaks, scheduler-level active Slurm evidence,
-  and public-safe blocked query sentinels. Write-side lifecycle, retry, and
-  migration behavior is intentionally reserved for section 4 tasks.
+  public-safe blocked query sentinels, source alias/casing consistency,
+  envelope/payload/run mismatch blockers, append-only sequence precedence,
+  valid direct-only pipeline-job reads, JSONL record limits, unknown record
+  types, non-matching directory-entry limits, and direct
+  `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED` method evidence. Write-side lifecycle,
+  retry, and migration behavior is intentionally reserved for section 4 tasks.
 
 ## 4. File Orchestration Journal Writes, Retry, And Migration
 

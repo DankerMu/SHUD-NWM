@@ -263,6 +263,28 @@ def read_tail_bytes_limited_no_follow(
 def list_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> list[str]:
     """List a directory through no-follow directory descriptors."""
 
+    return _list_directory_no_follow(path, containment_root=containment_root, max_entries=None)
+
+
+def list_directory_no_follow_limited(
+    path: Path,
+    *,
+    max_entries: int,
+    containment_root: Path | None = None,
+) -> list[str]:
+    """List at most max_entries plus one sentinel entry through no-follow directory descriptors."""
+
+    if max_entries < 0:
+        raise ValueError("max_entries must be non-negative")
+    return _list_directory_no_follow(path, containment_root=containment_root, max_entries=max_entries)
+
+
+def _list_directory_no_follow(
+    path: Path,
+    *,
+    containment_root: Path | None,
+    max_entries: int | None,
+) -> list[str]:
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
     root_fd = _open_directory_no_follow(root)
@@ -273,7 +295,13 @@ def list_directory_no_follow(path: Path, *, containment_root: Path | None = None
             if fd != root_fd:
                 os.close(fd)
             fd = next_fd
-        return list(os.listdir(fd))
+        names: list[str] = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if max_entries is not None and len(names) > max_entries:
+                    break
+        return names
     except OSError as error:
         raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
     finally:

@@ -11,7 +11,7 @@ from typing import Any
 
 from packages.common.safe_fs import (
     SafeFilesystemError,
-    list_directory_no_follow,
+    list_directory_no_follow_limited,
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
@@ -42,6 +42,10 @@ MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
 MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
+_CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
+_REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
+_REPLAY_ORDER_FIELD = "_file_journal_replay_order"
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -101,33 +105,41 @@ class FileOrchestrationJournalRepository:
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=None)
         except FileOrchestrationJournalError:
             return True
         return any(_job_is_active(job) for job in rows.pipeline_jobs.values())
 
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return True
         hydro_run = rows.hydro_run
-        if _row_matches_candidate(hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id):
+        if _row_matches_candidate(hydro_run, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id):
             if str(hydro_run.get("status") or "") in ACTIVE_HYDRO_STATUSES:
                 return True
         return any(
             _job_is_active(job)
-            and _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
             for job in rows.pipeline_jobs.values()
         )
 
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return False
         hydro_run = rows.hydro_run
-        if not _row_matches_candidate(hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id):
+        if not _row_matches_candidate(
+            hydro_run,
+            source_id=canonical_source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+        ):
             return False
         return str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES
 
@@ -140,7 +152,8 @@ class FileOrchestrationJournalRepository:
         limit: int = DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
     ) -> list[dict[str, Any]]:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return [
                 {
@@ -157,7 +170,7 @@ class FileOrchestrationJournalRepository:
             for job in rows.pipeline_jobs.values()
             if job.get("slurm_job_id") not in (None, "")
             and _job_is_active(job)
-            and _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         ]
         jobs.sort(
             key=lambda job: (
@@ -181,7 +194,26 @@ class FileOrchestrationJournalRepository:
         event_limit: int = DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     ) -> dict[str, Any] | None:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            canonical_run_id = _canonical_candidate_run_id(
+                run_id,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
+            canonical_forcing_version_id = _canonical_forcing_version_id(
+                forcing_version_id,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
+            canonical_candidate_id = _canonical_candidate_id(
+                candidate_id,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError as error:
             return _file_journal_blocked_candidate_state(
                 error,
@@ -196,12 +228,12 @@ class FileOrchestrationJournalRepository:
                 event_limit=event_limit,
             )
         state = chain_repository_state.candidate_state_from_rows(
-            source_id=source_id,
+            source_id=canonical_source_id,
             cycle_time=cycle_time,
             model_id=model_id,
-            run_id=run_id,
-            forcing_version_id=forcing_version_id,
-            candidate_id=candidate_id,
+            run_id=canonical_run_id,
+            forcing_version_id=canonical_forcing_version_id,
+            candidate_id=canonical_candidate_id,
             hydro_run=rows.hydro_run,
             pipeline_jobs=[_public_scheduler_row(job) for job in rows.pipeline_jobs.values()],
             pipeline_events=[_public_scheduler_row(event) for event in rows.pipeline_events],
@@ -229,9 +261,14 @@ class FileOrchestrationJournalRepository:
 
     def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
             if rows.forcing_version is None:
-                forcing_context = self._forcing_context(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+                forcing_context = self._forcing_context(
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
             else:
                 forcing_context = rows.forcing_version
             if forcing_context is None:
@@ -254,10 +291,13 @@ class FileOrchestrationJournalRepository:
 
     def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
         try:
-            _safe_segment(job_id)
-            for job in self._iter_pipeline_job_records():
-                if str(job.get("job_id") or "") == job_id:
+            expected_job_id = _safe_segment(job_id)
+            for job in self._iter_pipeline_job_records(include_direct=False):
+                if str(job.get("job_id") or "") == expected_job_id:
                     return _public_scheduler_row(job)
+            direct_job = self._direct_pipeline_job_record(expected_job_id)
+            if direct_job is not None:
+                return _public_scheduler_row(direct_job)
         except FileOrchestrationJournalError as error:
             return _blocked_query_job(error, job_id=job_id)
         return None
@@ -337,7 +377,7 @@ class FileOrchestrationJournalRepository:
 
     def _cycle_rows(self, *, source_id: str, cycle_time: datetime, model_id: str | None) -> _CycleRows:
         rows = _CycleRows()
-        _normalize_file_source_id(source_id, field="source_id")
+        source_id = _normalize_file_source_id(source_id, field="source_id")
         source_segment = _safe_segment(source_id)
         cycle_segment = format_cycle_time(cycle_time)
         latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
@@ -491,22 +531,28 @@ class FileOrchestrationJournalRepository:
         expected_model_id: str | None = None,
     ) -> None:
         payload = _payload_or_record_payload(record)
-        record_model_id = _record_model_id(record, payload)
-        if (
-            expected_model_id is not None
-            and record_model_id is not None
-            and record_model_id != expected_model_id
-        ):
-            return
         record_type = _record_type(record, payload)
         _require_schema(record, FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION)
         _require_source_cycle(record, source_id=source_id, cycle_time=cycle_time)
+        record_model_id = _record_model_id(
+            record,
+            payload,
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
         if expected_record_type is not None and record_type != expected_record_type:
             raise FileOrchestrationJournalError(
                 "file_journal_record_type_mismatch",
                 field="record_type",
                 evidence={"expected": expected_record_type, "actual": record_type[:80]},
             )
+        if (
+            expected_model_id is not None
+            and record_model_id is not None
+            and record_model_id != expected_model_id
+        ):
+            return
+        payload = _with_replay_order(payload, record)
         if record_type == "pipeline_job":
             _validate_pipeline_job_identity(
                 payload,
@@ -530,7 +576,7 @@ class FileOrchestrationJournalRepository:
             raise FileOrchestrationJournalError("file_journal_unknown_record_type", field="record_type")
 
     def _apply_event_record(self, rows: _CycleRows, record: Mapping[str, Any]) -> None:
-        payload = _payload_or_record_payload(record)
+        payload = _with_replay_order(_payload_or_record_payload(record), record)
         if "event_id" not in payload and record.get("sequence") not in (None, ""):
             payload["event_id"] = record.get("sequence")
         _validate_event_identity(payload)
@@ -582,14 +628,14 @@ class FileOrchestrationJournalRepository:
                 continue
             if len(records) >= MAX_FILE_JOURNAL_RECORDS:
                 raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field="journal")
-            records.append(
-                _decode_mapping(
-                    raw_line,
-                    field=f"{_relative_evidence(path, self.root)}:{line_number}",
-                    max_nodes=self.max_json_nodes,
-                    max_depth=self.max_json_depth,
-                )
+            record = _decode_mapping(
+                raw_line,
+                field=f"{_relative_evidence(path, self.root)}:{line_number}",
+                max_nodes=self.max_json_nodes,
+                max_depth=self.max_json_depth,
             )
+            record[_REPLAY_ORDER_FIELD] = line_number
+            records.append(record)
         return records
 
     def _require_within_byte_limit(self, content: bytes, path: Path) -> None:
@@ -613,6 +659,12 @@ class FileOrchestrationJournalRepository:
             if payload is not None:
                 yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
 
+    def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
+        payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
+        if payload is None:
+            return None
+        return self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+
     def _iter_direct_pipeline_job_records_for_cycle(
         self,
         *,
@@ -630,13 +682,6 @@ class FileOrchestrationJournalRepository:
             )
         ):
             expected_job_id = _safe_segment(path.stem)
-            if not _direct_job_path_matches_scope(
-                expected_job_id,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-            ):
-                continue
             payload = self._read_optional_json(path)
             if payload is None:
                 continue
@@ -649,7 +694,7 @@ class FileOrchestrationJournalRepository:
             ):
                 yield job
 
-    def _iter_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+    def _iter_pipeline_job_records(self, *, include_direct: bool = True) -> Iterable[dict[str, Any]]:
         jobs: dict[str, dict[str, Any]] = {}
         for path in sorted(
             _iter_regular_json_files(
@@ -688,8 +733,9 @@ class FileOrchestrationJournalRepository:
                 self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
                 for job in rows.pipeline_jobs.values():
                     _upsert_by_key(jobs, job, key="job_id")
-        for job in self._iter_direct_pipeline_job_records():
-            _insert_missing_by_key(jobs, job, key="job_id")
+        if include_direct:
+            for job in self._iter_direct_pipeline_job_records():
+                _insert_missing_by_key(jobs, job, key="job_id")
         yield from jobs.values()
 
     def _model_context(self, model_id: str) -> dict[str, Any] | None:
@@ -753,7 +799,7 @@ class FileOrchestrationJournalRepository:
                 field="record_type",
                 evidence={"expected": "model_context", "actual": record_type[:80]},
             )
-        record_model_id = _record_model_id(record, payload)
+        record_model_id = _explicit_record_model_id(record, payload)
         if record_model_id in (None, ""):
             raise FileOrchestrationJournalError("file_journal_missing_identity", field="model_id")
         if record_model_id != expected_model_id:
@@ -812,7 +858,7 @@ class FileOrchestrationJournalRepository:
             )
         source_id = _required_source_id(record, "source_id")
         cycle_time = _parse_cycle_time_field(record, "cycle_time")
-        model_id = _record_model_id(record, payload)
+        model_id = _record_model_id(record, payload, source_id=source_id, cycle_time=cycle_time)
         _validate_pipeline_job_identity(
             payload,
             source_id=source_id,
@@ -915,6 +961,7 @@ def _sanitize_public_evidence(value: Any) -> Any:
         return {
             str(key): _sanitize_public_field(str(key), nested)
             for key, nested in value.items()
+            if not str(key).startswith("_file_journal_")
         }
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_sanitize_public_evidence(item) for item in value]
@@ -994,27 +1041,6 @@ def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time
     )
 
 
-def _direct_job_path_matches_scope(
-    job_id: str,
-    *,
-    source_id: str,
-    cycle_time: datetime,
-    model_id: str | None,
-) -> bool:
-    source_id = _normalize_file_source_id(source_id, field="source_id")
-    job_id_lower = job_id.lower()
-    source_lower = source_id.lower()
-    cycle_stamp = format_cycle_time(cycle_time)
-    cycle_id = _cycle_id_for_file_source(source_id, cycle_time).lower()
-    cycle_run_id = f"cycle_{source_lower}_{cycle_stamp}"
-    if cycle_id not in job_id_lower and cycle_run_id not in job_id_lower:
-        return False
-    candidate_prefix = f"fcst_{source_lower}_{cycle_stamp}_"
-    if model_id is not None and candidate_prefix in job_id_lower:
-        return f"{candidate_prefix}{model_id.lower()}" in job_id_lower
-    return True
-
-
 def _row_matches_candidate(
     row: Mapping[str, Any] | None,
     *,
@@ -1024,7 +1050,9 @@ def _row_matches_candidate(
 ) -> bool:
     if not isinstance(row, Mapping):
         return False
-    if str(row.get("source_id") or "") not in ("", source_id):
+    source_id = _normalize_file_source_id(source_id, field="source_id")
+    actual_source = _optional_source_id(row, "source_id")
+    if actual_source is not None and actual_source != source_id:
         return False
     if row.get("cycle_time") not in (None, ""):
         try:
@@ -1088,6 +1116,10 @@ def _latest_mapping(current: dict[str, Any] | None, incoming: Mapping[str, Any] 
         return current
     if current is None:
         return dict(incoming)
+    current_replay_key = _replay_order_key(current)
+    incoming_replay_key = _replay_order_key(incoming)
+    if current_replay_key is not None and incoming_replay_key is not None:
+        return dict(incoming) if incoming_replay_key >= current_replay_key else current
     current_time = _datetime_sort_key(current.get("updated_at") or current.get("created_at"))
     incoming_time = _datetime_sort_key(incoming.get("updated_at") or incoming.get("created_at"))
     return dict(incoming) if incoming_time >= current_time else current
@@ -1102,6 +1134,38 @@ def _upsert_by_key(target: dict[str, dict[str, Any]], row: Mapping[str, Any], *,
 def _insert_missing_by_key(target: dict[str, dict[str, Any]], row: Mapping[str, Any], *, key: str) -> None:
     row_key = _required_safe_identity(row, key)
     target.setdefault(row_key, dict(row))
+
+
+def _with_replay_order(payload: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
+    row = dict(payload)
+    sequence = _optional_replay_sequence(record)
+    if sequence is not None:
+        row[_REPLAY_SEQUENCE_FIELD] = sequence
+    line_order = record.get(_REPLAY_ORDER_FIELD)
+    if isinstance(line_order, int):
+        row[_REPLAY_ORDER_FIELD] = line_order
+    return row
+
+
+def _optional_replay_sequence(record: Mapping[str, Any]) -> int | None:
+    value = record.get("sequence")
+    if value in (None, ""):
+        return None
+    text = _scalar_text(value, field="sequence", invalid_reason="file_journal_invalid_field")
+    try:
+        return int(text)
+    except ValueError as error:
+        raise FileOrchestrationJournalError("file_journal_invalid_field", field="sequence") from error
+
+
+def _replay_order_key(row: Mapping[str, Any]) -> tuple[int, int] | None:
+    sequence = row.get(_REPLAY_SEQUENCE_FIELD)
+    line_order = row.get(_REPLAY_ORDER_FIELD)
+    if not isinstance(sequence, int) and not isinstance(line_order, int):
+        return None
+    sequence_value = sequence if isinstance(sequence, int) else -1
+    line_order_value = line_order if isinstance(line_order, int) else -1
+    return sequence_value, line_order_value
 
 
 def _dedupe_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1199,6 +1263,51 @@ def _blocked_cycle_id(source_id: str, cycle_time: datetime) -> str:
         return _cycle_id_for_file_source(source_id, cycle_time)
     except FileOrchestrationJournalError:
         return "file_journal_read_blocked"
+
+
+def _canonical_candidate_run_id(value: str, *, source_id: str, cycle_time: datetime, model_id: str) -> str:
+    cycle_stamp = format_cycle_time(cycle_time)
+    match = _FORECAST_RUN_ID_RE.fullmatch(str(value))
+    if match is None:
+        return value
+    run_source, run_cycle, run_model = match.groups()
+    try:
+        matches_source = _normalize_file_source_id(run_source, field="run_id") == source_id
+    except FileOrchestrationJournalError:
+        return value
+    if matches_source and run_cycle == cycle_stamp and run_model == model_id:
+        return f"fcst_{source_id.lower()}_{cycle_stamp}_{model_id}"
+    return value
+
+
+def _canonical_forcing_version_id(value: str, *, source_id: str, cycle_time: datetime, model_id: str) -> str:
+    cycle_stamp = format_cycle_time(cycle_time)
+    match = re.fullmatch(r"forc_([^_]+)_(\d{10})_(.+)", str(value))
+    if match is None:
+        return value
+    forcing_source, forcing_cycle, forcing_model = match.groups()
+    try:
+        matches_source = _normalize_file_source_id(forcing_source, field="forcing_version_id") == source_id
+    except FileOrchestrationJournalError:
+        return value
+    if matches_source and forcing_cycle == cycle_stamp and forcing_model == model_id:
+        return f"forc_{source_id.lower()}_{cycle_stamp}_{model_id}"
+    return value
+
+
+def _canonical_candidate_id(value: str, *, source_id: str, cycle_time: datetime, model_id: str) -> str:
+    text = str(value)
+    candidate_source, separator, remainder = text.partition(":")
+    if not separator:
+        return value
+    try:
+        matches_source = _normalize_file_source_id(candidate_source, field="candidate_id") == source_id
+    except FileOrchestrationJournalError:
+        return value
+    if not matches_source:
+        return value
+    remainder = remainder.replace(f"forecast_{candidate_source}_", f"forecast_{source_id}_", 1)
+    return f"{source_id}:{remainder}"
 
 
 def _required_text(row: Mapping[str, Any], field: str) -> str:
@@ -1318,11 +1427,72 @@ def _require_model_id(row: Mapping[str, Any], expected_model_id: str, *, require
         )
 
 
-def _record_model_id(record: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
-    value = _optional_safe_identity(record, "model_id")
-    if value is None:
-        value = _optional_safe_identity(payload, "model_id")
-    return value
+def _record_model_id(
+    record: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> str | None:
+    envelope_model_id = _optional_safe_identity(record, "model_id")
+    payload_model_id = _optional_safe_identity(payload, "model_id")
+    inferred_run_model_id = _model_id_from_run_identity(
+        payload.get("run_id") if payload.get("run_id") not in (None, "") else record.get("run_id"),
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
+    if envelope_model_id is not None and payload_model_id is not None and envelope_model_id != payload_model_id:
+        raise FileOrchestrationJournalError(
+            "file_journal_model_mismatch",
+            field="model_id",
+            evidence={"expected": envelope_model_id, "actual": payload_model_id[:80]},
+        )
+    explicit_model_id = envelope_model_id if envelope_model_id is not None else payload_model_id
+    if (
+        explicit_model_id is not None
+        and inferred_run_model_id is not None
+        and explicit_model_id != inferred_run_model_id
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_run_mismatch",
+            field="run_id",
+            evidence={"expected": explicit_model_id, "actual": inferred_run_model_id[:80]},
+        )
+    return explicit_model_id if explicit_model_id is not None else inferred_run_model_id
+
+
+def _explicit_record_model_id(record: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+    envelope_model_id = _optional_safe_identity(record, "model_id")
+    payload_model_id = _optional_safe_identity(payload, "model_id")
+    if envelope_model_id is not None and payload_model_id is not None and envelope_model_id != payload_model_id:
+        raise FileOrchestrationJournalError(
+            "file_journal_model_mismatch",
+            field="model_id",
+            evidence={"expected": envelope_model_id, "actual": payload_model_id[:80]},
+        )
+    return envelope_model_id if envelope_model_id is not None else payload_model_id
+
+
+def _model_id_from_run_identity(value: Any, *, source_id: str, cycle_time: datetime) -> str | None:
+    if value in (None, ""):
+        return None
+    run_id = _safe_identity_text(
+        _scalar_text(value, field="run_id", invalid_reason="file_journal_invalid_identity"),
+        field="run_id",
+    )
+    cycle_stamp = format_cycle_time(cycle_time)
+    forecast_match = _FORECAST_RUN_ID_RE.fullmatch(run_id)
+    if forecast_match is not None:
+        run_source, run_cycle, run_model = forecast_match.groups()
+        if _normalize_file_source_id(run_source, field="run_id") == source_id and run_cycle == cycle_stamp:
+            return _safe_identity_text(run_model, field="run_id")
+        return None
+    cycle_match = _CYCLE_RUN_ID_RE.fullmatch(run_id)
+    if cycle_match is not None:
+        run_source, run_cycle = cycle_match.groups()
+        if _normalize_file_source_id(run_source, field="run_id") == source_id and run_cycle == cycle_stamp:
+            return None
+    return None
 
 
 def _validate_hydro_run_identity(
@@ -1562,10 +1732,10 @@ def _iter_discovered_files(
     max_files: int,
     max_depth: int,
 ) -> Iterable[Path]:
-    count = 0
+    scanned_entries = 0
 
     def walk(current: Path, depth: int) -> Iterable[Path]:
-        nonlocal count
+        nonlocal scanned_entries
         if depth > max_depth:
             raise FileOrchestrationJournalError(
                 "file_journal_depth_limit_exceeded",
@@ -1588,8 +1758,19 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"entry_type": "not_directory"},
             )
+        remaining_entries = max_files - scanned_entries
+        if remaining_entries < 0:
+            raise FileOrchestrationJournalError(
+                "file_journal_file_limit_exceeded",
+                field=str(_relative_evidence(directory, root)),
+                evidence={"max_files": max_files},
+            )
         try:
-            entry_names = sorted(list_directory_no_follow(current, containment_root=root))
+            entry_names = list_directory_no_follow_limited(
+                current,
+                containment_root=root,
+                max_entries=remaining_entries,
+            )
         except FileNotFoundError:
             return
         except (OSError, SafeFilesystemError) as error:
@@ -1598,7 +1779,14 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(current, root)),
                 evidence={"error_type": type(error).__name__},
             ) from error
-        for entry_name in entry_names:
+        if len(entry_names) > remaining_entries:
+            raise FileOrchestrationJournalError(
+                "file_journal_file_limit_exceeded",
+                field=str(_relative_evidence(directory, root)),
+                evidence={"max_files": max_files},
+            )
+        scanned_entries += len(entry_names)
+        for entry_name in sorted(entry_names):
             if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
                 raise FileOrchestrationJournalError(
                     "file_journal_unsafe_path_segment",
@@ -1625,13 +1813,6 @@ def _iter_discovered_files(
                         "file_journal_unsafe_scanned_entry",
                         field=str(_relative_evidence(entry, root)),
                         evidence={"entry_type": "not_regular_file"},
-                    )
-                count += 1
-                if count > max_files:
-                    raise FileOrchestrationJournalError(
-                        "file_journal_file_limit_exceeded",
-                        field=str(_relative_evidence(directory, root)),
-                        evidence={"max_files": max_files},
                     )
                 yield entry
 
