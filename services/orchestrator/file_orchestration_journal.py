@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.redaction import is_sensitive_key
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -137,6 +138,27 @@ TERMINAL_PIPELINE_STATUSES = {
     "submission_failed",
     "permanently_failed",
 }
+_STAGE_STATUS_ORDER = {
+    "download": 1,
+    "download_gfs": 1,
+    "download_source_cycle": 1,
+    "convert": 2,
+    "convert_canonical": 2,
+    "forcing": 3,
+    "produce_forcing": 3,
+    "forecast": 4,
+    "run_shud_forecast": 4,
+    "parse": 5,
+    "state_save_qc": 6,
+    "frequency": 7,
+    "publish": 8,
+    "era5_download": 11,
+    "canonical_convert": 12,
+    "forcing_produce": 13,
+    "analysis_run": 14,
+    "parse_output": 15,
+}
+_UNKNOWN_STAGE_STATUS_ORDER = 99
 
 __all__ = (
     "FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION",
@@ -962,8 +984,45 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        statuses: list[dict[str, Any]] = []
         if source_id is None:
-            return []
+            try:
+                source_ids = self._cycle_source_ids(cycle_time=cycle_time)
+            except FileOrchestrationJournalError as error:
+                return [
+                    _blocked_stage_status(
+                        error,
+                        source_id="unknown",
+                        cycle_time=cycle_time,
+                        model_id=model_id,
+                    )
+                ]
+            for candidate_source_id in source_ids:
+                statuses.extend(
+                    self._list_stage_statuses_for_source(
+                        source_id=candidate_source_id,
+                        cycle_time=cycle_time,
+                        model_id=model_id,
+                    )
+                )
+            statuses.sort(key=_db_compatible_stage_status_order_key)
+            return statuses
+        statuses = self._list_stage_statuses_for_source(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+        )
+        statuses.sort(key=_db_compatible_stage_status_order_key)
+        return statuses
+
+    def _list_stage_statuses_for_source(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+    ) -> list[dict[str, Any]]:
+        source_id = _normalize_file_source_id(source_id, field="source_id")
         try:
             rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError as error:
@@ -974,12 +1033,55 @@ class FileOrchestrationJournalRepository:
                     "stage": job.get("stage"),
                     "status": job.get("status"),
                     "job_id": job.get("job_id"),
+                    "run_id": job.get("run_id"),
+                    "cycle_id": job.get("cycle_id"),
+                    "job_type": job.get("job_type"),
                     "slurm_job_id": job.get("slurm_job_id"),
                     "model_id": job.get("model_id"),
+                    "source_id": job.get("source_id") or source_id,
+                    "submitted_at": job.get("submitted_at"),
+                    "started_at": job.get("started_at"),
+                    "finished_at": job.get("finished_at"),
+                    "exit_code": job.get("exit_code"),
+                    "error_code": job.get("error_code"),
+                    "error_message": job.get("error_message"),
+                    "log_uri": job.get("log_uri"),
                 }
             )
             for job in rows.pipeline_jobs.values()
         ]
+
+    def _cycle_source_ids(self, *, cycle_time: datetime) -> list[str]:
+        cycle_segment = format_cycle_time(cycle_time)
+        source_ids: set[str] = set()
+        for path in sorted(
+            _iter_regular_json_files(
+                self.root / "latest",
+                root=self.root,
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        ):
+            parts = path.relative_to(self.root).parts
+            if len(parts) == 4 and parts[0] == "latest" and parts[2] == cycle_segment:
+                source_ids.add(_normalize_file_source_id(parts[1], field="source_id"))
+        for surface in ("journal", "pipeline-events"):
+            for path in sorted(
+                _iter_jsonl_files(
+                    self.root / surface,
+                    root=self.root,
+                    max_files=self.max_files,
+                    max_depth=self.max_depth,
+                )
+            ):
+                parts = path.relative_to(self.root).parts
+                if len(parts) == 3 and parts[0] == surface and Path(parts[2]).stem == cycle_segment:
+                    source_ids.add(_normalize_file_source_id(parts[1], field="source_id"))
+        for job in self._iter_direct_pipeline_job_records():
+            if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
+                source_ids.add(_source_id_from_job(job))
+        return sorted(source_ids)
 
     def _cycle_rows(self, *, source_id: str, cycle_time: datetime, model_id: str | None) -> _CycleRows:
         rows = _CycleRows()
@@ -3296,10 +3398,12 @@ def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _public_evidence(value: Any) -> Any:
-    return _evidence_safe(_sanitize_public_evidence(value))
+    return _sanitize_public_evidence(value)
 
 
 def _sanitize_public_evidence(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _format_utc(value)
     if isinstance(value, Mapping):
         return {
             str(key): _sanitize_public_field(str(key), nested)
@@ -3313,6 +3417,8 @@ def _sanitize_public_evidence(value: Any) -> Any:
 
 def _sanitize_public_field(key: str, value: Any) -> Any:
     lowered = key.lower()
+    if is_sensitive_key(key):
+        return "[redacted]" if value not in (None, "") else value
     if lowered == "message" or lowered.endswith("_message"):
         return _public_message(value)
     if lowered.endswith("_path") or lowered.endswith("_root") or lowered in {"path", "root"}:
@@ -3325,7 +3431,16 @@ def _sanitize_public_field(key: str, value: Any) -> Any:
 def _sanitize_public_scalar(value: Any) -> Any:
     if not isinstance(value, str):
         return value
+    sanitized = _sanitize_public_path_or_uri_scalar(value)
+    if sanitized != value:
+        return sanitized
+    return _sanitize_public_text(value)
+
+
+def _sanitize_public_path_or_uri_scalar(value: str) -> str:
     text = value.strip()
+    if not text or any(char.isspace() for char in text):
+        return value
     if (
         text.startswith("/")
         or text.startswith("~")
@@ -3342,6 +3457,10 @@ def _public_message(value: Any) -> Any:
         return value
     if not isinstance(value, str):
         return _sanitize_public_evidence(value)
+    return _sanitize_public_text(value)
+
+
+def _sanitize_public_text(value: str) -> str:
     redacted = _safe_error_message(value)
     return _sanitize_public_text_tokens(redacted)
 
@@ -3374,13 +3493,13 @@ def _sanitize_public_text_token(value: str) -> str:
     core = value[prefix_length : len(value) - suffix_length if suffix_length else len(value)]
     if not core:
         return value
-    sanitized = _sanitize_public_scalar(core)
+    sanitized = _sanitize_public_path_or_uri_scalar(core)
     if sanitized == core:
         for separator in ("=", ":"):
             key, found, nested = core.partition(separator)
             if not found or not key or not nested:
                 continue
-            sanitized_nested = _sanitize_public_scalar(nested)
+            sanitized_nested = _sanitize_public_path_or_uri_scalar(nested)
             if sanitized_nested != nested:
                 sanitized = f"{key}{found}{sanitized_nested}"
                 break
@@ -3679,6 +3798,19 @@ def _db_compatible_pipeline_job_order_key(row: Mapping[str, Any]) -> tuple[Any, 
         str(row.get("job_id") or ""),
         str(row.get("run_id") or ""),
         str(row.get("slurm_job_id") or ""),
+    )
+
+
+def _db_compatible_stage_status_order_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    stage = str(row.get("stage") or "")
+    return (
+        _STAGE_STATUS_ORDER.get(stage, _UNKNOWN_STAGE_STATUS_ORDER),
+        stage,
+        str(row.get("source_id") or ""),
+        str(row.get("cycle_id") or ""),
+        str(row.get("model_id") or ""),
+        str(row.get("job_id") or ""),
+        str(row.get("run_id") or ""),
     )
 
 

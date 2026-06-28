@@ -12,6 +12,7 @@ from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_f
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
+    _public_evidence,
 )
 from services.orchestrator.scheduler_state import _format_utc
 from workers.data_adapters.base import parse_cycle_time
@@ -27,6 +28,14 @@ HISTORICAL_NODE22_DB_HOSTS = {
     "10.0.2.100",
     "210.77.77.22",
 }
+MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION = 100_000
+HISTORICAL_MIGRATION_ROW_LIMITS = {
+    "forecast_cycles": MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION,
+    "hydro_runs": MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION,
+    "pipeline_jobs": MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION,
+    "pipeline_events": MAX_HISTORICAL_MIGRATION_ROWS_PER_RELATION,
+}
+EXPORT_FETCHMANY_BATCH_SIZE = 1_000
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
 
@@ -42,10 +51,10 @@ def import_historical_scheduler_state(
     source: str = "node22:55433",
 ) -> dict[str, Any]:
     cutoff = _ensure_utc(cutoff_time or datetime.now(UTC))
-    cycles = [_normalized_mapping(row) for row in forecast_cycles]
-    runs = [_normalized_mapping(row) for row in hydro_runs]
-    jobs = [_normalized_mapping(row) for row in pipeline_jobs]
-    events = [_normalized_mapping(row) for row in pipeline_events]
+    cycles = _normalized_rows_limited("forecast_cycles", forecast_cycles)
+    runs = _normalized_rows_limited("hydro_runs", hydro_runs)
+    jobs = _normalized_rows_limited("pipeline_jobs", pipeline_jobs)
+    events = _normalized_rows_limited("pipeline_events", pipeline_events)
     repository = FileOrchestrationJournalRepository(journal_root)
     imported_cycles: list[dict[str, Any]] = []
     imported_runs: list[dict[str, Any]] = []
@@ -158,6 +167,7 @@ def export_scheduler_state_from_postgres(
             ORDER BY cycle_time ASC, cycle_id ASC
             """,
             {"cutoff": cutoff},
+            relation="forecast_cycles",
         )
         hydro_runs = _fetch_rows(
             connection,
@@ -171,6 +181,7 @@ def export_scheduler_state_from_postgres(
             ORDER BY cycle_time ASC, run_id ASC
             """,
             {"cutoff": cutoff},
+            relation="hydro_runs",
         )
         pipeline_jobs = _fetch_rows(
             connection,
@@ -187,6 +198,7 @@ def export_scheduler_state_from_postgres(
             ORDER BY created_at ASC NULLS FIRST, job_id ASC
             """,
             {"cutoff": cutoff},
+            relation="pipeline_jobs",
         )
         pipeline_events = _fetch_rows(
             connection,
@@ -198,6 +210,7 @@ def export_scheduler_state_from_postgres(
             ORDER BY created_at ASC NULLS FIRST, event_id ASC
             """,
             {"cutoff": cutoff},
+            relation="pipeline_events",
         )
     return import_historical_scheduler_state(
         journal_root=journal_root,
@@ -229,10 +242,31 @@ def write_migration_receipt(
         raise ValueError(f"failed to write migration receipt safely: {error}") from error
 
 
-def _fetch_rows(connection: Any, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _fetch_rows(connection: Any, sql: str, params: Mapping[str, Any], *, relation: str) -> list[dict[str, Any]]:
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
+        fetchmany = getattr(cursor, "fetchmany", None)
+        if callable(fetchmany):
+            return _fetch_rows_limited(cursor, relation=relation)
+        rows = [dict(row) for row in cursor.fetchall()]
+        _validate_relation_row_count(relation, len(rows))
+        return rows
+
+
+def _fetch_rows_limited(cursor: Any, *, relation: str) -> list[dict[str, Any]]:
+    limit = _relation_row_limit(relation)
+    rows: list[dict[str, Any]] = []
+    while True:
+        remaining_probe_rows = limit + 1 - len(rows)
+        if remaining_probe_rows <= 0:
+            _raise_relation_row_limit(relation, limit)
+        batch_size = min(EXPORT_FETCHMANY_BATCH_SIZE, remaining_probe_rows)
+        batch = cursor.fetchmany(batch_size)
+        if not batch:
+            return rows
+        rows.extend(dict(row) for row in batch)
+        if len(rows) > limit:
+            _raise_relation_row_limit(relation, limit)
 
 
 def _unsupported_forecast_cycle_reason(row: Mapping[str, Any]) -> str | None:
@@ -299,7 +333,7 @@ def _skipped_row(relation: str, row: Mapping[str, Any], reason: str) -> dict[str
     return {
         "relation": relation,
         "reason": reason,
-        "identity": _skipped_row_identity(row),
+        "identity": _migration_receipt_text(_skipped_row_identity(row)),
     }
 
 
@@ -321,7 +355,7 @@ def _skipped_rows_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
         "count": len(rows),
         "by_relation": by_relation,
         "by_reason": by_reason,
-        "samples": rows[:8],
+        "samples": [_migration_receipt_sample(row) for row in rows[:8]],
     }
 
 
@@ -346,6 +380,46 @@ def _historical_source_label(database_url: str) -> str:
 
 def _normalized_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): _normalize_json_value(value) for key, value in row.items() if value is not None}
+
+
+def _normalized_rows_limited(relation: str, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    limit = _relation_row_limit(relation)
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if len(normalized) >= limit:
+            _raise_relation_row_limit(relation, limit)
+        normalized.append(_normalized_mapping(row))
+    return normalized
+
+
+def _relation_row_limit(relation: str) -> int:
+    try:
+        return int(HISTORICAL_MIGRATION_ROW_LIMITS[relation])
+    except KeyError as error:
+        raise ValueError(f"historical migration row limit is not configured for relation {relation!r}") from error
+
+
+def _validate_relation_row_count(relation: str, row_count: int) -> None:
+    limit = _relation_row_limit(relation)
+    if row_count > limit:
+        _raise_relation_row_limit(relation, limit)
+
+
+def _raise_relation_row_limit(relation: str, limit: int) -> None:
+    raise ValueError(
+        f"historical migration relation {relation!r} exceeds row limit {limit}; "
+        "split the migration or raise the per-relation cap intentionally"
+    )
+
+
+def _migration_receipt_sample(value: Mapping[str, Any]) -> dict[str, Any]:
+    sanitized = _public_evidence(value)
+    return dict(sanitized) if isinstance(sanitized, Mapping) else {}
+
+
+def _migration_receipt_text(value: str) -> str:
+    sanitized = _public_evidence(value)
+    return sanitized if isinstance(sanitized, str) else str(sanitized)
 
 
 def _normalize_json_value(value: Any) -> Any:
@@ -448,17 +522,19 @@ def _download_source_cycle_supersession(
             continue
         if details.get("manual_retry_marker") is True or details.get("trigger") == "manual":
             superseded.append(
-                {
-                    "failed_job_id": str(previous_job_id),
-                    "superseding_event_id": str(event.get("event_id") or ""),
-                    "superseding_entity_id": str(event.get("entity_id") or ""),
-                    "cycle_id": str(previous.get("cycle_id") or ""),
-                    "prior_failure_reason": str(
-                        details.get("prior_failure_reason")
-                        or details.get("previous_error")
-                        or previous.get("error_code")
-                        or ""
-                    ),
-                }
+                _migration_receipt_sample(
+                    {
+                        "failed_job_id": str(previous_job_id),
+                        "superseding_event_id": str(event.get("event_id") or ""),
+                        "superseding_entity_id": str(event.get("entity_id") or ""),
+                        "cycle_id": str(previous.get("cycle_id") or ""),
+                        "prior_failure_reason": str(
+                            details.get("prior_failure_reason")
+                            or details.get("previous_error")
+                            or previous.get("error_code")
+                            or ""
+                        ),
+                    }
+                )
             )
     return {"count": len(superseded), "samples": superseded[:8]}

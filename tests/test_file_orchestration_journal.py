@@ -148,6 +148,29 @@ def _active_job(cycle_time: datetime, *, model_id: str = "model_a") -> dict[str,
     }
 
 
+def _source_job(
+    cycle_time: datetime,
+    *,
+    source_id: str,
+    job_id: str,
+    stage: str = "forecast",
+    model_id: str = "model_a",
+) -> dict[str, Any]:
+    job = _active_job(cycle_time, model_id=model_id)
+    cycle_stamp = format_cycle_time(cycle_time)
+    job.update(
+        {
+            "job_id": job_id,
+            "run_id": f"fcst_{source_id}_{cycle_stamp}_{model_id}",
+            "cycle_id": cycle_id_for(source_id, cycle_time),
+            "source_id": source_id,
+            "stage": stage,
+            "idempotency_key": f"{source_id}:{cycle_id_for(source_id, cycle_time)}:{model_id}:{stage}:{job_id}",
+        }
+    )
+    return job
+
+
 class _FailingSlurmGatewayClient:
     def __init__(
         self,
@@ -1002,6 +1025,52 @@ def test_pipeline_event_public_surfaces_redact_message_text(tmp_path: Path) -> N
         "live-token-123",
     ):
         assert raw not in public_rendered
+    assert "[local-path]" in public_rendered
+    assert "[object-uri]" in public_rendered
+    assert "[redacted]" in public_rendered
+
+
+def test_pipeline_event_public_surfaces_redact_arbitrary_detail_strings(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_public_detail_redaction")
+    repository.reserve_pipeline_job(record)
+
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_public_detail_redaction",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "reason": (
+                "Authorization: Bearer detail-bearer token=detail-token "
+                "/secret/detail/path s3://nhms-prod/private/detail.grib"
+            )
+        },
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_rendered = "\n".join(path.read_text(encoding="utf-8") for path in (journal_root / "latest").rglob("*.json"))
+    public_rendered = "\n".join(
+        [
+            raw_journal,
+            latest_rendered,
+            json.dumps(inserted, sort_keys=True),
+            json.dumps(state, sort_keys=True),
+        ]
+    )
+
+    assert state is not None
+    for raw in (
+        "detail-bearer",
+        "detail-token",
+        "/secret/detail/path",
+        "s3://nhms-prod/private/detail.grib",
+    ):
+        assert raw not in public_rendered
+    assert inserted["details"]["reason"].count("[redacted]") >= 1
     assert "[local-path]" in public_rendered
     assert "[object-uri]" in public_rendered
     assert "[redacted]" in public_rendered
@@ -2411,6 +2480,103 @@ def test_file_orchestration_journal_list_stage_statuses_returns_blocked_row(tmp_
             },
         }
     ]
+
+
+def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    gfs_job = _source_job(cycle_time, source_id="gfs", job_id="job_gfs_forecast")
+    ifs_job = _source_job(cycle_time, source_id="ifs", job_id="job_ifs_forecast")
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(source_id="gfs", cycle_time=cycle_time, jobs=[gfs_job]),
+    )
+    _write_json(
+        journal_root / "latest/ifs/2026062800/model_a.json",
+        _latest_view(source_id="ifs", cycle_time=cycle_time, jobs=[ifs_job]),
+    )
+
+    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+        source_id=None,
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "job_ifs_forecast"]
+    assert {row["cycle_id"] for row in rows} == {
+        cycle_id_for("gfs", cycle_time),
+        cycle_id_for("ifs", cycle_time),
+    }
+
+
+def test_file_orchestration_journal_list_stage_statuses_preserves_db_stage_order(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    jobs = [
+        _source_job(cycle_time, source_id="gfs", job_id="job_unknown", stage="custom_stage"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_forecast", stage="forecast"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_convert_canonical", stage="convert_canonical"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_download_gfs", stage="download_gfs"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_forcing", stage="forcing"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_parse_output", stage="parse_output"),
+        _source_job(cycle_time, source_id="gfs", job_id="job_publish", stage="publish"),
+    ]
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=jobs),
+    )
+
+    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert [row["job_id"] for row in rows] == [
+        "job_download_gfs",
+        "job_convert_canonical",
+        "job_forcing",
+        "job_forecast",
+        "job_publish",
+        "job_parse_output",
+        "job_unknown",
+    ]
+
+
+def test_file_orchestration_journal_list_stage_statuses_all_sources_blocks_malformed_source(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    gfs_job = _source_job(cycle_time, source_id="gfs", job_id="job_gfs_forecast")
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(source_id="gfs", cycle_time=cycle_time, jobs=[gfs_job]),
+    )
+    _write_json(
+        journal_root / "latest/ifs/2026062800/model_a.json",
+        {
+            "schema_version": "wrong /secret/schema token=stage-secret",
+            "source_id": "ifs",
+            "cycle_time": cycle_time.isoformat(),
+            "model_id": "model_a",
+        },
+    )
+
+    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+        source_id=None,
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+    rendered = json.dumps(rows, sort_keys=True)
+
+    assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "file_journal_read_blocked"]
+    assert rows[1]["cycle_id"] == cycle_id_for("ifs", cycle_time)
+    assert rows[1]["error_code"] == "file_journal_schema_mismatch"
+    assert "/secret/schema" not in rendered
+    assert "stage-secret" not in rendered
+    assert "[local-path]" in rendered
+    assert "[redacted]" in rendered
 
 
 def test_file_orchestration_journal_discovery_uses_no_follow_listing_and_missing_dirs_are_absent(

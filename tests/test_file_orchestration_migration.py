@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from services.orchestrator import cli as cli_module
+from services.orchestrator import file_orchestration_migration as migration_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
 from services.orchestrator.file_orchestration_migration import (
@@ -257,6 +258,90 @@ def test_historical_pipeline_event_messages_are_redacted_in_journal_latest_and_p
     assert "[redacted]" in raw_journal
 
 
+def test_historical_migration_receipt_redacts_skipped_row_identities(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["hydro_runs"].append(
+        {
+            "run_id": "hindcast token=run-secret /local/path",
+            "run_type": "hindcast",
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "status": "failed",
+        }
+    )
+    rows["pipeline_jobs"].append(
+        {
+            **_job(
+                job_id="file:///local/path/job.log?token=job-secret",
+                run_id="hindcast_gfs_2026062800_model_a",
+                cycle_time=cycle_time,
+                model_id="model_a",
+                status="failed",
+            ),
+            "error_message": "Authorization: Bearer job-bearer",
+        }
+    )
+    rows["pipeline_events"].append(
+        {
+            "entity_type": "pipeline_job",
+            "entity_id": "s3://private-bucket/path/event.json?token=event-secret",
+            "event_type": "retry",
+            "status_from": "failed",
+            "status_to": "manual_repair_requested",
+            "details": {"manual_retry_marker": True},
+            "created_at": "2026-06-28T00:07:00Z",
+        }
+    )
+
+    receipt = import_historical_scheduler_state(
+        journal_root=tmp_path / "journal",
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        **rows,
+    )
+    rendered = json.dumps(receipt["skipped_rows"], sort_keys=True)
+
+    assert receipt["skipped_rows"]["count"] == 3
+    for raw in (
+        "/local/path",
+        "file:///local/path/job.log",
+        "s3://private-bucket/path/event.json",
+        "run-secret",
+        "job-secret",
+        "event-secret",
+        "job-bearer",
+    ):
+        assert raw not in rendered
+    assert "[local-path]" in rendered
+    assert "[uri]" in rendered
+    assert "[object-uri]" in rendered
+    assert "[redacted]" in rendered
+
+
+def test_historical_migration_receipt_redacts_stale_download_supersession_sample(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["pipeline_events"][1]["details"]["prior_failure_reason"] = (
+        "download read s3://private-bucket/raw/file.grib token=download-secret "
+        "Authorization: Bearer download-bearer"
+    )
+
+    receipt = import_historical_scheduler_state(
+        journal_root=tmp_path / "journal",
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        **rows,
+    )
+    rendered = json.dumps(receipt["stale_download_source_cycle_supersession"], sort_keys=True)
+
+    assert receipt["stale_download_source_cycle_supersession"]["count"] == 1
+    for raw in ("s3://private-bucket/raw/file.grib", "download-secret", "download-bearer"):
+        assert raw not in rendered
+    assert "[object-uri]" in rendered
+    assert "[redacted]" in rendered
+
+
 def test_historical_scheduler_state_import_skips_unsupported_non_forecast_rows(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     rows = _historical_rows(cycle_time)
@@ -490,6 +575,47 @@ def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_pat
         write_migration_receipt(receipt, "receipt.json", containment_root=journal_root)
 
 
+def test_historical_scheduler_state_import_rejects_over_limit_iterable_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        migration_module,
+        "HISTORICAL_MIGRATION_ROW_LIMITS",
+        {
+            "forecast_cycles": 2,
+            "hydro_runs": 2,
+            "pipeline_jobs": 2,
+            "pipeline_events": 2,
+        },
+    )
+
+    def oversized_cycles() -> Any:
+        for index in range(3):
+            yield {
+                "cycle_id": f"gfs_202606280{index}",
+                "source_id": "gfs",
+                "cycle_time": _dt("2026-06-28T00:00:00Z"),
+                "status": "forecast_running",
+                "manifest_uri": f"s3://private-bucket/raw/{index}.json?token=secret-{index}",
+            }
+
+    journal_root = tmp_path / "journal"
+
+    with pytest.raises(ValueError) as error:
+        import_historical_scheduler_state(
+            journal_root=journal_root,
+            forecast_cycles=oversized_cycles(),
+            cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        )
+
+    message = str(error.value)
+    assert "forecast_cycles" in message
+    assert "2" in message
+    assert "secret-2" not in message
+    assert not journal_root.exists()
+
+
 def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -653,6 +779,83 @@ def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order
     assert documented_receipt["source"] == "10.0.2.100:55433"
     assert len(captured_sql) == 8
     assert "ORDER BY created_at ASC NULLS FIRST, event_id ASC" in captured_sql[-1]
+
+
+def test_export_scheduler_state_from_postgres_rejects_over_limit_fetchmany_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        migration_module,
+        "HISTORICAL_MIGRATION_ROW_LIMITS",
+        {
+            "forecast_cycles": 2,
+            "hydro_runs": 2,
+            "pipeline_jobs": 2,
+            "pipeline_events": 2,
+        },
+    )
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    exported_rows = [
+        {
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "status": "forecast_running",
+            "manifest_uri": f"s3://private-bucket/raw/{index}.json?token=secret-{index}",
+            "created_at": "2026-06-28T00:00:00Z",
+        }
+        for index in range(3)
+    ]
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.offset = 0
+
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, _sql: str, _params: dict[str, Any]) -> None:
+            return None
+
+        def fetchmany(self, size: int) -> list[dict[str, Any]]:
+            batch = exported_rows[self.offset : self.offset + size]
+            self.offset += len(batch)
+            return [dict(row) for row in batch]
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            raise AssertionError("export must not use unbounded fetchall when fetchmany is available")
+
+    class Connection:
+        def __enter__(self) -> "Connection":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    fake_psycopg = types.SimpleNamespace(connect=lambda *_args, **_kwargs: Connection())
+    fake_rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+
+    with pytest.raises(ValueError) as error:
+        export_scheduler_state_from_postgres(
+            database_url="postgresql://nwm@localhost:55433/nhms",
+            journal_root=tmp_path / "journal",
+            allow_historical_node22=True,
+            cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        )
+
+    message = str(error.value)
+    assert "forecast_cycles" in message
+    assert "2" in message
+    assert "secret-2" not in message
 
 
 @pytest.mark.parametrize(
