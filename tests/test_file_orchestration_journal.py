@@ -1098,6 +1098,89 @@ def test_file_orchestration_journal_non_object_embedded_rows_block(
     assert state["file_journal"]["field"] == expected_field
 
 
+@pytest.mark.parametrize("surface", ["journal", "direct_pipeline_job", "sidecar_event"])
+def test_file_orchestration_journal_non_object_payload_blocks_state_replay_surfaces(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    record = {
+        "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+        "sequence": 1,
+        "record_type": "pipeline_job",
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": "model_a",
+        "payload": ["not-an-object"],
+    }
+    if surface == "journal":
+        _write_jsonl(journal_root / "journal/gfs/2026062800.jsonl", [record])
+    elif surface == "direct_pipeline_job":
+        _write_json(journal_root / f"pipeline-jobs/{job['job_id']}.json", record)
+    else:
+        _write_json(
+            journal_root / "latest/gfs/2026062800/model_a.json",
+            _latest_view(cycle_time=cycle_time, jobs=[job]),
+        )
+        event_record = {
+            **record,
+            "record_type": "pipeline_event",
+        }
+        _write_jsonl(journal_root / "pipeline-events/gfs/2026062800.jsonl", [event_record])
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "running"
+    assert state["file_journal"]["reason"] == "file_journal_expected_object"
+    assert state["file_journal"]["field"] == "payload"
+
+
+@pytest.mark.parametrize("surface", ["direct_model", "direct_forcing"])
+def test_file_orchestration_journal_non_object_payload_blocks_direct_context_records(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    if surface == "direct_model":
+        _write_json(
+            journal_root / "models/model_a.json",
+            {
+                "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+                "record_type": "model_context",
+                "model_id": "model_a",
+                "payload": ["not-an-object"],
+            },
+        )
+        with pytest.raises(OrchestratorError) as error:
+            FileOrchestrationJournalRepository(journal_root).load_model_context("model_a")
+    else:
+        _write_json(
+            journal_root / "forcing/gfs/2026062800/model_a.json",
+            {
+                "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+                "record_type": "forcing_version",
+                "source_id": "gfs",
+                "cycle_time": cycle_time.isoformat(),
+                "model_id": "model_a",
+                "payload": ["not-an-object"],
+            },
+        )
+        with pytest.raises(OrchestratorError) as error:
+            FileOrchestrationJournalRepository(journal_root).find_forcing_context(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                model_id="model_a",
+            )
+
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_expected_object" in error.value.message
+
+
 def test_file_orchestration_journal_direct_pipeline_job_requires_journal_schema(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -1144,6 +1227,50 @@ def test_file_orchestration_journal_valid_direct_only_custom_pipeline_job_is_rea
     assert state is not None
     assert state["pipeline_status"] == "running"
     assert state["pipeline_jobs"][0]["job_id"] == "custom_safe_job"
+
+
+def test_file_orchestration_journal_cycle_level_direct_jobs_ignore_unrelated_valid_snapshots(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    unrelated_cycle_time = _dt("2026-06-28T12:00:00Z")
+    journal_root = tmp_path / "journal"
+    completed_job = _active_job(cycle_time)
+    completed_job.update({"status": "succeeded", "slurm_job_id": "3001"})
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="complete", jobs=[completed_job]),
+    )
+    unrelated_job = _active_job(unrelated_cycle_time)
+    unrelated_job.update(
+        {
+            "job_id": "job_cycle_ifs_2026062812_forecast",
+            "idempotency_key": "cycle_ifs_2026062812:forecast",
+            "run_id": "cycle_ifs_2026062812",
+            "cycle_id": cycle_id_for("ifs", unrelated_cycle_time),
+            "source_id": "ifs",
+            "cycle_time": unrelated_cycle_time.isoformat(),
+            "status": "running",
+            "slurm_job_id": "9999",
+        }
+    )
+    _write_json(
+        journal_root / "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json",
+        _journal_record(
+            record_type="pipeline_job",
+            source_id="ifs",
+            cycle_time=unrelated_cycle_time,
+            payload=unrelated_job,
+            model_id=None,
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_orchestration(source_id="gfs", cycle_time=cycle_time) is False
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
 
 
 def test_file_orchestration_journal_get_pipeline_job_exact_direct_path_ignores_unrelated_bad_direct_snapshot(
@@ -1669,6 +1796,98 @@ def test_file_orchestration_journal_equal_timestamp_tiebreak_matches_db_ordering
     assert [event["event_id"] for event in state["pipeline_events"]] == [2]
 
 
+def test_file_orchestration_journal_active_slurm_jobs_sorts_null_submitted_at_after_limit(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    null_submitted = _active_job(cycle_time)
+    null_submitted.update(
+        {
+            "job_id": "job_null_submitted",
+            "slurm_job_id": "3002",
+            "submitted_at": None,
+            "created_at": "2026-06-28T00:00:00Z",
+            "status": "running",
+        }
+    )
+    submitted = _active_job(cycle_time)
+    submitted.update(
+        {
+            "job_id": "job_submitted",
+            "slurm_job_id": "3001",
+            "submitted_at": "2026-06-28T00:05:00Z",
+            "created_at": "2026-06-28T00:10:00Z",
+            "status": "running",
+        }
+    )
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[null_submitted, submitted]),
+    )
+
+    jobs = FileOrchestrationJournalRepository(journal_root).active_slurm_jobs(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        limit=1,
+    )
+
+    assert [job["job_id"] for job in jobs] == ["job_submitted"]
+
+
+def test_file_orchestration_journal_query_pipeline_jobs_match_db_ordering(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    early = _active_job(cycle_time)
+    early.update(
+        {
+            "job_id": "job_early",
+            "submitted_at": "2026-06-28T00:01:00Z",
+            "created_at": "2026-06-28T00:09:00Z",
+        }
+    )
+    later = _active_job(cycle_time)
+    later.update(
+        {
+            "job_id": "job_later",
+            "submitted_at": "2026-06-28T00:02:00Z",
+            "created_at": "2026-06-28T00:00:00Z",
+        }
+    )
+    tie_b = _active_job(cycle_time)
+    tie_b.update(
+        {
+            "job_id": "job_tie_b",
+            "submitted_at": "2026-06-28T00:03:00Z",
+            "created_at": "2026-06-28T00:04:00Z",
+        }
+    )
+    tie_a = _active_job(cycle_time)
+    tie_a.update(
+        {
+            "job_id": "job_tie_a",
+            "submitted_at": "2026-06-28T00:03:00Z",
+            "created_at": "2026-06-28T00:04:00Z",
+        }
+    )
+    null_submitted = _active_job(cycle_time)
+    null_submitted.update({"job_id": "job_null", "submitted_at": None, "created_at": "2026-06-28T00:00:00Z"})
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[null_submitted, tie_b, later, tie_a, early]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    expected_order = ["job_early", "job_later", "job_tie_a", "job_tie_b", "job_null"]
+
+    assert [
+        job["job_id"] for job in repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    ] == expected_order
+    assert [job["job_id"] for job in repository.query_pipeline_jobs_by_run(early["run_id"])] == expected_order
+
+
 def test_file_orchestration_journal_blocked_query_sentinels_redact_raw_ids(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -1693,6 +1912,32 @@ def test_file_orchestration_journal_blocked_query_sentinels_redact_raw_ids(tmp_p
     assert "published://" not in rendered
     assert "[local-path]" in rendered
     assert "[uri]" in rendered or "[object-uri]" in rendered
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_token"),
+    [
+        ("/private/model-a", "[local-path]"),
+        ("file:///private/model-a", "[uri]"),
+    ],
+)
+def test_file_orchestration_journal_active_slurm_blocked_sentinel_redacts_model_id(
+    tmp_path: Path,
+    model_id: str,
+    expected_token: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    jobs = FileOrchestrationJournalRepository(tmp_path / "journal").active_slurm_jobs(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=model_id,
+    )
+    rendered = json.dumps(jobs, sort_keys=True)
+
+    assert jobs[0]["job_id"] == "file_journal_read_blocked"
+    assert jobs[0]["model_id"] == expected_token
+    assert "/private" not in rendered
+    assert "file://" not in rendered
 
 
 def test_file_orchestration_journal_candidate_state_blocker_redacts_public_evidence(tmp_path: Path) -> None:
@@ -1807,6 +2052,119 @@ def test_db_free_scheduler_from_env_run_once_uses_file_journal_active_slurm_evid
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_job"
     assert result.evidence["skipped_candidates"][0]["active_slurm_jobs"][0]["slurm_job_id"] == "3001"
+
+
+def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=(0, 3),
+        model=_model("model_a", "basin_a"),
+    )
+    _write_json(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
+    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        scheduler_module,
+        "_default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
+    )
+
+    def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("DB-free status sync must not construct the default DB-backed orchestrator")
+
+    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
+
+    result = ProductionScheduler.from_env(
+        ProductionSchedulerConfig(
+            now=cycle_time,
+            dry_run=False,
+            lookback_hours=0,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            restart_reconcile_enabled=False,
+        )
+    ).run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_deferred"
+    sync_evidence = result.evidence["model_run_evidence"][0]
+    assert sync_evidence["error_code"] == "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
+    assert sync_evidence["sync_attempted"] is False
+    assert sync_evidence["evidence_pre_execution"]["reason"] == "db_free_file_journal_write_not_implemented"
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is False
+    assert result.evidence["slurm_status_sync_proof"]["block_reason"] == (
+        "db_free_file_journal_write_not_implemented"
+    )
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+
+
+def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=(0, 3),
+        model=_model("model_a", "basin_a"),
+    )
+    _write_json(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
+    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        scheduler_module,
+        "_default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
+    )
+
+    def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("DB-free cancellation must not construct the default DB-backed orchestrator")
+
+    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
+
+    result = ProductionScheduler.from_env(
+        ProductionSchedulerConfig(
+            now=cycle_time,
+            dry_run=False,
+            lookback_hours=0,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            cancel_active_slurm=True,
+            restart_reconcile_enabled=False,
+        )
+    ).run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "cancel_requested_active_slurm"
+    cancellation = result.evidence["slurm_cancellation_evidence"][0]
+    assert cancellation["error_code"] == "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
+    assert cancellation["cancel_attempted"] is False
+    assert cancellation["replacement_submitted"] is False
+    assert cancellation["evidence_pre_execution"]["reason"] == "db_free_file_journal_write_not_implemented"
+    assert result.evidence["slurm_cancellation_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is False
+    assert result.evidence["slurm_cancellation_proof"]["block_reason"] == "db_free_file_journal_write_not_implemented"
+    assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 1
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
 
 
 def test_file_orchestration_journal_malformed_latest_fails_closed(tmp_path: Path) -> None:

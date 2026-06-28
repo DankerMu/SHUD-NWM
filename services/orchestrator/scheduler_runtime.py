@@ -120,6 +120,45 @@ def _db_free_journal_write_blocked_reservation(config: Any, candidate_count: int
     }
 
 
+def _db_free_journal_write_blocked_sync_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = _sync_candidate_evidence_write_blocked_evidence(candidate, reservation)
+    _apply_db_free_journal_write_blocker(evidence, reservation)
+    evidence["execution_mode"] = "db_free_file_journal_write_blocked"
+    return evidence
+
+
+def _db_free_journal_write_blocked_cancel_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = _cancel_candidate_evidence_write_blocked_evidence(candidate, reservation)
+    _apply_db_free_journal_write_blocker(evidence, reservation)
+    return evidence
+
+
+def _apply_db_free_journal_write_blocker(
+    evidence: dict[str, Any],
+    reservation: Mapping[str, Any],
+) -> None:
+    error_code = str(reservation.get("error_code") or "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED")
+    evidence["error_code"] = error_code
+    evidence["error_message"] = str(
+        reservation.get("message")
+        or "DB-free scheduler mutation is blocked until the file orchestration journal write side is implemented."
+    )
+    residual_blockers = evidence.get("residual_blockers")
+    if isinstance(residual_blockers, list):
+        for blocker in residual_blockers:
+            if not isinstance(blocker, dict):
+                continue
+            blocker["code"] = error_code
+            blocker["quality_flag"] = "db_free_file_journal_write_not_implemented"
+            blocker["residual_risk"] = evidence["error_message"]
+
+
 def _now(*args, **kwargs):
     return getattr(_scheduler, "_now")(*args, **kwargs)
 
@@ -633,7 +672,42 @@ def run_once(self) -> SchedulerPassResult:
                     blocked=True,
                 )
             else:
-                if pending_status_sync_candidates:
+                db_free_journal_write_blocked = (
+                    bool(self.config.db_free_required)
+                    and self.orchestrator_factory is None
+                    and (bool(pending_status_sync_candidates) or cancel_active_slurm_requested)
+                )
+                db_free_journal_reservation = None
+                if db_free_journal_write_blocked:
+                    db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
+                        self.config,
+                        len(pending_status_sync_candidates) + len(pending_cancel_candidates),
+                    )
+                    if pending_status_sync_candidates:
+                        execution_evidence.extend(
+                            _db_free_journal_write_blocked_sync_evidence(candidate, db_free_journal_reservation)
+                            for candidate in pending_status_sync_candidates
+                        )
+                        slurm_status_sync_proof = _slurm_status_sync_proof(
+                            sync_required=True,
+                            reservation=db_free_journal_reservation,
+                            blocked=True,
+                        )
+                        execution_boundary = "db_free_journal_write_blocked"
+                        pass_status = "preflight_blocked"
+                    if cancel_active_slurm_requested:
+                        cancellation_evidence = [
+                            _db_free_journal_write_blocked_cancel_evidence(candidate, db_free_journal_reservation)
+                            for candidate in pending_cancel_candidates
+                        ]
+                        slurm_cancellation_proof = _slurm_cancellation_proof(
+                            cancellation_required=True,
+                            reservation=db_free_journal_reservation,
+                            blocked=True,
+                        )
+                        execution_boundary = "db_free_journal_write_blocked"
+                        pass_status = "preflight_blocked"
+                if pending_status_sync_candidates and not db_free_journal_write_blocked:
                     (
                         candidates,
                         blocked_candidates,
@@ -653,15 +727,16 @@ def run_once(self) -> SchedulerPassResult:
                     cancel_active_slurm_requested = (
                         self.config.cancel_active_slurm and not self.config.dry_run and bool(pending_cancel_candidates)
                     )
-                slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
-                    slurm_status_sync_evidence,
-                    reservation=evidence_reservation,
-                )
+                if not (db_free_journal_write_blocked and pending_status_sync_candidates):
+                    slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
+                        slurm_status_sync_evidence,
+                        reservation=evidence_reservation,
+                    )
                 if _slurm_status_sync_failed(slurm_status_sync_proof):
                     pass_status = "slurm_status_sync_failed"
                     execution_boundary = "slurm_status_sync"
                 else:
-                    if cancel_active_slurm_requested:
+                    if cancel_active_slurm_requested and not cancellation_evidence:
                         cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
                         slurm_cancellation_proof = _slurm_cancellation_proof_from_evidence(
                             cancellation_evidence,

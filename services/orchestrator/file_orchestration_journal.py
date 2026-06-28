@@ -156,14 +156,16 @@ class FileOrchestrationJournalRepository:
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return [
-                {
-                    "job_id": "file_journal_read_blocked",
-                    "cycle_id": _blocked_cycle_id(source_id, cycle_time),
-                    "model_id": model_id,
-                    "status": "running",
-                    "stage": "file_journal_read",
-                    "slurm_job_id": "unknown_after_attempt",
-                }
+                _public_scheduler_row(
+                    {
+                        "job_id": "file_journal_read_blocked",
+                        "cycle_id": _blocked_cycle_id(source_id, cycle_time),
+                        "model_id": model_id,
+                        "status": "running",
+                        "stage": "file_journal_read",
+                        "slurm_job_id": "unknown_after_attempt",
+                    }
+                )
             ]
         jobs = [
             _public_scheduler_row(job)
@@ -172,12 +174,7 @@ class FileOrchestrationJournalRepository:
             and _job_is_active(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         ]
-        jobs.sort(
-            key=lambda job: (
-                _datetime_sort_key(job.get("submitted_at")),
-                _datetime_sort_key(job.get("created_at")),
-            )
-        )
+        jobs.sort(key=_db_compatible_pipeline_job_order_key)
         return jobs[: max(int(limit), 1)]
 
     def candidate_state(
@@ -304,21 +301,25 @@ class FileOrchestrationJournalRepository:
 
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         try:
-            return [
+            jobs = [
                 _public_scheduler_row(job)
                 for job in self._iter_pipeline_job_records()
                 if str(job.get("cycle_id") or "") == cycle_id
             ]
+            jobs.sort(key=_db_compatible_pipeline_job_order_key)
+            return jobs
         except FileOrchestrationJournalError as error:
             return [_blocked_query_job(error, cycle_id=cycle_id)]
 
     def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
         try:
-            return [
+            jobs = [
                 _public_scheduler_row(job)
                 for job in self._iter_pipeline_job_records()
                 if str(job.get("run_id") or "") == run_id
             ]
+            jobs.sort(key=_db_compatible_pipeline_job_order_key)
+            return jobs
         except FileOrchestrationJournalError as error:
             return [_blocked_query_job(error, run_id=run_id)]
 
@@ -686,12 +687,11 @@ class FileOrchestrationJournalRepository:
             if payload is None:
                 continue
             job = self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
-            if model_id is None or _job_matches_candidate(
-                job,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-            ):
+            if model_id is None:
+                if _job_matches_source_cycle(job, source_id=source_id, cycle_time=cycle_time):
+                    yield job
+                continue
+            if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id):
                 yield job
 
     def _iter_pipeline_job_records(self, *, include_direct: bool = True) -> Iterable[dict[str, Any]]:
@@ -1041,6 +1041,18 @@ def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time
     )
 
 
+def _job_matches_source_cycle(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime) -> bool:
+    source_id = _normalize_file_source_id(source_id, field="source_id")
+    cycle_id = _cycle_id_for_file_source(source_id, cycle_time)
+    if str(job.get("cycle_id") or "") != cycle_id:
+        return False
+    cycle_stamp = format_cycle_time(cycle_time)
+    run_id = str(job.get("run_id") or "")
+    return run_id == f"cycle_{source_id.lower()}_{cycle_stamp}" or run_id.startswith(
+        f"fcst_{source_id.lower()}_{cycle_stamp}_"
+    )
+
+
 def _row_matches_candidate(
     row: Mapping[str, Any] | None,
     *,
@@ -1065,9 +1077,11 @@ def _row_matches_candidate(
 
 
 def _payload_or_record_payload(record: Mapping[str, Any]) -> dict[str, Any]:
-    payload = record.get("payload")
-    if isinstance(payload, Mapping):
-        return dict(payload)
+    if "payload" in record:
+        payload = record.get("payload")
+        if isinstance(payload, Mapping):
+            return dict(payload)
+        raise FileOrchestrationJournalError("file_journal_expected_object", field="payload")
     return dict(record)
 
 
@@ -1178,6 +1192,20 @@ def _dedupe_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             continue
         keyed[str(key)] = _latest_mapping(keyed.get(str(key)), event) or dict(event)
     return [*keyed.values(), *unkeyed]
+
+
+def _db_compatible_pipeline_job_order_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    submitted_at = row.get("submitted_at")
+    submitted_missing = submitted_at in (None, "")
+    submitted_key = datetime.max.replace(tzinfo=UTC) if submitted_missing else _datetime_sort_key(submitted_at)
+    return (
+        submitted_missing,
+        submitted_key,
+        _datetime_sort_key(row.get("created_at")),
+        str(row.get("job_id") or ""),
+        str(row.get("run_id") or ""),
+        str(row.get("slurm_job_id") or ""),
+    )
 
 
 def _decode_mapping(content: bytes, *, field: str, max_nodes: int, max_depth: int) -> dict[str, Any]:
