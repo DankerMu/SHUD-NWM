@@ -14,8 +14,10 @@ from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+    FileJournalRetryService,
     FileOrchestrationJournalRepository,
 )
+from services.orchestrator.retry import RetryConfig
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
 from tests.test_production_scheduler import (
     FakeAdapter,
@@ -602,32 +604,270 @@ def test_file_orchestration_journal_forcing_context_reads_db_lineage_json_fallba
     assert forcing.forcing_package_manifest_checksum == "sha256:forcing-package"
 
 
-@pytest.mark.parametrize(
-    "method_name",
-    [
-        "ensure_forecast_cycle",
-        "create_hydro_run",
-        "create_hydro_run_from_basin",
-        "update_hydro_run_status",
-        "upsert_pipeline_job",
-        "reserve_pipeline_job",
-        "reclaim_pipeline_job_reservation",
-        "bind_pipeline_job_reservation",
-        "update_pipeline_job_status",
-        "insert_pipeline_event",
-        "update_forecast_cycle_status",
-    ],
-)
-def test_file_orchestration_journal_write_methods_fail_not_implemented(
+def _pipeline_reservation_record(
+    cycle_time: datetime,
+    *,
+    job_id: str = "job_cycle_gfs_2026062800_forecast",
+    status: str = "reserved",
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "run_id": f"fcst_gfs_{format_cycle_time(cycle_time)}_model_a",
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_a",
+        "status": status,
+        "stage": "forecast",
+        "idempotency_key": f"gfs:{cycle_id_for('gfs', cycle_time)}:basin_a:forecast",
+        "candidate_id": "candidate_a",
+    }
+
+
+def test_file_orchestration_journal_lifecycle_writes_materialize_latest_and_replay(
     tmp_path: Path,
-    method_name: str,
 ) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    forecast = repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    updated_cycle = repository.update_forecast_cycle_status(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        status="forecast_running",
+    )
+    run = repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+            "outputs": {
+                "run_manifest_uri": "s3://nhms/manifests/run.json",
+                "output_uri": "s3://nhms/runs/output",
+                "log_uri": "s3://nhms/logs/run.log",
+            },
+        },
+    )
+    completed = repository.update_hydro_run_status(run["run_id"], "succeeded", slurm_job_id="3001")
+
+    latest = json.loads((journal_root / "latest/gfs/2026062800/model_a.json").read_text(encoding="utf-8"))
+    reloaded = FileOrchestrationJournalRepository(journal_root)
+
+    assert forecast["status"] == "discovered"
+    assert updated_cycle["status"] == "forecast_running"
+    assert run["status"] == "created"
+    assert completed["status"] == "succeeded"
+    assert latest["hydro_run"]["status"] == "succeeded"
+    assert latest["forecast_cycle"]["status"] == "forecast_running"
+    assert latest["replay"]["latest_sequence"] >= 4
+    assert reloaded.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+def test_file_orchestration_journal_lifecycle_updates_cycle_cohort_run_ids(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
 
-    with pytest.raises(OrchestratorError) as error:
-        getattr(repository, method_name)()
+    run = repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "cycle_gfs_2026062800_convert_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    updated = repository.update_hydro_run_status(run["run_id"], "succeeded", slurm_job_id="3001")
 
-    assert error.value.error_code == "FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
+    assert updated["run_id"] == "cycle_gfs_2026062800_convert_model_a"
+    assert updated["status"] == "succeeded"
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal_guards(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time)
+
+    created = repository.reserve_pipeline_job(record)
+    duplicate = repository.reserve_pipeline_job(record)
+    bound = repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3001")
+    previous_status, succeeded = repository.update_pipeline_job_status(
+        record["job_id"],
+        "succeeded",
+        finished_at=cycle_time,
+    )
+    event = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="status_change",
+        status_from="submitted",
+        status_to="succeeded",
+        details={"stage": "forecast", "slurm_job_id": "3001"},
+    )
+    guarded_previous, guarded = repository.update_pipeline_job_status(record["job_id"], "running")
+
+    assert created is not None
+    assert created["status"] == "reserved"
+    assert duplicate is None
+    assert bound is not None
+    assert bound["status"] == "submitted"
+    assert bound["slurm_job_id"] == "3001"
+    assert previous_status == "submitted"
+    assert succeeded["status"] == "succeeded"
+    assert event["status_to"] == "succeeded"
+    assert guarded_previous == "succeeded"
+    assert guarded["status"] == "succeeded"
+    assert repository.get_pipeline_job(record["job_id"])["status"] == "succeeded"
+    assert repository.query_pipeline_job_by_slurm_id("3001")["job_id"] == record["job_id"]
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
+    assert state["pipeline_jobs"][0]["status"] == "succeeded"
+    assert state["pipeline_events"][0]["status_to"] == "succeeded"
+
+
+def test_file_orchestration_journal_reclaims_dead_reservation_and_keeps_permanent_failure_sticky(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    dead_record = _pipeline_reservation_record(cycle_time, job_id="job_dead")
+    live_record = _pipeline_reservation_record(cycle_time, job_id="job_live")
+    live_record["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_live"
+
+    assert repository.reserve_pipeline_job(dead_record) is not None
+    repository.update_pipeline_job_status("job_dead", "submission_failed", error_code="SBATCH_REJECTED")
+    reclaimed = repository.reclaim_pipeline_job_reservation(dead_record)
+
+    assert reclaimed is not None
+    assert reclaimed["status"] == "reserved"
+    assert reclaimed["slurm_job_id"] is None
+
+    assert repository.reserve_pipeline_job(live_record) is not None
+    repository.bind_pipeline_job_reservation(live_record["idempotency_key"], slurm_job_id="3002")
+    assert repository.reclaim_pipeline_job_reservation(live_record) is None
+
+    repository.update_pipeline_job_status("job_dead", "permanently_failed", error_code="RETRY_LIMIT_EXHAUSTED")
+    previous, sticky = repository.update_pipeline_job_status("job_dead", "succeeded")
+
+    assert previous == "permanently_failed"
+    assert sticky["status"] == "permanently_failed"
+    assert sticky["error_code"] == "RETRY_LIMIT_EXHAUSTED"
+
+
+def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast")
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3001")
+    repository.update_pipeline_job_status(
+        "job_forecast",
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        error_message="Timed out while polling Slurm.",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    handled = service.handle_failed_job(repository.get_pipeline_job("job_forecast"))
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert handled.job_id == "job_forecast_retry_1"
+    assert handled.status == "pending"
+    assert handled.retry_count == 1
+    assert state is not None
+    assert {job["job_id"]: job["status"] for job in state["pipeline_jobs"]}["job_forecast_retry_1"] == "pending"
+    retry_event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_forecast_retry_1")
+    assert retry_event["event_type"] == "retry"
+    assert retry_event["details"]["trigger"] == "auto"
+    assert retry_event["details"]["previous_job_id"] == "job_forecast"
+    assert retry_event["details"]["failure"]["retryable"] is True
+
+
+def test_file_journal_retry_service_exhaustion_records_permanent_failure(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_exhausted")
+    record["retry_count"] = 3
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_exhausted",
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        error_message="Timed out after final retry.",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    handled = service.handle_failed_job(repository.get_pipeline_job("job_exhausted"))
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert handled.job_id == "job_exhausted"
+    assert handled.status == "permanently_failed"
+    assert handled.error_code == "SLURM_TIMEOUT"
+    assert state is not None
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["retry_count"] == 3
+    assert state["error_code"] == "SLURM_TIMEOUT"
+    permanent_event = next(event for event in state["pipeline_events"] if event["event_type"] == "permanently_failed")
+    assert permanent_event["status_to"] == "permanently_failed"
+    assert permanent_event["details"]["failure"]["limit_exhausted"] is True
+
+
+def test_file_journal_manual_repair_marker_allows_candidate_and_preserves_prior_reason(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_repair")
+    record["retry_count"] = 3
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_manual_repair",
+        "permanently_failed",
+        error_code="INVALID_MANIFEST",
+        error_message="Operator repaired malformed manifest.",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    repair = service.record_manual_repair(
+        "fcst_gfs_2026062800_model_a",
+        requested_by="operator",
+        request_id="manual-1",
+        reason="manifest repaired",
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.job_id == "job_manual_repair"
+    assert repair.status == "manual_repair_requested"
+    assert repair.manual_retry_marker is True
+    assert repair.retry_count == 4
+    assert state is not None
+    assert state["pipeline_status"] == "permanently_failed"
+    assert scheduler_module._manual_retry_requested(state) is True
+    manual_payload = scheduler_module._manual_retry_payload(state)
+    assert manual_payload["marker"] is True
+    assert manual_payload["new_attempt"] == 4
+    assert manual_payload["prior_failure_reason"] == "INVALID_MANIFEST"
+    event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_manual_repair")
+    assert event["details"]["manual_retry_marker"] is True
+    assert event["details"]["requested_by"] == "operator"
+    assert event["details"]["request_id"] == "manual-1"
 
 
 def test_file_orchestration_journal_direct_model_context_must_match_path_model(tmp_path: Path) -> None:
@@ -2329,19 +2569,18 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
         )
     ).run_once()
 
-    assert result.status == "preflight_blocked"
-    assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_deferred"
-    sync_evidence = result.evidence["model_run_evidence"][0]
-    assert sync_evidence["error_code"] == "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
-    assert sync_evidence["sync_attempted"] is False
-    assert sync_evidence["evidence_pre_execution"]["reason"] == "db_free_file_journal_write_not_implemented"
-    assert result.evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
-    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is False
-    assert result.evidence["slurm_status_sync_proof"]["block_reason"] == (
-        "db_free_file_journal_write_not_implemented"
-    )
-    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
-    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.status == "slurm_status_sync_failed"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_failed"
+    sync_evidence = result.evidence["skipped_candidates"][0]["state_evidence"]["slurm_state_sync"]
+    assert sync_evidence["error_code"] == "SLURM_STATUS_SYNC_FAILED"
+    assert sync_evidence["sync_attempted"] is True
+    assert sync_evidence["sync_called"] is True
+    assert sync_evidence["status"] == "failed"
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "failed"
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is True
+    assert result.evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
@@ -2386,19 +2625,19 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
         )
     ).run_once()
 
-    assert result.status == "preflight_blocked"
+    assert result.status == "slurm_cancellation_blocked"
     assert result.evidence["skipped_candidates"][0]["reason"] == "cancel_requested_active_slurm"
     cancellation = result.evidence["slurm_cancellation_evidence"][0]
-    assert cancellation["error_code"] == "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
-    assert cancellation["cancel_attempted"] is False
+    assert cancellation["error_code"] == "SLURM_CANCEL_FAILED"
+    assert cancellation["cancel_attempted"] is True
     assert cancellation["replacement_submitted"] is False
-    assert cancellation["evidence_pre_execution"]["reason"] == "db_free_file_journal_write_not_implemented"
-    assert result.evidence["slurm_cancellation_proof"]["status"] == "preflight_blocked"
-    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is False
-    assert result.evidence["slurm_cancellation_proof"]["block_reason"] == "db_free_file_journal_write_not_implemented"
+    assert cancellation["status"] == "failed"
+    assert result.evidence["slurm_cancellation_proof"]["status"] == "slurm_cancellation_blocked"
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
+    assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
     assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 1
-    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
-    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def test_file_orchestration_journal_malformed_latest_fails_closed(tmp_path: Path) -> None:

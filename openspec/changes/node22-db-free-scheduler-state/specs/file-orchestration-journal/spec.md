@@ -20,14 +20,16 @@ by `PsycopgOrchestratorRepository`.
   completed
 - **AND** completed candidates are skipped with bounded evidence.
 
-#### Scenario: Write-side submission lifecycle is reserved for later slices
+#### Scenario: File journal writes lifecycle and pipeline state
 
-- **WHEN** #833 read-side file repository write methods are called before the
-  write-side slice lands
-- **THEN** they fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`
-- **AND** atomic reservation, binding, pipeline-job writes, pipeline-event
-  writes, Slurm job ID persistence, retry attempt writes, and materialized
-  latest writes remain explicitly out of scope for the read-side slice.
+- **WHEN** DB-free scheduler or orchestrator code creates lifecycle,
+  reservation, pipeline-job, or pipeline-event state
+- **THEN** the file journal writes append-only records with atomic/no-clobber
+  file behavior and materializes latest/query views for the same source/cycle
+  identity
+- **AND** reservation, binding, job-status, event insertion, forecast/hydro
+  status, retry, and permanent-failure writes preserve the existing DB-backed
+  repository semantics.
 
 #### Scenario: Read-side journal schemas are explicit
 
@@ -85,14 +87,23 @@ by `PsycopgOrchestratorRepository`.
 - **AND** active Slurm jobs prevent duplicate submission and support
   cancel/status-sync evidence.
 
-#### Scenario: Read-side slice does not claim write support
+#### Scenario: DB-free mode uses file-backed retry state
 
-- **WHEN** #833 file repository write methods are called before the write-side
-  slice lands
-- **THEN** they fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`
-- **AND** scheduler default DB-free mutation remains blocked until the write
-  side, retry/permanent-failure persistence, atomic latest materialization, and
-  historical migration slices are implemented.
+- **WHEN** DB-free mode constructs a production orchestrator
+- **THEN** it uses a file-journal retry service instead of DB-backed
+  `_retry_service_from_env()` or SQLAlchemy `PipelineStore`
+- **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
+  permanent-failure state are represented in append-only file journal records.
+
+#### Scenario: Historical scheduler state migrates into append-only journal
+
+- **WHEN** operators export scheduler-relevant rows from historical node-22
+  PostgreSQL `:55433`
+- **THEN** the importer writes active/completed/candidate/job/event/retry and
+  permanent-failure rows into the file journal
+- **AND** the migration receipt records cutoff time, row counts, input
+  checksums, replay status, and stale `download_source_cycle` supersession
+  evidence.
 
 #### Scenario: Malformed file state fails closed
 
@@ -134,12 +145,13 @@ orchestration state behavior against existing scheduler semantics.
 #### Scenario: Contract fixtures cover critical repository methods
 
 - **WHEN** repository contract tests run
-- **THEN** the #833 read-side fixture covers active orchestration, active
-  pipeline, completed pipeline, active Slurm jobs, candidate state,
-  model/forcing context reads, and query helpers
-- **AND** write-side lifecycle, reservation/bind, job status updates, event
-  insertion, retry supersession, and permanent failure guards are explicitly
-  deferred to later write/retry/migration slices.
+- **THEN** fixtures cover active orchestration, active pipeline, completed
+  pipeline, active Slurm jobs, candidate state, model/forcing context reads,
+  lifecycle writes, reservation/bind, job status updates, event insertion,
+  retry supersession, permanent failure guards, historical migration, and query
+  helpers
+- **AND** DB-backed repository semantics remain covered by existing
+  `PsycopgOrchestratorRepository` tests.
 
 #### Scenario: Read-side contract fixtures cover scheduler planning
 

@@ -70,6 +70,7 @@ DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
 
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
+    "tests/test_file_orchestration_migration.py",
     "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
     "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
     "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
@@ -82,10 +83,10 @@ FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion",
     "tests/test_production_scheduler.py::test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call",
     "tests/test_production_scheduler.py::test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_call",
-    "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_convert_submission",
+    "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_download_source_cycle",
     "tests/test_production_scheduler.py::test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission",
     "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
-    "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exists",
+    "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
     "tests/test_source_cycle_raw_manifest.py",
 )
 
@@ -93,6 +94,8 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
     "packages/common/safe_fs.py",
     "services/orchestrator/chain_repository_state.py",
     "services/orchestrator/file_orchestration_journal.py",
+    "services/orchestrator/file_orchestration_migration.py",
+    "services/orchestrator/cli.py",
     "services/orchestrator/scheduler_core.py",
     "services/orchestrator/scheduler_runtime.py",
 )
@@ -177,6 +180,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[5],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[6],
         FILE_JOURNAL_READ_STATE_TESTS,
         stop_on_match=True,
     ),

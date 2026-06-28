@@ -120,8 +120,15 @@ def _db_free_journal_write_blocked_reservation(config: Any, candidate_count: int
     }
 
 
-def _db_free_journal_mutation_blocked(config: Any, *, mutation_requested: bool) -> bool:
-    return bool(getattr(config, "db_free_required", False)) and bool(mutation_requested)
+def _db_free_journal_mutation_blocked(
+    config: Any,
+    *,
+    mutation_requested: bool,
+    repository: Any | None = None,
+) -> bool:
+    if not (bool(getattr(config, "db_free_required", False)) and bool(mutation_requested)):
+        return False
+    return not bool(getattr(repository, "supports_writes", False))
 
 
 def _db_free_journal_write_blocked_sync_evidence(
@@ -679,6 +686,7 @@ def run_once(self) -> SchedulerPassResult:
                 db_free_journal_write_blocked = _db_free_journal_mutation_blocked(
                     self.config,
                     mutation_requested=bool(pending_status_sync_candidates) or cancel_active_slurm_requested,
+                    repository=self.active_repository,
                 )
                 db_free_journal_reservation = None
                 if db_free_journal_write_blocked:
@@ -746,7 +754,11 @@ def run_once(self) -> SchedulerPassResult:
                             reservation=evidence_reservation,
                         )
                     if candidates:
-                        if _db_free_journal_mutation_blocked(self.config, mutation_requested=bool(candidates)):
+                        if _db_free_journal_mutation_blocked(
+                            self.config,
+                            mutation_requested=bool(candidates),
+                            repository=self.active_repository,
+                        ):
                             db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
                                 self.config,
                                 len(candidates),
@@ -776,6 +788,7 @@ def run_once(self) -> SchedulerPassResult:
                         if candidates and not _db_free_journal_mutation_blocked(
                             self.config,
                             mutation_requested=bool(candidates),
+                            repository=self.active_repository,
                         ):
                             slurm_preflight = _slurm_preflight(self.config)
                             if slurm_preflight["status"] != "not_required":

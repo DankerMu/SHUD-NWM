@@ -561,10 +561,10 @@ Boundary-surface checklist:
 - Read surfaces: `<journal-root>/latest`, `<journal-root>/journal`,
   `<journal-root>/pipeline-jobs`, `<journal-root>/pipeline-events`,
   `<journal-root>/models`, and `<journal-root>/forcing`.
-- Write/delete/overwrite surfaces: none in #833; write methods deliberately
-  raise `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
-- Staging/publish/rollback surfaces: replay metadata and latest schema only;
-  migration/import remains #834.
+- Write/delete/overwrite surfaces: none in #833; task 4 replaces the
+  temporary fail-not-implemented write methods with file-journal writes.
+- Staging/publish/rollback surfaces: replay metadata, latest schema, and task
+  4 historical migration/import receipts.
 - Producer/consumer evidence boundaries: candidate state, active Slurm jobs,
   scheduler skipped/blocked candidates, and model/forcing context reads.
 - Stale-state/idempotency boundaries: active/completed statuses, candidate
@@ -582,7 +582,7 @@ Invariant Matrix:
   source/cycle/model/run identity, candidate ID, forcing version ID, job ID,
   Slurm job ID, stage, status, error code, sequence/event ID, replay metadata,
   context field contracts, and redacted runtime roots.
-- Producers: later #834 write side and historical migration; #833 tests create
+- Producers: #834 write side and historical migration; #833 tests created
   read-side fixtures only.
 - Validators/preflight: file schema validation, source/cycle/model/run/job
   identity checks, path segment checks, no-follow scanned entry validation,
@@ -597,7 +597,8 @@ Invariant Matrix:
   planning outcomes are the downstream contract in #833.
 - Failure paths/rollback/stale state: malformed JSON, schema mismatch, source
   mismatch, cycle mismatch, missing optional latest view, unknown record type,
-  and write method calls before #834.
+  reservation conflicts, retry exhaustion, permanent failures, and migration
+  replay blockers.
 - Evidence/audit/readiness: repository contract tests, scheduler no-DB planning
   test, raw handoff regression selector, ruff, and OpenSpec strict validation.
 - Regression rows:
@@ -627,8 +628,11 @@ Invariant Matrix:
   - Malformed latest view, unknown journal record type, JSONL record over-limit,
     or over-limit non-matching directory entries -> active detection, query
     helpers, and candidate state fail closed with bounded public evidence.
-  - Read-side lifecycle/write method call before #834 -> stable
-    `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
+  - File lifecycle/reservation/status/event write -> append-only journal record
+    plus latest/query materialization without DB-backed repository calls.
+  - Retry exhaustion or manual repair -> file journal records permanent-failure
+    or manual retry marker evidence consumable by existing candidate-state
+    decision helpers.
   - DB-free scheduler from_env -> file journal repository is constructed and
     DB-backed active/orchestrator repository factories are not called.
 

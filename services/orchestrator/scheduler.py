@@ -462,6 +462,7 @@ from services.orchestrator.scheduler_file_providers import (  # noqa: E402
 from services.orchestrator.file_orchestration_journal import (  # noqa: E402
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+    FileJournalRetryService,
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )

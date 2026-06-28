@@ -128,26 +128,26 @@
 
 ## 4. File Orchestration Journal Writes, Retry, And Migration
 
-- [ ] 4.1 Implement file-backed lifecycle and pipeline writes.
+- [x] 4.1 Implement file-backed lifecycle and pipeline writes.
   Evidence floor: file repository supports `ensure_forecast_cycle`,
   `create_hydro_run`, hydro/forecast status updates, reservation/bind,
   pipeline job upsert/status update, and pipeline event insertion with
   atomic writes.
-- [ ] 4.2 Replace DB-backed retry service in DB-free mode.
+- [x] 4.2 Replace DB-backed retry service in DB-free mode.
   Evidence floor: DB-free orchestrator construction does not call
   `_retry_service_from_env` or `PipelineStore`; retry attempts, retry-limit
   exhaustion, manual repair, and permanent-failure state are represented in the
   file journal.
-- [ ] 4.3 Add historical scheduler-state export/import migration.
+- [x] 4.3 Add historical scheduler-state export/import migration.
   Evidence floor: exporter reads active/completed/candidate/job/event/retry and
   permanent-failure rows from node-22 `:55433`, writes append-only journal
   events, records cutoff time, row counts, checksums, replay status, and stale
   `download_source_cycle` supersession evidence.
-- [ ] 4.4 Add write-side and migration contract tests.
+- [x] 4.4 Add write-side and migration contract tests.
   Evidence floor: fixtures for active, completed, permanent failure, manual
   repair, retry exhaustion, stale `download_source_cycle`, and migrated journal
   replay produce decisions equivalent to DB-backed state.
-- [ ] 4.5 Wire scheduler submission path to file journal in DB-free mode.
+- [x] 4.5 Wire scheduler submission path to file journal in DB-free mode.
   Evidence floor: fake Slurm submission with no `DATABASE_URL` writes file
   reservation/job/event evidence and does not call
   `PsycopgOrchestratorRepository.from_env()`.

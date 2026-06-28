@@ -17431,7 +17431,7 @@ def test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_cal
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
-def test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_convert_submission(
+def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_download_source_cycle(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -17469,11 +17469,10 @@ def test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_conver
 
     result = scheduler.run_once()
 
-    assert result.status == "preflight_blocked"
-    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
-    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.status == "submitted"
+    assert result.evidence["counts"]["submitted_count"] == 1
     assert result.evidence["blocked_candidates"] == []
-    assert orchestrator.calls == []
+    assert orchestrator.calls
     state_evidence = result.evidence["candidates"][0]["state_evidence"]
     assert state_evidence["restart_stage"] == "convert"
     assert state_evidence["nfs_raw_manifest"]["status"] == "ready"
@@ -17482,10 +17481,10 @@ def test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_conver
     assert state_evidence["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
     assert state_evidence["raw_manifest_reuse"]["manifest_uri"] == "[object-uri]"
     assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
-    assert result.evidence["model_run_evidence"][0]["evidence_pre_execution"]["reason"] == (
-        "db_free_file_journal_write_not_implemented"
-    )
-    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["state_evidence"]["restart_stage"] == "convert"
+    assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052106_convert_model_a"
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
     rendered_submission = json.dumps(
         {"evidence": result.evidence},
         sort_keys=True,
@@ -17616,10 +17615,12 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     assert str(raw_fixture["manifest_path"]) not in rendered
 
 
-def test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exists(
+def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
+    from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
+
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T06:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
@@ -17646,6 +17647,38 @@ def test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exi
             )
         },
     )
+    fake_slurm = ImmediateTerminalSlurmClient()
+
+    def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("DB-free fake Slurm submission must not construct DB-backed state")
+
+    monkeypatch.setattr("services.orchestrator.chain.HttpSlurmGatewayClient", lambda _url: fake_slurm)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._slurm_preflight",
+        lambda _config: {"status": "ready", "enabled": True, "blockers": [], "checks": {}},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._orchestrator_repository_from_env",
+        lambda: pytest.fail("DB-free fake Slurm submission must not construct psycopg orchestrator repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._retry_service_from_env",
+        lambda: pytest.fail("DB-free fake Slurm submission must not construct DB retry service"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain.PsycopgOrchestratorRepository.from_env",
+        staticmethod(fail_db_factory),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain_repository.PsycopgOrchestratorRepository.from_env",
+        staticmethod(fail_db_factory),
+    )
+    monkeypatch.setattr("services.orchestrator.persistence.PipelineStore", fail_db_factory)
+    monkeypatch.setattr(
+        scheduler_module.StateManager,
+        "from_env",
+        staticmethod(lambda: pytest.fail("DB-free fake Slurm submission must not construct state manager")),
+    )
     config = ProductionSchedulerConfig(
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
@@ -17654,14 +17687,26 @@ def test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exi
 
     result = _RealProductionScheduler.from_env(config).run_once()
     rendered = json.dumps(result.evidence, sort_keys=True)
-
-    assert result.status == "preflight_blocked"
-    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
-    assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["model_run_evidence"][0]["evidence_pre_execution"]["reason"] == (
-        "db_free_file_journal_write_not_implemented"
+    journal_repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    jobs = journal_repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    state = journal_repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        forcing_version_id="forc_gfs_2026052106_model_a",
+        candidate_id="candidate_a",
     )
-    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+    assert result.status in {"submitted", "submitted_partial"}
+    assert result.evidence["execution_boundary"] == "slurm_gateway_orchestration"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    assert fake_slurm.submissions
+    assert jobs
+    assert state is not None
+    assert state["pipeline_jobs"]
+    assert any(event["event_type"] == "status_change" for event in state["pipeline_events"])
     assert "download_source_cycle" not in rendered
     assert str(roots["object_store_root"]) not in rendered
 
