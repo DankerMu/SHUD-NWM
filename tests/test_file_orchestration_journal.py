@@ -8,6 +8,7 @@ from typing import Any, Mapping
 import pytest
 
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
@@ -163,6 +164,40 @@ def _journal_record(
     return record
 
 
+def _direct_model_context_record(model_id: str = "model_a") -> dict[str, Any]:
+    return {
+        "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+        "record_type": "model_context",
+        "model_id": model_id,
+        "payload": _model_context(model_id),
+    }
+
+
+def _direct_forcing_context_record(
+    *,
+    source_id: str = "gfs",
+    cycle_time: datetime,
+    model_id: str = "model_a",
+    payload_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "forcing_version_id": f"forc_{source_id}_{format_cycle_time(cycle_time)}_{model_id}",
+        "forcing_package_uri": "s3://nhms/forcing/direct.tar",
+        "source_id": source_id,
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": model_id,
+        "max_lead_hours": 9,
+    }
+    payload.update(payload_overrides or {})
+    return _journal_record(
+        record_type="forcing_version",
+        source_id=source_id,
+        cycle_time=cycle_time,
+        model_id=model_id,
+        payload=payload,
+    )
+
+
 def test_file_orchestration_journal_read_contract_active_completed_and_contexts(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -171,17 +206,10 @@ def test_file_orchestration_journal_read_contract_active_completed_and_contexts(
         journal_root / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[active_job]),
     )
-    _write_json(journal_root / "models/model_a.json", {"payload": _model_context()})
+    _write_json(journal_root / "models/model_a.json", _direct_model_context_record())
     _write_json(
         journal_root / "forcing/gfs/2026062800/model_a.json",
-        {
-            "payload": {
-                "forcing_version_id": "forc-file",
-                "forcing_package_uri": "s3://nhms/forcing/file.tar",
-                "source_id": "gfs",
-                "max_lead_hours": 9,
-            }
-        },
+        _direct_forcing_context_record(cycle_time=cycle_time),
     )
 
     repository = FileOrchestrationJournalRepository(journal_root)
@@ -338,6 +366,273 @@ def test_file_orchestration_journal_public_outputs_are_recursively_sanitized(tmp
     assert "file://" not in serialized
 
 
+def test_file_orchestration_journal_malformed_forcing_context_blocks_public_context_read(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        _direct_forcing_context_record(cycle_time=cycle_time, payload_overrides={"max_lead_hours": {"not": "scalar"}}),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    with pytest.raises(OrchestratorError) as error:
+        repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_invalid_field" in error.value.message
+
+
+def test_file_orchestration_journal_direct_context_records_are_schema_bound(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / "models/model_a.json", {"payload": _model_context()})
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        {
+            "payload": {
+                "forcing_version_id": "forc_gfs_2026062800_model_a",
+                "forcing_package_uri": "s3://nhms/forcing/schema-less.tar",
+                "source_id": "gfs",
+                "cycle_time": cycle_time.isoformat(),
+                "model_id": "model_a",
+            }
+        },
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    with pytest.raises(OrchestratorError) as model_error:
+        repository.load_model_context("model_a")
+    with pytest.raises(OrchestratorError) as forcing_error:
+        repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+
+    assert model_error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_schema_mismatch" in model_error.value.message
+    assert forcing_error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_schema_mismatch" in forcing_error.value.message
+
+
+@pytest.mark.parametrize("missing_field", ["source_id", "cycle_time", "model_id", "forcing_version_id"])
+def test_file_orchestration_journal_direct_forcing_requires_content_identity(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    record = _direct_forcing_context_record(cycle_time=cycle_time)
+    del record["payload"][missing_field]
+    _write_json(journal_root / "forcing/gfs/2026062800/model_a.json", record)
+
+    with pytest.raises(OrchestratorError) as error:
+        FileOrchestrationJournalRepository(journal_root).find_forcing_context(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_a",
+        )
+
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_missing_identity" in error.value.message
+
+
+def test_file_orchestration_journal_valid_direct_context_records_are_read(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / "models/model_a.json", _direct_model_context_record())
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        _direct_forcing_context_record(cycle_time=cycle_time),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    model = repository.load_model_context("model_a")
+    forcing = repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+
+    assert model.model_id == "model_a"
+    assert model.segment_count == 7
+    assert forcing.forcing_version_id == "forc_gfs_2026062800_model_a"
+    assert forcing.max_lead_hours == 9
+
+
+def test_file_orchestration_journal_direct_model_context_must_match_path_model(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / "models/model_a.json", _direct_model_context_record("model_b"))
+
+    with pytest.raises(OrchestratorError) as error:
+        FileOrchestrationJournalRepository(journal_root).load_model_context("model_a")
+
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_model_mismatch" in error.value.message
+
+
+def test_file_orchestration_journal_direct_forcing_record_must_match_path_identity(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        _direct_forcing_context_record(source_id="ifs", cycle_time=cycle_time),
+    )
+
+    with pytest.raises(OrchestratorError) as error:
+        FileOrchestrationJournalRepository(journal_root).find_forcing_context(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_a",
+        )
+
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_source_mismatch" in error.value.message
+
+
+def test_file_orchestration_journal_list_stage_statuses_returns_blocked_row(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        {"schema_version": "wrong", "source_id": "gfs", "cycle_time": cycle_time.isoformat(), "model_id": "model_a"},
+    )
+
+    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert rows == [
+        {
+            "stage": "file_journal_read",
+            "status": "running",
+            "job_id": "file_journal_read_blocked",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "model_id": "model_a",
+            "slurm_job_id": "unknown_after_attempt",
+            "error_code": "file_journal_schema_mismatch",
+            "file_journal": {
+                "status": "blocked",
+                "reason": "file_journal_schema_mismatch",
+                "field": "schema_version",
+                "evidence": {
+                    "expected": FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+                    "actual": "wrong",
+                },
+            },
+        }
+    ]
+
+
+def test_file_orchestration_journal_discovery_uses_no_follow_listing_and_missing_dirs_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time)) == []
+
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
+    )
+
+    def fail_path_iterdir(_path: Path) -> Any:
+        raise AssertionError("file journal discovery must not use path-based iterdir")
+
+    monkeypatch.setattr(Path, "iterdir", fail_path_iterdir)
+
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))[0]["job_id"] == (
+        "job_cycle_gfs_2026062800_forecast"
+    )
+
+
+def test_file_orchestration_journal_discovery_blocks_symlink_parent(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    target = tmp_path / "outside-latest"
+    target.mkdir()
+    journal_root.mkdir()
+    (journal_root / "latest").symlink_to(target, target_is_directory=True)
+
+    query = FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle(
+        cycle_id_for("gfs", cycle_time)
+    )
+
+    assert query[0]["error_code"] == "file_journal_unsafe_scanned_entry"
+    assert query[0]["file_journal"]["field"] == "latest"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_reason"),
+    [
+        ("job_id", ["job"], "file_journal_invalid_identity"),
+        ("job_id", "/secret/job", "file_journal_unsafe_identity"),
+        ("run_id", {"run": "bad"}, "file_journal_invalid_identity"),
+        ("cycle_id", ["gfs_2026062800"], "file_journal_invalid_identity"),
+        ("model_id", {"model": "bad"}, "file_journal_invalid_identity"),
+        ("status", {"state": "queued"}, "file_journal_invalid_field"),
+        ("stage", ["forecast"], "file_journal_invalid_field"),
+        ("slurm_job_id", {"slurm": "3001"}, "file_journal_invalid_field"),
+        ("idempotency_key", ["cycle:gfs"], "file_journal_invalid_field"),
+    ],
+)
+def test_file_orchestration_journal_rejects_unsafe_job_scheduler_fields(
+    tmp_path: Path,
+    field_name: str,
+    value: Any,
+    expected_reason: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    job[field_name] = value
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[job]),
+    )
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["file_journal"]["reason"] == expected_reason
+    assert state["file_journal"]["field"] == field_name
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_reason"),
+    [
+        ("entity_id", ["job"], "file_journal_invalid_identity"),
+        ("entity_id", "/secret/job", "file_journal_unsafe_identity"),
+        ("status_to", {"status": "queued"}, "file_journal_invalid_field"),
+    ],
+)
+def test_file_orchestration_journal_rejects_unsafe_event_scheduler_fields(
+    tmp_path: Path,
+    field_name: str,
+    value: Any,
+    expected_reason: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    event = {
+        "event_id": 1,
+        "entity_type": "pipeline_job",
+        "entity_id": job["job_id"],
+        "event_type": "status_change",
+        "status_to": "queued",
+        "created_at": "2026-06-28T00:01:00Z",
+    }
+    event[field_name] = value
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[job], events=[event]),
+    )
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["file_journal"]["reason"] == expected_reason
+    assert state["file_journal"]["field"] == field_name
+
+
 def test_file_orchestration_journal_scoped_cycle_ignores_global_replay_scan(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     other_cycle_time = _dt("2026-06-28T12:00:00Z")
@@ -361,10 +656,10 @@ def test_file_orchestration_journal_scoped_cycle_ignores_global_replay_scan(tmp_
         _latest_view(source_id="ifs", cycle_time=other_cycle_time, jobs=[intruder_job]),
     )
     _write_json(
-        journal_root / "latest/z-bad/2026062812/model_a.json",
+        journal_root / "latest/era5/2026062812/model_a.json",
         {
             "schema_version": "wrong",
-            "source_id": "z-bad",
+            "source_id": "ERA5",
             "cycle_time": other_cycle_time.isoformat(),
             "pipeline_jobs": [],
         },
@@ -578,6 +873,34 @@ def test_file_orchestration_journal_direct_pipeline_job_requires_journal_schema(
     assert query["error_code"] == "file_journal_schema_mismatch"
 
 
+def test_file_orchestration_journal_scoped_reads_do_not_parse_unrelated_direct_snapshots(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    other_cycle_time = _dt("2026-06-28T12:00:00Z")
+    journal_root = tmp_path / "journal"
+    scoped_job = _active_job(cycle_time)
+    scoped_job["status"] = "succeeded"
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="complete", jobs=[scoped_job]),
+    )
+    unrelated_direct = journal_root / "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
+    unrelated_direct.parent.mkdir(parents=True)
+    unrelated_direct.write_text("{not-json", encoding="utf-8")
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
+    assert "file_journal" not in state
+
+    query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    assert query[0]["error_code"] == "file_journal_malformed_json"
+    assert query[0]["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
+    assert cycle_id_for("ifs", other_cycle_time) not in json.dumps(state, sort_keys=True)
+
+
 @pytest.mark.parametrize("authoritative_surface", ["latest", "journal"])
 def test_file_orchestration_journal_direct_terminal_job_cannot_mask_active_replay(
     tmp_path: Path,
@@ -634,6 +957,102 @@ def test_file_orchestration_journal_direct_terminal_job_cannot_mask_active_repla
     assert query["slurm_job_id"] == "3001"
 
 
+def test_file_orchestration_journal_model_scoped_journal_replay_ignores_sibling_singletons(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    model_a_forcing = {
+        "forcing_version_id": "forc_gfs_2026062800_model_a",
+        "forcing_package_uri": "s3://nhms/forcing/model-a.tar",
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": "model_a",
+        "max_lead_hours": 3,
+    }
+    model_b_forcing = {
+        "forcing_version_id": "forc_gfs_2026062800_model_b",
+        "forcing_package_uri": "s3://nhms/forcing/model-b.tar",
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": "model_b",
+        "max_lead_hours": 9,
+    }
+    model_b_hydro = {
+        "run_id": "fcst_gfs_2026062800_model_b",
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "model_id": "model_b",
+        "status": "created",
+        "updated_at": "2026-06-28T00:05:00Z",
+    }
+    _write_jsonl(
+        journal_root / "journal/gfs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="forcing_version",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=model_a_forcing,
+                sequence=1,
+                model_id="model_a",
+            ),
+            _journal_record(
+                record_type="forcing_version",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=model_b_forcing,
+                sequence=2,
+                model_id="model_b",
+            ),
+            {
+                "schema_version": "wrong",
+                "sequence": 3,
+                "record_type": ["not-scalar"],
+                "source_id": "gfs",
+                "cycle_time": cycle_time.isoformat(),
+                "model_id": "model_b",
+                "payload": {"model_id": "model_b"},
+            },
+            _journal_record(
+                record_type="hydro_run",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=model_b_hydro,
+                sequence=4,
+                model_id="model_b",
+            ),
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    forcing = repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert forcing.forcing_version_id == "forc_gfs_2026062800_model_a"
+    assert forcing.max_lead_hours == 3
+    assert state is not None
+    assert state["forcing_version"]["forcing_version_id"] == "forc_gfs_2026062800_model_a"
+    assert state["hydro_status"] is None
+
+
+def test_file_orchestration_journal_model_scoped_pipeline_job_requires_run_id(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    del job["run_id"]
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[job]),
+    )
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["file_journal"]["reason"] == "file_journal_missing_identity"
+    assert state["file_journal"]["field"] == "run_id"
+
+
 @pytest.mark.parametrize(
     ("record_override", "expected_reason"),
     [
@@ -668,6 +1087,84 @@ def test_file_orchestration_journal_sidecar_pipeline_events_validate_schema_and_
 
     assert state is not None
     assert state["file_journal"]["reason"] == expected_reason
+
+
+@pytest.mark.parametrize("surface", ["latest", "journal"])
+def test_file_orchestration_journal_unknown_path_source_blocks_query_helpers(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    if surface == "latest":
+        _write_json(
+            journal_root / "latest/unknown-source/2026062800/model_a.json",
+            {
+                "schema_version": FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+                "source_id": "unknown-source",
+                "cycle_time": cycle_time.isoformat(),
+                "model_id": "model_a",
+                "pipeline_jobs": [],
+            },
+        )
+    else:
+        _write_jsonl(
+            journal_root / "journal/unknown-source/2026062800.jsonl",
+            [
+                {
+                    "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+                    "sequence": 1,
+                    "record_type": "pipeline_job",
+                    "source_id": "unknown-source",
+                    "cycle_time": cycle_time.isoformat(),
+                    "payload": _active_job(cycle_time),
+                }
+            ],
+        )
+
+    query = FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle(
+        cycle_id_for("gfs", cycle_time)
+    )
+
+    assert query[0]["status"] == "running"
+    assert query[0]["stage"] == "file_journal_read"
+    assert query[0]["error_code"] == "file_journal_invalid_identity"
+    assert query[0]["file_journal"]["field"] == "source_id"
+
+
+@pytest.mark.parametrize("surface", ["latest", "journal", "direct"])
+def test_file_orchestration_journal_unknown_record_source_blocks_candidate_and_query_helpers(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    if surface == "latest":
+        latest = _latest_view(cycle_time=cycle_time, jobs=[job])
+        latest["source_id"] = "unknown-source"
+        _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    elif surface == "journal":
+        record = _journal_record(record_type="pipeline_job", source_id="gfs", cycle_time=cycle_time, payload=job)
+        record["source_id"] = "unknown-source"
+        _write_jsonl(journal_root / "journal/gfs/2026062800.jsonl", [record])
+    else:
+        record = _journal_record(record_type="pipeline_job", source_id="gfs", cycle_time=cycle_time, payload=job)
+        record["source_id"] = "unknown-source"
+        _write_json(journal_root / f"pipeline-jobs/{job['job_id']}.json", record)
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    query = repository.get_pipeline_job(job["job_id"])
+
+    assert state is not None
+    assert state["pipeline_status"] == "running"
+    assert state["file_journal"]["reason"] == "file_journal_invalid_identity"
+    assert state["file_journal"]["field"] == "source_id"
+    assert query is not None
+    assert query["status"] == "running"
+    assert query["stage"] == "file_journal_read"
+    assert query["error_code"] == "file_journal_invalid_identity"
 
 
 @pytest.mark.parametrize("surface", ["latest", "journal"])
@@ -843,6 +1340,28 @@ def test_file_orchestration_journal_blocked_query_sentinels_redact_raw_ids(tmp_p
     assert "published://" not in rendered
     assert "[local-path]" in rendered
     assert "[uri]" in rendered or "[object-uri]" in rendered
+
+
+def test_file_orchestration_journal_candidate_state_blocker_redacts_public_evidence(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        {
+            "schema_version": "s3://private-bucket/schema",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "model_id": "model_a",
+        },
+    )
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+    rendered = json.dumps(state, sort_keys=True)
+
+    assert state is not None
+    assert state["file_journal"]["reason"] == "file_journal_schema_mismatch"
+    assert state["file_journal"]["evidence"]["actual"] == "[object-uri]"
+    assert "s3://private-bucket" not in rendered
 
 
 def test_db_free_scheduler_from_env_uses_file_journal_without_database_url(
