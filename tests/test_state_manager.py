@@ -32,7 +32,7 @@ from packages.common.state_qc import MAX_STATE_IC_BYTES
 class FakeStateSnapshotRepository:
     def __init__(self) -> None:
         self.snapshots: dict[str, StateSnapshot] = {}
-        self.by_model_time: dict[tuple[str, str | None, datetime], str] = {}
+        self.by_model_time: dict[tuple[str, str | None, datetime, str | None, int | None], str] = {}
         self.qc_results: list[dict[str, Any]] = []
 
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
@@ -44,15 +44,25 @@ class FakeStateSnapshotRepository:
         model_id: str,
         valid_time: datetime,
         source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
     ) -> StateSnapshot | None:
-        state_id = self.by_model_time.get((model_id, source_id, _dt(valid_time)))
+        key = (model_id, source_id, _dt(valid_time), cycle_id, lead_hours)
+        state_id = self.by_model_time.get(key)
+        if state_id is None and (cycle_id is not None or lead_hours is not None):
+            state_id = self.by_model_time.get((model_id, source_id, _dt(valid_time), None, None))
+        if state_id is None:
+            for candidate_key, candidate_state_id in self.by_model_time.items():
+                if candidate_key[:3] == (model_id, source_id, _dt(valid_time)):
+                    state_id = candidate_state_id
+                    break
         if state_id is None and source_id is None:
-            state_id = self.by_model_time.get((model_id, None, _dt(valid_time)))
+            state_id = self.by_model_time.get((model_id, None, _dt(valid_time), None, None))
         return self.snapshots.get(state_id) if state_id is not None else None
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         valid_time = _dt(snapshot.valid_time)
-        key = (snapshot.model_id, snapshot.source_id, valid_time)
+        key = (snapshot.model_id, snapshot.source_id, valid_time, snapshot.cycle_id, snapshot.lead_hours)
         existing_state_id = self.by_model_time.get(key)
         if existing_state_id is not None and existing_state_id != snapshot.state_id:
             self.snapshots.pop(existing_state_id, None)
@@ -73,7 +83,9 @@ class FakeStateSnapshotRepository:
             original_shud_filename=snapshot.original_shud_filename,
         )
         self.snapshots[saved.state_id] = saved
-        self.by_model_time[(saved.model_id, saved.source_id, saved.valid_time)] = saved.state_id
+        self.by_model_time[(saved.model_id, saved.source_id, saved.valid_time, saved.cycle_id, saved.lead_hours)] = (
+            saved.state_id
+        )
         return saved
 
     def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
@@ -189,6 +201,22 @@ def test_state_snapshot_qc_pass_sets_usable_true(
     assert passed is True
     assert repository.snapshots[result.state_id].usable_flag is True
     assert repository.qc_results[-1]["passed"] is True
+    assert repository.qc_results[-1]["checks_json"]["checksum_matches"] is True
+
+
+def test_state_snapshot_qc_accepts_prefixed_snapshot_checksum(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    result = _save_ic(tmp_path, manager, content=b"valid-state-prefixed-checksum")
+    snapshot = repository.snapshots[result.state_id]
+    repository.snapshots[result.state_id] = replace(snapshot, checksum=f"sha256:{snapshot.checksum}")
+
+    passed = manager.run_qc(result.state_id)
+
+    assert passed is True
+    assert repository.snapshots[result.state_id].usable_flag is True
     assert repository.qc_results[-1]["checks_json"]["checksum_matches"] is True
 
 
@@ -365,6 +393,7 @@ def test_file_state_snapshot_index_fail_closed_cases(
         "state_uri": state_uri,
         "checksum": f"sha256:{sha256_bytes(content)}",
         "usable_flag": case_name != "unusable",
+        "cycle_id": "gfs_2026052018",
         "lead_hours": 12,
         "model_package_version": "s3://nhms/models/model_a/package/",
         "model_package_checksum": "old-package-sha" if case_name == "wrong_package" else "package-sha",
@@ -398,6 +427,91 @@ def test_file_state_snapshot_index_fail_closed_cases(
     assert evidence["ready"] is False
     assert evidence["reason"] == expected_reason
     assert "latest" not in json.dumps(evidence).lower()
+
+
+@pytest.mark.parametrize(
+    ("case_name", "cycle_id", "expected_reason"),
+    [
+        ("missing_cycle_id", None, "state_snapshot_index_cycle_id_missing"),
+        ("wrong_cycle_id", "gfs_2026052100", "state_snapshot_index_cycle_id_mismatch"),
+    ],
+)
+def test_file_state_snapshot_index_rejects_bad_cycle_id_lineage(
+    tmp_path: Path,
+    case_name: str,
+    cycle_id: str | None,
+    expected_reason: str,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(case_name.encode("utf-8"))
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    entry = _state_index_test_entry(state_uri, content, state_id=f"state_{case_name}")
+    if cycle_id is None:
+        entry.pop("cycle_id")
+    else:
+        entry["cycle_id"] = cycle_id
+    index_path = tmp_path / "state-index.json"
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == expected_reason
+
+
+def test_file_state_snapshot_index_accepts_prefixed_model_package_checksum(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"prefixed-package-checksum")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    entry = _state_index_test_entry(state_uri, content, state_id="state_prefixed_package_checksum")
+    entry["model_package_checksum"] = "sha256:package-sha"
+    index_path = tmp_path / "state-index.json"
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert evidence["ready"] is True
+    assert evidence["candidate_state"]["init_state_id"] == "state_prefixed_package_checksum"
 
 
 @pytest.mark.parametrize(
@@ -663,6 +777,11 @@ def test_strict_warm_start_evidence_caches_index_and_verifies_only_exact_objects
         entry = _state_index_test_entry(state_uri, content, state_id=f"state_{source_id}_model_a_20260521{hour}")
         entry["source_id"] = source_id
         entry["valid_time"] = f"2026-05-21T{hour}:00:00Z"
+        entry["cycle_id"] = {
+            ("gfs", "06"): "gfs_2026052018",
+            ("ifs", "12"): "ifs_2026052100",
+            ("era5", "18"): "era5_2026052106",
+        }[(source_id, hour)]
         entries.append(entry)
     publish_state_snapshot_index(
         entries,
@@ -833,6 +952,7 @@ def test_file_state_snapshot_index_rejects_unsafe_state_object_uris(
         "state_uri": state_uri,
         "checksum": f"sha256:{sha256_bytes(content)}",
         "usable_flag": True,
+        "cycle_id": "gfs_2026052018",
         "lead_hours": 12,
         "model_package_version": "s3://nhms/models/model_a/package/",
         "model_package_checksum": "package-sha",
@@ -874,6 +994,7 @@ def test_file_state_snapshot_index_accepts_relative_object_key_compatibility(tmp
         "state_uri": "states/gfs/model_a/2026052106/state.cfg.ic",
         "checksum": f"sha256:{sha256_bytes(content)}",
         "usable_flag": True,
+        "cycle_id": "gfs_2026052018",
         "lead_hours": 12,
         "model_package_version": "s3://nhms/models/model_a/package/",
         "model_package_checksum": "package-sha",
@@ -1104,6 +1225,147 @@ def test_file_state_snapshot_index_upsert_repairs_stale_existing_index(tmp_path:
     assert {item["state_id"] for item in listed["items"]} == {"state_old", "state_new"}
 
 
+def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T18:00:00Z"),
+        create_missing=True,
+    )
+    manager = StateManager(repository=repository, object_store=LocalObjectStore(object_root, "s3://nhms"))
+    state_file = tmp_path / "model_a.cfg.ic.update"
+    state_file.write_bytes(_valid_ic_bytes(b"same-checksum-lineage-repair"))
+    valid_time = _dt("2026-05-21T18:00:00Z")
+
+    first = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        valid_time=valid_time,
+        ic_file_path=state_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+    )
+    assert manager.run_qc(first.state_id) is True
+
+    repaired = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        valid_time=valid_time,
+        ic_file_path=state_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        original_shud_filename="model_a.cfg.ic.update",
+    )
+    assert manager.run_qc(repaired.state_id) is True
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=valid_time,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert first.status == "created"
+    assert repaired.status == "superseded"
+    assert repaired.state_id == first.state_id
+    repaired_snapshot = repository.get_state_snapshot_by_model_time(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=valid_time,
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+    )
+    assert repaired_snapshot is not None
+    assert repaired_snapshot.original_shud_filename == "model_a.cfg.ic.update"
+    assert evidence["ready"] is True
+    assert evidence["candidate_state"]["init_state_lineage"]["model_package_checksum"] == "package-sha"
+
+
+def test_file_state_snapshot_index_preserves_overlapping_valid_time_leads(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T18:00:00Z"),
+        create_missing=True,
+    )
+    manager = StateManager(repository=repository, object_store=LocalObjectStore(object_root, "s3://nhms"))
+    valid_time = _dt("2026-05-21T18:00:00Z")
+    lead12_file = tmp_path / "lead12.cfg.ic.update"
+    lead6_file = tmp_path / "lead6.cfg.ic.update"
+    lead12_file.write_bytes(_valid_ic_bytes(b"overlap-lead12"))
+    lead6_file.write_bytes(_valid_ic_bytes(b"overlap-lead6"))
+
+    lead12 = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        valid_time=valid_time,
+        ic_file_path=lead12_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        original_shud_filename="lead12.cfg.ic.update",
+    )
+    assert manager.run_qc(lead12.state_id) is True
+    lead6 = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052112_model_a",
+        valid_time=valid_time,
+        ic_file_path=lead6_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052112",
+        lead_hours=6,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        original_shud_filename="lead6.cfg.ic.update",
+    )
+    assert manager.run_qc(lead6.state_id) is True
+
+    lead12_evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=valid_time,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+    lead6_evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=valid_time,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=6,
+    )
+    listed = repository.list_state_snapshots(model_id="model_a", usable=True, limit=10, offset=0)
+
+    assert lead12.status == "created"
+    assert lead6.status == "created"
+    assert lead12.state_id != lead6.state_id
+    assert lead12.snapshot.state_uri != lead6.snapshot.state_uri
+    assert listed["total_count"] == 2
+    assert lead12_evidence["ready"] is True
+    assert lead12_evidence["candidate_state"]["init_state_id"] == lead12.state_id
+    assert lead12_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 12
+    assert lead6_evidence["ready"] is True
+    assert lead6_evidence["candidate_state"]["init_state_id"] == lead6.state_id
+    assert lead6_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 6
+
+
 def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatch: Any, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
@@ -1226,7 +1488,11 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     assert snapshot.model_package_checksum == "package-sha"
 
 
-def test_db_free_state_save_env_requires_lineage_before_upload(monkeypatch: Any, tmp_path: Path) -> None:
+def test_db_free_state_save_env_requires_lineage_before_upload(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
@@ -1251,10 +1517,24 @@ def test_db_free_state_save_env_requires_lineage_before_upload(monkeypatch: Any,
     monkeypatch.delenv("NHMS_SOURCE_ID", raising=False)
     monkeypatch.delenv("NHMS_CYCLE_TIME", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free env state save must fail lineage validation before PostgreSQL run lookup"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail(
+            "DB-free env state save must fail lineage validation before PostgreSQL snapshot repository"
+        ),
+    )
 
     result_code = _state_cli_exit_code(["save", "--run-id", run_id])
+    stderr = capsys.readouterr().err
 
     assert result_code == 1
+    assert "missing required lineage fields" in stderr
+    assert "NHMS_SOURCE_ID" in stderr
+    assert "NHMS_CYCLE_TIME" in stderr
     assert not index_path.exists()
     assert not (object_root / "states").exists()
 

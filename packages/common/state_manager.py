@@ -26,6 +26,7 @@ from packages.common.safe_fs import (
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import STATE_QC_FAILED
 from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
+from workers.data_adapters.base import cycle_id_for
 
 
 class StateManagerError(RuntimeError):
@@ -90,7 +91,7 @@ class StateSnapshotSaveResult:
 class _StateIndexSnapshot:
     payload: dict[str, Any]
     content: bytes
-    entries: dict[tuple[str, str, str], dict[str, Any]]
+    entries: dict[tuple[str, str, str, str, str], dict[str, Any]]
     evidence: dict[str, Any]
 
 
@@ -103,6 +104,8 @@ class StateSnapshotRepository(Protocol):
         model_id: str,
         valid_time: datetime,
         source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
     ) -> StateSnapshot | None: ...
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot: ...
@@ -121,6 +124,37 @@ class StateSnapshotRepository(Protocol):
     ) -> dict[str, Any]: ...
 
     def insert_qc_result(self, record: Mapping[str, Any]) -> dict[str, Any]: ...
+
+
+def _state_snapshot_metadata_matches(
+    snapshot: StateSnapshot,
+    *,
+    run_id: str,
+    source_id: str | None,
+    cycle_id: str | None,
+    lead_hours: int | None,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+    original_shud_filename: str | None,
+) -> bool:
+    if snapshot.run_id != run_id:
+        return False
+    if _optional_str(snapshot.source_id) != _optional_str(source_id):
+        return False
+    if _optional_str(snapshot.cycle_id) != _optional_str(cycle_id):
+        return False
+    if snapshot.lead_hours != lead_hours:
+        return False
+    if _optional_str(snapshot.model_package_version) != _optional_str(model_package_version):
+        return False
+    if bool(snapshot.model_package_checksum) != bool(model_package_checksum):
+        return False
+    if snapshot.model_package_checksum and not _checksum_matches(
+        snapshot.model_package_checksum,
+        model_package_checksum,
+    ):
+        return False
+    return _optional_str(snapshot.original_shud_filename) == _optional_str(original_shud_filename)
 
 
 @dataclass(frozen=True)
@@ -153,7 +187,13 @@ class StateManager:
         original_shud_filename: str | None = None,
     ) -> StateSnapshotSaveResult:
         parsed_valid_time = _ensure_utc(valid_time)
-        state_id = state_snapshot_id(model_id, parsed_valid_time, source_id=source_id)
+        state_id = state_snapshot_id(
+            model_id,
+            parsed_valid_time,
+            source_id=source_id,
+            cycle_id=cycle_id,
+            lead_hours=lead_hours,
+        )
         path = Path(ic_file_path)
         try:
             content = read_bytes_limited_no_follow(path, max_bytes=MAX_STATE_IC_BYTES)
@@ -167,15 +207,54 @@ class StateManager:
             raise StateManagerError(f"Failed to read state snapshot file {path}: {error}") from error
 
         checksum = sha256_bytes(content)
-        existing = self.repository.get_state_snapshot_by_model_time(
-            model_id=model_id,
-            valid_time=parsed_valid_time,
-            source_id=source_id,
-        )
+        lookup_kwargs: dict[str, Any] = {
+            "model_id": model_id,
+            "valid_time": parsed_valid_time,
+            "source_id": source_id,
+        }
+        if cycle_id not in (None, ""):
+            lookup_kwargs["cycle_id"] = cycle_id
+        if lead_hours is not None:
+            lookup_kwargs["lead_hours"] = lead_hours
+        existing = self.repository.get_state_snapshot_by_model_time(**lookup_kwargs)
         if existing is not None and _checksum_matches(existing.checksum, checksum):
-            return StateSnapshotSaveResult(status="already_done", state_id=existing.state_id, snapshot=existing)
+            if _state_snapshot_metadata_matches(
+                existing,
+                run_id=run_id,
+                source_id=source_id,
+                cycle_id=cycle_id,
+                lead_hours=lead_hours,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+                original_shud_filename=original_shud_filename,
+            ):
+                return StateSnapshotSaveResult(status="already_done", state_id=existing.state_id, snapshot=existing)
+            repaired = self.repository.upsert_state_snapshot(
+                StateSnapshot(
+                    state_id=existing.state_id,
+                    model_id=model_id,
+                    run_id=run_id,
+                    valid_time=parsed_valid_time,
+                    state_uri=existing.state_uri,
+                    checksum=existing.checksum,
+                    usable_flag=False,
+                    source_id=source_id,
+                    cycle_id=cycle_id,
+                    lead_hours=lead_hours,
+                    model_package_version=model_package_version,
+                    model_package_checksum=model_package_checksum,
+                    original_shud_filename=original_shud_filename,
+                )
+            )
+            return StateSnapshotSaveResult(status="superseded", state_id=repaired.state_id, snapshot=repaired)
 
-        state_key = _state_object_key(model_id, parsed_valid_time, source_id=source_id)
+        state_key = _state_object_key(
+            model_id,
+            parsed_valid_time,
+            source_id=source_id,
+            cycle_id=cycle_id,
+            lead_hours=lead_hours,
+        )
         try:
             state_uri = self.object_store.write_bytes_atomic(state_key, content)
         except (OSError, ObjectStoreError, ValueError) as error:
@@ -315,8 +394,8 @@ class StateManager:
 
             actual_checksum = self.object_store.checksum(snapshot.state_uri)
             checks["actual_checksum"] = actual_checksum
-            checks["checksum_matches"] = actual_checksum == snapshot.checksum
-            if actual_checksum != snapshot.checksum:
+            checks["checksum_matches"] = _checksum_matches(snapshot.checksum, actual_checksum)
+            if not _checksum_matches(snapshot.checksum, actual_checksum):
                 checks.update(
                     {
                         "passed": False,
@@ -410,7 +489,10 @@ class PsycopgStateSnapshotRepository:
         model_id: str,
         valid_time: datetime,
         source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
     ) -> StateSnapshot | None:
+        del cycle_id, lead_hours
         if source_id is not None:
             row = self._fetch_optional(
                 """
@@ -672,16 +754,33 @@ class FileStateSnapshotIndexRepository:
         model_id: str,
         valid_time: datetime,
         source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
     ) -> StateSnapshot | None:
         if source_id in (None, ""):
             return None
-        key = self._snapshot_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
         index_snapshot = self._load_index_snapshot(
             allow_empty=self.create_missing,
             verify_objects=False,
             enforce_freshness=not self.create_missing,
         )
-        entry = index_snapshot.entries.get(key)
+        entry: dict[str, Any] | None
+        if cycle_id not in (None, "") or lead_hours is not None:
+            key = self._snapshot_key(
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+                cycle_id=cycle_id,
+                lead_hours=lead_hours,
+            )
+            entry = index_snapshot.entries.get(key)
+        else:
+            entry = self._first_entry_for_base_key(
+                index_snapshot.entries,
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
         if entry is None:
             return None
         return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
@@ -693,6 +792,8 @@ class FileStateSnapshotIndexRepository:
                 model_id=snapshot.model_id,
                 source_id=snapshot.source_id,
                 valid_time=snapshot.valid_time,
+                cycle_id=snapshot.cycle_id,
+                lead_hours=snapshot.lead_hours,
             )
             entries[key] = _state_index_entry_from_snapshot(snapshot)
             self._publish_entries(entries.values())
@@ -771,15 +872,34 @@ class FileStateSnapshotIndexRepository:
                 valid_time=valid_time,
             )
         index_evidence = index_snapshot.evidence
-        key = self._snapshot_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
+        expected_cycle_id = _expected_state_index_cycle_id(source_id, valid_time, required_lead_hours)
+        key = self._snapshot_key(
+            model_id=model_id,
+            source_id=source_id,
+            valid_time=valid_time,
+            cycle_id=expected_cycle_id,
+            lead_hours=required_lead_hours,
+        )
         entry = index_snapshot.entries.get(key)
         if entry is None:
-            return _state_index_unavailable_evidence(
-                reason="state_snapshot_index_exact_checkpoint_missing",
-                index_evidence=index_evidence,
+            base_entries = self._entries_for_base_key(
+                index_snapshot.entries,
                 model_id=model_id,
                 source_id=source_id,
                 valid_time=valid_time,
+            )
+            if not base_entries:
+                return _state_index_unavailable_evidence(
+                    reason="state_snapshot_index_exact_checkpoint_missing",
+                    index_evidence=index_evidence,
+                    model_id=model_id,
+                    source_id=source_id,
+                    valid_time=valid_time,
+                )
+            entry = _best_lineage_candidate_entry(
+                base_entries,
+                expected_cycle_id=expected_cycle_id,
+                required_lead_hours=required_lead_hours,
             )
         try:
             entry = self._entry_with_verified_object(entry)
@@ -851,19 +971,57 @@ class FileStateSnapshotIndexRepository:
     def _clear_index_snapshot_cache(self) -> None:
         object.__setattr__(self, "_index_snapshot_cache", None)
 
-    def _snapshot_key(self, *, model_id: str, source_id: str | None, valid_time: datetime) -> tuple[str, str, str]:
+    def _snapshot_key(
+        self,
+        *,
+        model_id: str,
+        source_id: str | None,
+        valid_time: datetime,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
+    ) -> tuple[str, str, str, str, str]:
         if source_id in (None, ""):
             raise StateManagerError("source_id is required for file state snapshot index lookups.")
-        return (str(model_id), normalize_source_id(str(source_id)), _format_time(_ensure_utc(valid_time)) or "")
+        return _state_index_identity_key(
+            model_id=model_id,
+            source_id=str(source_id),
+            valid_time=valid_time,
+            cycle_id=cycle_id,
+            lead_hours=lead_hours,
+        )
 
-    def _load_snapshots(self) -> dict[tuple[str, str, str], StateSnapshot]:
+    def _entries_for_base_key(
+        self,
+        entries: Mapping[tuple[str, str, str, str, str], dict[str, Any]],
+        *,
+        model_id: str,
+        source_id: str,
+        valid_time: datetime,
+    ) -> list[dict[str, Any]]:
+        base_key = _state_index_base_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
+        return [entry for key, entry in entries.items() if key[:3] == base_key]
+
+    def _first_entry_for_base_key(
+        self,
+        entries: Mapping[tuple[str, str, str, str, str], dict[str, Any]],
+        *,
+        model_id: str,
+        source_id: str,
+        valid_time: datetime,
+    ) -> dict[str, Any] | None:
+        matches = self._entries_for_base_key(entries, model_id=model_id, source_id=source_id, valid_time=valid_time)
+        if not matches:
+            return None
+        return sorted(matches, key=lambda entry: str(entry.get("state_id") or ""))[0]
+
+    def _load_snapshots(self) -> dict[tuple[str, str, str, str, str], StateSnapshot]:
         return {key: _state_snapshot_from_index_entry(entry) for key, entry in self._load_entries().items()}
 
-    def _load_snapshots_for_lookup(self) -> dict[tuple[str, str, str], StateSnapshot]:
+    def _load_snapshots_for_lookup(self) -> dict[tuple[str, str, str, str, str], StateSnapshot]:
         entries = self._load_entries_for_update() if self.create_missing else self._load_entries()
         return {key: _state_snapshot_from_index_entry(entry) for key, entry in entries.items()}
 
-    def _load_entries(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+    def _load_entries(self) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
         payload, _content = self._read_payload(allow_empty=False)
         return _validate_state_snapshot_index(
             payload,
@@ -874,7 +1032,7 @@ class FileStateSnapshotIndexRepository:
             max_age_hours=self.max_age_hours,
         )
 
-    def _load_entries_for_update(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+    def _load_entries_for_update(self) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
         payload, content = self._read_payload(allow_empty=self.create_missing)
         if not payload and not content:
             return {}
@@ -910,7 +1068,7 @@ class FileStateSnapshotIndexRepository:
         if use_cache and cached is not None:
             return cached
         payload, content = self._read_payload(allow_empty=allow_empty)
-        entries: dict[tuple[str, str, str], dict[str, Any]]
+        entries: dict[tuple[str, str, str, str, str], dict[str, Any]]
         if not payload and not content and allow_empty:
             entries = {}
         else:
@@ -1077,7 +1235,7 @@ def _validate_state_snapshot_index(
     max_age_hours: int,
     verify_objects: bool = True,
     enforce_freshness: bool = True,
-) -> dict[tuple[str, str, str], dict[str, Any]]:
+) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
     if payload.get("schema_version") != FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION:
         raise _state_index_error("state_snapshot_index_schema_unsupported", field="schema_version")
     _validate_state_index_json_complexity(payload)
@@ -1097,7 +1255,7 @@ def _validate_state_snapshot_index(
             field="entries",
             evidence={"entry_count": len(entries_value), "max_entries": MAX_STATE_SNAPSHOT_INDEX_ENTRIES},
         )
-    entries: dict[tuple[str, str, str], dict[str, Any]] = {}
+    entries: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     state_ids: set[str] = set()
     for index, item in enumerate(entries_value):
         if not isinstance(item, Mapping):
@@ -1110,16 +1268,24 @@ def _validate_state_snapshot_index(
             published_artifact_root=published_artifact_root,
             verify_object=verify_objects,
         )
-        key = (
-            str(entry["model_id"]),
-            str(entry["source_id"]),
-            str(entry["valid_time"]),
+        key = _state_index_identity_key(
+            model_id=str(entry["model_id"]),
+            source_id=str(entry["source_id"]),
+            valid_time=_parse_state_index_time(entry["valid_time"], field=f"entries[{index}].valid_time"),
+            cycle_id=_optional_str(entry.get("cycle_id")),
+            lead_hours=entry.get("lead_hours"),
         )
         if key in entries:
             raise _state_index_error(
                 "state_snapshot_index_duplicate_identity",
                 field="entries[]",
-                evidence={"model_id": key[0], "source_id": key[1], "valid_time": key[2]},
+                evidence={
+                    "model_id": key[0],
+                    "source_id": key[1],
+                    "valid_time": key[2],
+                    "cycle_id": key[3],
+                    "lead_hours": key[4],
+                },
             )
         state_id = str(entry["state_id"])
         if state_id in state_ids:
@@ -1276,6 +1442,52 @@ def _candidate_state_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
     }
 
 
+def _state_index_identity_key(
+    *,
+    model_id: str,
+    source_id: str,
+    valid_time: datetime | str,
+    cycle_id: str | None,
+    lead_hours: Any,
+) -> tuple[str, str, str, str, str]:
+    parsed_valid_time = (
+        _parse_state_index_time(valid_time, field="valid_time") if not isinstance(valid_time, datetime) else valid_time
+    )
+    lead_text = "" if lead_hours in (None, "") else str(int(lead_hours))
+    return (
+        str(model_id),
+        normalize_source_id(str(source_id)),
+        _format_time(_ensure_utc(parsed_valid_time)) or "",
+        str(cycle_id or ""),
+        lead_text,
+    )
+
+
+def _state_index_base_key(*, model_id: str, source_id: str, valid_time: datetime) -> tuple[str, str, str]:
+    return (str(model_id), normalize_source_id(str(source_id)), _format_time(_ensure_utc(valid_time)) or "")
+
+
+def _expected_state_index_cycle_id(source_id: str, valid_time: datetime, lead_hours: int) -> str:
+    producer_cycle_time = _ensure_utc(valid_time) - timedelta(hours=int(lead_hours))
+    return cycle_id_for(source_id, producer_cycle_time)
+
+
+def _best_lineage_candidate_entry(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    expected_cycle_id: str,
+    required_lead_hours: int,
+) -> dict[str, Any]:
+    ordered = sorted((dict(entry) for entry in entries), key=lambda entry: str(entry.get("state_id") or ""))
+    for entry in ordered:
+        if entry.get("cycle_id") == expected_cycle_id and entry.get("lead_hours") == required_lead_hours:
+            return entry
+    for entry in ordered:
+        if entry.get("lead_hours") == required_lead_hours:
+            return entry
+    return ordered[0]
+
+
 def _state_index_lineage_mismatch(
     snapshot: StateSnapshot,
     *,
@@ -1285,6 +1497,15 @@ def _state_index_lineage_mismatch(
 ) -> str | None:
     if snapshot.lead_hours != required_lead_hours:
         return "state_snapshot_index_lead_hours_mismatch"
+    expected_cycle_id = _expected_state_index_cycle_id(
+        str(snapshot.source_id),
+        snapshot.valid_time,
+        required_lead_hours,
+    )
+    if snapshot.cycle_id in (None, ""):
+        return "state_snapshot_index_cycle_id_missing"
+    if str(snapshot.cycle_id) != expected_cycle_id:
+        return "state_snapshot_index_cycle_id_mismatch"
     if (
         model_package_version not in (None, "")
         and (
@@ -1295,7 +1516,7 @@ def _state_index_lineage_mismatch(
         return "state_snapshot_index_model_package_version_mismatch"
     if snapshot.model_package_checksum in (None, "") or model_package_checksum in (None, ""):
         return "state_snapshot_index_model_package_checksum_missing"
-    if str(snapshot.model_package_checksum) != str(model_package_checksum):
+    if not _checksum_matches(snapshot.model_package_checksum, model_package_checksum):
         return "state_snapshot_index_model_package_checksum_mismatch"
     return None
 
@@ -1908,9 +2129,17 @@ def _state_index_error(reason: str, *, field: str, evidence: Mapping[str, Any] |
     return error
 
 
-def state_snapshot_id(model_id: str, valid_time: datetime, *, source_id: str | None = None) -> str:
+def state_snapshot_id(
+    model_id: str,
+    valid_time: datetime,
+    *,
+    source_id: str | None = None,
+    cycle_id: str | None = None,
+    lead_hours: int | None = None,
+) -> str:
     source_part = f"{_safe_path_component(source_id)}_" if source_id not in (None, "") else ""
-    return f"state_{source_part}{_safe_path_component(model_id)}_{_ensure_utc(valid_time):%Y%m%d%H}"
+    lineage_suffix = _state_lineage_id_suffix(cycle_id=cycle_id, lead_hours=lead_hours)
+    return f"state_{source_part}{_safe_path_component(model_id)}_{_ensure_utc(valid_time):%Y%m%d%H}{lineage_suffix}"
 
 
 def assess_freshness(
@@ -1935,13 +2164,39 @@ def state_snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
     return _snapshot_to_dict(snapshot)
 
 
-def _state_object_key(model_id: str, valid_time: datetime, *, source_id: str | None = None) -> str:
+def _state_object_key(
+    model_id: str,
+    valid_time: datetime,
+    *,
+    source_id: str | None = None,
+    cycle_id: str | None = None,
+    lead_hours: int | None = None,
+) -> str:
+    lineage_path = _state_lineage_path_suffix(cycle_id=cycle_id, lead_hours=lead_hours)
     if source_id not in (None, ""):
         return (
             f"states/{_safe_path_component(source_id)}/{_safe_path_component(model_id)}/"
-            f"{_ensure_utc(valid_time):%Y%m%d%H}/state.cfg.ic"
+            f"{_ensure_utc(valid_time):%Y%m%d%H}{lineage_path}/state.cfg.ic"
         )
-    return f"states/{_safe_path_component(model_id)}/{_ensure_utc(valid_time):%Y%m%d%H}/state.cfg.ic"
+    return f"states/{_safe_path_component(model_id)}/{_ensure_utc(valid_time):%Y%m%d%H}{lineage_path}/state.cfg.ic"
+
+
+def _state_lineage_id_suffix(*, cycle_id: str | None, lead_hours: int | None) -> str:
+    parts: list[str] = []
+    if cycle_id not in (None, ""):
+        parts.append(_safe_path_component(cycle_id))
+    if lead_hours is not None:
+        parts.append(f"f{int(lead_hours):03d}")
+    return "_" + "_".join(parts) if parts else ""
+
+
+def _state_lineage_path_suffix(*, cycle_id: str | None, lead_hours: int | None) -> str:
+    parts: list[str] = []
+    if cycle_id not in (None, ""):
+        parts.append(_safe_path_component(cycle_id))
+    if lead_hours is not None:
+        parts.append(f"f{int(lead_hours):03d}")
+    return "/" + "/".join(parts) if parts else ""
 
 
 def _qc_record(

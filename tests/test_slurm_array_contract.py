@@ -280,6 +280,26 @@ def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Pat
     assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(state_index))}" in rendered
 
 
+def test_state_save_array_template_does_not_fallback_to_secret_state_index_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_STATE_INDEX",
+        "s3://nhms/scheduler/state-index.json?X-Amz-Signature=super-secret",
+    )
+
+    rendered = _gateway(tmp_path).render_template(
+        "save_state_snapshot_array",
+        _render_manifest(tmp_path, "save_state_snapshot_array"),
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    assert "super-secret" not in rendered
+    assert "X-Amz-Signature" not in rendered
+    assert "export NHMS_SCHEDULER_STATE_INDEX=''" in rendered
+
+
 @pytest.mark.parametrize(
     "key",
     ["NHMS_SCHEDULER_DB_FREE_REQUIRED", "NHMS_SCHEDULER_STATE_INDEX_BACKEND", "NHMS_SCHEDULER_STATE_INDEX"],
