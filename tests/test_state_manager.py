@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,11 +11,15 @@ from httpx import ASGITransport, AsyncClient
 
 from apps.api.main import app
 from apps.api.routes.state_snapshots import get_state_manager
+from packages.common import state_cli
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import (
+    FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+    FileStateSnapshotIndexRepository,
     StateManager,
     StateSnapshot,
     assess_freshness,
+    publish_state_snapshot_index,
     state_snapshot_id,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
@@ -197,6 +202,194 @@ def test_state_snapshot_qc_fail_keeps_usable_false(
     assert repository.snapshots[result.state_id].usable_flag is False
     assert repository.qc_results[-1]["passed"] is False
     assert repository.qc_results[-1]["checks_json"]["error_code"] == "STATE_FILE_MISSING"
+
+
+def test_file_state_snapshot_index_strict_lookup_returns_exact_usable_checkpoint(tmp_path: Path) -> None:
+    object_store = LocalObjectStore(tmp_path / "objects", "s3://nhms")
+    content = _valid_ic_bytes(b"state-index-ready")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+
+    receipt = publish_state_snapshot_index(
+        [
+            {
+                "state_id": "state_gfs_model_a_2026052106",
+                "model_id": "model_a",
+                "run_id": "analysis_gfs_2026052018_model_a",
+                "source_id": "gfs",
+                "valid_time": "2026-05-21T06:00:00Z",
+                "state_uri": state_uri,
+                "checksum": f"sha256:{sha256_bytes(content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052018",
+                "lead_hours": 12,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": "package-sha",
+            }
+        ],
+        index_path,
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    snapshot = repository.get_state_snapshot_by_model_time(
+        model_id="model_a",
+        source_id="GFS",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+    )
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert receipt["status"] == "published"
+    assert snapshot is not None
+    assert snapshot.state_id == "state_gfs_model_a_2026052106"
+    assert evidence["ready"] is True
+    assert evidence["candidate_state"]["init_state_uri"] == state_uri
+    assert evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 12
+    assert evidence["state_snapshot_index"]["schema_version"] == FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_reason"),
+    [
+        ("missing_object", "state_snapshot_index_object_missing"),
+        ("checksum_mismatch", "state_snapshot_index_object_checksum_mismatch"),
+        ("unusable", "state_snapshot_index_checkpoint_unusable"),
+        ("wrong_package", "state_snapshot_index_model_package_checksum_mismatch"),
+    ],
+)
+def test_file_state_snapshot_index_fail_closed_cases(
+    tmp_path: Path,
+    case_name: str,
+    expected_reason: str,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"state-index-fail")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    index_path = tmp_path / "state-index.json"
+    entry = {
+        "state_id": "state_gfs_model_a_2026052106",
+        "model_id": "model_a",
+        "run_id": "analysis_gfs_2026052018_model_a",
+        "source_id": "gfs",
+        "valid_time": "2026-05-21T06:00:00Z",
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": case_name != "unusable",
+        "lead_hours": 12,
+        "model_package_version": "s3://nhms/models/model_a/package/",
+        "model_package_checksum": "old-package-sha" if case_name == "wrong_package" else "package-sha",
+    }
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    if case_name == "missing_object":
+        (object_root / object_store.normalize_key(state_uri)).unlink()
+    elif case_name == "checksum_mismatch":
+        (object_root / object_store.normalize_key(state_uri)).write_text("changed\n", encoding="utf-8")
+
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == expected_reason
+    assert "latest" not in json.dumps(evidence).lower()
+
+
+def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatch: Any, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    run_id = "fcst_gfs_2026052106_model_a"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / "model_a.cfg.ic.update").write_text(
+        _valid_ic_bytes(b"state-index-save").decode("utf-8"),
+        encoding="utf-8",
+    )
+    manifest_index = tmp_path / "manifest-index.json"
+    manifest_index.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "run_id": run_id,
+                    "model_id": "model_a",
+                    "basin_version_id": "basin_a_v1",
+                    "river_network_version_id": "basin_a_rivnet_v1",
+                    "source_id": "gfs",
+                    "cycle_time": "2026-05-21T06:00:00Z",
+                    "end_time": "2026-05-21T18:00:00Z",
+                    "workspace_dir": str(workspace),
+                    "model_package_uri": "s3://nhms/models/model_a/package/",
+                    "model_package_checksum": "package-sha",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free state save must not load run context from PostgreSQL"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail("DB-free state save must not construct PsycopgStateSnapshotRepository"),
+    )
+
+    resolved_run_id, run_context = state_cli.resolve_run_context(None, str(manifest_index), 0)
+    result = state_cli.save_state_for_run(resolved_run_id, run_context=run_context)
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    snapshot = repository.get_state_snapshot_by_model_time(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T18:00:00Z"),
+    )
+
+    assert result["qc_passed"] is True
+    assert snapshot is not None
+    assert snapshot.usable_flag is True
+    assert snapshot.model_package_checksum == "package-sha"
 
 
 def test_oversized_state_object_fails_qc_without_crash(

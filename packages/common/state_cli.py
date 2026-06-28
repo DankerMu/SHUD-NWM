@@ -4,16 +4,22 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from packages.common.object_store import LocalObjectStore
-from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateManagerError
+from packages.common.state_manager import (
+    FileStateSnapshotIndexRepository,
+    PsycopgStateSnapshotRepository,
+    StateManager,
+    StateManagerError,
+)
 from packages.common.state_qc import cfg_ic_header_minute_index
-from workers.data_adapters.base import cycle_id_for
+from workers.data_adapters.base import cycle_id_for, parse_cycle_time
 
 
 @dataclass(frozen=True)
@@ -100,18 +106,21 @@ def save_state_for_run(
     *,
     manager: StateManager | None = None,
     repository: StateRunRepository | None = None,
+    run_context: StateRunContext | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace_root or os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
     object_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace))).expanduser().resolve()
     object_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
     state_object_store = LocalObjectStore(object_root, object_prefix)
-    state_manager = manager or StateManager(
-        repository=PsycopgStateSnapshotRepository.from_env(),
-        object_store=state_object_store,
-    )
-    run_repository = repository or StateRunRepository.from_env()
-    run = run_repository.load_run_context(run_id)
+    state_manager = manager or _state_manager_from_env_for_save(state_object_store)
+    if run_context is not None:
+        run = run_context
+        if run.run_id != run_id:
+            raise StateManagerError(f"State save run context mismatch: {run.run_id} != {run_id}")
+    else:
+        run_repository = repository or _state_run_repository_from_env_for_save()
+        run = run_repository.load_run_context(run_id)
     checkpoints = _find_state_checkpoints(run, workspace, state_manager.object_store)
     if not checkpoints:
         ic_file = _find_ic_file(run, workspace, state_manager.object_store)
@@ -208,6 +217,114 @@ def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int 
             {"missing_fields": ["run_id"]},
         )
     return run_id
+
+
+def resolve_run_context(
+    run_id: str | None,
+    manifest_index: str | None,
+    task_id: int | None,
+) -> tuple[str, StateRunContext | None]:
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        resolved_run_id = str(entry["run_id"])
+        if _db_free_state_save_enabled():
+            return resolved_run_id, _state_run_context_from_manifest_entry(entry)
+        return resolved_run_id, None
+    resolved_run_id = resolve_run_id(run_id, manifest_index, task_id)
+    if _db_free_state_save_enabled():
+        return resolved_run_id, _state_run_context_from_env(resolved_run_id)
+    return resolved_run_id, None
+
+
+def _state_manager_from_env_for_save(object_store: LocalObjectStore) -> StateManager:
+    if _db_free_state_save_enabled():
+        return StateManager(
+            repository=FileStateSnapshotIndexRepository.from_env(create_missing=True),
+            object_store=object_store,
+        )
+    return StateManager(
+        repository=PsycopgStateSnapshotRepository.from_env(),
+        object_store=object_store,
+    )
+
+
+def _state_run_repository_from_env_for_save() -> StateRunRepository:
+    if _db_free_state_save_enabled():
+        raise StateManagerError(
+            "DB-free state save requires run context from --manifest-index or NHMS_* runtime env; "
+            "StateRunRepository.from_env() is not allowed."
+        )
+    return StateRunRepository.from_env()
+
+
+def _db_free_state_save_enabled() -> bool:
+    return _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED") and os.getenv(
+        "NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""
+    ).strip().lower() == "file"
+
+
+def _state_run_context_from_manifest_entry(entry: Mapping[str, Any]) -> StateRunContext:
+    assembly = entry.get("model_run_assembly") if isinstance(entry.get("model_run_assembly"), Mapping) else {}
+    identity = assembly.get("identity") if isinstance(assembly.get("identity"), Mapping) else {}
+    outputs = assembly.get("outputs") if isinstance(assembly.get("outputs"), Mapping) else {}
+    model = assembly.get("model") if isinstance(assembly.get("model"), Mapping) else {}
+    resource_profile = entry.get("resource_profile") if isinstance(entry.get("resource_profile"), Mapping) else {}
+    run_id = str(entry["run_id"])
+    end_time_value = (
+        identity.get("end_time")
+        or entry.get("end_time")
+        or os.getenv("NHMS_END_TIME")
+    )
+    if end_time_value in (None, ""):
+        raise StateManagerError("DB-free state save manifest entry is missing end_time.")
+    model_id = str(entry.get("model_id") or identity.get("model_id") or "")
+    if not model_id:
+        raise StateManagerError("DB-free state save manifest entry is missing model_id.")
+    source_id = _optional_str(entry.get("source_id") or identity.get("source_id"))
+    cycle_time_value = entry.get("cycle_time") or identity.get("cycle_time")
+    return StateRunContext(
+        run_id=run_id,
+        model_id=model_id,
+        end_time=_parse_time_flexible(end_time_value),
+        output_uri=_optional_str(entry.get("output_uri") or outputs.get("output_uri")),
+        source_id=source_id,
+        cycle_time=_parse_time_flexible(cycle_time_value) if cycle_time_value not in (None, "") else None,
+        model_package_version=_optional_str(
+            entry.get("model_package_uri")
+            or identity.get("model_package_uri")
+            or model.get("model_package_uri")
+        ),
+        model_package_checksum=_optional_str(
+            entry.get("model_package_checksum")
+            or entry.get("package_checksum")
+            or identity.get("model_package_checksum")
+            or model.get("model_package_checksum")
+            or resource_profile.get("package_checksum")
+        ),
+    )
+
+
+def _state_run_context_from_env(run_id: str) -> StateRunContext:
+    model_id = os.getenv("NHMS_MODEL_ID", "").strip()
+    end_time = os.getenv("NHMS_END_TIME", "").strip()
+    if not model_id or not end_time:
+        raise StateManagerError("DB-free state save requires NHMS_MODEL_ID and NHMS_END_TIME.")
+    cycle_time = os.getenv("NHMS_CYCLE_TIME", "").strip()
+    return StateRunContext(
+        run_id=run_id,
+        model_id=model_id,
+        end_time=_parse_time_flexible(end_time),
+        output_uri=None,
+        source_id=_optional_str(os.getenv("NHMS_SOURCE_ID")),
+        cycle_time=_parse_time_flexible(cycle_time) if cycle_time else None,
+        model_package_version=_optional_str(os.getenv("NHMS_MODEL_PACKAGE_URI")),
+        model_package_checksum=_optional_str(os.getenv("NHMS_MODEL_PACKAGE_CHECKSUM")),
+    )
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: LocalObjectStore) -> Path:
@@ -352,8 +469,17 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--task-id", type=int, default=None)
     def save(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
+            resolved_run_id, run_context = resolve_run_context(run_id, manifest_index, task_id)
+            result = (
+                save_state_for_run(resolved_run_id, run_context=run_context)
+                if run_context is not None
+                else save_state_for_run(resolved_run_id)
+            )
             click.echo(
-                json.dumps(save_state_for_run(resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True)
+                json.dumps(
+                    result,
+                    sort_keys=True,
+                )
             )
         except ManifestValidationError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
@@ -377,8 +503,13 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "save":
         try:
-            resolved_run_id = resolve_run_id(args.run_id, args.manifest_index, args.task_id)
-            print(json.dumps(save_state_for_run(resolved_run_id), sort_keys=True))
+            resolved_run_id, run_context = resolve_run_context(args.run_id, args.manifest_index, args.task_id)
+            result = (
+                save_state_for_run(resolved_run_id, run_context=run_context)
+                if run_context is not None
+                else save_state_for_run(resolved_run_id)
+            )
+            print(json.dumps(result, sort_keys=True))
         except ManifestValidationError as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
@@ -403,6 +534,16 @@ def _parse_time(value: str | datetime) -> datetime:
         return _ensure_utc(value)
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return _ensure_utc(parsed)
+
+
+def _parse_time_flexible(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    text = str(value)
+    try:
+        return _ensure_utc(parse_cycle_time(text))
+    except ValueError:
+        return _parse_time(text)
 
 
 def _format_time(value: datetime) -> str:

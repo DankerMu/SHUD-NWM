@@ -156,21 +156,52 @@
 
 ## 5. File State Snapshot Index And DB-Free State Save
 
-- [ ] 5.1 Define the file-backed state snapshot index contract.
+- [x] 5.1 Define the file-backed state snapshot index contract.
   Evidence floor: index maps `model_id + source_id + valid_time` to usable
   state URI, checksum, source identity, schema version, generated_at, and
   object existence evidence.
-- [ ] 5.2 Add exact-match strict warm-start lookup.
+- [x] 5.2 Add exact-match strict warm-start lookup.
   Evidence floor: exact successor checkpoint succeeds; missing, stale, checksum
   mismatch, wrong source/model/time, and unusable state fail closed without
   latest-state fallback or `PsycopgStateSnapshotRepository`.
-- [ ] 5.3 Make `state_save_qc` produce DB-free state-index records.
+- [x] 5.3 Make `state_save_qc` produce DB-free state-index records.
   Evidence floor: state-save command runs without `DATABASE_URL`, writes or
   stages index records with checksum/identity evidence, and does not instantiate
   `StateRunRepository.from_env()` or `PsycopgStateSnapshotRepository`.
-- [ ] 5.4 Add scheduler warm-start integration tests.
+- [x] 5.4 Add scheduler warm-start integration tests.
   Evidence floor: scheduler candidate construction carries file-index state
   evidence and blocks candidates when strict state is unavailable.
+
+Scenario evidence rows for section 5:
+
+- Valid state-index entry with matching `model_id`, normalized `source_id`,
+  `valid_time`, model package checksum, usable flag, and object checksum ->
+  strict lookup returns ready `candidate_state` evidence with state URI,
+  checksum, lineage, schema version, and entry/object evidence.
+- Missing exact entry for `model_id + source_id + valid_time` -> scheduler
+  candidate blocks with `state_snapshot_index_exact_checkpoint_missing`; latest
+  usable fallback is not called.
+- Missing state object after index publish -> lookup blocks with
+  `state_snapshot_index_object_missing`.
+- Mutated state object checksum -> lookup blocks with
+  `state_snapshot_index_object_checksum_mismatch`.
+- `usable_flag=false` -> lookup blocks with
+  `state_snapshot_index_checkpoint_unusable`.
+- Wrong model/source/time/package or stale/unsupported/malformed index ->
+  lookup fails closed with state-index evidence and no
+  `PsycopgStateSnapshotRepository`.
+- DB-free `state_cli save` with `DATABASE_URL` absent and manifest-index run
+  context -> writes a usable file-index record with state checksum, source,
+  cycle, valid-time, and model package evidence; `StateRunRepository.from_env()`
+  and `PsycopgStateSnapshotRepository.from_env()` are not constructed.
+- Legacy non-DB-free `state_cli save --manifest-index --task-id` with old
+  manifest entries containing only `run_id` -> still resolves `run_id` and
+  delegates to the legacy repository path.
+- DB-free strict scheduler candidate with ready exact state index -> candidate
+  carries `state_snapshot_index` and `candidate_state` evidence.
+- DB-free strict scheduler candidate with empty or unavailable state index ->
+  candidate blocks before orchestrator/Slurm mutation and does not use latest
+  fallback.
 
 ## 6. DB-Free Runtime Integration And Deployment Compatibility
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -8,14 +9,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    read_bytes_limited_no_follow,
+)
+from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import STATE_QC_FAILED
 from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
 
 
 class StateManagerError(RuntimeError):
     """Raised when StateSnapshot operations cannot complete."""
+
+
+FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION = "nhms.scheduler.file_state_snapshot_index.v1"
+MAX_STATE_SNAPSHOT_INDEX_BYTES = 16 * 1024 * 1024
+MAX_STATE_SNAPSHOT_INDEX_ENTRIES = 100_000
+DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS = 168
+MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH = 64
+MAX_STATE_SNAPSHOT_INDEX_JSON_NODES = 300_000
 
 
 def default_database_url() -> str:
@@ -585,6 +601,852 @@ class PsycopgStateSnapshotRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+
+@dataclass(frozen=True)
+class FileStateSnapshotIndexRepository:
+    index_uri: str
+    object_store_root: Path | str | None = None
+    object_store_prefix: str | None = None
+    published_artifact_root: Path | str | None = None
+    now: datetime | None = None
+    max_age_hours: int = DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS
+    create_missing: bool = False
+
+    @classmethod
+    def from_env(cls, *, create_missing: bool = False) -> FileStateSnapshotIndexRepository:
+        index_uri = os.getenv("NHMS_SCHEDULER_STATE_INDEX", "").strip()
+        if not index_uri:
+            raise StateManagerError("NHMS_SCHEDULER_STATE_INDEX is required for file state index operations.")
+        return cls(
+            index_uri=index_uri,
+            object_store_root=os.getenv("OBJECT_STORE_ROOT"),
+            object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
+            published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"),
+            create_missing=create_missing,
+        )
+
+    def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
+        for snapshot in self._load_snapshots_for_lookup().values():
+            if snapshot.state_id == state_id:
+                return snapshot
+        return None
+
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None:
+        if source_id in (None, ""):
+            return None
+        key = self._snapshot_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
+        return self._load_snapshots_for_lookup().get(key)
+
+    def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
+        entries = self._load_entries_for_update()
+        key = self._snapshot_key(
+            model_id=snapshot.model_id,
+            source_id=snapshot.source_id,
+            valid_time=snapshot.valid_time,
+        )
+        entries[key] = _state_index_entry_from_snapshot(snapshot)
+        self._publish_entries(entries.values())
+        return snapshot
+
+    def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
+        entries = self._load_entries_for_update()
+        selected_key: tuple[str, str, str] | None = None
+        selected: dict[str, Any] | None = None
+        for key, entry in entries.items():
+            if str(entry.get("state_id") or "") == state_id:
+                selected_key = key
+                selected = dict(entry)
+                break
+        if selected_key is None or selected is None:
+            return None
+        selected["usable_flag"] = bool(usable_flag)
+        entries[selected_key] = selected
+        self._publish_entries(entries.values())
+        return _state_snapshot_from_index_entry(selected)
+
+    def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
+        del model_id, before_time
+        raise StateManagerError("Latest usable state fallback is not supported by the file state snapshot index.")
+
+    def list_state_snapshots(
+        self,
+        *,
+        model_id: str | None,
+        usable: bool | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        snapshots = list(self._load_snapshots_for_lookup().values())
+        if model_id is not None:
+            snapshots = [snapshot for snapshot in snapshots if snapshot.model_id == model_id]
+        if usable is not None:
+            snapshots = [snapshot for snapshot in snapshots if snapshot.usable_flag is usable]
+        snapshots.sort(key=lambda snapshot: (snapshot.valid_time, snapshot.state_id), reverse=True)
+        page = snapshots[offset : offset + limit]
+        return {
+            "total_count": len(snapshots),
+            "items": [_snapshot_to_dict(snapshot) for snapshot in page],
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def insert_qc_result(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        return {"status": "recorded_in_state_index", **dict(record)}
+
+    def strict_warm_start_evidence(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        valid_time: datetime,
+        model_package_version: str | None = None,
+        model_package_checksum: str | None = None,
+        required_lead_hours: int = 12,
+    ) -> dict[str, Any]:
+        index_evidence = self.state_index_evidence()
+        if index_evidence.get("status") != "ready":
+            return _state_index_unavailable_evidence(
+                reason=_first_state_index_blocker_reason(index_evidence) or "state_snapshot_index_unavailable",
+                index_evidence=index_evidence,
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
+        key = self._snapshot_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
+        entries = self._load_entries()
+        entry = entries.get(key)
+        if entry is None:
+            return _state_index_unavailable_evidence(
+                reason="state_snapshot_index_exact_checkpoint_missing",
+                index_evidence=index_evidence,
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
+        snapshot = _state_snapshot_from_index_entry(entry)
+        if not snapshot.usable_flag:
+            return _state_index_unavailable_evidence(
+                reason="state_snapshot_index_checkpoint_unusable",
+                index_evidence={**index_evidence, "entry_status": "unusable"},
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
+        lineage_mismatch = _state_index_lineage_mismatch(
+            snapshot,
+            model_package_version=model_package_version,
+            model_package_checksum=model_package_checksum,
+            required_lead_hours=required_lead_hours,
+        )
+        if lineage_mismatch is not None:
+            return _state_index_unavailable_evidence(
+                reason=lineage_mismatch,
+                index_evidence={**index_evidence, "entry_status": "lineage_mismatch"},
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            )
+        candidate_state = _candidate_state_from_snapshot(snapshot)
+        return _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "ready": True,
+                "reason": None,
+                "candidate_state": candidate_state,
+                "state_snapshot_index": {
+                    **index_evidence,
+                    "entry_status": "ready",
+                    "entry_model_id": snapshot.model_id,
+                    "entry_source_id": snapshot.source_id,
+                    "entry_valid_time": _format_time(snapshot.valid_time),
+                    "object_evidence": entry.get("object_evidence"),
+                },
+            }
+        )
+
+    def state_index_evidence(self) -> dict[str, Any]:
+        try:
+            entries = self._load_entries()
+            payload, content = self._read_payload(allow_empty=False)
+        except StateManagerError as error:
+            return _state_index_evidence_safe(
+                {
+                    "status": "blocked",
+                    "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+                    "index": _state_index_uri_evidence(self.index_uri),
+                    "blockers": [
+                        {
+                            "code": str(getattr(error, "reason", "state_snapshot_index_unavailable")),
+                            "reason": str(getattr(error, "reason", "state_snapshot_index_unavailable")),
+                            "field": str(getattr(error, "field", "index")),
+                            "message": "File state snapshot index validation failed closed.",
+                        }
+                    ],
+                }
+            )
+        return _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+                "index": _state_index_uri_evidence(self.index_uri),
+                "generated_at": payload.get("generated_at"),
+                "checksum": _safe_checksum(payload.get("checksum")),
+                "content_checksum_verified": _checksum_matches(payload.get("checksum"), _payload_checksum(payload)),
+                "entry_count": len(entries),
+                "index_bytes": len(content),
+            }
+        )
+
+    def refresh(self) -> None:
+        return None
+
+    def _snapshot_key(self, *, model_id: str, source_id: str | None, valid_time: datetime) -> tuple[str, str, str]:
+        if source_id in (None, ""):
+            raise StateManagerError("source_id is required for file state snapshot index lookups.")
+        return (str(model_id), normalize_source_id(str(source_id)), _format_time(_ensure_utc(valid_time)) or "")
+
+    def _load_snapshots(self) -> dict[tuple[str, str, str], StateSnapshot]:
+        return {key: _state_snapshot_from_index_entry(entry) for key, entry in self._load_entries().items()}
+
+    def _load_snapshots_for_lookup(self) -> dict[tuple[str, str, str], StateSnapshot]:
+        entries = self._load_entries_for_update() if self.create_missing else self._load_entries()
+        return {key: _state_snapshot_from_index_entry(entry) for key, entry in entries.items()}
+
+    def _load_entries(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        payload, _content = self._read_payload(allow_empty=False)
+        return _validate_state_snapshot_index(
+            payload,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            now=self.now,
+            max_age_hours=self.max_age_hours,
+        )
+
+    def _load_entries_for_update(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        payload, _content = self._read_payload(allow_empty=self.create_missing)
+        if not payload:
+            return {}
+        return _validate_state_snapshot_index(
+            payload,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            now=self.now,
+            max_age_hours=self.max_age_hours,
+        )
+
+    def _publish_entries(self, entries: Sequence[Mapping[str, Any]]) -> None:
+        publish_state_snapshot_index(
+            list(entries),
+            self.index_uri,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            generated_at=self.now,
+        )
+
+    def _read_payload(self, *, allow_empty: bool) -> tuple[dict[str, Any], bytes]:
+        try:
+            content = _read_state_index_bytes(
+                self.index_uri,
+                object_store_root=self.object_store_root,
+                object_store_prefix=self.object_store_prefix,
+                published_artifact_root=self.published_artifact_root,
+                max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+            )
+        except FileNotFoundError as error:
+            if allow_empty:
+                return {}, b""
+            raise _state_index_error("state_snapshot_index_missing", field="index") from error
+        except ObjectStoreError as error:
+            if _is_missing_file_error(error):
+                if allow_empty:
+                    return {}, b""
+                raise _state_index_error("state_snapshot_index_missing", field="index") from error
+            raise _state_index_error("state_snapshot_index_unreadable", field="index") from error
+        except (OSError, SafeFilesystemError, ValueError) as error:
+            raise _state_index_error("state_snapshot_index_unreadable", field="index") from error
+        if allow_empty and content.strip() in {b"", b"{}"}:
+            return {}, content
+        if len(content) > MAX_STATE_SNAPSHOT_INDEX_BYTES:
+            raise _state_index_error("state_snapshot_index_size_limit_exceeded", field="index")
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+            raise _state_index_error("state_snapshot_index_malformed_json", field="index") from error
+        if not isinstance(payload, Mapping):
+            raise _state_index_error("state_snapshot_index_not_object", field="index")
+        return dict(payload), content
+
+
+def publish_state_snapshot_index(
+    entries: Sequence[Mapping[str, Any]],
+    destination_uri: str | Path,
+    *,
+    object_store_root: str | Path | None = None,
+    object_store_prefix: str | None = None,
+    published_artifact_root: str | Path | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
+    payload: dict[str, Any] = {
+        "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+        "generated_at": _format_time(generated),
+        "entries": [dict(entry) for entry in entries],
+    }
+    payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+    content = _canonical_json_bytes(payload, pretty=True)
+    normalized = _validate_state_snapshot_index(
+        payload,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+        now=generated,
+        max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
+    )
+    _write_state_index_bytes(
+        str(destination_uri),
+        content,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+    )
+    return _state_index_evidence_safe(
+        {
+            "status": "published",
+            "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+            "destination": _state_index_uri_evidence(destination_uri),
+            "checksum": payload["checksum"],
+            "generated_at": payload["generated_at"],
+            "entry_count": len(normalized),
+            "index_last": True,
+            "atomic_write": True,
+        }
+    )
+
+
+def _validate_state_snapshot_index(
+    payload: Mapping[str, Any],
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+    now: datetime | None,
+    max_age_hours: int,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    if payload.get("schema_version") != FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION:
+        raise _state_index_error("state_snapshot_index_schema_unsupported", field="schema_version")
+    _validate_state_index_json_complexity(payload)
+    _require_state_index_checksum(payload)
+    generated_at = _parse_state_index_generated_at(payload.get("generated_at"), now=now, max_age_hours=max_age_hours)
+    entries_value = payload.get("entries")
+    if not isinstance(entries_value, Sequence) or isinstance(entries_value, str | bytes | bytearray):
+        raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
+    if len(entries_value) > MAX_STATE_SNAPSHOT_INDEX_ENTRIES:
+        raise _state_index_error(
+            "state_snapshot_index_entry_limit_exceeded",
+            field="entries",
+            evidence={"entry_count": len(entries_value), "max_entries": MAX_STATE_SNAPSHOT_INDEX_ENTRIES},
+        )
+    entries: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for index, item in enumerate(entries_value):
+        if not isinstance(item, Mapping):
+            raise _state_index_error("state_snapshot_index_entry_not_object", field=f"entries[{index}]")
+        entry = _normalize_state_index_entry(
+            item,
+            index=index,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+        )
+        key = (
+            str(entry["model_id"]),
+            str(entry["source_id"]),
+            str(entry["valid_time"]),
+        )
+        if key in entries:
+            raise _state_index_error(
+                "state_snapshot_index_duplicate_identity",
+                field="entries[]",
+                evidence={"model_id": key[0], "source_id": key[1], "valid_time": key[2]},
+            )
+        entry["index_generated_at"] = _format_time(generated_at)
+        entries[key] = entry
+    return entries
+
+
+def _normalize_state_index_entry(
+    item: Mapping[str, Any],
+    *,
+    index: int,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+) -> dict[str, Any]:
+    row = dict(item)
+    required = ("state_id", "model_id", "run_id", "source_id", "valid_time", "state_uri", "checksum", "usable_flag")
+    for field in required:
+        if row.get(field) in (None, ""):
+            raise _state_index_error(
+                "state_snapshot_index_required_field_missing",
+                field=f"entries[{index}].{field}",
+            )
+    source_id = normalize_source_id(str(row["source_id"]))
+    valid_time = _ensure_utc(_parse_state_index_time(row["valid_time"], field=f"entries[{index}].valid_time"))
+    state_uri = str(row["state_uri"])
+    checksum = str(row["checksum"])
+    object_evidence = _verify_state_index_object(
+        state_uri,
+        checksum,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+        published_artifact_root=published_artifact_root,
+        field=f"entries[{index}].state_uri",
+    )
+    lead_hours = _optional_state_index_int(row.get("lead_hours"), field=f"entries[{index}].lead_hours")
+    return {
+        **row,
+        "state_id": str(row["state_id"]),
+        "model_id": str(row["model_id"]),
+        "run_id": str(row["run_id"]),
+        "source_id": source_id,
+        "valid_time": _format_time(valid_time),
+        "state_uri": state_uri,
+        "checksum": checksum,
+        "usable_flag": bool(row["usable_flag"]),
+        "created_at": _format_time(
+            _parse_state_index_time(row["created_at"], field=f"entries[{index}].created_at")
+        )
+        if row.get("created_at") not in (None, "")
+        else None,
+        "cycle_id": _optional_str(row.get("cycle_id")),
+        "lead_hours": lead_hours,
+        "model_package_version": _optional_str(row.get("model_package_version")),
+        "model_package_checksum": _optional_str(row.get("model_package_checksum")),
+        "original_shud_filename": _optional_str(row.get("original_shud_filename")),
+        "object_evidence": object_evidence,
+    }
+
+
+def _state_index_entry_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
+    return {
+        "state_id": snapshot.state_id,
+        "model_id": snapshot.model_id,
+        "run_id": snapshot.run_id,
+        "valid_time": _format_time(snapshot.valid_time),
+        "state_uri": snapshot.state_uri,
+        "checksum": snapshot.checksum,
+        "usable_flag": snapshot.usable_flag,
+        "created_at": _format_time(snapshot.created_at),
+        "source_id": snapshot.source_id,
+        "cycle_id": snapshot.cycle_id,
+        "lead_hours": snapshot.lead_hours,
+        "model_package_version": snapshot.model_package_version,
+        "model_package_checksum": snapshot.model_package_checksum,
+        "original_shud_filename": snapshot.original_shud_filename,
+    }
+
+
+def _state_snapshot_from_index_entry(entry: Mapping[str, Any]) -> StateSnapshot:
+    lead_hours = entry.get("lead_hours")
+    return StateSnapshot(
+        state_id=str(entry["state_id"]),
+        model_id=str(entry["model_id"]),
+        run_id=str(entry["run_id"]),
+        valid_time=_ensure_utc(_parse_state_index_time(entry["valid_time"], field="valid_time")),
+        state_uri=str(entry["state_uri"]),
+        checksum=str(entry["checksum"]),
+        usable_flag=bool(entry["usable_flag"]),
+        created_at=(
+            _ensure_utc(_parse_state_index_time(entry["created_at"], field="created_at"))
+            if entry.get("created_at") not in (None, "")
+            else None
+        ),
+        source_id=_optional_str(entry.get("source_id")),
+        cycle_id=_optional_str(entry.get("cycle_id")),
+        lead_hours=int(lead_hours) if lead_hours is not None else None,
+        model_package_version=_optional_str(entry.get("model_package_version")),
+        model_package_checksum=_optional_str(entry.get("model_package_checksum")),
+        original_shud_filename=_optional_str(entry.get("original_shud_filename")),
+    )
+
+
+def _candidate_state_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
+    lineage = {
+        "source_id": snapshot.source_id,
+        "cycle_id": snapshot.cycle_id,
+        "lead_hours": snapshot.lead_hours,
+        "model_package_version": snapshot.model_package_version,
+        "model_package_checksum": snapshot.model_package_checksum,
+        "state_index_schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+    }
+    lineage = {key: value for key, value in lineage.items() if value not in (None, "")}
+    valid_time = _format_time(snapshot.valid_time)
+    return {
+        "state_id": snapshot.state_id,
+        "init_state_id": snapshot.state_id,
+        "state_uri": snapshot.state_uri,
+        "init_state_uri": snapshot.state_uri,
+        "checksum": snapshot.checksum,
+        "init_state_checksum": snapshot.checksum,
+        "valid_time": valid_time,
+        "init_state_valid_time": valid_time,
+        "usable_flag": snapshot.usable_flag,
+        "init_state_quality": "fresh",
+        "lineage": lineage,
+        "init_state_lineage": lineage,
+    }
+
+
+def _state_index_lineage_mismatch(
+    snapshot: StateSnapshot,
+    *,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+    required_lead_hours: int,
+) -> str | None:
+    if snapshot.lead_hours != required_lead_hours:
+        return "state_snapshot_index_lead_hours_mismatch"
+    if (
+        model_package_version not in (None, "")
+        and (
+            snapshot.model_package_version in (None, "")
+            or str(snapshot.model_package_version) != str(model_package_version)
+        )
+    ):
+        return "state_snapshot_index_model_package_version_mismatch"
+    if snapshot.model_package_checksum in (None, "") or model_package_checksum in (None, ""):
+        return "state_snapshot_index_model_package_checksum_missing"
+    if str(snapshot.model_package_checksum) != str(model_package_checksum):
+        return "state_snapshot_index_model_package_checksum_mismatch"
+    return None
+
+
+def _state_index_unavailable_evidence(
+    *,
+    reason: str,
+    index_evidence: Mapping[str, Any],
+    model_id: str,
+    source_id: str,
+    valid_time: datetime,
+) -> dict[str, Any]:
+    return _state_index_evidence_safe(
+        {
+            "status": "blocked",
+            "ready": False,
+            "reason": reason,
+            "model_id": model_id,
+            "source_id": source_id,
+            "valid_time": _format_time(valid_time),
+            "state_snapshot_index": dict(index_evidence),
+            "dependency": {
+                "name": "file_state_snapshot_index",
+                "status": "unavailable",
+                "retryable": True,
+            },
+            "failure": {
+                "classifier": "file_state_snapshot_index_unavailable",
+                "reason_code": reason.upper(),
+                "dependency": "file_state_snapshot_index",
+                "retryable": True,
+                "permanent": False,
+            },
+        }
+    )
+
+
+def _verify_state_index_object(
+    uri: str,
+    expected_checksum: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+    field: str,
+) -> dict[str, Any]:
+    try:
+        content = _read_state_object_bytes(
+            uri,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+            max_bytes=MAX_STATE_IC_BYTES,
+        )
+    except FileNotFoundError as error:
+        raise _state_index_error("state_snapshot_index_object_missing", field=field) from error
+    except ObjectStoreError as error:
+        if _is_missing_file_error(error):
+            raise _state_index_error("state_snapshot_index_object_missing", field=field) from error
+        raise _state_index_error("state_snapshot_index_object_unreadable", field=field) from error
+    except (OSError, SafeFilesystemError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_object_unreadable", field=field) from error
+    actual_checksum = sha256_bytes(content)
+    if not _checksum_matches(expected_checksum, actual_checksum):
+        raise _state_index_error("state_snapshot_index_object_checksum_mismatch", field=field)
+    return _state_index_evidence_safe(
+        {
+            "exists": True,
+            "uri": _state_index_uri_evidence(uri),
+            "checksum_verified": True,
+            "size_bytes": len(content),
+        }
+    )
+
+
+def _read_state_index_bytes(
+    uri: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+    max_bytes: int,
+) -> bytes:
+    parsed = urlparse(str(uri))
+    if parsed.scheme in {"s3", "published"}:
+        return _state_index_object_store(
+            str(uri),
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+        ).read_bytes_limited(_state_index_object_key(str(uri)), max_bytes=max_bytes)
+    return read_bytes_limited_no_follow(Path(uri).expanduser(), max_bytes=max_bytes)
+
+
+def _write_state_index_bytes(
+    uri: str,
+    content: bytes,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+) -> None:
+    parsed = urlparse(str(uri))
+    if parsed.scheme in {"s3", "published"}:
+        _state_index_object_store(
+            str(uri),
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+        ).write_bytes_atomic(_state_index_object_key(str(uri)), content)
+        return
+    atomic_write_bytes_no_follow(Path(uri).expanduser(), content)
+
+
+def _read_state_object_bytes(
+    uri: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+    max_bytes: int,
+) -> bytes:
+    parsed = urlparse(str(uri))
+    if parsed.scheme in {"s3", "published"}:
+        return _state_index_object_store(
+            str(uri),
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=published_artifact_root,
+        ).read_bytes_limited(_state_index_object_key(str(uri)), max_bytes=max_bytes)
+    if parsed.scheme:
+        raise ValueError("Unsupported state object URI scheme.")
+    path = Path(uri)
+    if path.is_absolute() or str(uri).startswith("~"):
+        raise ValueError("State object URI must be an object URI or object-store relative key.")
+    root = object_store_root or os.getenv("OBJECT_STORE_ROOT")
+    if root in (None, ""):
+        raise ObjectStoreError("OBJECT_STORE_ROOT is required for relative state object URIs.")
+    store = LocalObjectStore(
+        root,
+        object_store_prefix=object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", ""),
+    )
+    return store.read_bytes_limited(str(uri), max_bytes=max_bytes)
+
+
+def _state_index_object_store(
+    uri: str,
+    *,
+    object_store_root: str | Path | None,
+    object_store_prefix: str | None,
+    published_artifact_root: str | Path | None,
+) -> LocalObjectStore:
+    parsed = urlparse(str(uri))
+    if parsed.scheme == "published":
+        root = published_artifact_root or object_store_root or os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT")
+        prefix = "published://"
+    else:
+        root = object_store_root or os.getenv("OBJECT_STORE_ROOT")
+        prefix = object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", "")
+    if root in (None, ""):
+        raise ObjectStoreError("object store root is required for file state index object URI reads")
+    return LocalObjectStore(root, object_store_prefix=prefix or "")
+
+
+def _state_index_object_key(uri: str) -> str:
+    parsed = urlparse(str(uri))
+    if parsed.scheme == "published":
+        return "/".join(part.strip("/") for part in (parsed.netloc, parsed.path) if part.strip("/"))
+    return str(uri)
+
+
+def _is_missing_file_error(error: BaseException) -> bool:
+    cursor: BaseException | None = error
+    seen: set[int] = set()
+    while cursor is not None and id(cursor) not in seen:
+        if isinstance(cursor, FileNotFoundError):
+            return True
+        seen.add(id(cursor))
+        cursor = cursor.__cause__ or cursor.__context__
+    return False
+
+
+def _parse_state_index_generated_at(value: Any, *, now: datetime | None, max_age_hours: int) -> datetime:
+    generated_at = _parse_state_index_time(value, field="generated_at")
+    current = _ensure_utc(now or datetime.now(tz=UTC))
+    generated = _ensure_utc(generated_at)
+    if generated > current + timedelta(minutes=5):
+        raise _state_index_error("state_snapshot_index_generated_at_future", field="generated_at")
+    if current - generated > timedelta(hours=max(int(max_age_hours), 1)):
+        raise _state_index_error(
+            "state_snapshot_index_stale",
+            field="generated_at",
+            evidence={"max_age_hours": int(max_age_hours)},
+        )
+    return generated
+
+
+def _parse_state_index_time(value: Any, *, field: str) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    try:
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except (TypeError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_time_invalid", field=field) from error
+
+
+def _optional_state_index_int(value: Any, *, field: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_int_invalid", field=field) from error
+    if parsed < 0:
+        raise _state_index_error("state_snapshot_index_int_invalid", field=field)
+    return parsed
+
+
+def _require_state_index_checksum(payload: Mapping[str, Any]) -> None:
+    checksum = payload.get("checksum")
+    if checksum in (None, ""):
+        raise _state_index_error("state_snapshot_index_checksum_missing", field="checksum")
+    if not _checksum_matches(checksum, _payload_checksum(payload)):
+        raise _state_index_error("state_snapshot_index_checksum_mismatch", field="checksum")
+
+
+def _payload_checksum(payload: Mapping[str, Any]) -> str:
+    return sha256_bytes(_canonical_json_bytes({key: value for key, value in payload.items() if key != "checksum"}))
+
+
+def _canonical_json_bytes(payload: Mapping[str, Any], *, pretty: bool = False) -> bytes:
+    if pretty:
+        return json.dumps(payload, sort_keys=True, indent=2, default=str).encode("utf-8") + b"\n"
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _checksum_matches(expected: Any, actual: Any) -> bool:
+    if expected in (None, "") or actual in (None, ""):
+        return False
+    return _checksum_value(expected) == _checksum_value(actual)
+
+
+def _checksum_value(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text.startswith("sha256:"):
+        return text.split(":", 1)[1]
+    return text
+
+
+def _safe_checksum(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return "sha256:[redacted]" if str(value).startswith("sha256:") else "[redacted]"
+
+
+def _state_index_uri_evidence(value: str | Path) -> str:
+    parsed = urlparse(str(value))
+    if parsed.scheme in {"s3", "published"}:
+        return "[object-uri]"
+    if parsed.scheme:
+        return "[uri]"
+    if str(value).startswith("/") or str(value).startswith("~"):
+        return "[local-path]"
+    return str(value)
+
+
+def _state_index_evidence_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _state_index_evidence_safe(nested) for key, nested in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_state_index_evidence_safe(item) for item in value]
+    if isinstance(value, str):
+        parsed = urlparse(value)
+        if parsed.scheme in {"s3", "published"}:
+            return value
+        if parsed.scheme:
+            return "[uri]"
+        if value.startswith("/") or value.startswith("~"):
+            return "[local-path]"
+    return value
+
+
+def _first_state_index_blocker_reason(evidence: Mapping[str, Any]) -> str | None:
+    blockers = evidence.get("blockers")
+    if isinstance(blockers, Sequence) and not isinstance(blockers, str | bytes | bytearray) and blockers:
+        first = blockers[0]
+        if isinstance(first, Mapping):
+            return str(first.get("reason") or first.get("code") or "") or None
+    return None
+
+
+def _validate_state_index_json_complexity(value: Any) -> None:
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    visited = 0
+    while stack:
+        item, depth = stack.pop()
+        visited += 1
+        if visited > MAX_STATE_SNAPSHOT_INDEX_JSON_NODES:
+            raise _state_index_error(
+                "state_snapshot_index_json_node_limit_exceeded",
+                field="index",
+                evidence={"max_nodes": MAX_STATE_SNAPSHOT_INDEX_JSON_NODES},
+            )
+        if depth > MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH:
+            raise _state_index_error(
+                "state_snapshot_index_json_depth_exceeded",
+                field="index",
+                evidence={"max_depth": MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH},
+            )
+        if isinstance(item, Mapping):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
+            stack.extend((child, depth + 1) for child in item)
+
+
+def _state_index_error(reason: str, *, field: str, evidence: Mapping[str, Any] | None = None) -> StateManagerError:
+    error = StateManagerError(reason)
+    error.reason = reason  # type: ignore[attr-defined]
+    error.field = field  # type: ignore[attr-defined]
+    error.evidence = dict(evidence or {})  # type: ignore[attr-defined]
+    return error
 
 
 def state_snapshot_id(model_id: str, valid_time: datetime, *, source_id: str | None = None) -> str:

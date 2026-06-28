@@ -37,6 +37,25 @@ def _db_free_orchestration_repository_from_config(
     return FileOrchestrationJournalRepository(str(config.scheduler_journal_root))
 
 
+def _db_free_state_manager_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.StateManager:
+    from packages.common.object_store import LocalObjectStore
+
+    repository = _scheduler.FileStateSnapshotIndexRepository(
+        str(config.scheduler_state_index),
+        object_store_root=config.object_store_root,
+        object_store_prefix=_scheduler.os.getenv("OBJECT_STORE_PREFIX"),
+        published_artifact_root=config.published_artifact_root,
+        now=config.now,
+    )
+    return _scheduler.StateManager(
+        repository=repository,
+        object_store=LocalObjectStore(
+            config.object_store_root or config.workspace_root,
+            object_store_prefix=_scheduler.os.getenv("OBJECT_STORE_PREFIX", ""),
+        ),
+    )
+
+
 def _db_free_file_retry_service_from_env(repository: _scheduler.FileOrchestrationJournalRepository) -> _scheduler.Any:
     from services.orchestrator.retry import RetryConfig
     from services.slurm_gateway.config import SlurmGatewaySettings
@@ -98,6 +117,7 @@ class ProductionScheduler:
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _scheduler._sleep
         self._source_readiness_context_cache: dict[tuple[str, str, str], dict[str, _scheduler.Any]] = {}
+        self._db_free_state_index_repository: _scheduler.FileStateSnapshotIndexRepository | None = None
 
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
@@ -340,7 +360,8 @@ class ProductionScheduler:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
         if self.config.db_free_required:
-            return self._default_orchestrator_for(source_id, state_manager=None)
+            state_manager = _db_free_state_manager_from_config(self.config) if self._db_free_strict_warm_start_required() else None
+            return self._default_orchestrator_for(source_id, state_manager=state_manager)
         return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
 
     def _cancel_orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
@@ -510,6 +531,42 @@ class ProductionScheduler:
         evidence.setdefault("accepted_horizon", _scheduler._accepted_horizon_from_hours(forecast_hours))
         return _scheduler._evidence_safe(evidence)
 
+    def _db_free_strict_warm_start_required(self) -> bool:
+        return bool(
+            self.config.db_free_required
+            and _scheduler.OrchestratorConfig.from_env().require_forecast_warm_start
+        )
+
+    def _db_free_state_index_provider(self) -> _scheduler.FileStateSnapshotIndexRepository:
+        if self._db_free_state_index_repository is None:
+            self._db_free_state_index_repository = _scheduler.FileStateSnapshotIndexRepository(
+                str(self.config.scheduler_state_index),
+                object_store_root=self.config.object_store_root,
+                object_store_prefix=_scheduler.os.getenv("OBJECT_STORE_PREFIX"),
+                published_artifact_root=self.config.published_artifact_root,
+                now=self.config.now,
+            )
+        return self._db_free_state_index_repository
+
+    def _strict_warm_start_for_candidate(
+        self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
+    ) -> dict[str, _scheduler.Any] | None:
+        if not self._db_free_strict_warm_start_required():
+            return None
+        del cycle
+        model_package_checksum = (
+            candidate.resource_profile.get("package_checksum")
+            or candidate.resource_profile.get("model_package_checksum")
+        )
+        return self._db_free_state_index_provider().strict_warm_start_evidence(
+            model_id=candidate.model_id,
+            source_id=candidate.source_id,
+            valid_time=candidate.cycle_time_utc,
+            model_package_version=candidate.model_package_uri,
+            model_package_checksum=str(model_package_checksum) if model_package_checksum not in (None, "") else None,
+            required_lead_hours=12,
+        )
+
     def _source_readiness_context(self, cycle: _scheduler.SchedulerSourceCycle) -> dict[str, _scheduler.Any]:
         cache_key = (
             cycle.discovery.source_id,
@@ -534,6 +591,7 @@ class ProductionScheduler:
             config=self.config,
             active_repository=self.active_repository,
             canonical_readiness_for_candidate=self._canonical_readiness_for_candidate,
+            strict_warm_start_for_candidate=self._strict_warm_start_for_candidate,
             orchestrator_for=self._orchestrator_for,
             candidate_factory=_scheduler._candidate_for,
             candidate_state_provider_caller=_scheduler._call_candidate_state_provider,

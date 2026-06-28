@@ -96,6 +96,10 @@ class SchedulerCandidateConstructionContext:
         [SchedulerCandidateLike, SchedulerSourceCycleLike],
         Mapping[str, Any] | None,
     ]
+    strict_warm_start_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycleLike],
+        Mapping[str, Any] | None,
+    ]
     orchestrator_for: Callable[[str], Any]
     candidate_factory: Callable[..., SchedulerCandidateLike]
     candidate_state_provider_caller: Callable[..., Any] = _call_candidate_state_provider
@@ -504,6 +508,18 @@ def build_candidates(
                     candidate,
                     {"canonical_readiness": canonical_readiness},
                 )
+            strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
+            if strict_warm_start is not None and not bool(strict_warm_start.get("ready")):
+                blocked.append(
+                    _blocked_candidate(
+                        candidate,
+                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
+                        state_evidence=strict_warm_start,
+                    )
+                )
+                continue
+            if strict_warm_start is not None:
+                candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
                 state_decision is not None
                 and state_decision.action == "retry"

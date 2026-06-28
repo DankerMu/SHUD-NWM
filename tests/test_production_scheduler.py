@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
@@ -15802,6 +15803,48 @@ def _write_db_free_file_provider_fixtures(
     }
 
 
+def _write_db_free_state_index_fixture(
+    roots: Mapping[str, Path],
+    paths: Mapping[str, Path],
+    *,
+    cycle_time: datetime,
+    package_checksum: str,
+    generated_at: datetime,
+    entries: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    if entries is None:
+        state_content = b"db-free-strict-warm-start-state\n"
+        state_uri = store.write_bytes_atomic(
+            f"states/gfs/model_a/{format_cycle_time(cycle_time)}/state.cfg.ic",
+            state_content,
+        )
+        entries = [
+            {
+                "state_id": "state_gfs_model_a_2026052106",
+                "model_id": "model_a",
+                "run_id": "analysis_gfs_2026052018_model_a",
+                "source_id": "gfs",
+                "valid_time": _format_iso_z(cycle_time),
+                "state_uri": state_uri,
+                "checksum": f"sha256:{sha256_bytes(state_content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052018",
+                "lead_hours": 12,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": package_checksum,
+            }
+        ]
+    receipt = publish_state_snapshot_index(
+        entries,
+        paths["NHMS_SCHEDULER_STATE_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+    )
+    return {"entries": [dict(entry) for entry in entries], "receipt": receipt}
+
+
 def _format_iso_z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -17185,6 +17228,167 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
     assert "advisory" not in rendered.lower()
     assert "db-free-local-root" not in rendered
     assert str(config.lock_path) not in rendered
+
+
+def test_db_free_strict_warm_start_uses_ready_file_state_index_without_db_state_repository(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setattr(
+        "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
+        staticmethod(lambda: pytest.fail("DB-free strict warm start must not construct PostgreSQL state repository")),
+    )
+    monkeypatch.setattr(
+        scheduler_module.StateManager,
+        "from_env",
+        staticmethod(lambda: pytest.fail("DB-free strict warm start must not construct DB-backed StateManager")),
+    )
+    monkeypatch.setattr(
+        scheduler_module.FileStateSnapshotIndexRepository,
+        "get_latest_usable_state",
+        lambda *_args, **_kwargs: pytest.fail("Strict file state lookup must not use latest fallback"),
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    state_evidence = candidates[0].state_evidence
+    assert state_evidence["ready"] is True
+    assert state_evidence["candidate_state"]["init_state_uri"] == state_fixture["entries"][0]["state_uri"]
+    assert state_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 12
+    assert state_evidence["state_snapshot_index"]["status"] == "ready"
+    assert state_evidence["state_snapshot_index"]["entry_status"] == "ready"
+    assert state_evidence["state_snapshot_index"]["object_evidence"]["exists"] is True
+
+
+def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_latest_fallback(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setattr(
+        "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
+        staticmethod(lambda: pytest.fail("DB-free strict warm start must not construct PostgreSQL state repository")),
+    )
+    monkeypatch.setattr(
+        scheduler_module.FileStateSnapshotIndexRepository,
+        "get_latest_usable_state",
+        lambda *_args, **_kwargs: pytest.fail("Strict file state lookup must not use latest fallback"),
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("blocked candidate must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    assert blocked[0].reason == "state_snapshot_index_exact_checkpoint_missing"
+    state_evidence = blocked[0].state_evidence
+    assert state_evidence["ready"] is False
+    assert state_evidence["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert state_evidence["state_snapshot_index"]["status"] == "ready"
+    assert state_evidence["state_snapshot_index"]["entry_count"] == 0
+    assert "candidate_state" not in state_evidence
+    assert "latest" not in json.dumps(state_evidence, sort_keys=True).lower()
 
 
 def test_db_free_orchestrator_uses_slurm_gateway_retry_config(
