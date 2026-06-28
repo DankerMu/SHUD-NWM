@@ -834,6 +834,27 @@ def test_save_state_snapshot_rejects_oversized_input_before_upload(
     assert repository.snapshots == {}
 
 
+def test_save_state_snapshot_rejects_symlink_input_before_upload(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    target = tmp_path / "real.cfg.ic"
+    target.write_bytes(_valid_ic_bytes(b"real-symlink-target"))
+    symlink = tmp_path / "linked.cfg.ic"
+    symlink.symlink_to(target)
+
+    with pytest.raises(StateManagerError, match="Failed to read state snapshot file"):
+        manager.save_state_snapshot(
+            model_id="demo_model",
+            run_id="run_symlink",
+            valid_time=_dt("2026-04-30T00:00:00Z"),
+            ic_file_path=symlink,
+        )
+
+    assert repository.snapshots == {}
+
+
 def test_state_save_checkpoint_ic_read_is_bounded_before_normalization(
     monkeypatch: Any,
     tmp_path: Path,
@@ -856,6 +877,50 @@ def test_state_save_checkpoint_ic_read_is_bounded_before_normalization(
     )
 
     with pytest.raises(StateManagerError, match="state checkpoint IC file exceeds size limit"):
+        state_cli.save_state_for_run(run_id, manager=manager, run_context=run, workspace_root=workspace)
+
+    assert repository.snapshots == {}
+
+
+def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    run_id = "fcst_gfs_2026052106_model_a"
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "runs" / run_id / "output"
+    manifest_dir = output_dir / "state_checkpoints"
+    manifest_dir.mkdir(parents=True)
+    target = manifest_dir / "real.cfg.ic.update"
+    target.write_bytes(_valid_ic_bytes(b"manifest-symlink-target"))
+    symlink = manifest_dir / "linked.cfg.ic.update"
+    symlink.symlink_to(target)
+    (manifest_dir / "state_checkpoints.json").write_text(
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "relative_path": "state_checkpoints/linked.cfg.ic.update",
+                        "valid_time": "2026-05-21T18:00:00Z",
+                        "checkpoint_filename": "linked.cfg.ic.update",
+                        "lead_hours": 12,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    run = state_cli.StateRunContext(
+        run_id=run_id,
+        model_id="model_a",
+        end_time=_dt("2026-05-21T18:00:00Z"),
+        output_uri=None,
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+    )
+
+    with pytest.raises(StateManagerError, match="State checkpoint path is unsafe"):
         state_cli.save_state_for_run(run_id, manager=manager, run_context=run, workspace_root=workspace)
 
     assert repository.snapshots == {}

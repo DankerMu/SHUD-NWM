@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +21,12 @@ from packages.common.manifest_index import (
     validate_manifest_index_entry_count,
 )
 from packages.common.object_store import LocalObjectStore
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, read_bytes_limited_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+)
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
     PsycopgStateSnapshotRepository,
@@ -479,12 +485,17 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
         valid_time = raw.get("valid_time")
         if not relative_path or not valid_time:
             continue
-        path = (output_root / relative_path).resolve(strict=False)
+        relative_candidate = Path(relative_path)
+        if relative_candidate.is_absolute() or ".." in relative_candidate.parts:
+            raise StateManagerError(f"State checkpoint path escapes output directory: {relative_path}")
+        path = output_root / relative_candidate
         try:
-            path.relative_to(output_root.resolve(strict=False))
-        except ValueError as error:
-            raise StateManagerError(f"State checkpoint path escapes output directory: {relative_path}") from error
-        if not path.is_file():
+            entry_stat = stat_no_follow(path, containment_root=output_root)
+        except FileNotFoundError:
+            continue
+        except SafeFilesystemError as error:
+            raise StateManagerError(f"State checkpoint path is unsafe: {relative_path}") from error
+        if not stat.S_ISREG(entry_stat.st_mode):
             continue
         checkpoints.append(
             StateCheckpoint(
