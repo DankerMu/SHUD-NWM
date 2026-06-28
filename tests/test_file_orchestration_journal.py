@@ -983,6 +983,43 @@ def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp
     assert object_store_prefix in private_rendered
 
 
+def test_pipeline_event_private_runtime_root_recovery_omits_secret_bearing_values(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    workspace_root = tmp_path / "runtime" / "workspace"
+    object_store_root = tmp_path / "runtime" / "object-store"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_private_recovery_filter")
+    repository.reserve_pipeline_job(record)
+
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_private_recovery_filter",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+                "object_store_prefix": "s3://user:secret@nhms-prod/private-root?token=private-token",
+                "published_artifact_uri_prefix": "s3://nhms-prod/published?X-Amz-Signature=signature-secret",
+            }
+        },
+    )
+
+    private_files = sorted((journal_root / "private/runtime-root-recovery").rglob("*.json"))
+    assert private_files
+    private_rendered = "\n".join(path.read_text(encoding="utf-8") for path in private_files)
+
+    assert str(workspace_root) in private_rendered
+    assert str(object_store_root) in private_rendered
+    for raw in ("user:secret", "private-token", "signature-secret", "X-Amz-Signature"):
+        assert raw not in private_rendered
+    assert "object_store_prefix" not in private_rendered
+    assert "published_artifact_uri_prefix" not in private_rendered
+
+
 def test_pipeline_event_public_surfaces_redact_message_text(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"

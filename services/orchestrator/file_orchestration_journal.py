@@ -23,6 +23,7 @@ from packages.common.safe_fs import (
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
+from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
 from services.orchestrator.chain_repository import (
@@ -3016,14 +3017,26 @@ def _runtime_root_recovery_candidate_records(details: Mapping[str, Any]) -> list
     for path in _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS:
         candidate = _mapping_at(details, path)
         if candidate and _has_runtime_root_field(candidate):
-            candidates.append({"path": list(path), "value": _runtime_root_recovery_candidate_value(candidate)})
+            value = _runtime_root_recovery_candidate_value(candidate)
+            if value:
+                candidates.append({"path": list(path), "value": value})
     if _has_runtime_root_field(details):
-        candidates.append({"path": ["details"], "value": _runtime_root_recovery_candidate_value(details)})
+        value = _runtime_root_recovery_candidate_value(details)
+        if value:
+            candidates.append({"path": ["details"], "value": value})
     return candidates
 
 
 def _runtime_root_recovery_candidate_value(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    return {field: _strip_internal_fields(candidate[field]) for field in _RUNTIME_ROOT_FIELDS if field in candidate}
+    values: dict[str, Any] = {}
+    for root_field in _RUNTIME_ROOT_FIELDS:
+        if root_field not in candidate:
+            continue
+        value = _strip_internal_fields(candidate[root_field])
+        if isinstance(value, str) and secret_manifest_value_reason(value) is not None:
+            continue
+        values[root_field] = value
+    return values
 
 
 def _private_runtime_root_recovery_path(
