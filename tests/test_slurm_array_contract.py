@@ -262,6 +262,46 @@ def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expect
     assert expected_command in rendered
 
 
+def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Path) -> None:
+    state_index = tmp_path / "object-store" / "db-free" / "state-index.json"
+    rendered = _gateway(tmp_path).render_template(
+        "save_state_snapshot_array",
+        {
+            **_render_manifest(tmp_path, "save_state_snapshot_array"),
+            "scheduler_db_free_required": "true",
+            "scheduler_state_index_backend": "file",
+            "scheduler_state_index": str(state_index),
+        },
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    assert "export NHMS_SCHEDULER_DB_FREE_REQUIRED=true" in rendered
+    assert "export NHMS_SCHEDULER_STATE_INDEX_BACKEND=file" in rendered
+    assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(state_index))}" in rendered
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NHMS_SCHEDULER_DB_FREE_REQUIRED", "NHMS_SCHEDULER_STATE_INDEX_BACKEND", "NHMS_SCHEDULER_STATE_INDEX"],
+)
+def test_state_save_array_slurm_env_cannot_override_db_free_state_index_env(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(
+            "save_state_snapshot_array",
+            {
+                **_render_manifest(tmp_path, "save_state_snapshot_array"),
+                "slurm_env": {key: "override"},
+            },
+            str(tmp_path / "manifest_index.json"),
+        )
+
+    assert exc_info.value.details["field"] == f"slurm_env.{key}"
+    assert exc_info.value.details["reason"] == "canonical_runtime_env"
+
+
 def test_publish_tiles_template_does_not_render_database_url_secret(tmp_path: Path) -> None:
     secret_database_url = "postgresql://nhms:secret@example.invalid/nhms"
     manifest = {

@@ -272,7 +272,7 @@ class ProductionScheduler:
         return results
 
     def _refresh_db_free_file_providers(self) -> None:
-        for provider in (self.registry, self.canonical_readiness_provider):
+        for provider in (self.registry, self.canonical_readiness_provider, self._db_free_state_index_repository):
             refresh = getattr(provider, "refresh", None)
             if callable(refresh):
                 refresh()

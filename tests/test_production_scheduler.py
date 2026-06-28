@@ -17431,12 +17431,70 @@ def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_befo
     result = scheduler.run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     blocked = result.evidence["blocked_candidates"][0]
     assert blocked["reason"] == "state_snapshot_index_malformed_json"
     assert blocked["state_evidence"]["reason"] == "state_snapshot_index_malformed_json"
     assert "candidate_state" not in blocked["state_evidence"]
     assert "latest" not in json.dumps(blocked["state_evidence"], sort_keys=True).lower()
+
+
+def test_db_free_strict_warm_start_refreshes_file_state_index_between_passes(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, dry_run=False),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"]),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    first = scheduler.run_once()
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    second = scheduler.run_once()
+
+    assert first.evidence["counts"]["submitted_count"] == 0
+    assert first.evidence["blocked_candidates"][0]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert second.status == "submitted"
+    assert second.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+    assert orchestrator.calls[0]["basins"][0]["init_state_id"] == state_fixture["entries"][0]["state_id"]
 
 
 def test_db_free_strict_warm_start_run_once_submits_basin_manifest_init_state(

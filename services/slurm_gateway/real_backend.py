@@ -878,6 +878,18 @@ class RealSlurmGateway(SlurmGateway):
             "NHMS_JOB_TYPE": context.get("job_type", ""),
             "NHMS_RUN_MANIFEST_URI": context.get("run_manifest_uri", ""),
             "NHMS_MANIFEST_INDEX": context.get("manifest_index_path", ""),
+            "NHMS_SCHEDULER_DB_FREE_REQUIRED": context.get(
+                "scheduler_db_free_required",
+                os.getenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", ""),
+            ),
+            "NHMS_SCHEDULER_STATE_INDEX_BACKEND": context.get(
+                "scheduler_state_index_backend",
+                os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""),
+            ),
+            "NHMS_SCHEDULER_STATE_INDEX": context.get(
+                "scheduler_state_index",
+                os.getenv("NHMS_SCHEDULER_STATE_INDEX", ""),
+            ),
             "NHMS_MAX_CONCURRENT": context.get("max_concurrent", ""),
             "SHUD_THREADS": context.get("shud_threads", ""),
             "OMP_NUM_THREADS": context.get("shud_threads", ""),

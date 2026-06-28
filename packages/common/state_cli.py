@@ -353,25 +353,37 @@ def _state_run_context_from_manifest_entry(entry: Mapping[str, Any]) -> StateRun
         raise StateManagerError("DB-free state save manifest entry is missing model_id.")
     source_id = _optional_str(entry.get("source_id") or identity.get("source_id"))
     cycle_time_value = entry.get("cycle_time") or identity.get("cycle_time")
+    cycle_time = _parse_time_flexible(cycle_time_value) if cycle_time_value not in (None, "") else None
+    model_package_version = _optional_str(
+        entry.get("model_package_uri")
+        or identity.get("model_package_uri")
+        or model.get("model_package_uri")
+    )
+    model_package_checksum = _optional_str(
+        entry.get("model_package_checksum")
+        or entry.get("package_checksum")
+        or identity.get("model_package_checksum")
+        or model.get("model_package_checksum")
+        or resource_profile.get("package_checksum")
+    )
+    _require_db_free_state_save_lineage(
+        {
+            "source_id": source_id,
+            "cycle_time": cycle_time,
+            "model_package_uri": model_package_version,
+            "model_package_checksum": model_package_checksum,
+        },
+        source="manifest entry",
+    )
     return StateRunContext(
         run_id=run_id,
         model_id=model_id,
         end_time=_parse_time_flexible(end_time_value),
         output_uri=_optional_str(entry.get("output_uri") or outputs.get("output_uri")),
         source_id=source_id,
-        cycle_time=_parse_time_flexible(cycle_time_value) if cycle_time_value not in (None, "") else None,
-        model_package_version=_optional_str(
-            entry.get("model_package_uri")
-            or identity.get("model_package_uri")
-            or model.get("model_package_uri")
-        ),
-        model_package_checksum=_optional_str(
-            entry.get("model_package_checksum")
-            or entry.get("package_checksum")
-            or identity.get("model_package_checksum")
-            or model.get("model_package_checksum")
-            or resource_profile.get("package_checksum")
-        ),
+        cycle_time=cycle_time,
+        model_package_version=model_package_version,
+        model_package_checksum=model_package_checksum,
     )
 
 
@@ -380,17 +392,43 @@ def _state_run_context_from_env(run_id: str) -> StateRunContext:
     end_time = os.getenv("NHMS_END_TIME", "").strip()
     if not model_id or not end_time:
         raise StateManagerError("DB-free state save requires NHMS_MODEL_ID and NHMS_END_TIME.")
+    source_id = _optional_str(os.getenv("NHMS_SOURCE_ID"))
     cycle_time = os.getenv("NHMS_CYCLE_TIME", "").strip()
+    parsed_cycle_time = _parse_time_flexible(cycle_time) if cycle_time else None
+    model_package_version = _optional_str(os.getenv("NHMS_MODEL_PACKAGE_URI"))
+    model_package_checksum = _optional_str(os.getenv("NHMS_MODEL_PACKAGE_CHECKSUM"))
+    _require_db_free_state_save_lineage(
+        {
+            "source_id": source_id,
+            "cycle_time": parsed_cycle_time,
+            "model_package_uri": model_package_version,
+            "model_package_checksum": model_package_checksum,
+        },
+        source="NHMS_* runtime env",
+    )
     return StateRunContext(
         run_id=run_id,
         model_id=model_id,
         end_time=_parse_time_flexible(end_time),
         output_uri=None,
-        source_id=_optional_str(os.getenv("NHMS_SOURCE_ID")),
-        cycle_time=_parse_time_flexible(cycle_time) if cycle_time else None,
-        model_package_version=_optional_str(os.getenv("NHMS_MODEL_PACKAGE_URI")),
-        model_package_checksum=_optional_str(os.getenv("NHMS_MODEL_PACKAGE_CHECKSUM")),
+        source_id=source_id,
+        cycle_time=parsed_cycle_time,
+        model_package_version=model_package_version,
+        model_package_checksum=model_package_checksum,
     )
+
+
+def _require_db_free_state_save_lineage(fields: Mapping[str, Any], *, source: str) -> None:
+    required = {
+        "source_id": "NHMS_SOURCE_ID",
+        "cycle_time": "NHMS_CYCLE_TIME",
+        "model_package_uri": "NHMS_MODEL_PACKAGE_URI",
+        "model_package_checksum": "NHMS_MODEL_PACKAGE_CHECKSUM",
+    }
+    missing = [env for key, env in required.items() if fields.get(key) in (None, "")]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise StateManagerError(f"DB-free state save {source} is missing required lineage fields: {missing_text}.")
 
 
 def _env_flag(name: str) -> bool:

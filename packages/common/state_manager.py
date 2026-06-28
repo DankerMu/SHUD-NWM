@@ -172,7 +172,7 @@ class StateManager:
             valid_time=parsed_valid_time,
             source_id=source_id,
         )
-        if existing is not None and existing.checksum == checksum:
+        if existing is not None and _checksum_matches(existing.checksum, checksum):
             return StateSnapshotSaveResult(status="already_done", state_id=existing.state_id, snapshot=existing)
 
         state_key = _state_object_key(model_id, parsed_valid_time, source_id=source_id)
@@ -656,9 +656,14 @@ class FileStateSnapshotIndexRepository:
         )
 
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
-        for snapshot in self._load_snapshots_for_lookup().values():
-            if snapshot.state_id == state_id:
-                return snapshot
+        index_snapshot = self._load_index_snapshot(
+            allow_empty=self.create_missing,
+            verify_objects=False,
+            enforce_freshness=not self.create_missing,
+        )
+        for entry in index_snapshot.entries.values():
+            if str(entry.get("state_id") or "") == state_id:
+                return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
         return None
 
     def get_state_snapshot_by_model_time(
@@ -671,7 +676,15 @@ class FileStateSnapshotIndexRepository:
         if source_id in (None, ""):
             return None
         key = self._snapshot_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
-        return self._load_snapshots_for_lookup().get(key)
+        index_snapshot = self._load_index_snapshot(
+            allow_empty=self.create_missing,
+            verify_objects=False,
+            enforce_freshness=not self.create_missing,
+        )
+        entry = index_snapshot.entries.get(key)
+        if entry is None:
+            return None
+        return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         with self._update_lock():
@@ -862,8 +875,8 @@ class FileStateSnapshotIndexRepository:
         )
 
     def _load_entries_for_update(self) -> dict[tuple[str, str, str], dict[str, Any]]:
-        payload, _content = self._read_payload(allow_empty=self.create_missing)
-        if not payload:
+        payload, content = self._read_payload(allow_empty=self.create_missing)
+        if not payload and not content:
             return {}
         return _validate_state_snapshot_index(
             payload,
@@ -872,6 +885,7 @@ class FileStateSnapshotIndexRepository:
             published_artifact_root=self.published_artifact_root,
             now=self.now,
             max_age_hours=self.max_age_hours,
+            enforce_freshness=False,
         )
 
     def _publish_entries(self, entries: Sequence[Mapping[str, Any]]) -> None:
@@ -884,13 +898,20 @@ class FileStateSnapshotIndexRepository:
             generated_at=self.now,
         )
 
-    def _load_index_snapshot(self, *, allow_empty: bool) -> _StateIndexSnapshot:
+    def _load_index_snapshot(
+        self,
+        *,
+        allow_empty: bool,
+        verify_objects: bool = False,
+        enforce_freshness: bool = True,
+    ) -> _StateIndexSnapshot:
+        use_cache = not allow_empty and not verify_objects and enforce_freshness
         cached = self._index_snapshot_cache
-        if not allow_empty and cached is not None:
+        if use_cache and cached is not None:
             return cached
         payload, content = self._read_payload(allow_empty=allow_empty)
         entries: dict[tuple[str, str, str], dict[str, Any]]
-        if not payload and allow_empty:
+        if not payload and not content and allow_empty:
             entries = {}
         else:
             entries = _validate_state_snapshot_index(
@@ -900,7 +921,8 @@ class FileStateSnapshotIndexRepository:
                 published_artifact_root=self.published_artifact_root,
                 now=self.now,
                 max_age_hours=self.max_age_hours,
-                verify_objects=False,
+                verify_objects=verify_objects,
+                enforce_freshness=enforce_freshness,
             )
         evidence = _state_index_evidence_safe(
             {
@@ -917,7 +939,7 @@ class FileStateSnapshotIndexRepository:
             }
         )
         snapshot = _StateIndexSnapshot(payload=dict(payload), content=content, entries=entries, evidence=evidence)
-        if not allow_empty:
+        if use_cache:
             object.__setattr__(self, "_index_snapshot_cache", snapshot)
         return snapshot
 
@@ -982,8 +1004,6 @@ class FileStateSnapshotIndexRepository:
             raise _state_index_error("state_snapshot_index_unreadable", field="index") from error
         except (OSError, SafeFilesystemError, ValueError) as error:
             raise _state_index_error("state_snapshot_index_unreadable", field="index") from error
-        if allow_empty and content.strip() in {b"", b"{}"}:
-            return {}, content
         if len(content) > MAX_STATE_SNAPSHOT_INDEX_BYTES:
             raise _state_index_error("state_snapshot_index_size_limit_exceeded", field="index")
         try:
@@ -1012,6 +1032,12 @@ def publish_state_snapshot_index(
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
     content = _canonical_json_bytes(payload, pretty=True)
+    if len(content) > MAX_STATE_SNAPSHOT_INDEX_BYTES:
+        raise _state_index_error(
+            "state_snapshot_index_size_limit_exceeded",
+            field="index",
+            evidence={"index_bytes": len(content), "max_bytes": MAX_STATE_SNAPSHOT_INDEX_BYTES},
+        )
     normalized = _validate_state_snapshot_index(
         payload,
         object_store_root=object_store_root,
@@ -1050,12 +1076,18 @@ def _validate_state_snapshot_index(
     now: datetime | None,
     max_age_hours: int,
     verify_objects: bool = True,
+    enforce_freshness: bool = True,
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
     if payload.get("schema_version") != FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION:
         raise _state_index_error("state_snapshot_index_schema_unsupported", field="schema_version")
     _validate_state_index_json_complexity(payload)
     _require_state_index_checksum(payload)
-    generated_at = _parse_state_index_generated_at(payload.get("generated_at"), now=now, max_age_hours=max_age_hours)
+    generated_at = _parse_state_index_generated_at(
+        payload.get("generated_at"),
+        now=now,
+        max_age_hours=max_age_hours,
+        enforce_freshness=enforce_freshness,
+    )
     entries_value = payload.get("entries")
     if not isinstance(entries_value, Sequence) or isinstance(entries_value, str | bytes | bytearray):
         raise _state_index_error("state_snapshot_index_entries_invalid", field="entries")
@@ -1066,6 +1098,7 @@ def _validate_state_snapshot_index(
             evidence={"entry_count": len(entries_value), "max_entries": MAX_STATE_SNAPSHOT_INDEX_ENTRIES},
         )
     entries: dict[tuple[str, str, str], dict[str, Any]] = {}
+    state_ids: set[str] = set()
     for index, item in enumerate(entries_value):
         if not isinstance(item, Mapping):
             raise _state_index_error("state_snapshot_index_entry_not_object", field=f"entries[{index}]")
@@ -1088,6 +1121,14 @@ def _validate_state_snapshot_index(
                 field="entries[]",
                 evidence={"model_id": key[0], "source_id": key[1], "valid_time": key[2]},
             )
+        state_id = str(entry["state_id"])
+        if state_id in state_ids:
+            raise _state_index_error(
+                "state_snapshot_index_duplicate_state_id",
+                field="entries[].state_id",
+                evidence={"state_id": state_id},
+            )
+        state_ids.add(state_id)
         entry["index_generated_at"] = _format_time(generated_at)
         entries[key] = entry
     return entries
@@ -1712,13 +1753,19 @@ def _is_missing_file_error(error: BaseException) -> bool:
     return False
 
 
-def _parse_state_index_generated_at(value: Any, *, now: datetime | None, max_age_hours: int) -> datetime:
+def _parse_state_index_generated_at(
+    value: Any,
+    *,
+    now: datetime | None,
+    max_age_hours: int,
+    enforce_freshness: bool = True,
+) -> datetime:
     generated_at = _parse_state_index_time(value, field="generated_at")
     current = _ensure_utc(now or datetime.now(tz=UTC))
     generated = _ensure_utc(generated_at)
     if generated > current + timedelta(minutes=5):
         raise _state_index_error("state_snapshot_index_generated_at_future", field="generated_at")
-    if current - generated > timedelta(hours=max(int(max_age_hours), 1)):
+    if enforce_freshness and current - generated > timedelta(hours=max(int(max_age_hours), 1)):
         raise _state_index_error(
             "state_snapshot_index_stale",
             field="generated_at",
