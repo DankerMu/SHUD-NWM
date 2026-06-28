@@ -141,18 +141,6 @@ def candidate_state(
             job_limit + 1,
         ),
     )
-    jobs_total = len(jobs)
-    jobs_truncated = jobs_total > job_limit
-    jobs = sorted(
-        jobs[:job_limit],
-        key=lambda job: (
-            _pipeline_job_truth_sort_key(job),
-            _datetime_sort_key(job.get("created_at")),
-        ),
-    )
-    events: list[dict[str, Any]] = []
-    events_total = 0
-    events_truncated = False
     events = self._fetch_all(
         """
         SELECT
@@ -191,16 +179,6 @@ def candidate_state(
             event_limit + 1,
         ),
     )
-    events_total = len(events)
-    events_truncated = events_total > event_limit
-    events = sorted(
-        events[:event_limit],
-        key=lambda event: (
-            _datetime_sort_key(event.get("created_at")),
-            _numeric_sort_key(event.get("event_id")),
-        ),
-    )
-    events = [_bounded_candidate_state_event(event) for event in events]
     forcing_version = self._fetch_optional(
         """
         SELECT
@@ -243,6 +221,89 @@ def candidate_state(
         """,
         (cycle_id, source_id, cycle_time, cycle_id),
     )
+    return candidate_state_from_rows(
+        source_id=source_id,
+        cycle_time=cycle_time,
+        model_id=model_id,
+        run_id=run_id,
+        forcing_version_id=forcing_version_id,
+        candidate_id=candidate_id,
+        hydro_run=hydro_run,
+        pipeline_jobs=jobs,
+        pipeline_events=events,
+        forcing_version=forcing_version,
+        forecast_cycle=forecast_cycle,
+        retry_limit=retry_limit,
+        job_limit=job_limit,
+        event_limit=event_limit,
+    )
+
+
+def candidate_state_from_rows(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    run_id: str,
+    forcing_version_id: str,
+    candidate_id: str,
+    hydro_run: Mapping[str, Any] | None,
+    pipeline_jobs: list[dict[str, Any]],
+    pipeline_events: list[dict[str, Any]],
+    forcing_version: Mapping[str, Any] | None,
+    forecast_cycle: Mapping[str, Any] | None,
+    retry_limit: int | None = None,
+    job_limit: int = DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
+    event_limit: int = DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
+) -> dict[str, Any] | None:
+    cycle_id = cycle_id_for(source_id, cycle_time)
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    job_limit = max(int(job_limit), 1)
+    event_limit = max(int(event_limit), 1)
+    indexed_jobs = [(index, dict(job)) for index, job in enumerate(pipeline_jobs)]
+    indexed_events = [(index, dict(event)) for index, event in enumerate(pipeline_events)]
+    jobs_total = len(indexed_jobs)
+    jobs_truncated = jobs_total > job_limit
+    jobs = [
+        job
+        for _, job in sorted(
+            indexed_jobs,
+            key=lambda indexed_job: (
+                _pipeline_job_truth_sort_key(indexed_job[1])[:-1],
+                _datetime_sort_key(indexed_job[1].get("created_at")),
+                -indexed_job[0],
+            ),
+            reverse=True,
+        )
+    ]
+    jobs = sorted(
+        jobs[:job_limit],
+        key=lambda job: (
+            _pipeline_job_truth_sort_key(job),
+            _datetime_sort_key(job.get("created_at")),
+        ),
+    )
+    events_total = len(indexed_events)
+    events_truncated = events_total > event_limit
+    events = [
+        event
+        for _, event in sorted(
+            indexed_events,
+            key=lambda indexed_event: (
+                _datetime_sort_key(indexed_event[1].get("created_at")),
+                -indexed_event[0],
+            ),
+            reverse=True,
+        )
+    ]
+    events = sorted(
+        events[:event_limit],
+        key=lambda event: (
+            _datetime_sort_key(event.get("created_at")),
+            _numeric_sort_key(event.get("event_id")),
+        ),
+    )
+    events = [_bounded_candidate_state_event(event) for event in events]
     nfs_raw_manifest = source_cycle_raw_manifest.nfs_raw_manifest_readiness_from_env(source_id, cycle_time)
     if isinstance(nfs_raw_manifest, Mapping) and nfs_raw_manifest.get("status") == "ready":
         if not _forecast_cycle_has_ready_raw_manifest(

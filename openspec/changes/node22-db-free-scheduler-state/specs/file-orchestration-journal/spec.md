@@ -20,14 +20,32 @@ by `PsycopgOrchestratorRepository`.
   completed
 - **AND** completed candidates are skipped with bounded evidence.
 
-#### Scenario: File journal records submission lifecycle
+#### Scenario: Write-side submission lifecycle is reserved for later slices
 
-- **WHEN** scheduler reserves and submits a pipeline job
-- **THEN** the file journal atomically records reservation, binding,
-  pipeline-job state, pipeline-event rows, Slurm job ID, stage, retry attempt,
-  and runtime-root evidence
-- **AND** materialized latest state can be replayed from append-only journal
-  records.
+- **WHEN** #833 read-side file repository write methods are called before the
+  write-side slice lands
+- **THEN** they fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`
+- **AND** atomic reservation, binding, pipeline-job writes, pipeline-event
+  writes, Slurm job ID persistence, retry attempt writes, and materialized
+  latest writes remain explicitly out of scope for the read-side slice.
+
+#### Scenario: Read-side journal schemas are explicit
+
+- **WHEN** node-22 scheduler reads orchestration state in DB-free mode
+- **THEN** append-only records use schema
+  `nhms.scheduler.file_orchestration_journal.v1`
+- **AND** materialized latest views use schema
+  `nhms.scheduler.file_orchestration_latest.v1`
+- **AND** records include source/cycle/model/run/candidate identity, job ID,
+  Slurm job ID, stage, status, error code, sequence or event ID, redacted
+  runtime-root evidence, and replay metadata.
+
+#### Scenario: Read-side journal replays without writes
+
+- **WHEN** only append-only journal records exist for a source/cycle
+- **THEN** the DB-free file repository can replay active pipeline jobs and
+  pipeline events into candidate state
+- **AND** missing materialized latest views do not block replay.
 
 #### Scenario: File journal preserves active Slurm job detection
 
@@ -70,6 +88,21 @@ by `PsycopgOrchestratorRepository`.
   rename for materialized latest views
 - **AND** evidence/log output remains bounded and credential-safe.
 
+#### Scenario: Read-side slice does not claim write support
+
+- **WHEN** #833 file repository write methods are called before the write-side
+  slice lands
+- **THEN** they fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`
+- **AND** scheduler default DB-free mutation remains blocked until the write
+  side is implemented.
+
+#### Scenario: Malformed file state fails closed
+
+- **WHEN** a DB-free scheduler read sees malformed JSON, unsupported schema, or
+  source/cycle identity mismatch in file journal state
+- **THEN** duplicate-prevention reads fail closed as active/blocking evidence
+- **AND** malformed state is not treated as an absent row.
+
 ### Requirement: File journal is contract-tested against DB semantics
 
 The system SHALL include repository contract tests that verify file-backed
@@ -78,7 +111,17 @@ orchestration state behavior against existing scheduler semantics.
 #### Scenario: Contract fixtures cover critical repository methods
 
 - **WHEN** repository contract tests run
-- **THEN** they cover active orchestration, active pipeline, completed pipeline,
-  active Slurm jobs, candidate state, model/forcing context reads,
-  forecast-cycle and hydro-run lifecycle writes, reservation/bind, job status
-  updates, event insertion, retry supersession, and permanent failure guards.
+- **THEN** the #833 read-side fixture covers active orchestration, active
+  pipeline, completed pipeline, active Slurm jobs, candidate state,
+  model/forcing context reads, and query helpers
+- **AND** write-side lifecycle, reservation/bind, job status updates, event
+  insertion, retry supersession, and permanent failure guards are explicitly
+  deferred to later write/retry/migration slices.
+
+#### Scenario: Read-side contract fixtures cover scheduler planning
+
+- **WHEN** #833 focused tests run without `DATABASE_URL`
+- **THEN** they prove file-backed active/completed/candidate/active-Slurm
+  decisions are visible to scheduler planning
+- **AND** DB-backed active/orchestrator repository factories are not called in
+  DB-free read-side construction.

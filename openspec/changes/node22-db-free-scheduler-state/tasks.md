@@ -90,23 +90,27 @@
 
 ## 3. File Orchestration Journal Contract And Read State
 
-- [ ] 3.1 Define the DB-free orchestration repository method contract.
-  Evidence floor: contract lists scheduler-required methods for active
+- [x] 3.1 Define the DB-free orchestration repository method contract.
+  Evidence floor: contract lists scheduler-required read methods for active
   orchestration, active pipeline, completed pipeline, active Slurm jobs,
-  candidate state, model/forcing context reads, lifecycle writes, pipeline
-  writes, retry/cancel/status-sync, and query helpers.
-- [ ] 3.2 Define append-only journal and materialized latest schemas.
+  candidate state, model/forcing context reads, and query helpers. Lifecycle,
+  pipeline write, retry/cancel/status-sync write methods are named in the
+  interface but explicitly fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED` in
+  this read-side slice until later write-side tasks land.
+- [x] 3.2 Define append-only journal and materialized latest schemas.
   Evidence floor: schemas cover candidate/job/event state, active Slurm job
   evidence, reservation, binding, retry attempt, Slurm job ID, stage, status,
   error code, redacted runtime roots, sequence IDs, and replay metadata.
-- [ ] 3.3 Implement file-backed read-side scheduler state.
+- [x] 3.3 Implement file-backed read-side scheduler state.
   Evidence floor: file repository answers active orchestration, active
   pipeline, completed pipeline, active Slurm jobs, candidate state, and
-  model/forcing context reads without PostgreSQL.
-- [ ] 3.4 Add read-side repository contract tests.
+  model/forcing context reads without PostgreSQL. Lifecycle and pipeline write
+  methods remain out of scope for this slice and fail-not-implemented.
+- [x] 3.4 Add read-side repository contract tests.
   Evidence floor: shared fixtures cover duplicate prevention, active Slurm job
   skip/cancel evidence, completed skip, candidate identity filtering, and
-  model/forcing context reads.
+  model/forcing context reads. Write-side lifecycle, retry, and migration
+  behavior is intentionally reserved for section 4 tasks.
 
 ## 4. File Orchestration Journal Writes, Retry, And Migration
 

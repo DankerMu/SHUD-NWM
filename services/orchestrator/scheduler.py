@@ -459,6 +459,12 @@ from services.orchestrator.scheduler_file_providers import (  # noqa: E402
     publish_canonical_readiness_index,
     publish_scheduler_registry_manifest,
 )
+from services.orchestrator.file_orchestration_journal import (  # noqa: E402
+    FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+    FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+    FileOrchestrationJournalError,
+    FileOrchestrationJournalRepository,
+)
 
 
 def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[str, Any]]:
