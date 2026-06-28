@@ -120,6 +120,10 @@ def _db_free_journal_write_blocked_reservation(config: Any, candidate_count: int
     }
 
 
+def _db_free_journal_mutation_blocked(config: Any, *, mutation_requested: bool) -> bool:
+    return bool(getattr(config, "db_free_required", False)) and bool(mutation_requested)
+
+
 def _db_free_journal_write_blocked_sync_evidence(
     candidate: Mapping[str, Any],
     reservation: Mapping[str, Any],
@@ -672,10 +676,9 @@ def run_once(self) -> SchedulerPassResult:
                     blocked=True,
                 )
             else:
-                db_free_journal_write_blocked = (
-                    bool(self.config.db_free_required)
-                    and self.orchestrator_factory is None
-                    and (bool(pending_status_sync_candidates) or cancel_active_slurm_requested)
+                db_free_journal_write_blocked = _db_free_journal_mutation_blocked(
+                    self.config,
+                    mutation_requested=bool(pending_status_sync_candidates) or cancel_active_slurm_requested,
                 )
                 db_free_journal_reservation = None
                 if db_free_journal_write_blocked:
@@ -751,7 +754,7 @@ def run_once(self) -> SchedulerPassResult:
                         blocked_candidates.extend(forcing_blocked_candidates)
                         execution_evidence.extend(forcing_evidence)
                     if candidates:
-                        if self.config.db_free_required and self.orchestrator_factory is None:
+                        if _db_free_journal_mutation_blocked(self.config, mutation_requested=bool(candidates)):
                             db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
                                 self.config,
                                 len(candidates),

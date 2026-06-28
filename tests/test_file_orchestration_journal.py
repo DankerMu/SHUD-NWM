@@ -1000,6 +1000,126 @@ def test_file_orchestration_journal_journal_sequence_order_overrides_timestamps_
     assert "_file_journal_replay_sequence" not in json.dumps(state, sort_keys=True)
 
 
+def test_file_orchestration_journal_later_journal_sequence_overrides_stale_latest_view(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    terminal_latest_job = _active_job(cycle_time)
+    terminal_latest_job.update(
+        {
+            "status": "failed",
+            "slurm_job_id": "9009",
+            "submitted_at": "2026-06-28T00:01:00Z",
+            "finished_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:10:00Z",
+        }
+    )
+    later_journal_job = dict(terminal_latest_job)
+    later_journal_job.update({"status": "running", "slurm_job_id": "3001"})
+    for timestamp_field in ("submitted_at", "finished_at", "updated_at", "created_at"):
+        later_journal_job.pop(timestamp_field, None)
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal_latest_job]),
+    )
+    _write_jsonl(
+        journal_root / "journal/gfs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=later_journal_job,
+                sequence=2,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")[0][
+        "slurm_job_id"
+    ] == "3001"
+    assert repository.get_pipeline_job(later_journal_job["job_id"])["status"] == "running"
+    assert repository.query_candidate_state(later_journal_job["idempotency_key"])["slurm_job_id"] == "3001"
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "running"
+    assert state["pipeline_jobs"][0]["slurm_job_id"] == "3001"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "envelope_value", "expected_reason"),
+    [
+        ("run_id", "fcst_gfs_2026062800_model_b", "file_journal_run_mismatch"),
+        ("job_id", "job_cycle_gfs_2026062800_intruder", "file_journal_job_mismatch"),
+    ],
+)
+def test_file_orchestration_journal_journal_envelope_payload_job_identity_mismatch_blocks_reads(
+    tmp_path: Path,
+    field_name: str,
+    envelope_value: str,
+    expected_reason: str,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    job.update({"status": "running", "slurm_job_id": "3001"})
+    record = _journal_record(
+        record_type="pipeline_job",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        payload=job,
+        sequence=1,
+    )
+    record[field_name] = envelope_value
+    _write_jsonl(journal_root / "journal/gfs/2026062800.jsonl", [record])
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_jobs"][0]["job_id"] == "file_journal_read_blocked"
+    assert state["file_journal"]["reason"] == expected_reason
+    assert state["file_journal"]["field"] == field_name
+
+    query_by_job = repository.get_pipeline_job(job["job_id"])
+    assert query_by_job is not None
+    assert query_by_job["stage"] == "file_journal_read"
+    assert query_by_job["error_code"] == expected_reason
+
+    query_by_idempotency = repository.query_candidate_state(job["idempotency_key"])
+    assert query_by_idempotency is not None
+    assert query_by_idempotency["stage"] == "file_journal_read"
+    assert query_by_idempotency["error_code"] == expected_reason
+
+
+def test_file_orchestration_journal_direct_pipeline_job_envelope_payload_job_mismatch_blocks_read(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    record = _journal_record(
+        record_type="pipeline_job",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        payload=job,
+        sequence=1,
+    )
+    record["job_id"] = "job_cycle_gfs_2026062800_intruder"
+    _write_json(journal_root / f"pipeline-jobs/{job['job_id']}.json", record)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    query_by_job = repository.get_pipeline_job(job["job_id"])
+
+    assert query_by_job is not None
+    assert query_by_job["stage"] == "file_journal_read"
+    assert query_by_job["error_code"] == "file_journal_job_mismatch"
+    assert query_by_job["file_journal"]["field"] == "job_id"
+
+
 @pytest.mark.parametrize(
     ("case_name", "expected_field"),
     [

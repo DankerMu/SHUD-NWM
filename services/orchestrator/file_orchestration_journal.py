@@ -535,6 +535,7 @@ class FileOrchestrationJournalRepository:
         record_type = _record_type(record, payload)
         _require_schema(record, FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION)
         _require_source_cycle(record, source_id=source_id, cycle_time=cycle_time)
+        _require_record_payload_identity_match(record_type, record, payload)
         record_model_id = _record_model_id(
             record,
             payload,
@@ -799,6 +800,7 @@ class FileOrchestrationJournalRepository:
                 field="record_type",
                 evidence={"expected": "model_context", "actual": record_type[:80]},
             )
+        _require_record_payload_identity_match(record_type, record, payload)
         record_model_id = _explicit_record_model_id(record, payload)
         if record_model_id in (None, ""):
             raise FileOrchestrationJournalError("file_journal_missing_identity", field="model_id")
@@ -828,6 +830,7 @@ class FileOrchestrationJournalRepository:
                 field="record_type",
                 evidence={"expected": "forcing_version", "actual": record_type[:80]},
             )
+        _require_record_payload_identity_match(record_type, record, payload)
         _require_source_cycle(record, source_id=source_id, cycle_time=cycle_time)
         _require_model_id(record, model_id, required=True)
         _validate_forcing_version_identity(
@@ -856,6 +859,7 @@ class FileOrchestrationJournalRepository:
                 field="record_type",
                 evidence={"expected": "pipeline_job", "actual": record_type[:80]},
             )
+        _require_record_payload_identity_match(record_type, record, payload)
         source_id = _required_source_id(record, "source_id")
         cycle_time = _parse_cycle_time_field(record, "cycle_time")
         model_id = _record_model_id(record, payload, source_id=source_id, cycle_time=cycle_time)
@@ -1132,7 +1136,11 @@ def _latest_mapping(current: dict[str, Any] | None, incoming: Mapping[str, Any] 
         return dict(incoming)
     current_replay_key = _replay_order_key(current)
     incoming_replay_key = _replay_order_key(incoming)
-    if current_replay_key is not None and incoming_replay_key is not None:
+    if current_replay_key is not None or incoming_replay_key is not None:
+        if current_replay_key is None:
+            return dict(incoming)
+        if incoming_replay_key is None:
+            return current
         return dict(incoming) if incoming_replay_key >= current_replay_key else current
     current_time = _datetime_sort_key(current.get("updated_at") or current.get("created_at"))
     incoming_time = _datetime_sort_key(incoming.get("updated_at") or incoming.get("created_at"))
@@ -1455,6 +1463,45 @@ def _require_model_id(row: Mapping[str, Any], expected_model_id: str, *, require
         )
 
 
+_RECORD_PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "hydro_run": (
+        ("run_id", "file_journal_run_mismatch"),
+        ("model_id", "file_journal_model_mismatch"),
+    ),
+    "forecast_cycle": (("cycle_id", "file_journal_cycle_id_mismatch"),),
+    "forcing_version": (
+        ("forcing_version_id", "file_journal_forcing_version_mismatch"),
+        ("model_id", "file_journal_model_mismatch"),
+    ),
+    "model_context": (("model_id", "file_journal_model_mismatch"),),
+    "pipeline_job": (
+        ("job_id", "file_journal_job_mismatch"),
+        ("run_id", "file_journal_run_mismatch"),
+        ("model_id", "file_journal_model_mismatch"),
+    ),
+    "pipeline_event": (
+        ("event_id", "file_journal_event_mismatch"),
+        ("entity_id", "file_journal_job_mismatch"),
+    ),
+}
+
+
+def _require_record_payload_identity_match(
+    record_type: str,
+    record: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    for identity_field, reason in _RECORD_PAYLOAD_IDENTITY_FIELDS.get(record_type, ()):
+        envelope_value = _optional_safe_identity(record, identity_field)
+        payload_value = _optional_safe_identity(payload, identity_field)
+        if envelope_value is not None and payload_value is not None and envelope_value != payload_value:
+            raise FileOrchestrationJournalError(
+                reason,
+                field=identity_field,
+                evidence={"expected": envelope_value, "actual": payload_value[:80]},
+            )
+
+
 def _record_model_id(
     record: Mapping[str, Any],
     payload: Mapping[str, Any],
@@ -1464,11 +1511,26 @@ def _record_model_id(
 ) -> str | None:
     envelope_model_id = _optional_safe_identity(record, "model_id")
     payload_model_id = _optional_safe_identity(payload, "model_id")
-    inferred_run_model_id = _model_id_from_run_identity(
-        payload.get("run_id") if payload.get("run_id") not in (None, "") else record.get("run_id"),
+    envelope_run_model_id = _model_id_from_run_identity(
+        record.get("run_id"),
         source_id=source_id,
         cycle_time=cycle_time,
     )
+    payload_run_model_id = _model_id_from_run_identity(
+        payload.get("run_id"),
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
+    if (
+        envelope_run_model_id is not None
+        and payload_run_model_id is not None
+        and envelope_run_model_id != payload_run_model_id
+    ):
+        raise FileOrchestrationJournalError(
+            "file_journal_run_mismatch",
+            field="run_id",
+            evidence={"expected": envelope_run_model_id, "actual": payload_run_model_id[:80]},
+        )
     if envelope_model_id is not None and payload_model_id is not None and envelope_model_id != payload_model_id:
         raise FileOrchestrationJournalError(
             "file_journal_model_mismatch",
@@ -1476,6 +1538,7 @@ def _record_model_id(
             evidence={"expected": envelope_model_id, "actual": payload_model_id[:80]},
         )
     explicit_model_id = envelope_model_id if envelope_model_id is not None else payload_model_id
+    inferred_run_model_id = envelope_run_model_id if envelope_run_model_id is not None else payload_run_model_id
     if (
         explicit_model_id is not None
         and inferred_run_model_id is not None
