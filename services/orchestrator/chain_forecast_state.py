@@ -67,6 +67,10 @@ def _validate_strict_state_lineage(*args, **kwargs):
     return getattr(_chain, "_validate_strict_state_lineage")(*args, **kwargs)
 
 
+def _package_checksum_matches(*args, **kwargs):
+    return getattr(_chain, "_package_checksum_matches")(*args, **kwargs)
+
+
 def _build_run_context(
     self,
     source_id: str,
@@ -413,7 +417,14 @@ def _validate_prefilled_state_identity(
             )
     for key, expected in lineage_checks:
         observed = lineage.get(key)
-        if observed not in (None, "") and expected not in (None, "") and str(observed) != str(expected):
+        if observed in (None, "") or expected in (None, ""):
+            continue
+        matches = (
+            _package_checksum_matches(observed, expected)
+            if key == "model_package_checksum"
+            else str(observed) == str(expected)
+        )
+        if not matches:
             raise OrchestratorError(
                 WARM_START_LINEAGE_MISMATCH,
                 "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",

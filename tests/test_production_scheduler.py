@@ -234,7 +234,7 @@ def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identit
         stages=(stage_result,),
     )
 
-    assert result.stages[0].stage == "download"
+    assert result.stages[0].stage == "convert"
     assert result.candidate_outcomes == ()
 
 
@@ -274,13 +274,20 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
     assert _scheduler_inventory_governed_group_ids(inventory_text) == (
         "scheduler-state-monkeypatch-bindings",
         "candidate-state-reexports",
+        "state-manager-facade-reexports",
         "scheduler-lease-reexports",
+        "scheduler-types-reexport",
+        "scheduler-runtime-roots-forwarders",
+        "scheduler-config-reexport",
+        "scheduler-adapter-provider-reexports",
         "discovery-compat-aliases",
+        "scheduler-model-discovery-forwarders",
         "candidate-construction-compat-aliases",
         "execution-restart-cohort-wrappers",
-        "scheduler-evidence-write-compat",
+        "scheduler-candidate-quality-forwarders",
         "cancellation-status-proof-wrappers",
         "scheduler-preflight-compat",
+        "scheduler-gateway-forwarders",
     )
     for token in (
         "_SCHEDULER_STATE_COMPAT_REEXPORT_NAMES",
@@ -1942,6 +1949,32 @@ def _fresh_zero_row_readiness_provider(
     )
 
 
+def _raw_ready_state(cycle_time: datetime, *, source_id: str = "gfs") -> dict[str, Any]:
+    cycle_id = cycle_id_for(source_id, cycle_time)
+    cycle_text = format_cycle_time(cycle_time)
+    manifest_uri = f"s3://nhms/raw/{source_id}/{cycle_text}/manifest.json"
+    return {
+        "forecast_cycle": {
+            "cycle_id": cycle_id,
+            "source_id": source_id,
+            "cycle_time": cycle_time.isoformat().replace("+00:00", "Z"),
+            "status": "raw_complete",
+            "manifest_uri": manifest_uri,
+        },
+        "nfs_raw_manifest": {
+            "status": "ready",
+            "required": True,
+            "source": "node27_nfs_raw_manifest",
+            "source_id": source_id,
+            "cycle_id": cycle_id,
+            "cycle_time": cycle_time.isoformat().replace("+00:00", "Z"),
+            "manifest_uri": manifest_uri,
+            "entry_count": 4,
+            "physical_file_count": 2,
+        },
+    }
+
+
 def test_fresh_cycle_with_zero_canonical_blocks_without_node27_raw_manifest(
     tmp_path: Path,
 ) -> None:
@@ -2176,22 +2209,23 @@ def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_pa
     assert "fresh_ingestion" not in blocked["state_evidence"]
 
 
-def test_fresh_cycle_manual_retry_preserves_retry_state_and_runs_full_chain(tmp_path: Path) -> None:
+def test_fresh_cycle_manual_retry_preserves_retry_state_and_reuses_raw_manifest(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
     active_repository = FakeCandidateStateRepository(
         {
+            **_raw_ready_state(cycle_time),
             "pipeline_status": "failed",
-            "failed_stage": "download",
+            "failed_stage": "convert",
             "error_code": "SLURM_JOB_FAILED",
             "retry_count": 0,
             "retry_limit": 3,
             "pipeline_jobs": [
                 {
-                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "job_id": "job_cycle_gfs_2026052106_convert",
                     "status": "failed",
-                    "stage": "download",
+                    "stage": "convert",
                     "retry_count": 0,
                     "error_code": "SLURM_JOB_FAILED",
                     "updated_at": "2026-05-21T06:20:00Z",
@@ -2201,19 +2235,19 @@ def test_fresh_cycle_manual_retry_preserves_retry_state_and_runs_full_chain(tmp_
                 {
                     "event_id": 5,
                     "event_type": "retry",
-                    "entity_id": "job_cycle_gfs_2026052106_download",
+                    "entity_id": "job_cycle_gfs_2026052106_convert",
                     "created_at": "2026-05-21T06:30:00Z",
                     "details": {
                         "trigger": "manual",
                         "manual_retry_marker": True,
                         "retry_count": 1,
-                        "previous_job_id": "job_cycle_gfs_2026052106_download",
+                        "previous_job_id": "job_cycle_gfs_2026052106_convert",
                     },
                 }
             ],
         }
     )
-    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
@@ -2237,13 +2271,15 @@ def test_fresh_cycle_manual_retry_preserves_retry_state_and_runs_full_chain(tmp_
     result = scheduler.run_once()
 
     assert result.status == "submitted"
+    assert forcing_producer.calls == []
     assert result.evidence["blocked_candidates"] == []
     submitted_basin = orchestrator.calls[0]["basins"][0]
     state_evidence = submitted_basin["state_evidence"]
-    assert state_evidence["fresh_ingestion"]["mode"] == "full_chain"
+    assert submitted_basin["restart_stage"] == "convert"
+    assert state_evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+    assert state_evidence["raw_manifest_reuse"]["source"] == "node27_nfs_raw_manifest"
     assert state_evidence["decision"] == "manual_retry"
     assert state_evidence["manual_retry"]["marker"] is True
-    assert "restart_stage" not in submitted_basin
 
 
 def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_path: Path) -> None:
@@ -2374,7 +2410,7 @@ def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: P
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
@@ -2387,7 +2423,7 @@ def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: P
                 source_object_identity=source_object,
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=FakeCandidateStateRepository(_raw_ready_state(cycle_time)),
         canonical_readiness_provider=_fresh_zero_row_readiness_provider(
             cycle_time, policy=policy, source_object=source_object
         ),
@@ -2398,6 +2434,7 @@ def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: P
     result = scheduler.run_once()
 
     assert result.status == "submitted"
+    assert forcing_producer.calls == []
     submitted_basin = orchestrator.calls[0]["basins"][0]
     # Identity contract must survive the fresh full-chain path.
     assert submitted_basin["canonical_product_id"] == "canon_gfs_2026052106"
@@ -2405,6 +2442,52 @@ def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: P
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
     assert submitted_basin["hydro_run_id"] == "fcst_gfs_2026052106_model_a"
     assert submitted_basin["published_manifest_id"] == "manifest_fcst_gfs_2026052106_model_a"
+
+
+def test_ready_nfs_raw_manifest_identity_mismatch_blocks_reuse(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    state = _raw_ready_state(cycle_time)
+    state["nfs_raw_manifest"] = {
+        **state["nfs_raw_manifest"],
+        "cycle_id": "gfs_2026052100",
+        "cycle_time": "2026-05-21T00:00:00Z",
+        "manifest_uri": "s3://nhms/raw/gfs/2026052100/manifest.json",
+    }
+    forcing_producer = FakeForcingProducer(error=RuntimeError("mismatched raw manifest must block before forcing"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeCandidateStateRepository(state),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_identity_mismatch"
+    assert blocked["state_evidence"]["nfs_raw_manifest"]["status"] == "ready"
+    assert "raw_manifest_reuse" not in blocked["state_evidence"]
 
 
 def test_partial_canonical_still_blocks_not_fresh_full_chain(tmp_path: Path) -> None:
@@ -2433,7 +2516,7 @@ def test_partial_canonical_still_blocks_not_fresh_full_chain(tmp_path: Path) -> 
         basin_id="basin_a",
     ).evidence
     assert readiness_evidence["candidate_row_count"] > 0
-    forcing_producer = FakeForcingProducer()
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     adapter = FakeAdapter(
         "gfs",
@@ -2510,7 +2593,7 @@ def test_fresh_cycle_ingestion_stage_failure_does_not_fabricate_success(tmp_path
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestratorWithStageEvidence(
         result_status="failed",
         stage_status="failed",
@@ -2527,7 +2610,7 @@ def test_fresh_cycle_ingestion_stage_failure_does_not_fabricate_success(tmp_path
                 source_object_identity=source_object,
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=FakeCandidateStateRepository(_raw_ready_state(cycle_time)),
         canonical_readiness_provider=_fresh_zero_row_readiness_provider(
             cycle_time, policy=policy, source_object=source_object
         ),
@@ -2542,7 +2625,9 @@ def test_fresh_cycle_ingestion_stage_failure_does_not_fabricate_success(tmp_path
     # The chain ran but a stage failed: the scheduler must record the failure
     # honestly (no fabricated "complete"/"submitted" terminal state).
     assert result.status != "submitted"
-    model_evidence = result.evidence["model_run_evidence"][0]
+    model_evidence = next(
+        item for item in result.evidence["model_run_evidence"] if item.get("pipeline_run_id")
+    )
     assert model_evidence["status"] == "failed"
 
 
@@ -2611,13 +2696,13 @@ def test_no_expected_leads_cycle_stays_blocked_not_fresh_full_chain(tmp_path: Pa
     # MAJOR-1 end-to-end: empty-horizon readiness must hard-block; no
     # fresh_ingestion marker, no orchestrator submission.
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    forcing_producer = FakeForcingProducer()
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=FakeCandidateStateRepository(_raw_ready_state(cycle_time)),
         canonical_readiness_provider=_no_expected_leads_readiness_provider(cycle_time),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -2661,10 +2746,10 @@ def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_
     assert cohort_candidates == [candidate]
 
 
-def test_fresh_full_chain_residual_restart_stage_submits_single_full_chain(tmp_path: Path) -> None:
-    # MAJOR-2 end-to-end: even when a retry state_decision merges a restart_stage
-    # into a fresh candidate, the submitted basin runs the full chain from
-    # download (no restart_stage) via a single orchestrator call.
+def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> None:
+    # MAJOR-2 end-to-end: even when a retry state_decision merges a downstream
+    # restart_stage into a fresh raw-ready candidate, the submitted basin restarts
+    # from convert rather than following the stale downstream marker.
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
@@ -2673,6 +2758,7 @@ def test_fresh_full_chain_residual_restart_stage_submits_single_full_chain(tmp_p
     active_repository = PerModelCandidateStateRepository(
         {
             "model_a": {
+                **_raw_ready_state(cycle_time),
                 "hydro_status": "succeeded",
                 "durable_shud_output_exists": True,
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
@@ -2684,7 +2770,7 @@ def test_fresh_full_chain_residual_restart_stage_submits_single_full_chain(tmp_p
             },
         }
     )
-    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
@@ -2708,12 +2794,16 @@ def test_fresh_full_chain_residual_restart_stage_submits_single_full_chain(tmp_p
     result = scheduler.run_once()
 
     assert result.status == "submitted"
+    assert forcing_producer.calls == []
     assert len(orchestrator.calls) == 1
     submitted_basin = orchestrator.calls[0]["basins"][0]
-    # Full chain from scratch: no restart_stage routes it off the full path.
-    assert "restart_stage" not in submitted_basin
-    assert "orchestration_run_id" not in submitted_basin
-    assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+    assert submitted_basin["restart_stage"] == "convert"
+    assert submitted_basin["orchestration_run_id"].endswith("_convert_model_a")
+    assert submitted_basin["state_evidence"]["fresh_ingestion"] == {
+        "required": False,
+        "mode": "reuse_raw_then_convert",
+    }
+    assert submitted_basin["state_evidence"]["restart_stage"] == "convert"
 
 
 def test_canonical_unavailable_evidence_is_not_fresh_zero_row() -> None:
@@ -2760,7 +2850,7 @@ def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Pat
     # End-to-end guardrail: an unavailable-canonical readiness must hard-block
     # the candidate with no fresh_ingestion marker and no submission.
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    forcing_producer = FakeForcingProducer()
+    forcing_producer = FakeForcingProducer(error=RuntimeError("raw manifest reuse skips in-process forcing"))
     orchestrator = FakeProductionOrchestrator()
     unavailable_evidence = {
         "source_id": "gfs",
@@ -2789,13 +2879,13 @@ def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Pat
     assert "fresh_ingestion" not in blocked["state_evidence"]
 
 
-def test_multi_basin_fresh_cycle_merges_into_single_download(tmp_path: Path) -> None:
-    # Two fresh basins on the same source/cycle must merge into ONE full-chain
-    # submission (single download), not two duplicate chains.
+def test_multi_basin_raw_manifest_reuse_submits_per_model_convert_restart(tmp_path: Path) -> None:
+    # Raw-ready zero-canonical candidates restart at convert. Non-full restart
+    # cohorts intentionally get one idempotent orchestration run per model.
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    forcing_producer = FakeForcingProducer()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
@@ -2808,7 +2898,7 @@ def test_multi_basin_fresh_cycle_merges_into_single_download(tmp_path: Path) -> 
                 source_object_identity=source_object,
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=FakeCandidateStateRepository(_raw_ready_state(cycle_time)),
         canonical_readiness_provider=_fresh_zero_row_readiness_provider(
             cycle_time, policy=policy, source_object=source_object
         ),
@@ -2819,15 +2909,18 @@ def test_multi_basin_fresh_cycle_merges_into_single_download(tmp_path: Path) -> 
     result = scheduler.run_once()
 
     assert result.status == "submitted"
+    assert forcing_producer.calls == []
     assert result.evidence["counts"]["submitted_count"] == 2
-    # Single full-chain submission (one download) covering both basins.
-    assert len(orchestrator.calls) == 1
-    basins = orchestrator.calls[0]["basins"]
-    assert len(basins) == 2
+    assert len(orchestrator.calls) == 2
+    basins = [call["basins"][0] for call in orchestrator.calls]
     assert {basin["model_id"] for basin in basins} == {"qhh", "heihe"}
     for basin in basins:
-        assert "restart_stage" not in basin
-        assert basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+        assert basin["restart_stage"] == "convert"
+        assert basin["orchestration_run_id"].endswith(f"_convert_{basin['model_id']}")
+        assert basin["state_evidence"]["fresh_ingestion"] == {
+            "required": False,
+            "mode": "reuse_raw_then_convert",
+        }
 
 
 def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
@@ -4205,7 +4298,7 @@ def test_non_authoritative_task_results_do_not_populate_retry_task_identity() ->
     assert decision is not None
     assert decision.action == "retry"
     assert decision.evidence["task_identity"] == {}
-    assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is False
+    assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is True
 
 
 def test_candidate_state_evidence_preserves_repaired_stage_metadata_additively() -> None:
@@ -4723,7 +4816,7 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
     assert result.evidence["skipped_candidates"] == []
 
 
-def test_non_authoritative_task_results_do_not_bypass_active_cycle_duplicate_block(
+def test_non_authoritative_task_results_preserve_candidate_scoped_retry(
     tmp_path: Path,
 ) -> None:
     candidate = _scheduler_candidate_fixture()
@@ -4772,12 +4865,12 @@ def test_non_authoritative_task_results_do_not_bypass_active_cycle_duplicate_blo
 
     result = scheduler.run_once()
 
-    skipped = result.evidence["skipped_candidates"][0]
-    assert result.evidence["counts"]["submitted_count"] == 0
-    assert skipped["reason"] == "active_duplicate_pipeline"
-    assert skipped["state_evidence"]["decision"] == "retry_failed"
-    assert skipped["state_evidence"]["task_identity"] == {}
-    assert orchestrator.calls == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["state_evidence"]["decision"] == "retry_failed"
+    assert submitted_basin["state_evidence"]["task_identity"] == {}
+    assert submitted_basin["restart_stage"] == "forecast"
 
 
 @pytest.mark.parametrize(
@@ -15815,22 +15908,29 @@ def _write_db_free_state_index_fixture(
     store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
     if entries is None:
         state_content = b"db-free-strict-warm-start-state\n"
+        producer_cycle_time = scheduler_module._floor_to_source_cycle_boundary(
+            cycle_time - timedelta(microseconds=1),
+            ("gfs",),
+            allowed_cycle_hours_utc=(0, 6, 12, 18),
+        )
+        producer_cycle_id = cycle_id_for("gfs", producer_cycle_time)
+        lead_hours = int(round((cycle_time - producer_cycle_time).total_seconds() / 3600.0))
         state_uri = store.write_bytes_atomic(
             f"states/gfs/model_a/{format_cycle_time(cycle_time)}/state.cfg.ic",
             state_content,
         )
         entries = [
             {
-                "state_id": "state_gfs_model_a_2026052106",
+                "state_id": f"state_gfs_model_a_{format_cycle_time(cycle_time)}_{producer_cycle_id}_f{lead_hours:03d}",
                 "model_id": "model_a",
-                "run_id": "analysis_gfs_2026052018_model_a",
+                "run_id": f"analysis_{producer_cycle_id}_model_a",
                 "source_id": "gfs",
                 "valid_time": _format_iso_z(cycle_time),
                 "state_uri": state_uri,
                 "checksum": f"sha256:{sha256_bytes(state_content)}",
                 "usable_flag": True,
-                "cycle_id": "gfs_2026052018",
-                "lead_hours": 12,
+                "cycle_id": producer_cycle_id,
+                "lead_hours": lead_hours,
                 "model_package_version": "s3://nhms/models/model_a/package/",
                 "model_package_checksum": package_checksum,
             }
@@ -17306,10 +17406,186 @@ def test_db_free_strict_warm_start_uses_ready_file_state_index_without_db_state_
     state_evidence = candidates[0].state_evidence
     assert state_evidence["ready"] is True
     assert state_evidence["candidate_state"]["init_state_uri"] == state_fixture["entries"][0]["state_uri"]
-    assert state_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 12
+    assert state_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == (
+        state_fixture["entries"][0]["lead_hours"]
+    )
     assert state_evidence["state_snapshot_index"]["status"] == "ready"
     assert state_evidence["state_snapshot_index"]["entry_status"] == "ready"
     assert state_evidence["state_snapshot_index"]["object_evidence"]["exists"] is True
+
+
+def test_db_free_strict_warm_start_required_lead_uses_previous_allowed_cycle_f006(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    state_content = b"db-free-strict-warm-start-state-f006\n"
+    state_uri = store.write_bytes_atomic(
+        "states/gfs/model_a/2026052106/gfs_2026052100/f006/state.cfg.ic",
+        state_content,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[
+            {
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+                "model_id": "model_a",
+                "run_id": "analysis_gfs_2026052100_model_a",
+                "source_id": "gfs",
+                "valid_time": _format_iso_z(cycle_time),
+                "state_uri": state_uri,
+                "checksum": f"sha256:{sha256_bytes(state_content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052100",
+                "lead_hours": 6,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": fixture["package_checksum"],
+            }
+        ],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    state_evidence = candidates[0].state_evidence
+    assert state_evidence["ready"] is True
+    assert state_evidence["candidate_state"]["init_state_id"] == state_fixture["entries"][0]["state_id"]
+    assert state_evidence["candidate_state"]["init_state_lineage"]["cycle_id"] == "gfs_2026052100"
+    assert state_evidence["candidate_state"]["init_state_lineage"]["lead_hours"] == 6
+
+
+def test_db_free_strict_warm_start_required_lead_blocks_stale_f012_for_six_hour_cycle(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    state_content = b"db-free-strict-warm-start-state-stale-f012\n"
+    state_uri = store.write_bytes_atomic(
+        "states/gfs/model_a/2026052106/gfs_2026052018/f012/state.cfg.ic",
+        state_content,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[
+            {
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052018_f012",
+                "model_id": "model_a",
+                "run_id": "analysis_gfs_2026052018_model_a",
+                "source_id": "gfs",
+                "valid_time": _format_iso_z(cycle_time),
+                "state_uri": state_uri,
+                "checksum": f"sha256:{sha256_bytes(state_content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052018",
+                "lead_hours": 12,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": fixture["package_checksum"],
+            }
+        ],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("blocked candidate must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    assert blocked[0].reason == "state_snapshot_index_lead_hours_mismatch"
+    assert blocked[0].state_evidence["reason"] == "state_snapshot_index_lead_hours_mismatch"
+    assert "candidate_state" not in blocked[0].state_evidence
 
 
 def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_latest_fallback(
@@ -17549,7 +17825,7 @@ def test_db_free_strict_warm_start_run_once_submits_basin_manifest_init_state(
     assert submitted_basin["init_state_valid_time"] == state_entry["valid_time"]
     assert submitted_basin["init_state_quality"] == "fresh"
     assert submitted_basin["init_state_lineage"]["source_id"] == "gfs"
-    assert submitted_basin["init_state_lineage"]["lead_hours"] == 12
+    assert submitted_basin["init_state_lineage"]["lead_hours"] == state_entry["lead_hours"]
     assert submitted_basin["init_state_lineage"]["model_package_checksum"] == fixture["package_checksum"]
     assert submitted_basin["state_evidence"]["candidate_state"]["init_state_id"] == state_entry["state_id"]
     assert result.evidence["candidates"][0]["state_evidence"]["state_snapshot_index"]["entry_status"] == "ready"

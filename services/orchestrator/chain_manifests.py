@@ -216,6 +216,7 @@ def build_cycle_stage_manifest(
         "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
         "published_artifact_uri_prefix": os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
         "scheduler_db_free_required": os.getenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", ""),
+        "scheduler_allowed_roots": os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", ""),
         "scheduler_state_index_backend": os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""),
         "scheduler_state_index": os.getenv("NHMS_SCHEDULER_STATE_INDEX", ""),
         "total_basins": len(context.all_basins),

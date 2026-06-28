@@ -553,7 +553,7 @@ class ProductionScheduler:
     ) -> dict[str, _scheduler.Any] | None:
         if not self._db_free_strict_warm_start_required():
             return None
-        del cycle
+        required_lead_hours = self._required_warm_start_lead_hours(candidate, cycle)
         model_package_checksum = (
             candidate.resource_profile.get("package_checksum")
             or candidate.resource_profile.get("model_package_checksum")
@@ -564,8 +564,24 @@ class ProductionScheduler:
             valid_time=candidate.cycle_time_utc,
             model_package_version=candidate.model_package_uri,
             model_package_checksum=str(model_package_checksum) if model_package_checksum not in (None, "") else None,
-            required_lead_hours=12,
+            required_lead_hours=required_lead_hours,
         )
+
+    def _required_warm_start_lead_hours(
+        self,
+        candidate: _scheduler.SchedulerCandidate,
+        cycle: _scheduler.SchedulerSourceCycle,
+    ) -> int:
+        candidate_time = _scheduler._ensure_utc(candidate.cycle_time_utc)
+        producer_cycle_time = _scheduler._floor_to_source_cycle_boundary(
+            candidate_time - _scheduler.timedelta(microseconds=1),
+            (cycle.discovery.source_id,),
+            allowed_cycle_hours_utc=self.config.allowed_cycle_hours_utc,
+        )
+        elapsed_seconds = int((candidate_time - producer_cycle_time).total_seconds())
+        if elapsed_seconds <= 0:
+            return 12
+        return max(1, int(round(elapsed_seconds / 3600.0)))
 
     def _source_readiness_context(self, cycle: _scheduler.SchedulerSourceCycle) -> dict[str, _scheduler.Any]:
         cache_key = (

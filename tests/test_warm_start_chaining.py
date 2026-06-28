@@ -174,8 +174,15 @@ def test_saved_state_valid_time_equals_next_cycle_init(tmp_path: Path) -> None:
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
+            del cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -241,8 +248,15 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
+            del cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -328,9 +342,15 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
             pass
 
         def get_state_snapshot_by_model_time(
-            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
         ) -> StateSnapshot | None:
-            del model_id, valid_time
+            del model_id, valid_time, cycle_id, lead_hours
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -385,8 +405,26 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
     ]
     assert [item["lead_hours"] for item in result["checkpoints"]] == [6, 12]
     assert result["state_uri"].endswith("state.cfg.ic")
-    saved_t6 = object_root / "states" / "GFS" / "demo_model" / "2026050106" / "state.cfg.ic"
-    saved_t12 = object_root / "states" / "GFS" / "demo_model" / "2026050112" / "state.cfg.ic"
+    saved_t6 = (
+        object_root
+        / "states"
+        / "GFS"
+        / "demo_model"
+        / "2026050106"
+        / "gfs_2026050100"
+        / "f006"
+        / "state.cfg.ic"
+    )
+    saved_t12 = (
+        object_root
+        / "states"
+        / "GFS"
+        / "demo_model"
+        / "2026050112"
+        / "gfs_2026050100"
+        / "f012"
+        / "state.cfg.ic"
+    )
     assert round(_read_cfg_ic_header_minute(saved_t6)) == round(_minute_time("2026-05-01T06:00:00Z"))
     assert round(_read_cfg_ic_header_minute(saved_t12)) == round(_minute_time("2026-05-01T12:00:00Z"))
 
@@ -737,6 +775,67 @@ def test_strict_cycle_prefilled_exact_successor_is_validated_and_preserved(tmp_p
     assert runtime_manifest["initial_state"]["quality"] != "cold_start_no_state"
     assert entry["init_state_uri"] == prior_state.state_uri
     assert entry["init_state_checksum"] == prior_state.checksum
+
+
+@pytest.mark.parametrize(
+    ("state_checksum", "prefilled_checksum"),
+    [
+        ("sha256:package-sha", "package-sha"),
+        ("package-sha", "sha256:package-sha"),
+    ],
+)
+def test_strict_cycle_prefilled_package_checksum_alias_is_validated_and_preserved(
+    tmp_path: Path,
+    state_checksum: str,
+    prefilled_checksum: str,
+) -> None:
+    t_next = "2026-05-01T12:00:00Z"
+    prior_state = StateSnapshot(
+        state_id="state_demo_model_2026050112",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050100_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050112/state.cfg.ic",
+        checksum="csum-next",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        lead_hours=12,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum=state_checksum,
+    )
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        FakeStateManager([prior_state]),
+        require_forecast_warm_start=True,
+    )
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "demo_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "model_package_checksum": "package-sha",
+        "source_id": "gfs",
+        "init_state_id": prior_state.state_id,
+        "init_state_uri": prior_state.state_uri,
+        "init_state_checksum": prior_state.checksum,
+        "init_state_valid_time": t_next,
+        "init_state_lineage": {
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026050100",
+            "lead_hours": 12,
+            "model_package_version": "models/demo_model/package/",
+            "model_package_checksum": prefilled_checksum,
+        },
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt(t_next))
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", _dt(t_next))
+
+    assert basins[0]["init_state_id"] == prior_state.state_id
+    assert basins[0]["init_state_lineage"]["model_package_checksum"] == state_checksum
 
 
 def test_strict_cycle_prefilled_invalid_state_blocks_before_side_effects(tmp_path: Path) -> None:

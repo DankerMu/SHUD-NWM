@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -479,6 +480,42 @@ def test_file_state_snapshot_index_rejects_bad_cycle_id_lineage(
     assert evidence["reason"] == expected_reason
 
 
+def test_file_state_snapshot_index_reports_wrong_lead_hours_mismatch(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"wrong-lead")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    entry = _state_index_test_entry(state_uri, content, state_id="state_wrong_lead")
+    entry["cycle_id"] = "gfs_2026052100"
+    entry["lead_hours"] = 6
+    index_path = tmp_path / "state-index.json"
+    publish_state_snapshot_index(
+        [entry],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt("2026-05-21T12:00:00Z"),
+    )
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "state_snapshot_index_lead_hours_mismatch"
+
+
 def test_file_state_snapshot_index_accepts_prefixed_model_package_checksum(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     object_store = LocalObjectStore(object_root, "s3://nhms")
@@ -512,6 +549,70 @@ def test_file_state_snapshot_index_accepts_prefixed_model_package_checksum(tmp_p
 
     assert evidence["ready"] is True
     assert evidence["candidate_state"]["init_state_id"] == "state_prefixed_package_checksum"
+
+
+@pytest.mark.parametrize("lead_hours", [True, 12.9, "12.9", "twelve"])
+def test_file_state_snapshot_index_rejects_malformed_lead_hours(
+    tmp_path: Path,
+    lead_hours: Any,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"malformed-lead")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    entry = _state_index_test_entry(state_uri, content, state_id="state_malformed_lead")
+    entry["lead_hours"] = lead_hours
+    index_path = tmp_path / "state-index.json"
+    _write_state_index_payload(index_path, [entry], generated_at="2026-05-21T12:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "state_snapshot_index_int_invalid"
+    assert "candidate_state" not in evidence
+
+
+def test_file_state_snapshot_index_rejects_unknown_source_id_invalid(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    content = _valid_ic_bytes(b"unknown-source")
+    state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
+    entry = _state_index_test_entry(state_uri, content, state_id="state_unknown_source")
+    entry["source_id"] = "unknown"
+    index_path = tmp_path / "state-index.json"
+    _write_state_index_payload(index_path, [entry], generated_at="2026-05-21T12:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+    )
+
+    evidence = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T06:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "state_snapshot_index_source_id_invalid"
+    assert "candidate_state" not in evidence
 
 
 @pytest.mark.parametrize(
@@ -1225,6 +1326,67 @@ def test_file_state_snapshot_index_upsert_repairs_stale_existing_index(tmp_path:
     assert {item["state_id"] for item in listed["items"]} == {"state_old", "state_new"}
 
 
+def test_file_state_snapshot_index_destination_upsert_and_usable_update_do_not_read_historical_objects(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    index_path = tmp_path / "state-index.json"
+    selected_content = _valid_ic_bytes(b"selected-existing")
+    selected_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/selected.cfg.ic", selected_content)
+    selected = _state_index_test_entry(selected_uri, selected_content, state_id="state_selected")
+    missing = _state_index_test_entry(
+        "s3://nhms/states/gfs/model_a/2026052112/missing.cfg.ic",
+        b"missing-historical",
+        state_id="state_missing_historical",
+    )
+    missing["valid_time"] = "2026-05-21T12:00:00Z"
+    missing["cycle_id"] = "gfs_2026052100"
+    _write_state_index_payload(index_path, [selected, missing], generated_at="2026-05-21T12:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T12:00:00Z"),
+        create_missing=True,
+    )
+    new_content = _valid_ic_bytes(b"new-upsert")
+    new_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052118/new.cfg.ic", new_content)
+    object_reads: list[str] = []
+    original_read_object = state_manager_module._read_state_object_bytes
+
+    def counting_read_object(uri: str, **kwargs: Any) -> bytes:
+        object_reads.append(uri)
+        return original_read_object(uri, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "_read_state_object_bytes", counting_read_object)
+
+    updated = repository.set_usable_flag(state_id="state_selected", usable_flag=False)
+    repository.upsert_state_snapshot(
+        StateSnapshot(
+            state_id="state_new",
+            model_id="model_a",
+            run_id="analysis_gfs_2026052106_model_a",
+            valid_time=_dt("2026-05-21T18:00:00Z"),
+            state_uri=new_uri,
+            checksum=f"sha256:{sha256_bytes(new_content)}",
+            usable_flag=False,
+            source_id="gfs",
+            cycle_id="gfs_2026052106",
+            lead_hours=12,
+            model_package_version="s3://nhms/models/model_a/package/",
+            model_package_checksum="package-sha",
+        )
+    )
+    listed = repository.list_state_snapshots(model_id="model_a", usable=None, limit=10, offset=0)
+
+    assert updated is not None
+    assert object_reads == [selected_uri, new_uri]
+    assert missing["state_uri"] not in object_reads
+    assert listed["total_count"] == 3
+
+
 def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
@@ -1288,6 +1450,85 @@ def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> 
     assert repaired_snapshot.original_shud_filename == "model_a.cfg.ic.update"
     assert evidence["ready"] is True
     assert evidence["candidate_state"]["init_state_lineage"]["model_package_checksum"] == "package-sha"
+
+
+def test_same_checksum_save_repairs_base_entry_missing_cycle_lead_without_rewrite(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    object_store = LocalObjectStore(object_root, "s3://nhms")
+    state_file = tmp_path / "model_a.cfg.ic.update"
+    content = _valid_ic_bytes(b"same-checksum-base-lineage-repair")
+    state_file.write_bytes(content)
+    legacy_state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052118/state.cfg.ic", content)
+    legacy_entry = _state_index_test_entry(legacy_state_uri, content, state_id="state_legacy_base_entry")
+    legacy_entry["valid_time"] = "2026-05-21T18:00:00Z"
+    legacy_entry.pop("cycle_id")
+    legacy_entry.pop("lead_hours")
+    legacy_entry.pop("model_package_version")
+    legacy_entry.pop("model_package_checksum")
+    _write_state_index_payload(index_path, [legacy_entry], generated_at="2026-05-21T18:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T18:00:00Z"),
+        create_missing=True,
+    )
+    manager = StateManager(repository=repository, object_store=object_store)
+    write_calls: list[str] = []
+    original_write = LocalObjectStore.write_bytes_atomic
+
+    def counting_write(self: LocalObjectStore, key: str, content: bytes) -> str:
+        write_calls.append(key)
+        return original_write(self, key, content)
+
+    monkeypatch.setattr(LocalObjectStore, "write_bytes_atomic", counting_write)
+
+    repaired = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        valid_time=_dt("2026-05-21T18:00:00Z"),
+        ic_file_path=state_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        original_shud_filename="model_a.cfg.ic.update",
+    )
+    blocked_before_qc = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T18:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+    assert manager.run_qc(repaired.state_id) is True
+    ready_after_qc = repository.strict_warm_start_evidence(
+        model_id="model_a",
+        source_id="gfs",
+        valid_time=_dt("2026-05-21T18:00:00Z"),
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        required_lead_hours=12,
+    )
+    listed = repository.list_state_snapshots(model_id="model_a", usable=None, limit=10, offset=0)
+
+    assert repaired.status == "superseded"
+    assert repaired.state_id == "state_legacy_base_entry"
+    assert repaired.snapshot.state_uri == legacy_state_uri
+    assert write_calls == []
+    assert listed["total_count"] == 1
+    assert listed["items"][0]["state_uri"] == legacy_state_uri
+    assert blocked_before_qc["ready"] is False
+    assert blocked_before_qc["reason"] == "state_snapshot_index_checkpoint_unusable"
+    assert ready_after_qc["ready"] is True
+    assert ready_after_qc["candidate_state"]["init_state_id"] == "state_legacy_base_entry"
 
 
 def test_file_state_snapshot_index_preserves_overlapping_valid_time_leads(tmp_path: Path) -> None:
@@ -1403,6 +1644,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", os.pathsep.join((str(workspace), str(object_root))))
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -1457,6 +1699,7 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", os.pathsep.join((str(workspace), str(object_root))))
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
     monkeypatch.setenv("NHMS_MODEL_ID", "model_a")
@@ -1488,10 +1731,20 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     assert snapshot.model_package_checksum == "package-sha"
 
 
+@pytest.mark.parametrize(
+    "missing_env",
+    [
+        "NHMS_SOURCE_ID",
+        "NHMS_CYCLE_TIME",
+        "NHMS_MODEL_PACKAGE_URI",
+        "NHMS_MODEL_PACKAGE_CHECKSUM",
+    ],
+)
 def test_db_free_state_save_env_requires_lineage_before_upload(
     monkeypatch: Any,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    missing_env: str,
 ) -> None:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
@@ -1508,14 +1761,16 @@ def test_db_free_state_save_env_requires_lineage_before_upload(
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", os.pathsep.join((str(workspace), str(object_root))))
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
     monkeypatch.setenv("NHMS_MODEL_ID", "model_a")
+    monkeypatch.setenv("NHMS_SOURCE_ID", "gfs")
+    monkeypatch.setenv("NHMS_CYCLE_TIME", "2026-05-21T06:00:00Z")
     monkeypatch.setenv("NHMS_END_TIME", "2026-05-21T18:00:00Z")
     monkeypatch.setenv("NHMS_MODEL_PACKAGE_URI", "s3://nhms/models/model_a/package/")
     monkeypatch.setenv("NHMS_MODEL_PACKAGE_CHECKSUM", "package-sha")
-    monkeypatch.delenv("NHMS_SOURCE_ID", raising=False)
-    monkeypatch.delenv("NHMS_CYCLE_TIME", raising=False)
+    monkeypatch.delenv(missing_env, raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(
         "packages.common.state_cli.StateRunRepository.from_env",
@@ -1533,9 +1788,112 @@ def test_db_free_state_save_env_requires_lineage_before_upload(
 
     assert result_code == 1
     assert "missing required lineage fields" in stderr
-    assert "NHMS_SOURCE_ID" in stderr
-    assert "NHMS_CYCLE_TIME" in stderr
+    assert missing_env in stderr
     assert not index_path.exists()
+    assert not (object_root / "states").exists()
+
+
+def test_db_free_state_save_requires_explicit_allowed_roots_for_local_state_index(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    run_id = "fcst_gfs_2026052106_model_a"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / "model_a.cfg.ic.update").write_text(
+        _valid_ic_bytes(b"state-index-missing-allowlist").decode("utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
+    monkeypatch.setenv("NHMS_MODEL_ID", "model_a")
+    monkeypatch.setenv("NHMS_SOURCE_ID", "gfs")
+    monkeypatch.setenv("NHMS_CYCLE_TIME", "2026-05-21T06:00:00Z")
+    monkeypatch.setenv("NHMS_END_TIME", "2026-05-21T18:00:00Z")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_URI", "s3://nhms/models/model_a/package/")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_CHECKSUM", "package-sha")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free env state save must fail allowed-root validation before PostgreSQL run lookup"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail("DB-free env state save must fail allowed-root validation before DB snapshot factory"),
+    )
+    monkeypatch.setattr(
+        LocalObjectStore,
+        "write_bytes_atomic",
+        lambda *_args, **_kwargs: pytest.fail("DB-free env state save must fail before object upload"),
+    )
+
+    result_code = _state_cli_exit_code(["save", "--run-id", run_id])
+    stderr = capsys.readouterr().err
+
+    assert result_code == 1
+    assert "allowed root" in stderr
+    assert not index_path.exists()
+    assert not (object_root / "states").exists()
+
+
+def test_db_free_state_save_rejects_outside_local_state_index_destination_before_upload(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    object_root = tmp_path / "objects"
+    outside_index = tmp_path / "outside" / "state-index.json"
+    run_id = "fcst_gfs_2026052106_model_a"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / "model_a.cfg.ic.update").write_text(
+        _valid_ic_bytes(b"state-index-outside-destination").decode("utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", os.pathsep.join((str(workspace), str(object_root))))
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(outside_index))
+    monkeypatch.setenv("NHMS_MODEL_ID", "model_a")
+    monkeypatch.setenv("NHMS_SOURCE_ID", "gfs")
+    monkeypatch.setenv("NHMS_CYCLE_TIME", "2026-05-21T06:00:00Z")
+    monkeypatch.setenv("NHMS_END_TIME", "2026-05-21T18:00:00Z")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_URI", "s3://nhms/models/model_a/package/")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_CHECKSUM", "package-sha")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free env state save must fail destination validation before PostgreSQL run lookup"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail("DB-free env state save must fail destination validation before DB snapshot factory"),
+    )
+    monkeypatch.setattr(
+        LocalObjectStore,
+        "write_bytes_atomic",
+        lambda *_args, **_kwargs: pytest.fail("DB-free env state save must fail before object upload"),
+    )
+
+    result_code = _state_cli_exit_code(["save", "--run-id", run_id])
+    stderr = capsys.readouterr().err
+
+    assert result_code == 1
+    assert "outside allowed roots" in stderr
+    assert not outside_index.exists()
     assert not (object_root / "states").exists()
 
 

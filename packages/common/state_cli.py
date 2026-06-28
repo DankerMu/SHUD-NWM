@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from packages.common.manifest_index import (
     MAX_MANIFEST_INDEX_BYTES,
@@ -262,6 +263,7 @@ def resolve_run_context(
 
 def _state_manager_from_env_for_save(object_store: LocalObjectStore) -> StateManager:
     if _db_free_state_save_enabled():
+        _require_db_free_state_index_destination()
         return StateManager(
             repository=FileStateSnapshotIndexRepository.from_env(create_missing=True),
             object_store=object_store,
@@ -285,6 +287,47 @@ def _db_free_state_save_enabled() -> bool:
     return _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED") and os.getenv(
         "NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""
     ).strip().lower() == "file"
+
+
+def _require_db_free_state_index_destination() -> None:
+    index_uri = os.getenv("NHMS_SCHEDULER_STATE_INDEX", "").strip()
+    if not index_uri:
+        raise StateManagerError("NHMS_SCHEDULER_STATE_INDEX is required for DB-free state save.")
+    parsed = urlparse(index_uri)
+    if parsed.scheme in {"s3", "published"}:
+        return
+    if parsed.scheme:
+        raise StateManagerError("DB-free state save NHMS_SCHEDULER_STATE_INDEX uses an unsupported URI scheme.")
+    destination = Path(index_uri).expanduser()
+    destination = destination if destination.is_absolute() else Path.cwd() / destination
+    destination = destination.resolve(strict=False)
+    allowed_roots = _db_free_state_index_allowed_roots()
+    if not allowed_roots:
+        raise StateManagerError("DB-free state save requires an allowed root for NHMS_SCHEDULER_STATE_INDEX.")
+    if not any(_path_is_relative_to(destination, root) for root in allowed_roots):
+        raise StateManagerError("DB-free state save NHMS_SCHEDULER_STATE_INDEX local path is outside allowed roots.")
+
+
+def _db_free_state_index_allowed_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    raw_values = [value for value in os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "").split(os.pathsep) if value.strip()]
+    for value in raw_values:
+        if value in (None, ""):
+            continue
+        root = Path(str(value)).expanduser()
+        root = root if root.is_absolute() else Path.cwd() / root
+        resolved = root.resolve(strict=False)
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _load_state_save_manifest_entry(manifest_index: str, task_id: int) -> dict[str, Any]:

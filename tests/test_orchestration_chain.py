@@ -1756,7 +1756,6 @@ def test_m3_forecast_saves_state_before_frequency() -> None:
     stages = [stage.stage for stage in M3_STAGES]
 
     assert stages == [
-        "download",
         "convert",
         "forcing",
         "forecast",
@@ -1784,9 +1783,9 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
     non_array_submissions = {
         submission["stage"]: submission
         for submission in client.submissions
-        if submission["stage"] in {"download", "convert", "publish"}
+        if submission["stage"] in {"convert", "publish"}
     }
-    assert set(non_array_submissions) == {"download", "convert", "publish"}
+    assert set(non_array_submissions) == {"convert", "publish"}
     for submission in non_array_submissions.values():
         assert submission["slurm_job_type_templates"] == dict(DEFAULT_JOB_TYPE_TEMPLATES)
         assert submission["slurm_env"] == {
@@ -1804,7 +1803,7 @@ def test_cycle_stage_submission_events_record_runtime_root_contract(tmp_path: Pa
 
     assert result.status == "complete"
     submission_events = [event for event in repository.events if event["event_type"] == "submission"]
-    download_event = next(event for event in submission_events if event["details"]["stage"] == "download")
+    convert_event = next(event for event in submission_events if event["details"]["stage"] == "convert")
     forecast_event = next(event for event in submission_events if event["details"]["stage"] == "forecast")
     expected_contract = {
         "workspace_dir": str(tmp_path / "workspace"),
@@ -1812,11 +1811,11 @@ def test_cycle_stage_submission_events_record_runtime_root_contract(tmp_path: Pa
         "object_store_prefix": "s3://nhms",
         "published_artifact_uri_prefix": "published://",
     }
-    assert download_event["details"]["runtime_root_contract"] == expected_contract
+    assert convert_event["details"]["runtime_root_contract"] == expected_contract
     assert forecast_event["details"]["runtime_root_contract"] == expected_contract
 
 
-def test_cycle_download_success_without_raw_manifest_is_resubmitted(tmp_path: Path) -> None:
+def test_cycle_download_success_without_raw_manifest_is_not_resubmitted(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     repository.jobs["job_cycle_ifs_2026050100_download"] = {
         "job_id": "job_cycle_ifs_2026050100_download",
@@ -1841,12 +1840,11 @@ def test_cycle_download_success_without_raw_manifest_is_resubmitted(tmp_path: Pa
     result = orchestrator.orchestrate_cycle("IFS", "2026050100", _basins(1))
 
     assert result.status == "complete"
-    assert client.submissions[0]["stage"] == "download"
+    assert client.submissions[0]["stage"] == "convert"
     assert client.submissions[0]["source_id"] == "IFS"
-    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_download_retry_1"
+    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_convert"
     assert repository.jobs["job_cycle_ifs_2026050100_download"]["slurm_job_id"] == "6084"
-    assert repository.jobs["job_cycle_ifs_2026050100_download_retry_1"]["slurm_job_id"] == "2001"
-    assert repository.jobs["job_cycle_ifs_2026050100_download_retry_1"]["status"] == "succeeded"
+    assert "job_cycle_ifs_2026050100_download_retry_1" not in repository.jobs
 
 
 def test_download_repair_retries_stale_failed_downstream_stage(tmp_path: Path) -> None:
@@ -1911,12 +1909,11 @@ def test_download_repair_retries_stale_failed_downstream_stage(tmp_path: Path) -
 
     result = orchestrator.orchestrate_cycle("IFS", "2026050100", _basins(1))
 
-    assert result.status == "complete"
-    assert [submission["stage"] for submission in client.submissions[:2]] == ["convert", "forcing"]
-    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_download_retry_1"
-    assert result.stages[1].pipeline_job_id == "job_cycle_ifs_2026050100_convert_retry_1"
+    assert result.status == "failed"
+    assert client.submissions == []
+    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_convert"
     assert repository.jobs["job_cycle_ifs_2026050100_convert"]["status"] == "failed"
-    assert repository.jobs["job_cycle_ifs_2026050100_convert_retry_1"]["status"] == "succeeded"
+    assert "job_cycle_ifs_2026050100_convert_retry_1" not in repository.jobs
 
 
 def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -> None:
@@ -2084,7 +2081,7 @@ def test_forecast_runtime_manifest_write_rejects_symlink_target_without_submissi
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert target.read_text(encoding="utf-8") == "untouched"
     forecast_job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
     assert forecast_job["status"] == "submission_failed"
@@ -2106,7 +2103,7 @@ def test_cycle_manifest_index_write_rejects_symlink_target_without_stage_submiss
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert"]
     assert target.read_text(encoding="utf-8") == "untouched"
     forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
     assert forcing_job["status"] == "submission_failed"
@@ -2127,7 +2124,7 @@ def test_cycle_manifest_index_rejects_task_count_over_limit_before_stage_submiss
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert"]
     index_path = tmp_path / "workspace" / "runs" / "cycle_gfs_2026050100" / "input" / "forcing_manifest_index.json"
     assert not index_path.exists()
     forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
@@ -2149,7 +2146,7 @@ def test_cycle_manifest_index_rejects_serialized_size_over_limit_before_stage_su
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert"]
     index_path = tmp_path / "workspace" / "runs" / "cycle_gfs_2026050100" / "input" / "forcing_manifest_index.json"
     assert not index_path.exists()
     forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
@@ -2751,7 +2748,7 @@ def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert repository.cycle_statuses[-1] == "failed_forcing"
 
 
@@ -2771,7 +2768,7 @@ def test_array_stage_requires_array_submit_contract_before_submission(tmp_path: 
     assert forcing_job["status"] == "submission_failed"
     assert forcing_job["slurm_job_id"] is None
     assert forcing_job["error_code"] == "SLURM_ARRAY_SUBMIT_UNSUPPORTED"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert"]
     assert all(payload["job_type"] != "produce_forcing_array" for payload in client.submit_job_payloads)
     assert "forecast" not in [submission["stage"] for submission in client.submissions]
     assert repository.cycle_statuses[-1] == "failed_forcing"
@@ -2790,7 +2787,7 @@ def test_forecast_manifest_write_failure_marks_pipeline_failed(tmp_path: Path) -
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
     assert job["status"] == "submission_failed"
     assert job["error_code"] == "RUNTIME_MANIFEST_WRITE_FAILED"
@@ -2806,7 +2803,7 @@ def test_forecast_submission_failure_marks_staged_hydro_runs_failed(tmp_path: Pa
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert {run["status"] for run in repository.hydro_runs.values()} == {"failed"}
     assert {
         run["error_code"]
@@ -2823,7 +2820,7 @@ def test_invalid_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> Non
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
     assert "publish" not in [submission["stage"] for submission in client.submissions]
     assert repository.cycle_statuses[-1] == "failed_run"
@@ -2837,7 +2834,7 @@ def test_missing_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> Non
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
     assert "publish" not in [submission["stage"] for submission in client.submissions]
     assert repository.cycle_statuses[-1] == "failed_run"
@@ -2851,7 +2848,7 @@ def test_unreadable_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
     assert job["status"] == "submission_failed"
     assert job["error_code"] == "RUNTIME_MANIFEST_READ_FAILED"
@@ -2863,15 +2860,15 @@ def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> No
     repository = FakeCycleRepository()
     cycle_id = "gfs_2026050100"
     run_id = "cycle_gfs_2026050100"
-    repository.jobs[f"job_{run_id}_download"] = {
-        "job_id": f"job_{run_id}_download",
+    repository.jobs[f"job_{run_id}_convert"] = {
+        "job_id": f"job_{run_id}_convert",
         "run_id": run_id,
         "cycle_id": cycle_id,
-        "job_type": "download_source_cycle",
+        "job_type": "convert_canonical",
         "slurm_job_id": "3001",
         "model_id": None,
         "status": "permanently_failed",
-        "stage": "download",
+        "stage": "convert",
         "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
         "started_at": None,
         "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
@@ -2888,14 +2885,14 @@ def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> No
     assert result.status == "failed"
     assert [stage.status for stage in result.stages] == ["permanently_failed"]
     assert client.submissions == []
-    assert repository.cycle_statuses[-1] == "failed_download"
+    assert repository.cycle_statuses[-1] == "failed_convert"
 
 
 def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(
-        failures_before_success_by_stage={"download": 1},
-        error_code_by_stage={"download": "SLURM_TIMEOUT"},
+        failures_before_success_by_stage={"convert": 1},
+        error_code_by_stage={"convert": "SLURM_TIMEOUT"},
     )
     retry_service = FakeRetryService(max_retries=1)
     orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
@@ -2903,14 +2900,14 @@ def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> N
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "complete"
-    assert [submission["stage"] for submission in client.submissions[:3]] == ["download", "download", "convert"]
+    assert [submission["stage"] for submission in client.submissions[:3]] == ["convert", "convert", "forcing"]
     assert [stage.status for stage in result.stages] == ["succeeded"] * len(M3_STAGES)
-    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_convert"]
 
 
 def test_poll_timeout_persists_failed_job_and_is_retry_eligible(monkeypatch, tmp_path: Path) -> None:
     repository = FakeCycleRepository()
-    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    client = FakeCycleSlurmClient(never_terminal_stage="convert")
     retry_service = FakeRetryService(max_retries=0)
     orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
     orchestrator.config = OrchestratorConfig(
@@ -2926,14 +2923,14 @@ def test_poll_timeout_persists_failed_job_and_is_retry_eligible(monkeypatch, tmp
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
-    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert result.status == "failed"
     assert timed_out_job["status"] == "failed"
     assert timed_out_job["error_code"] == "SLURM_JOB_TIMEOUT"
-    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_convert"]
     assert any(
         event["event_type"] == "timeout"
-        and event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["status_to"] == "failed"
         and event["details"]["error_code"] == "SLURM_JOB_TIMEOUT"
         for event in repository.events
@@ -2948,7 +2945,7 @@ def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_ur
     publish_root_file.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(publish_root_file))
     repository = FakeCycleRepository()
-    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    client = FakeCycleSlurmClient(never_terminal_stage="convert")
     orchestrator = _orchestrator(tmp_path, repository, client)
     orchestrator.config = OrchestratorConfig(
         workspace_root=tmp_path / "workspace",
@@ -2964,12 +2961,12 @@ def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_ur
     expected = (
         "published://logs/gfs/2026050100/"
         "cycle_gfs_2026050100/"
-        "job_cycle_gfs_2026050100_download.out"
+        "job_cycle_gfs_2026050100_convert.out"
     )
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
-    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert timed_out_job["status"] == "failed"
@@ -2978,7 +2975,7 @@ def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_ur
     timeout_event = next(event for event in repository.events if event["event_type"] == "timeout")
     assert timeout_event["status_to"] == "failed"
     assert timeout_event["details"].get("slurm", {}).get("log_uri") is None
-    assert repository.cycle_statuses[-1] == "failed_download"
+    assert repository.cycle_statuses[-1] == "failed_convert"
 
 
 def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_advertising_uri(
@@ -2987,7 +2984,7 @@ def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_adver
 ) -> None:
     monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
     repository = FakeCycleRepository()
-    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    client = FakeCycleSlurmClient(never_terminal_stage="convert")
     object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
     orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
     orchestrator.config = OrchestratorConfig(
@@ -3001,11 +2998,11 @@ def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_adver
     monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
 
-    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/convert.log"
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
-    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert timed_out_job["status"] == "failed"
@@ -3018,7 +3015,7 @@ def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_adver
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
     )
-    assert repository.cycle_statuses[-1] == "failed_download"
+    assert repository.cycle_statuses[-1] == "failed_convert"
 
 
 def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:
@@ -3036,8 +3033,8 @@ def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -
     assert [task["model_id"] for task in forcing_submissions[0]["tasks"]] == ["model_0", "model_1", "model_2"]
     assert [task["model_id"] for task in forcing_submissions[1]["tasks"]] == ["model_1"]
     assert [submission["stage"] for submission in client.submissions].count("forcing") == 2
-    assert client.submissions[4]["stage"] == "forecast"
-    assert [task["model_id"] for task in client.submissions[4]["tasks"]] == ["model_0", "model_1", "model_2"]
+    assert client.submissions[3]["stage"] == "forecast"
+    assert [task["model_id"] for task in client.submissions[3]["tasks"]] == ["model_0", "model_1", "model_2"]
 
 
 def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_retry_service(
@@ -3062,10 +3059,10 @@ def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_re
     assert result.status == "complete"
     assert retry_job is not None
     assert retry_job.status == "succeeded"
-    assert retry_job.slurm_job_id == "2004"
+    assert retry_job.slurm_job_id == "2003"
     assert retry_job.retry_count == 1
     assert pending_retry_jobs == []
-    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["slurm_job_id"] == "2004"
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["slurm_job_id"] == "2003"
     assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["status"] == "succeeded"
     assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "partially_failed"
     assert [task["model_id"] for task in forcing_submissions[1]["tasks"]] == ["model_1"]
@@ -3079,7 +3076,7 @@ def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_re
     assert retry_event["details"]["task_results"][0]["original_task_id"] == 1
     assert retry_event["details"]["task_results"][0]["model_id"] == "model_1"
     assert retry_event["details"]["task_results"][0]["run_id"] == "run_1"
-    assert result.stages[2].pipeline_job_id == "job_cycle_gfs_2026050100_forcing_retry_1"
+    assert result.stages[1].pipeline_job_id == "job_cycle_gfs_2026050100_forcing_retry_1"
     assert result.stages[2].task_results[1]["array_task_id"] == 1
     assert result.stages[2].task_results[1]["original_task_id"] == 1
     assert result.stages[2].task_results[1]["model_id"] == "model_1"
@@ -3243,13 +3240,23 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
         array_results_by_stage={
             "forcing": ["succeeded", "succeeded"],
             "forecast": ["succeeded", "succeeded"],
+            "parse": ["succeeded", "succeeded"],
         }
     )
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "succeeded",
+        "submitted_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "payload": {"tasks": [{}, {}]},
+    }
     client.jobs["3002"] = {
         "job_id": "3002",
         "run_id": run_id,
         "model_id": "model_0",
-        "stage": "forcing",
+        "stage": "forecast",
         "status": "succeeded",
         "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
         "payload": {"tasks": [{}, {}]},
@@ -3258,7 +3265,7 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
         "job_id": "3003",
         "run_id": run_id,
         "model_id": "model_0",
-        "stage": "forecast",
+        "stage": "parse",
         "status": "succeeded",
         "submitted_at": _fmt(_dt("2026-05-01T00:03:00Z")),
         "payload": {"tasks": [{}, {}]},
@@ -3273,7 +3280,6 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
 
     assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [
-        "parse",
         "state_save_qc",
         "frequency",
         "publish",
@@ -3335,7 +3341,7 @@ def test_resume_array_status_override_publishes_log_before_advertising_uri(
         restart_stage="forcing",
     )
 
-    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[job_id])
 
     expected = (
         "published://logs/gfs/2026050100/"
@@ -3426,7 +3432,7 @@ def test_resume_array_status_override_publish_failure_does_not_advertise_missing
         restart_stage="forcing",
     )
     with pytest.raises(OrchestratorError) as exc_info:
-        orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+        orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[job_id])
 
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
@@ -3502,7 +3508,7 @@ def test_resume_array_status_override_legacy_log_write_failure_does_not_advertis
         restart_stage="forcing",
     )
     with pytest.raises(OrchestratorError) as exc_info:
-        orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+        orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[job_id])
 
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
@@ -3582,7 +3588,7 @@ def test_resume_array_status_override_preserves_existing_log_uri_without_fetchin
         restart_stage="forcing",
     )
 
-    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[job_id])
 
     assert result.status == "succeeded"
     assert result.log_uri == existing_log_uri
@@ -3940,7 +3946,7 @@ def test_pipeline_result_candidate_outcomes_redact_signed_task_log_uri(tmp_path:
 def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(
-        accounting_by_stage={"download": {"elapsed": "00:02:00", "max_rss": "2048K", "alloc_tres": "cpu=2,mem=4G"}}
+        accounting_by_stage={"convert": {"elapsed": "00:02:00", "max_rss": "2048K", "alloc_tres": "cpu=2,mem=4G"}}
     )
     orchestrator = _orchestrator(tmp_path, repository, client)
 
@@ -3949,7 +3955,7 @@ def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_pa
     accounting_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["event_type"] == "slurm_accounting"
     )
     slurm = accounting_event["details"]["slurm"]
@@ -3957,7 +3963,7 @@ def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_pa
     assert slurm["job_id"] == "2001"
     assert slurm["state"] == "succeeded"
     assert slurm["exit_code"] == 0
-    assert slurm["log_uri"].endswith("/download.log")
+    assert slurm["log_uri"].endswith("/convert.log")
     assert slurm["accounting"]["elapsed"] == "00:02:00"
     assert slurm["accounting"]["max_rss"] == "2048K"
     assert slurm["resource_metrics"]["alloc_tres"] == "cpu=2,mem=4G"
@@ -4334,9 +4340,9 @@ def test_direct_cycle_publish_failure_does_not_advertise_missing_published_log_u
     expected = (
         "published://logs/gfs/2026050100/"
         "cycle_gfs_2026050100/"
-        "job_cycle_gfs_2026050100_download.out"
+        "job_cycle_gfs_2026050100_convert.out"
     )
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
@@ -4346,7 +4352,7 @@ def test_direct_cycle_publish_failure_does_not_advertise_missing_published_log_u
     terminal_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["status_to"] == "succeeded"
     )
     assert terminal_event["details"]["slurm"].get("log_uri") is None
@@ -4373,19 +4379,19 @@ def test_direct_cycle_legacy_log_write_failure_persists_terminal_state_before_ra
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
-    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/convert.log"
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     terminal_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["status_to"] == "succeeded"
     )
     assert terminal_event["details"]["slurm"].get("log_uri") is None
@@ -4393,7 +4399,7 @@ def test_direct_cycle_legacy_log_write_failure_persists_terminal_state_before_ra
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
     )
-    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "download.log").exists()
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "convert.log").exists()
 
 
 def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_log_uri(
@@ -4428,9 +4434,9 @@ def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_l
     expected = (
         "published://logs/gfs/2026050100/"
         "fcst_gfs_2026050100_model_0/"
-        "job_fcst_gfs_2026050100_model_0_download.out"
+        "job_fcst_gfs_2026050100_model_0_convert.out"
     )
-    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
@@ -4440,7 +4446,7 @@ def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_l
     terminal_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_convert"
         and event["status_to"] == "succeeded"
     )
     assert terminal_event["details"]["slurm"].get("log_uri") is None
@@ -4478,21 +4484,21 @@ def test_direct_non_cycle_legacy_log_write_failure_persists_adjacent_state_befor
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator._submit_and_wait(M3_STAGES[0], context, first_stage=True)
 
-    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/download.log"
-    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/convert.log"
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     assert repository.hydro_runs[context.run_id]["status"] == "submitted"
     assert repository.hydro_runs[context.run_id]["slurm_job_id"] == "2001"
     terminal_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_convert"
         and event["status_to"] == "succeeded"
     )
     assert terminal_event["details"]["slurm"].get("log_uri") is None
@@ -4500,7 +4506,7 @@ def test_direct_non_cycle_legacy_log_write_failure_persists_adjacent_state_befor
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
     )
-    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "download.log").exists()
+    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "convert.log").exists()
 
 
 def test_direct_non_cycle_polled_success_event_includes_readable_published_log_uri(
@@ -4532,13 +4538,13 @@ def test_direct_non_cycle_polled_success_event_includes_readable_published_log_u
     expected = (
         "published://logs/gfs/2026050100/"
         "fcst_gfs_2026050100_model_0/"
-        "job_fcst_gfs_2026050100_model_0_download.out"
+        "job_fcst_gfs_2026050100_model_0_convert.out"
     )
-    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_convert"]
     terminal_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_convert"
         and event["status_to"] == "succeeded"
     )
     reader_result = ArtifactReader(
@@ -4569,20 +4575,20 @@ def test_direct_cycle_immediate_terminal_publish_failure_persists_terminal_state
     expected = (
         "published://logs/gfs/2026050100/"
         "cycle_gfs_2026050100/"
-        "job_cycle_gfs_2026050100_download.out"
+        "job_cycle_gfs_2026050100_convert.out"
     )
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     submission_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["event_type"] == "submission"
     )
     assert submission_event["status_to"] == "succeeded"
@@ -4616,16 +4622,16 @@ def test_direct_cycle_immediate_terminal_symlink_publish_root_is_not_followed(
     expected = (
         "published://logs/gfs/2026050100/"
         "cycle_gfs_2026050100/"
-        "job_cycle_gfs_2026050100_download.out"
+        "job_cycle_gfs_2026050100_convert.out"
     )
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     assert all(event["details"].get("slurm", {}).get("log_uri") != expected for event in repository.events)
     assert expected not in str({"jobs": repository.jobs, "events": repository.events})
     assert client.fetch_log_calls == ["2001"]
@@ -4647,19 +4653,19 @@ def test_direct_cycle_immediate_terminal_legacy_log_write_failure_persists_termi
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
-    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/convert.log"
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     submission_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["event_type"] == "submission"
     )
     assert submission_event["status_to"] == "succeeded"
@@ -4670,7 +4676,7 @@ def test_direct_cycle_immediate_terminal_legacy_log_write_failure_persists_termi
     )
     assert client.fetch_log_calls == ["2001"]
     assert client.poll_counts["2001"] == 0
-    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "download.log").exists()
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "convert.log").exists()
 
 
 def test_direct_non_cycle_immediate_terminal_publish_failure_persists_adjacent_state_before_raise(
@@ -4705,22 +4711,22 @@ def test_direct_non_cycle_immediate_terminal_publish_failure_persists_adjacent_s
     expected = (
         "published://logs/gfs/2026050100/"
         "fcst_gfs_2026050100_model_0/"
-        "job_fcst_gfs_2026050100_model_0_download.out"
+        "job_fcst_gfs_2026050100_model_0_convert.out"
     )
-    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     assert repository.hydro_runs[context.run_id]["status"] == "submitted"
     assert repository.hydro_runs[context.run_id]["slurm_job_id"] == "2001"
     status_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_convert"
         and event["event_type"] == "status_change"
     )
     assert status_event["status_to"] == "succeeded"
@@ -4761,21 +4767,21 @@ def test_direct_non_cycle_immediate_terminal_legacy_log_write_failure_persists_a
     with pytest.raises(OrchestratorError) as exc_info:
         orchestrator._submit_and_wait(M3_STAGES[0], context, first_stage=True)
 
-    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/download.log"
-    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/convert.log"
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_convert"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
     assert job["status"] == "succeeded"
     assert job["exit_code"] == 0
     assert job["error_code"] is None
     assert job["log_uri"] is None
-    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.cycle_statuses[-1] == "canonical_ready"
     assert repository.hydro_runs[context.run_id]["status"] == "submitted"
     assert repository.hydro_runs[context.run_id]["slurm_job_id"] == "2001"
     status_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_convert"
         and event["event_type"] == "status_change"
     )
     assert status_event["status_to"] == "succeeded"
@@ -4786,7 +4792,7 @@ def test_direct_non_cycle_immediate_terminal_legacy_log_write_failure_persists_a
     )
     assert client.fetch_log_calls == ["2001"]
     assert client.poll_counts["2001"] == 0
-    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "download.log").exists()
+    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "convert.log").exists()
 
 
 def test_direct_submit_success_with_immediate_terminal_publish_root_advertises_readable_uri(
@@ -4805,13 +4811,13 @@ def test_direct_submit_success_with_immediate_terminal_publish_root_advertises_r
     expected = (
         "published://logs/gfs/2026050100/"
         "cycle_gfs_2026050100/"
-        "job_cycle_gfs_2026050100_download.out"
+        "job_cycle_gfs_2026050100_convert.out"
     )
-    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    job = repository.jobs["job_cycle_gfs_2026050100_convert"]
     submission_event = next(
         event
         for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        if event["entity_id"] == "job_cycle_gfs_2026050100_convert"
         and event["event_type"] == "submission"
     )
     assert result.status == "complete"
@@ -4825,7 +4831,7 @@ def test_direct_submit_success_with_immediate_terminal_publish_root_advertises_r
         / "gfs"
         / "2026050100"
         / "cycle_gfs_2026050100"
-        / "job_cycle_gfs_2026050100_download.out"
+        / "job_cycle_gfs_2026050100_convert.out"
     ).read_text(encoding="utf-8") == "ok"
 
 
@@ -4849,7 +4855,7 @@ def test_malformed_array_accounting_records_gap_without_fabricating_metrics(tmp_
         and event["status_to"] == "failed"
     )
     assert result.status == "failed"
-    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
     assert gap_event["details"]["fabricated_metrics"] is False
     assert gap_event["details"]["gap"]["error"]
     assert forcing_event["details"]["task_results"] == ()
@@ -5980,6 +5986,13 @@ def test_find_existing_source_cycle_stage_prefers_successful_manual_retry_identi
         all_basins=[],
         active_basins=[],
     )
+    download_stage = StageDefinition(
+        "download",
+        "download_source_cycle",
+        "download_source_cycle.sbatch",
+        "raw_complete",
+        "failed_download",
+    )
 
     selected = ForecastOrchestrator._find_existing_stage_job(
         ForecastOrchestrator,
@@ -6007,7 +6020,7 @@ def test_find_existing_source_cycle_stage_prefers_successful_manual_retry_identi
                 "created_at": "2026-06-12T10:51:55Z",
             },
         ],
-        M3_STAGES[0],
+        download_stage,
         context=context,
     )
 
@@ -6023,6 +6036,13 @@ def test_find_existing_source_cycle_stage_prefers_retry_active_by_persisted_retr
         run_id="cycle_ifs_2026060912",
         all_basins=[],
         active_basins=[],
+    )
+    download_stage = StageDefinition(
+        "download",
+        "download_source_cycle",
+        "download_source_cycle.sbatch",
+        "raw_complete",
+        "failed_download",
     )
 
     selected = ForecastOrchestrator._find_existing_stage_job(
@@ -6051,7 +6071,7 @@ def test_find_existing_source_cycle_stage_prefers_retry_active_by_persisted_retr
                 "created_at": "2026-06-12T10:51:55Z",
             },
         ],
-        M3_STAGES[0],
+        download_stage,
         context=context,
     )
 
@@ -6604,7 +6624,6 @@ def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
     assert len(results) == 1
     assert results[0].status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [
-        "produce_forcing",
         "run_shud_forecast",
         "parse_output",
     ]
@@ -6910,7 +6929,6 @@ def test_trigger_ready_forecasts_current_converter_version_is_not_demoted(
     assert results[0].status == "complete"
     assert "raw_complete" not in repository.cycle_statuses
     assert [submission["stage"] for submission in client.submissions] == [
-        "produce_forcing",
         "run_shud_forecast",
         "parse_output",
     ]
@@ -8151,14 +8169,14 @@ def test_chain_persistence_repository_compat_repository_retention_classification
         "list_stage_statuses",
     )
     expected_legacy_import_tokens = {
-        "services/orchestrator/scheduler.py": (
+        "services/orchestrator/scheduler_adapters.py": (
             "from services.orchestrator.chain import PsycopgOrchestratorRepository",
             "PsycopgOrchestratorRepository",
             "return PsycopgOrchestratorRepository.from_env()",
         )
     }
     expected_legacy_import_function_tokens = {
-        "services/orchestrator/scheduler.py": {
+        "services/orchestrator/scheduler_adapters.py": {
             "_active_repository_from_env": (
                 "from services.orchestrator.chain import PsycopgOrchestratorRepository",
                 "return PsycopgOrchestratorRepository.from_env()",
@@ -9383,7 +9401,7 @@ def test_chain_stage_reserves_before_submit_and_binds_after(tmp_path: Path) -> N
         assert entry["status_at_submit"] == "reserved"
 
     # After the run, those reservations are bound to a slurm_job_id (phase 2).
-    for stage in ("download", "convert"):
+    for stage in ("convert", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
         assert job["idempotency_key"] == f"cycle_gfs_2026050100:{stage}"
         assert job["slurm_job_id"] is not None
@@ -9499,7 +9517,7 @@ def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
     monkeypatch.setattr(orchestrator, "_slurm_submission_manifest", _slurm_submission_manifest)
     monkeypatch.setattr(orchestrator, "_submit_array_stage", _submit_array_stage)
 
-    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[1], context)
 
     assert result.status == "succeeded"
     assert aggregation is not None
@@ -9549,7 +9567,7 @@ def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
         "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
     }
 
-    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[resume_job_id])
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[0], context, repository.jobs[resume_job_id])
 
     assert result.status == "succeeded"
     assert aggregation is None
@@ -9591,7 +9609,7 @@ def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -
     orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
 
     orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
-    key = "cycle_gfs_2026050100:download"
+    key = "cycle_gfs_2026050100:convert"
     first = repository.query_candidate_state(key)
     assert first is not None
 
@@ -9603,7 +9621,7 @@ def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -
 def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path) -> None:
     """A manual retry must not reuse the old terminal stage job/idempotency key.
 
-    Production hit this with ``job_cycle_gfs_..._download`` already failed and
+    Production hit this with ``job_cycle_gfs_..._convert`` already failed and
     bound to an old Slurm job: reusing the same idempotency key made the reserve
     gate skip sbatch and evidence kept pointing at the stale failure.
     """
@@ -9613,15 +9631,15 @@ def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
     old_job = store.create_job(
-        job_id="job_cycle_gfs_2026050100_download",
+        job_id="job_cycle_gfs_2026050100_convert",
         run_id="cycle_gfs_2026050100",
         cycle_id="gfs_2026050100",
-        job_type="download_source_cycle",
+        job_type="convert_canonical",
         slurm_job_id="6051",
         model_id=None,
-        stage="download",
+        stage="convert",
         status="failed",
-        idempotency_key="cycle_gfs_2026050100:download",
+        idempotency_key="cycle_gfs_2026050100:convert",
     )
     old_job.exit_code = 127
     old_job.error_code = "SLURM_JOB_FAILED"
@@ -9647,19 +9665,19 @@ def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
 
-    retry_job_id = "job_cycle_gfs_2026050100_download_retry_4"
+    retry_job_id = "job_cycle_gfs_2026050100_convert_retry_4"
     assert result.status == "complete"
     assert result.stages[0].pipeline_job_id == retry_job_id
-    persisted_old_job = store.get_job("job_cycle_gfs_2026050100_download")
+    persisted_old_job = store.get_job("job_cycle_gfs_2026050100_convert")
     assert persisted_old_job is not None
     assert persisted_old_job.slurm_job_id == "6051"
     assert persisted_old_job.status == "failed"
     retry_job = repository.jobs[retry_job_id]
     assert retry_job["status"] == "succeeded"
     assert retry_job["slurm_job_id"] == "2001"
-    assert retry_job["idempotency_key"] == "cycle_gfs_2026050100:download:retry_4"
-    assert idempotency_key_from_comment(comments[0]) == "cycle_gfs_2026050100:download:retry_4"
-    assert client.submissions[0]["stage"] == "download"
+    assert retry_job["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
+    assert idempotency_key_from_comment(comments[0]) == "cycle_gfs_2026050100:convert:retry_4"
+    assert client.submissions[0]["stage"] == "convert"
 
 
 class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):
@@ -9721,7 +9739,7 @@ def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path
     client = _CountingSubmitClient()
     orchestrator = _orchestrator(tmp_path, repository, client)
 
-    stage = M3_STAGES[0]  # download: non-array, single submit_job.
+    stage = M3_STAGES[0]  # convert: non-array, single submit_job.
     context = CycleOrchestrationContext(
         source_id="gfs",
         cycle_time=_dt("2026-05-01T00:00:00Z"),

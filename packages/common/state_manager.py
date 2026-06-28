@@ -157,6 +157,32 @@ def _state_snapshot_metadata_matches(
     return _optional_str(snapshot.original_shud_filename) == _optional_str(original_shud_filename)
 
 
+def _same_checksum_lineage_repair_candidate(
+    snapshot: StateSnapshot,
+    *,
+    cycle_id: str | None,
+    lead_hours: int | None,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+) -> bool:
+    if snapshot.cycle_id not in (None, "", cycle_id):
+        return False
+    if snapshot.lead_hours not in (None, lead_hours):
+        return False
+    if snapshot.cycle_id in (None, "") or snapshot.lead_hours is None:
+        return True
+    target_package_version = _optional_str(model_package_version)
+    if target_package_version is not None and _optional_str(snapshot.model_package_version) != target_package_version:
+        return True
+    target_package_checksum = _optional_str(model_package_checksum)
+    if target_package_checksum is not None:
+        if snapshot.model_package_checksum in (None, ""):
+            return True
+        if not _checksum_matches(snapshot.model_package_checksum, target_package_checksum):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class StateManager:
     repository: StateSnapshotRepository
@@ -217,6 +243,21 @@ class StateManager:
         if lead_hours is not None:
             lookup_kwargs["lead_hours"] = lead_hours
         existing = self.repository.get_state_snapshot_by_model_time(**lookup_kwargs)
+        if existing is None and (cycle_id not in (None, "") or lead_hours is not None):
+            same_checksum_existing = self._find_same_checksum_base_snapshot(
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=parsed_valid_time,
+                checksum=checksum,
+            )
+            if same_checksum_existing is not None and _same_checksum_lineage_repair_candidate(
+                same_checksum_existing,
+                cycle_id=cycle_id,
+                lead_hours=lead_hours,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+            ):
+                existing = same_checksum_existing
         if existing is not None and _checksum_matches(existing.checksum, checksum):
             if _state_snapshot_metadata_matches(
                 existing,
@@ -278,6 +319,31 @@ class StateManager:
         saved = self.repository.upsert_state_snapshot(snapshot)
         status = "superseded" if existing is not None else "created"
         return StateSnapshotSaveResult(status=status, state_id=saved.state_id, snapshot=saved)
+
+    def _find_same_checksum_base_snapshot(
+        self,
+        *,
+        model_id: str,
+        source_id: str | None,
+        valid_time: datetime,
+        checksum: str,
+    ) -> StateSnapshot | None:
+        finder = getattr(self.repository, "find_state_snapshot_by_model_time_checksum", None)
+        if callable(finder):
+            return finder(
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+                checksum=checksum,
+            )
+        candidate = self.repository.get_state_snapshot_by_model_time(
+            model_id=model_id,
+            source_id=source_id,
+            valid_time=valid_time,
+        )
+        if candidate is not None and _checksum_matches(candidate.checksum, checksum):
+            return candidate
+        return None
 
     def run_qc(self, state_id: str | StateSnapshotSaveResult) -> bool:
         resolved_state_id = str(state_id)
@@ -785,6 +851,34 @@ class FileStateSnapshotIndexRepository:
             return None
         return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
 
+    def find_state_snapshot_by_model_time_checksum(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None,
+        checksum: str,
+    ) -> StateSnapshot | None:
+        if source_id in (None, ""):
+            return None
+        index_snapshot = self._load_index_snapshot(
+            allow_empty=self.create_missing,
+            verify_objects=False,
+            enforce_freshness=not self.create_missing,
+        )
+        for entry in sorted(
+            self._entries_for_base_key(
+                index_snapshot.entries,
+                model_id=model_id,
+                source_id=source_id,
+                valid_time=valid_time,
+            ),
+            key=lambda item: str(item.get("state_id") or ""),
+        ):
+            if _checksum_matches(entry.get("checksum"), checksum):
+                return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
+        return None
+
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         with self._update_lock():
             entries = self._load_entries_for_update()
@@ -795,15 +889,22 @@ class FileStateSnapshotIndexRepository:
                 cycle_id=snapshot.cycle_id,
                 lead_hours=snapshot.lead_hours,
             )
-            entries[key] = _state_index_entry_from_snapshot(snapshot)
-            self._publish_entries(entries.values())
+            entry = _state_index_entry_from_snapshot(snapshot)
+            self._verify_publish_entry_object(entry, field="entries[].state_uri")
+            entries = {
+                entry_key: entry_value
+                for entry_key, entry_value in entries.items()
+                if entry_value.get("state_id") != snapshot.state_id
+            }
+            entries[key] = entry
+            self._publish_entries(entries.values(), verify_objects=False)
             self._clear_index_snapshot_cache()
         return snapshot
 
     def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
         with self._update_lock():
             entries = self._load_entries_for_update()
-            selected_key: tuple[str, str, str] | None = None
+            selected_key: tuple[str, str, str, str, str] | None = None
             selected: dict[str, Any] | None = None
             for key, entry in entries.items():
                 if str(entry.get("state_id") or "") == state_id:
@@ -816,8 +917,9 @@ class FileStateSnapshotIndexRepository:
                 usable_flag,
                 field="usable_flag",
             )
+            self._verify_publish_entry_object(selected, field="entries[].state_uri")
             entries[selected_key] = selected
-            self._publish_entries(entries.values())
+            self._publish_entries(entries.values(), verify_objects=False)
             self._clear_index_snapshot_cache()
             return _state_snapshot_from_index_entry(selected)
 
@@ -1043,10 +1145,11 @@ class FileStateSnapshotIndexRepository:
             published_artifact_root=self.published_artifact_root,
             now=self.now,
             max_age_hours=self.max_age_hours,
+            verify_objects=False,
             enforce_freshness=False,
         )
 
-    def _publish_entries(self, entries: Sequence[Mapping[str, Any]]) -> None:
+    def _publish_entries(self, entries: Sequence[Mapping[str, Any]], *, verify_objects: bool = True) -> None:
         publish_state_snapshot_index(
             list(entries),
             self.index_uri,
@@ -1054,6 +1157,7 @@ class FileStateSnapshotIndexRepository:
             object_store_prefix=self.object_store_prefix,
             published_artifact_root=self.published_artifact_root,
             generated_at=self.now,
+            verify_objects=verify_objects,
         )
 
     def _load_index_snapshot(
@@ -1103,15 +1207,21 @@ class FileStateSnapshotIndexRepository:
 
     def _entry_with_verified_object(self, entry: Mapping[str, Any]) -> dict[str, Any]:
         verified = dict(entry)
-        verified["object_evidence"] = _verify_state_index_object(
-            str(verified["state_uri"]),
-            str(verified["checksum"]),
-            object_store_root=self.object_store_root,
-            object_store_prefix=self.object_store_prefix,
-            published_artifact_root=self.published_artifact_root,
+        verified["object_evidence"] = self._verify_publish_entry_object(
+            verified,
             field="entries[].state_uri",
         )
         return verified
+
+    def _verify_publish_entry_object(self, entry: Mapping[str, Any], *, field: str) -> dict[str, Any]:
+        return _verify_state_index_object(
+            str(entry["state_uri"]),
+            str(entry["checksum"]),
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+            published_artifact_root=self.published_artifact_root,
+            field=field,
+        )
 
     def _blocked_index_evidence(self, error: StateManagerError) -> dict[str, Any]:
         return _state_index_evidence_safe(
@@ -1181,6 +1291,7 @@ def publish_state_snapshot_index(
     object_store_prefix: str | None = None,
     published_artifact_root: str | Path | None = None,
     generated_at: datetime | None = None,
+    verify_objects: bool = True,
 ) -> dict[str, Any]:
     generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     payload: dict[str, Any] = {
@@ -1203,6 +1314,7 @@ def publish_state_snapshot_index(
         published_artifact_root=published_artifact_root,
         now=generated,
         max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
+        verify_objects=verify_objects,
     )
     _write_state_index_bytes(
         str(destination_uri),
@@ -1274,6 +1386,7 @@ def _validate_state_snapshot_index(
             valid_time=_parse_state_index_time(entry["valid_time"], field=f"entries[{index}].valid_time"),
             cycle_id=_optional_str(entry.get("cycle_id")),
             lead_hours=entry.get("lead_hours"),
+            field_prefix=f"entries[{index}]",
         )
         if key in entries:
             raise _state_index_error(
@@ -1324,7 +1437,7 @@ def _normalize_state_index_entry(
                 "state_snapshot_index_required_field_missing",
                 field=f"entries[{index}].{field}",
             )
-    source_id = normalize_source_id(str(row["source_id"]))
+    source_id = _normalize_state_index_source_id(row["source_id"], field=f"entries[{index}].source_id")
     valid_time = _ensure_utc(_parse_state_index_time(row["valid_time"], field=f"entries[{index}].valid_time"))
     state_uri = str(row["state_uri"])
     checksum = str(row["checksum"])
@@ -1449,14 +1562,16 @@ def _state_index_identity_key(
     valid_time: datetime | str,
     cycle_id: str | None,
     lead_hours: Any,
+    field_prefix: str = "identity",
 ) -> tuple[str, str, str, str, str]:
     parsed_valid_time = (
         _parse_state_index_time(valid_time, field="valid_time") if not isinstance(valid_time, datetime) else valid_time
     )
-    lead_text = "" if lead_hours in (None, "") else str(int(lead_hours))
+    lead_value = _optional_state_index_int(lead_hours, field=f"{field_prefix}.lead_hours")
+    lead_text = "" if lead_value is None else str(lead_value)
     return (
         str(model_id),
-        normalize_source_id(str(source_id)),
+        _normalize_state_index_source_id(source_id, field=f"{field_prefix}.source_id"),
         _format_time(_ensure_utc(parsed_valid_time)) or "",
         str(cycle_id or ""),
         lead_text,
@@ -1464,7 +1579,11 @@ def _state_index_identity_key(
 
 
 def _state_index_base_key(*, model_id: str, source_id: str, valid_time: datetime) -> tuple[str, str, str]:
-    return (str(model_id), normalize_source_id(str(source_id)), _format_time(_ensure_utc(valid_time)) or "")
+    return (
+        str(model_id),
+        _normalize_state_index_source_id(source_id, field="identity.source_id"),
+        _format_time(_ensure_utc(valid_time)) or "",
+    )
 
 
 def _expected_state_index_cycle_id(source_id: str, valid_time: datetime, lead_hours: int) -> str:
@@ -2004,13 +2123,31 @@ def _parse_state_index_time(value: Any, *, field: str) -> datetime:
         raise _state_index_error("state_snapshot_index_time_invalid", field=field) from error
 
 
+def _normalize_state_index_source_id(value: Any, *, field: str) -> str:
+    try:
+        return normalize_source_id(str(value))
+    except (TypeError, ValueError) as error:
+        raise _state_index_error("state_snapshot_index_source_id_invalid", field=field) from error
+
+
 def _optional_state_index_int(value: Any, *, field: str) -> int | None:
     if value in (None, ""):
         return None
-    try:
+    if type(value) is bool:
+        raise _state_index_error("state_snapshot_index_int_invalid", field=field)
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise _state_index_error("state_snapshot_index_int_invalid", field=field)
         parsed = int(value)
-    except (TypeError, ValueError) as error:
-        raise _state_index_error("state_snapshot_index_int_invalid", field=field) from error
+    elif isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"[0-9]+", text):
+            raise _state_index_error("state_snapshot_index_int_invalid", field=field)
+        parsed = int(text)
+    else:
+        raise _state_index_error("state_snapshot_index_int_invalid", field=field)
     if parsed < 0:
         raise _state_index_error("state_snapshot_index_int_invalid", field=field)
     return parsed
