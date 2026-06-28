@@ -2465,8 +2465,10 @@ def test_fresh_cycle_with_active_slurm_job_does_not_double_submit(tmp_path: Path
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    active_repository = FakeSlurmActiveRepository(
-        active_jobs=[{"job_id": "job_download", "slurm_job_id": "9001", "stage": "download", "status": "running"}]
+    active_jobs = [{"job_id": "job_download", "slurm_job_id": "9001", "stage": "download", "status": "running"}]
+    active_repository = CandidateAndActiveRepository(
+        {"active_slurm_jobs": active_jobs},
+        active_jobs=active_jobs,
     )
     forcing_producer = FakeForcingProducer(error=RuntimeError("must not run when an active job exists"))
     orchestrator = FakeProductionOrchestrator()
@@ -17254,7 +17256,182 @@ def test_db_free_injected_collaborators_plan_without_unimplemented_provider_bloc
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
-def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_download_job(
+def test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    factory_calls: list[str] = []
+    forcing_producer = FakeForcingProducer()
+
+    def _factory(source_id: str) -> FakeProductionOrchestrator:
+        factory_calls.append(source_id)
+        return FakeProductionOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(dry_run=False, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=_factory,
+    )
+
+    result = scheduler.run_once()
+
+    assert factory_calls == []
+    assert forcing_producer.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["model_run_evidence"][0]["evidence_pre_execution"]["reason"] == (
+        "db_free_file_journal_write_not_implemented"
+    )
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_journal_write_block_forces_retention_dry_run_before_deletion(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    old_cycle = format_cycle_time(now - timedelta(days=30))
+    expired_file = roots["object_store_root"] / "raw" / "gfs" / old_cycle / "gfs.f000.nc"
+    expired_file.parent.mkdir(parents=True)
+    expired_file.write_text("expired\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    orchestrator = FakeProductionOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(dry_run=False, now=now),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert expired_file.exists()
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["retention"]["status"] == "completed"
+    assert result.evidence["retention"]["dry_run"] is True
+    assert result.evidence["retention"]["forced_dry_run_by_scheduler"] is True
+    assert result.evidence["retention"]["forced_dry_run_reason"] == "db_free_journal_write_blocked"
+    assert result.evidence["retention"]["planned"]
+    assert result.evidence["retention"]["deleted"] == []
+
+
+def test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    factory_calls: list[str] = []
+    active_state = {
+        "pipeline_status": "running",
+        "pipeline_jobs": [
+            {
+                "job_id": "job_forcing",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "status": "running",
+                "stage": "forcing",
+                "slurm_job_id": "7777",
+            }
+        ],
+    }
+    active_jobs = [
+        {
+            "job_id": "job_forcing",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": "running",
+            "stage": "forcing",
+            "slurm_job_id": "7777",
+        }
+    ]
+
+    def _factory(source_id: str) -> FakeProductionOrchestrator:
+        factory_calls.append(source_id)
+        return FakeProductionOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(dry_run=False, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=CandidateAndActiveRepository(active_state, active_jobs),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=_factory,
+    )
+
+    result = scheduler.run_once()
+
+    assert factory_calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_deferred"
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is False
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_call(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    factory_calls: list[str] = []
+    active_jobs = [
+        {
+            "job_id": "job_forcing",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": "running",
+            "stage": "forcing",
+            "slurm_job_id": "7777",
+        }
+    ]
+
+    def _factory(source_id: str) -> FakeProductionOrchestrator:
+        factory_calls.append(source_id)
+        return FakeProductionOrchestrator()
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            dry_run=False,
+            now=_dt("2026-05-21T12:00:00Z"),
+            cancel_active_slurm=True,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(active_jobs=active_jobs),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=_factory,
+    )
+
+    result = scheduler.run_once()
+
+    assert factory_calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "cancel_requested_active_slurm"
+    assert result.evidence["slurm_cancellation_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_cancellation_proof"]["block_reason"] == (
+        "db_free_file_journal_write_not_implemented"
+    )
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is False
+    assert result.evidence["slurm_cancellation_evidence"][0]["error_code"] == (
+        "DB_FREE_FILE_JOURNAL_WRITE_NOT_IMPLEMENTED"
+    )
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_convert_submission(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -17292,19 +17469,25 @@ def test_db_free_from_env_raw_ready_canonical_zero_restarts_at_convert_without_d
 
     result = scheduler.run_once()
 
-    assert result.status == "submitted"
-    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "db_free_journal_write_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["blocked_candidates"] == []
-    submitted_basin = orchestrator.calls[0]["basins"][0]
-    assert submitted_basin["restart_stage"] == "convert"
-    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["status"] == "ready"
-    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["manifest_uri"] == "[object-uri]"
-    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
-    assert submitted_basin["state_evidence"]["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
-    assert submitted_basin["state_evidence"]["raw_manifest_reuse"]["manifest_uri"] == "[object-uri]"
-    assert submitted_basin["state_evidence"]["canonical_readiness"]["candidate_row_count"] == 0
+    assert orchestrator.calls == []
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["restart_stage"] == "convert"
+    assert state_evidence["nfs_raw_manifest"]["status"] == "ready"
+    assert state_evidence["nfs_raw_manifest"]["manifest_uri"] == "[object-uri]"
+    assert state_evidence["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
+    assert state_evidence["nfs_raw_manifest"]["manifest_path"] == "[local-path]"
+    assert state_evidence["raw_manifest_reuse"]["manifest_uri"] == "[object-uri]"
+    assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
+    assert result.evidence["model_run_evidence"][0]["evidence_pre_execution"]["reason"] == (
+        "db_free_file_journal_write_not_implemented"
+    )
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     rendered_submission = json.dumps(
-        {"calls": orchestrator.calls, "evidence": result.evidence},
+        {"evidence": result.evidence},
         sort_keys=True,
         default=str,
     )

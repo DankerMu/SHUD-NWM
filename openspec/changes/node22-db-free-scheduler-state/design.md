@@ -485,6 +485,153 @@ Invariant Matrix:
   - Non-DB-free postgres mode -> legacy registry/readiness factories remain
     available where existing tests cover them.
 
+## Issue #833 Fixture
+
+Fixture level: expanded
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- File-backed replacement for scheduler planning reads currently supplied by
+  `PsycopgOrchestratorRepository`.
+- Append-only journal replay and materialized latest views affect duplicate
+  prevention and active Slurm behavior.
+- DB-free `ProductionScheduler.from_env()` changes its active repository wiring.
+- Candidate-state evidence can trigger active skip, completed skip, retry,
+  permanent block, raw handoff restart, and cancellation/status-sync paths.
+
+Must preserve:
+
+- #832 registry, canonical readiness, and node-27 raw handoff evidence stay
+  bounded and redacted.
+- File journal write side, retry service replacement, historical migration, and
+  live node-22 deployment remain later issue scope.
+- Non-DB-free postgres repository behavior and public scheduler facade imports
+  remain stable.
+- DB-free default mutation still blocks until the file journal write side lands.
+
+Must add/change:
+
+- Add a versioned append-only record schema
+  `nhms.scheduler.file_orchestration_journal.v1` and materialized latest schema
+  `nhms.scheduler.file_orchestration_latest.v1`.
+- Implement a file-backed read repository for active orchestration, active
+  pipeline, completed pipeline, active Slurm jobs, candidate state, model
+  context, forcing context, pipeline job lookup, and stage-status query helpers.
+- Reuse the existing candidate-state row materialization algorithm so DB-backed
+  and file-backed rows produce the same scheduler decisions.
+- Wire DB-free scheduler construction to the file journal repository from
+  `NHMS_SCHEDULER_JOURNAL_ROOT` without DB-backed repository factories.
+- Fail closed on malformed journal/latest state, schema-less direct job
+  snapshots, sidecar event schema/cycle mismatches, nested identity mismatches,
+  unsafe scanned entries, discovery/file/JSON complexity limits, and invalid
+  scalar fields; redact runtime roots, local paths, object URIs, and blocked
+  query sentinels in public candidate/job evidence.
+
+Risk packs considered for #833:
+
+- Public API / CLI / script entry: selected - `ProductionScheduler.from_env()`
+  uses the new read repository in DB-free mode.
+- Config / project setup: selected - `NHMS_SCHEDULER_JOURNAL_ROOT` becomes a
+  live planning input.
+- File IO / path safety / overwrite: selected - reader consumes latest JSON,
+  append-only JSONL, pipeline-job files, and pipeline-event files.
+- Schema / columns / units / field names: selected - new journal/latest schemas
+  encode scheduler row contracts and replay metadata.
+- Auth / permissions / secrets: selected - runtime roots and local paths must
+  not leak through scheduler evidence.
+- Concurrency / shared state / ordering: selected - append-only replay and
+  materialized latest views must not allow duplicate submission.
+- Resource limits / large input / discovery: selected - file reads, scanned
+  file discovery, recursion depth, replay records, and JSON node/depth
+  complexity are bounded.
+- Legacy compatibility / examples: selected - postgres-mode repository methods
+  and scheduler facade imports remain compatible.
+- Error handling / rollback / partial outputs: selected - malformed state fails
+  closed instead of being treated as absent.
+- Slurm production lifecycle / mock-vs-real parity: selected - active Slurm job
+  evidence controls skip/cancel/status-sync paths.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `chain_repository_state.py`, new file journal reader,
+  `scheduler_core.py`, and scheduler facade exports.
+- Public entrypoints: `ProductionScheduler.from_env()`, scheduler planning
+  `run_once()`, and repository read/query methods.
+- Read surfaces: `<journal-root>/latest`, `<journal-root>/journal`,
+  `<journal-root>/pipeline-jobs`, `<journal-root>/pipeline-events`,
+  `<journal-root>/models`, and `<journal-root>/forcing`.
+- Write/delete/overwrite surfaces: none in #833; write methods deliberately
+  raise `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
+- Staging/publish/rollback surfaces: replay metadata and latest schema only;
+  migration/import remains #834.
+- Producer/consumer evidence boundaries: candidate state, active Slurm jobs,
+  scheduler skipped/blocked candidates, and model/forcing context reads.
+- Stale-state/idempotency boundaries: active/completed statuses, candidate
+  identity filters, append-only sequence replay, malformed JSON, and missing
+  optional latest views.
+- Unchanged downstream consumers: #832 file providers, raw handoff staging,
+  postgres-mode repository tests, and future write/migration tasks.
+
+Invariant Matrix:
+
+- Governing invariant: DB-free scheduler planning must treat file journal rows
+  as the orchestration-state source of truth only when schema and identity are
+  valid; malformed state blocks rather than permitting duplicate submission.
+- Source-of-truth identity/contract: applicable schema version,
+  source/cycle/model/run identity, candidate ID, forcing version ID, job ID,
+  Slurm job ID, stage, status, error code, sequence/event ID, replay metadata,
+  context field contracts, and redacted runtime roots.
+- Producers: later #834 write side and historical migration; #833 tests create
+  read-side fixtures only.
+- Validators/preflight: file schema validation, source/cycle/model/run/job
+  identity checks, path segment checks, no-follow scanned entry validation,
+  safe bounded reads, file/depth/JSON complexity limits, and existing DB-free
+  runtime preflight.
+- Storage/cache/query: materialized latest views, append-only JSONL replay,
+  pipeline job JSON files, pipeline event JSONL files, model context JSON, and
+  forcing context JSON.
+- Public routes/entrypoints: DB-free scheduler construction and read/query
+  repository methods.
+- Frontend/downstream consumers: none directly - scheduler evidence and Slurm
+  planning outcomes are the downstream contract in #833.
+- Failure paths/rollback/stale state: malformed JSON, schema mismatch, source
+  mismatch, cycle mismatch, missing optional latest view, unknown record type,
+  and write method calls before #834.
+- Evidence/audit/readiness: repository contract tests, scheduler no-DB planning
+  test, raw handoff regression selector, ruff, and OpenSpec strict validation.
+- Regression rows:
+  - Active job in file latest or append-only journal -> scheduler sees active
+    orchestration/pipeline and active Slurm evidence.
+  - Valid source alias/casing at caller or row boundary -> canonical file
+    source identity is used consistently for path lookup, cycle IDs, row
+    matching, and context reads; accepted rows cannot later disappear because
+    of raw source-string casing.
+  - Active job in file latest or append-only journal plus newer terminal direct
+    `pipeline-jobs` snapshot for the same `job_id` -> active replay remains
+    authoritative for scheduler planning and query evidence.
+  - Append-only journal records for the same `job_id` with increasing sequence
+    -> the later valid sequence/replay row is authoritative even when timestamp
+    fields are absent or older.
+  - Journal envelope/payload/run identity disagreement -> file replay fails
+    closed for the affected model instead of treating the row as a sibling
+    absence.
+  - Valid direct-only `pipeline-jobs/<job_id>.json` snapshot with matching
+    payload identity -> scheduler active/candidate/Slurm/query reads can
+    consume it without relying on undocumented filename substrings.
+  - Completed hydro run in file latest -> scheduler skips completed duplicate.
+  - Candidate-state rows from file latest/journal -> existing candidate-state
+    decision code sees the same row shape as DB-backed reads.
+  - Model/forcing context file rows -> context methods return typed
+    `ModelContext`/`ForcingContext` without PostgreSQL.
+  - Malformed latest view, unknown journal record type, JSONL record over-limit,
+    or over-limit non-matching directory entries -> active detection, query
+    helpers, and candidate state fail closed with bounded public evidence.
+  - Read-side lifecycle/write method call before #834 -> stable
+    `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
+  - DB-free scheduler from_env -> file journal repository is constructed and
+    DB-backed active/orchestrator repository factories are not called.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains

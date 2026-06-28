@@ -5177,6 +5177,7 @@ def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scop
                         "event_type": "status_change",
                         "status_from": "running",
                         "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:02:00Z",
                         "details": {
                             "stage": "forcing",
                             "task_results": [
@@ -5195,6 +5196,7 @@ def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scop
                         "entity_type": "pipeline_job",
                         "entity_id": "job_cycle_gfs_2026050100_forcing",
                         "event_type": "retry",
+                        "created_at": "2026-05-01T00:01:00Z",
                         "details": {"trigger": "manual", "manual_retry_marker": True, "retry_count": 2},
                     },
                 ]

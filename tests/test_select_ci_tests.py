@@ -7,6 +7,7 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
+    FILE_JOURNAL_READ_STATE_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     main,
     select_tests,
@@ -96,6 +97,22 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
 
     assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
     assert all("::" in test_path for test_path in selected)
+
+
+def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites() -> None:
+    selected = select_tests(
+        [
+            "packages/common/safe_fs.py",
+            "services/orchestrator/file_orchestration_journal.py",
+            "services/orchestrator/scheduler_runtime.py",
+            "tests/test_production_scheduler.py",
+        ],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(FILE_JOURNAL_READ_STATE_TESTS)
+    assert "tests/test_orchestration_chain.py" not in selected
+    assert "tests/test_production_scheduler.py" not in selected
 
 
 def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:

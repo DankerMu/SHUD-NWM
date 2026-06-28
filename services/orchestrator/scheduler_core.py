@@ -29,10 +29,12 @@ def _db_free_canonical_readiness_provider_from_config(
     )
 
 
-def _db_free_raw_handoff_repository() -> _scheduler.ActiveCandidateRepository:
-    from services.orchestrator.scheduler_file_providers import FileRawHandoffCandidateRepository
+def _db_free_orchestration_repository_from_config(
+    config: _scheduler.ProductionSchedulerConfig,
+) -> _scheduler.ActiveCandidateRepository:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
-    return FileRawHandoffCandidateRepository()
+    return FileOrchestrationJournalRepository(str(config.scheduler_journal_root))
 
 
 class ProductionScheduler:
@@ -68,7 +70,7 @@ class ProductionScheduler:
         if active_repository is not None:
             self.active_repository = active_repository
         elif db_free_required:
-            self.active_repository = _db_free_raw_handoff_repository()
+            self.active_repository = _db_free_orchestration_repository_from_config(self.config)
         else:
             self.active_repository = None
         if (
