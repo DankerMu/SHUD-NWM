@@ -58,8 +58,8 @@ software work needed to satisfy that gate.
 4. **Journal is append-only with materialized latest views.** The file-backed
    orchestration state uses append-only JSONL records for auditability and
    atomic materialized `state.json` files for fast scheduler reads. Writes are
-   performed under the scheduler file lock and use temporary files plus atomic
-   rename.
+   performed under durable per-cycle file locks, commit journal truth before
+   direct cache snapshots, and use temporary files plus atomic rename.
 
 5. **Compatibility is contract-tested against existing repository semantics.**
    The file journal must preserve behavior currently supplied by
@@ -504,11 +504,15 @@ Must preserve:
 
 - #832 registry, canonical readiness, and node-27 raw handoff evidence stay
   bounded and redacted.
-- File journal write side, retry service replacement, historical migration, and
-  live node-22 deployment remain later issue scope.
+- File journal write side, retry service replacement, and historical migration
+  were intentionally deferred by #833 at that time. That deferral is now
+  superseded by #834 / section 4, which implements those surfaces while live
+  node-22 deployment remains a later cutover step.
 - Non-DB-free postgres repository behavior and public scheduler facade imports
   remain stable.
-- DB-free default mutation still blocks until the file journal write side lands.
+- DB-free default mutation blocked during #833 because the file journal write
+  side had not landed. That blocker is historical; #834 closes the file-backed
+  write/retry/migration contract without weakening the DB-free preflight gate.
 
 Must add/change:
 
@@ -561,10 +565,11 @@ Boundary-surface checklist:
 - Read surfaces: `<journal-root>/latest`, `<journal-root>/journal`,
   `<journal-root>/pipeline-jobs`, `<journal-root>/pipeline-events`,
   `<journal-root>/models`, and `<journal-root>/forcing`.
-- Write/delete/overwrite surfaces: none in #833; write methods deliberately
-  raise `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
-- Staging/publish/rollback surfaces: replay metadata and latest schema only;
-  migration/import remains #834.
+- Write/delete/overwrite surfaces: none in #833. Section 4 / #834 replaces the
+  temporary fail-not-implemented write methods with file-journal writes,
+  retry-source parity, forecast-cycle events, and historical migration import.
+- Staging/publish/rollback surfaces: replay metadata, latest schema, and task
+  4 historical migration/import receipts.
 - Producer/consumer evidence boundaries: candidate state, active Slurm jobs,
   scheduler skipped/blocked candidates, and model/forcing context reads.
 - Stale-state/idempotency boundaries: active/completed statuses, candidate
@@ -582,8 +587,9 @@ Invariant Matrix:
   source/cycle/model/run identity, candidate ID, forcing version ID, job ID,
   Slurm job ID, stage, status, error code, sequence/event ID, replay metadata,
   context field contracts, and redacted runtime roots.
-- Producers: later #834 write side and historical migration; #833 tests create
-  read-side fixtures only.
+- Producers: #833 tests created read-side fixtures only. #834 now owns the file
+  write side, retry replacement, and historical migration producer/import
+  contract.
 - Validators/preflight: file schema validation, source/cycle/model/run/job
   identity checks, path segment checks, no-follow scanned entry validation,
   safe bounded reads, file/depth/JSON complexity limits, and existing DB-free
@@ -597,7 +603,8 @@ Invariant Matrix:
   planning outcomes are the downstream contract in #833.
 - Failure paths/rollback/stale state: malformed JSON, schema mismatch, source
   mismatch, cycle mismatch, missing optional latest view, unknown record type,
-  and write method calls before #834.
+  reservation conflicts, retry exhaustion, permanent failures, and migration
+  replay blockers.
 - Evidence/audit/readiness: repository contract tests, scheduler no-DB planning
   test, raw handoff regression selector, ruff, and OpenSpec strict validation.
 - Regression rows:
@@ -627,8 +634,11 @@ Invariant Matrix:
   - Malformed latest view, unknown journal record type, JSONL record over-limit,
     or over-limit non-matching directory entries -> active detection, query
     helpers, and candidate state fail closed with bounded public evidence.
-  - Read-side lifecycle/write method call before #834 -> stable
-    `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED`.
+  - File lifecycle/reservation/status/event write -> append-only journal record
+    plus latest/query materialization without DB-backed repository calls.
+  - Retry exhaustion or manual repair -> file journal records permanent-failure
+    or manual retry marker evidence consumable by existing candidate-state
+    decision helpers.
   - DB-free scheduler from_env -> file journal repository is constructed and
     DB-backed active/orchestrator repository factories are not called.
 

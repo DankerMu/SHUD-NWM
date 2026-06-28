@@ -99,6 +99,17 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     assert all("::" in test_path for test_path in selected)
 
 
+def test_select_tests_maps_scheduler_facade_to_manifest_and_file_journal_surfaces() -> None:
+    selected = select_tests(["services/orchestrator/scheduler.py"], repo_root=Path("."))
+
+    assert set(FILE_JOURNAL_READ_STATE_TESTS) <= set(selected)
+    assert set(ORCHESTRATOR_MANIFEST_SURFACE_TESTS) <= set(selected)
+    assert "tests/test_file_orchestration_journal.py" in selected
+    assert "tests/test_file_orchestration_migration.py" in selected
+    assert "tests/test_orchestration_chain.py" not in selected
+    assert "tests/test_production_scheduler.py" not in selected
+
+
 def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites() -> None:
     selected = select_tests(
         [

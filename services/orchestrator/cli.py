@@ -11,6 +11,7 @@ from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
 
 from .chain import AnalysisOrchestrator, OrchestratorError
+from .file_orchestration_migration import export_scheduler_state_from_postgres, write_migration_receipt
 from .retention import RetentionConfig, run_retention
 from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
 
@@ -272,6 +273,30 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
 
+    @cli.command("migrate-scheduler-state")
+    @click.option("--database-url", required=True)
+    @click.option("--journal-root", required=True)
+    @click.option("--receipt-path")
+    @click.option("--allow-historical-node22", is_flag=True)
+    def migrate_scheduler_state(
+        database_url: str,
+        journal_root: str,
+        receipt_path: str | None,
+        allow_historical_node22: bool,
+    ) -> None:
+        try:
+            receipt = export_scheduler_state_from_postgres(
+                database_url=database_url,
+                journal_root=journal_root,
+                allow_historical_node22=allow_historical_node22,
+            )
+            if receipt_path:
+                write_migration_receipt(receipt, receipt_path, containment_root=journal_root)
+            click.echo(json.dumps(receipt, sort_keys=True))
+        except (RuntimeError, ValueError) as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
+
     @cli.command("plan-production")
     @click.option(
         "--source",
@@ -364,6 +389,11 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     cleanup_parser.add_argument("--retention-days", type=int, default=None)
     cleanup_parser.add_argument("--dry-run", action="store_true", default=True)
     cleanup_parser.add_argument("--execute", action="store_false", dest="dry_run")
+    migrate_parser = subparsers.add_parser("migrate-scheduler-state")
+    migrate_parser.add_argument("--database-url", required=True)
+    migrate_parser.add_argument("--journal-root", required=True)
+    migrate_parser.add_argument("--receipt-path")
+    migrate_parser.add_argument("--allow-historical-node22", action="store_true")
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
@@ -408,6 +438,20 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(_run_cleanup(retention_days=args.retention_days, dry_run=args.dry_run), sort_keys=True))
             return 0
         except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    if args.command == "migrate-scheduler-state":
+        try:
+            receipt = export_scheduler_state_from_postgres(
+                database_url=args.database_url,
+                journal_root=args.journal_root,
+                allow_historical_node22=args.allow_historical_node22,
+            )
+            if args.receipt_path:
+                write_migration_receipt(receipt, args.receipt_path, containment_root=args.journal_root)
+            print(json.dumps(receipt, sort_keys=True))
+            return 0
+        except (RuntimeError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
     if args.command == "plan-production":

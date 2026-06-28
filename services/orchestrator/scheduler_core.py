@@ -37,6 +37,13 @@ def _db_free_orchestration_repository_from_config(
     return FileOrchestrationJournalRepository(str(config.scheduler_journal_root))
 
 
+def _db_free_file_retry_service_from_env(repository: _scheduler.FileOrchestrationJournalRepository) -> _scheduler.Any:
+    from services.orchestrator.retry import RetryConfig
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    return _scheduler.FileJournalRetryService(repository, RetryConfig.from_settings(SlurmGatewaySettings()))
+
+
 class ProductionScheduler:
     def __init__(
         self,
@@ -333,14 +340,14 @@ class ProductionScheduler:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
         if self.config.db_free_required:
-            raise RuntimeError("DB-free scheduler mode forbids DB-backed default orchestrator construction")
+            return self._default_orchestrator_for(source_id, state_manager=None)
         return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
 
     def _cancel_orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
         if self.config.db_free_required:
-            raise RuntimeError("DB-free scheduler mode forbids DB-backed default orchestrator construction")
+            return self._default_orchestrator_for(source_id, state_manager=None)
         return self._default_orchestrator_for(source_id, state_manager=None)
 
     def _default_orchestrator_for(
@@ -387,9 +394,20 @@ class ProductionScheduler:
             )
         return _scheduler.ForecastOrchestrator(
             config=config,
-            repository=_scheduler._orchestrator_repository_from_env(),
+            repository=(
+                self.active_repository
+                if self.config.db_free_required and self.active_repository is not None
+                else _scheduler._orchestrator_repository_from_env()
+            ),
             state_manager=state_manager,
-            retry_service=_scheduler._retry_service_from_env(),
+            retry_service=(
+                _db_free_file_retry_service_from_env(self.active_repository)
+                if self.config.db_free_required
+                and isinstance(self.active_repository, _scheduler.FileOrchestrationJournalRepository)
+                else None
+                if self.config.db_free_required
+                else _scheduler._retry_service_from_env()
+            ),
         )
 
     def _base_evidence(self, pass_id: str, started_at: _scheduler.datetime) -> dict[str, _scheduler.Any]:
