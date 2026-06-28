@@ -269,9 +269,8 @@ def candidate_state_from_rows(
         for _, job in sorted(
             indexed_jobs,
             key=lambda indexed_job: (
-                _pipeline_job_truth_sort_key(indexed_job[1])[:-1],
+                _pipeline_job_truth_sort_key(indexed_job[1]),
                 _datetime_sort_key(indexed_job[1].get("created_at")),
-                -indexed_job[0],
             ),
             reverse=True,
         )
@@ -291,7 +290,7 @@ def candidate_state_from_rows(
             indexed_events,
             key=lambda indexed_event: (
                 _datetime_sort_key(indexed_event[1].get("created_at")),
-                -indexed_event[0],
+                _numeric_sort_key(indexed_event[1].get("event_id")),
             ),
             reverse=True,
         )

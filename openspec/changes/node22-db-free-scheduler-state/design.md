@@ -522,8 +522,11 @@ Must add/change:
   and file-backed rows produce the same scheduler decisions.
 - Wire DB-free scheduler construction to the file journal repository from
   `NHMS_SCHEDULER_JOURNAL_ROOT` without DB-backed repository factories.
-- Fail closed on malformed journal/latest state and redact runtime roots,
-  local paths, and object URIs in public candidate/job evidence.
+- Fail closed on malformed journal/latest state, schema-less direct job
+  snapshots, sidecar event schema/cycle mismatches, nested identity mismatches,
+  unsafe scanned entries, discovery/file/JSON complexity limits, and invalid
+  scalar fields; redact runtime roots, local paths, object URIs, and blocked
+  query sentinels in public candidate/job evidence.
 
 Risk packs considered for #833:
 
@@ -539,8 +542,9 @@ Risk packs considered for #833:
   not leak through scheduler evidence.
 - Concurrency / shared state / ordering: selected - append-only replay and
   materialized latest views must not allow duplicate submission.
-- Resource limits / large input / discovery: selected - file reads and replay
-  records are byte/count bounded.
+- Resource limits / large input / discovery: selected - file reads, scanned
+  file discovery, recursion depth, replay records, and JSON node/depth
+  complexity are bounded.
 - Legacy compatibility / examples: selected - postgres-mode repository methods
   and scheduler facade imports remain compatible.
 - Error handling / rollback / partial outputs: selected - malformed state fails
@@ -574,14 +578,16 @@ Invariant Matrix:
 - Governing invariant: DB-free scheduler planning must treat file journal rows
   as the orchestration-state source of truth only when schema and identity are
   valid; malformed state blocks rather than permitting duplicate submission.
-- Source-of-truth identity/contract: schema version, source/cycle/model/run
-  identity, candidate ID, forcing version ID, job ID, Slurm job ID, stage,
-  status, error code, sequence/event ID, replay metadata, and redacted runtime
-  roots.
+- Source-of-truth identity/contract: applicable schema version,
+  source/cycle/model/run identity, candidate ID, forcing version ID, job ID,
+  Slurm job ID, stage, status, error code, sequence/event ID, replay metadata,
+  context field contracts, and redacted runtime roots.
 - Producers: later #834 write side and historical migration; #833 tests create
   read-side fixtures only.
-- Validators/preflight: file schema validation, source/cycle identity checks,
-  path segment checks, safe bounded reads, and existing DB-free runtime preflight.
+- Validators/preflight: file schema validation, source/cycle/model/run/job
+  identity checks, path segment checks, no-follow scanned entry validation,
+  safe bounded reads, file/depth/JSON complexity limits, and existing DB-free
+  runtime preflight.
 - Storage/cache/query: materialized latest views, append-only JSONL replay,
   pipeline job JSON files, pipeline event JSONL files, model context JSON, and
   forcing context JSON.
@@ -597,6 +603,9 @@ Invariant Matrix:
 - Regression rows:
   - Active job in file latest or append-only journal -> scheduler sees active
     orchestration/pipeline and active Slurm evidence.
+  - Active job in file latest or append-only journal plus newer terminal direct
+    `pipeline-jobs` snapshot for the same `job_id` -> active replay remains
+    authoritative for scheduler planning and query evidence.
   - Completed hydro run in file latest -> scheduler skips completed duplicate.
   - Candidate-state rows from file latest/journal -> existing candidate-state
     decision code sees the same row shape as DB-backed reads.

@@ -2465,8 +2465,10 @@ def test_fresh_cycle_with_active_slurm_job_does_not_double_submit(tmp_path: Path
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
-    active_repository = FakeSlurmActiveRepository(
-        active_jobs=[{"job_id": "job_download", "slurm_job_id": "9001", "stage": "download", "status": "running"}]
+    active_jobs = [{"job_id": "job_download", "slurm_job_id": "9001", "stage": "download", "status": "running"}]
+    active_repository = CandidateAndActiveRepository(
+        {"active_slurm_jobs": active_jobs},
+        active_jobs=active_jobs,
     )
     forcing_producer = FakeForcingProducer(error=RuntimeError("must not run when an active job exists"))
     orchestrator = FakeProductionOrchestrator()

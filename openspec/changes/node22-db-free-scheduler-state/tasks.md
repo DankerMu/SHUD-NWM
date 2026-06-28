@@ -105,12 +105,20 @@
   Evidence floor: file repository answers active orchestration, active
   pipeline, completed pipeline, active Slurm jobs, candidate state, and
   model/forcing context reads without PostgreSQL. Lifecycle and pipeline write
-  methods remain out of scope for this slice and fail-not-implemented.
+  methods remain out of scope for this slice and fail-not-implemented. Trusted
+  replay also validates nested latest/journal identity, strict direct
+  `pipeline-jobs` schema, sidecar `pipeline-events` source/cycle schema,
+  no-follow scanned entries, file/depth/JSON complexity limits, and blocked
+  query redaction before state is trusted.
 - [x] 3.4 Add read-side repository contract tests.
   Evidence floor: shared fixtures cover duplicate prevention, active Slurm job
   skip/cancel evidence, completed skip, candidate identity filtering, and
-  model/forcing context reads. Write-side lifecycle, retry, and migration
-  behavior is intentionally reserved for section 4 tasks.
+  model/forcing context reads. Regression fixtures also cover malformed
+  embedded rows, invalid cycle timestamps, newer terminal direct job masking,
+  sidecar-event schema/cycle mismatch, resource limits, DB-compatible
+  equal-timestamp job/event tie-breaks, scheduler-level active Slurm evidence,
+  and public-safe blocked query sentinels. Write-side lifecycle, retry, and
+  migration behavior is intentionally reserved for section 4 tasks.
 
 ## 4. File Orchestration Journal Writes, Retry, And Migration
 
