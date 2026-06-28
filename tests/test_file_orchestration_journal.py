@@ -10,6 +10,7 @@ import pytest
 from packages.common import safe_fs
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator.chain import SlurmClientError
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
@@ -144,6 +145,27 @@ def _active_job(cycle_time: datetime, *, model_id: str = "model_a") -> dict[str,
         "created_at": "2026-06-28T00:00:00Z",
         "runtime_roots": {"workspace_root": "/secret/workspace", "object_store_root": "/secret/object-store"},
     }
+
+
+class _FailingSlurmGatewayClient:
+    def __init__(
+        self,
+        *,
+        status_error_code: str | None = None,
+        cancel_error_code: str | None = None,
+    ) -> None:
+        self.status_error_code = status_error_code
+        self.cancel_error_code = cancel_error_code
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        if self.status_error_code is not None:
+            raise SlurmClientError(self.status_error_code, "Slurm status sync failed.", {"job_id": job_id})
+        return {"job_id": job_id, "state": "PENDING", "status": "queued"}
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        if self.cancel_error_code is not None:
+            raise SlurmClientError(self.cancel_error_code, "Slurm cancellation failed.", {"job_id": job_id})
+        return {"job_id": job_id, "status": "cancelled", "replacement_submitted": False}
 
 
 def _journal_record(
@@ -2772,6 +2794,10 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
         raise AssertionError("DB-free status sync must not construct the default DB-backed orchestrator")
 
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
+    monkeypatch.setattr(
+        "services.orchestrator.chain.HttpSlurmGatewayClient",
+        lambda _url: _FailingSlurmGatewayClient(status_error_code="SLURM_STATUS_SYNC_FAILED"),
+    )
 
     result = ProductionScheduler.from_env(
         ProductionSchedulerConfig(
@@ -2827,6 +2853,10 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
         raise AssertionError("DB-free cancellation must not construct the default DB-backed orchestrator")
 
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
+    monkeypatch.setattr(
+        "services.orchestrator.chain.HttpSlurmGatewayClient",
+        lambda _url: _FailingSlurmGatewayClient(cancel_error_code="SLURM_CANCEL_FAILED"),
+    )
 
     result = ProductionScheduler.from_env(
         ProductionSchedulerConfig(
