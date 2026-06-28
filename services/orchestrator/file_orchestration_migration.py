@@ -15,7 +15,15 @@ from workers.data_adapters.base import parse_cycle_time
 
 HISTORICAL_NODE22_DB_PORT = 55433
 MIGRATION_RECEIPT_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_migration.v1"
-HISTORICAL_NODE22_DB_HOSTS = {"127.0.0.1", "::1", "localhost", "node22", "node-22", "210.77.77.22"}
+HISTORICAL_NODE22_DB_HOSTS = {
+    "127.0.0.1",
+    "::1",
+    "localhost",
+    "node22",
+    "node-22",
+    "10.0.2.100",
+    "210.77.77.22",
+}
 
 _FAILED_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed", "cancelled"}
 
@@ -38,23 +46,13 @@ def import_historical_scheduler_state(
     repository = FileOrchestrationJournalRepository(journal_root)
 
     for row in cycles:
-        source_id, cycle_time = _source_cycle_from_row(row)
-        repository._append_validated_record("forecast_cycle", row, source_id=source_id, cycle_time=cycle_time)
+        repository.append_historical_forecast_cycle(row)
 
     for row in runs:
-        source_id, cycle_time = _source_cycle_from_row(row)
-        model_id = str(row["model_id"])
-        repository._append_validated_record(
-            "hydro_run",
-            row,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            model_id=model_id,
-            materialize_model_id=model_id,
-        )
+        repository.append_historical_hydro_run(row)
 
     for row in jobs:
-        repository.upsert_pipeline_job(row)
+        repository.append_historical_pipeline_job(row)
 
     for row in events:
         repository.append_historical_pipeline_event(row)
@@ -186,11 +184,13 @@ def _fetch_rows(connection: Any, sql: str, params: Mapping[str, Any]) -> list[di
 
 
 def _validate_historical_node22_database_url(database_url: str, *, allow_historical_node22: bool) -> None:
-    parsed = urlparse(database_url)
     if not allow_historical_node22:
         raise ValueError("historical node-22 export requires --allow-historical-node22")
+    parsed = urlparse(database_url)
     if parsed.scheme not in {"postgresql", "postgres"}:
         raise ValueError("historical scheduler-state export requires a PostgreSQL URL")
+    if parsed.query or parsed.fragment:
+        raise ValueError("historical scheduler-state export does not allow libpq URL query parameters")
     if parsed.port != HISTORICAL_NODE22_DB_PORT:
         raise ValueError(f"historical scheduler-state export must target port {HISTORICAL_NODE22_DB_PORT}")
     if (parsed.hostname or "") not in HISTORICAL_NODE22_DB_HOSTS:

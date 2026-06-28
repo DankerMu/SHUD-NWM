@@ -749,6 +749,7 @@ def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal
     created = repository.reserve_pipeline_job(record)
     duplicate = repository.reserve_pipeline_job(record)
     bound = repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3001")
+    duplicate_bind = repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3002")
     previous_status, succeeded = repository.update_pipeline_job_status(
         record["job_id"],
         "succeeded",
@@ -770,6 +771,7 @@ def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal
     assert bound is not None
     assert bound["status"] == "submitted"
     assert bound["slurm_job_id"] == "3001"
+    assert duplicate_bind is None
     assert previous_status == "submitted"
     assert succeeded["status"] == "succeeded"
     assert event["status_to"] == "succeeded"
@@ -1105,6 +1107,114 @@ def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
     )
     assert submission_event["details"]["runtime_root_resolution"]["resolved"]["workspace_dir"]["present"] is True
     assert submission_event["details"]["runtime_root_contract"]["object_store_root"] == "[local-path]"
+    journal_records = [
+        json.loads(line)
+        for line in (tmp_path / "journal/journal/gfs/2026062800.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    persisted_submission = next(
+        record
+        for record in reversed(journal_records)
+        if record.get("record_type") == "pipeline_event"
+        and record.get("payload", {}).get("entity_id") == retried.job_id
+        and record.get("payload", {}).get("status_to") == "submitted"
+    )
+    rendered_submission = json.dumps(persisted_submission, sort_keys=True)
+    assert str(workspace_root) not in rendered_submission
+    assert str(object_store_root) not in rendered_submission
+    assert "[local-path]" in rendered_submission
+
+
+def test_file_journal_download_retry_ignores_stale_manual_retry_runtime_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status("cycle_gfs_2026062800", "failed", error_code="SOURCE_CYCLE_UNAVAILABLE")
+    stale_manual = _pipeline_reservation_record(cycle_time, job_id="job_manual_stale")
+    stale_manual.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "manual_retry_marker": True,
+            "idempotency_key": "gfs:gfs_2026062800:manual-stale",
+        }
+    )
+    source_failed = _pipeline_reservation_record(cycle_time, job_id="job_download_failed")
+    source_failed.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "idempotency_key": "gfs:gfs_2026062800:download",
+        }
+    )
+    repository.reserve_pipeline_job(stale_manual)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_manual_stale",
+        event_type="submission",
+        status_from="pending",
+        status_to="submission_failed",
+        details={
+            "trigger": "manual",
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+            },
+        },
+    )
+    repository.update_pipeline_job_status(
+        "job_manual_stale",
+        "submission_failed",
+        error_code="SBATCH_REJECTED",
+        finished_at=_dt("2026-06-28T00:01:00Z"),
+    )
+    repository.reserve_pipeline_job(source_failed)
+    repository.update_pipeline_job_status(
+        "job_download_failed",
+        "permanently_failed",
+        error_code="SOURCE_CYCLE_UNAVAILABLE",
+        finished_at=_dt("2026-06-28T00:05:00Z"),
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7002", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+
+    assert retried.status == "submission_failed"
+    assert retried.error_code == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+    assert gateway.requests == []
 
 
 def test_file_orchestration_journal_direct_model_context_must_match_path_model(tmp_path: Path) -> None:

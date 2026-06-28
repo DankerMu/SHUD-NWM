@@ -93,10 +93,10 @@
 - [x] 3.1 Define the DB-free orchestration repository method contract.
   Evidence floor: contract lists scheduler-required read methods for active
   orchestration, active pipeline, completed pipeline, active Slurm jobs,
-  candidate state, model/forcing context reads, and query helpers. Lifecycle,
-  pipeline write, retry/cancel/status-sync write methods are named in the
-  interface but explicitly fail with `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED` in
-  this read-side slice until later write-side tasks land.
+  candidate state, model/forcing context reads, and query helpers. This
+  read-side boundary was superseded by the section 4 write-side tasks, which
+  now carry the final lifecycle, pipeline write, retry/cancel, and status-sync
+  evidence floor.
 - [x] 3.2 Define append-only journal and materialized latest schemas.
   Evidence floor: schemas cover candidate/job/event state, active Slurm job
   evidence, reservation, binding, retry attempt, Slurm job ID, stage, status,
@@ -104,9 +104,8 @@
 - [x] 3.3 Implement file-backed read-side scheduler state.
   Evidence floor: file repository answers active orchestration, active
   pipeline, completed pipeline, active Slurm jobs, candidate state, and
-  model/forcing context reads without PostgreSQL. Lifecycle and pipeline write
-  methods remain out of scope for this slice and fail-not-implemented. Trusted
-  replay also validates nested latest/journal identity, strict direct
+  model/forcing context reads without PostgreSQL. Trusted replay also validates
+  nested latest/journal identity, strict direct
   `pipeline-jobs` schema, sidecar `pipeline-events` source/cycle schema,
   no-follow scanned entries, file/depth/JSON complexity limits, source alias
   canonicalization, envelope/payload/run identity consistency, append-only
@@ -122,9 +121,8 @@
   public-safe blocked query sentinels, source alias/casing consistency,
   envelope/payload/run mismatch blockers, append-only sequence precedence,
   valid direct-only pipeline-job reads, JSONL record limits, unknown record
-  types, non-matching directory-entry limits, and direct
-  `FILE_JOURNAL_WRITE_NOT_IMPLEMENTED` method evidence. Write-side lifecycle,
-  retry, and migration behavior is intentionally reserved for section 4 tasks.
+  types, and non-matching directory-entry limits. Write-side lifecycle, retry,
+  and migration behavior is covered by section 4 tasks.
 
 ## 4. File Orchestration Journal Writes, Retry, And Migration
 

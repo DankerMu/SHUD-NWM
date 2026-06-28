@@ -224,6 +224,63 @@ def test_historical_scheduler_state_import_is_idempotent_for_replay_decisions(tm
     assert scheduler_module._manual_retry_payload(first_state) == scheduler_module._manual_retry_payload(second_state)
 
 
+def test_historical_scheduler_state_reimport_does_not_override_newer_live_success(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    journal_root = tmp_path / "journal"
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    retry_success = _job(
+        job_id="job_model_a_retry_success",
+        run_id="fcst_gfs_2026062800_model_a",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        status="succeeded",
+        retry_count=4,
+    )
+    retry_success["idempotency_key"] = "gfs:gfs_2026062800:model_a:retry-success"
+    retry_success["created_at"] = "2026-06-28T00:20:00Z"
+    retry_success["updated_at"] = "2026-06-28T00:20:00Z"
+    repository.upsert_pipeline_job(retry_success)
+    before = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    after = _candidate_state(
+        FileOrchestrationJournalRepository(journal_root),
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert before["pipeline_status"] == "succeeded"
+    assert after["pipeline_status"] == "succeeded"
+    assert any(job["job_id"] == "job_model_a_retry_success" for job in after["pipeline_jobs"])
+
+
+def test_historical_event_ids_do_not_collide_with_new_file_events(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["pipeline_events"] = [{**rows["pipeline_events"][0], "event_id": 3}]
+    journal_root = tmp_path / "journal"
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_model_a_permanent",
+        event_type="operator_note",
+        status_from="permanently_failed",
+        status_to="manual_repair_requested",
+        details={"note": "post-migration event"},
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
+
+    assert inserted["event_id"] > 3
+    assert state["pipeline_events_total"] == 2
+    assert {event["event_id"] for event in state["pipeline_events"]} == {3, inserted["event_id"]}
+    assert scheduler_module._manual_retry_requested(state) is True
+
+
 def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_path: Path) -> None:
     receipt = {"schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION}
     journal_root = tmp_path / "journal"
@@ -289,8 +346,46 @@ def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order
     )
 
     assert receipt["source"] == "localhost:55433"
-    assert len(captured_sql) == 4
+    documented_receipt = export_scheduler_state_from_postgres(
+        database_url="postgresql://nwm@10.0.2.100:55433/nhms",
+        journal_root=tmp_path / "journal-documented-host",
+        allow_historical_node22=True,
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+    )
+
+    assert documented_receipt["source"] == "10.0.2.100:55433"
+    assert len(captured_sql) == 8
     assert "ORDER BY created_at ASC NULLS FIRST, event_id ASC" in captured_sql[-1]
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://nwm@localhost:55433/nhms?host=210.77.77.27",
+        "postgresql://nwm@localhost:55433/nhms?hostaddr=210.77.77.27",
+        "postgresql://nwm@localhost:55433/nhms?port=55432",
+        "postgresql://nwm@localhost:55433/nhms?service=node27-primary",
+    ],
+)
+def test_export_scheduler_state_from_postgres_rejects_libpq_query_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
+) -> None:
+    def fail_connect(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("unsafe historical DB URL must be rejected before psycopg.connect")
+
+    fake_psycopg = types.SimpleNamespace(connect=fail_connect)
+    fake_rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+
+    with pytest.raises(ValueError, match="query parameters"):
+        export_scheduler_state_from_postgres(
+            database_url=database_url,
+            journal_root=tmp_path / "journal",
+            allow_historical_node22=True,
+        )
 
 
 def test_migrate_scheduler_state_cli_writes_receipt_under_journal_root(

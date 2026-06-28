@@ -51,6 +51,7 @@ from services.orchestrator.retry import (
     RetryNotFoundError,
     _attach_retry_runtime_root_contract,
     _attach_retry_runtime_root_resolution,
+    _event_details_is_manual_retry_submission,
     _resolve_runtime_root_candidate,
     _retry_submission_manifest,
     _RetryRuntimeRootResolutionError,
@@ -344,18 +345,28 @@ class FileOrchestrationJournalRepository:
             return _blocked_query_job(error, idempotency_key=idempotency_key)
         return None
 
+    def _candidate_job_for_idempotency_unlocked(self, idempotency_key: str) -> dict[str, Any] | None:
+        for job in self._iter_pipeline_job_records():
+            if str(job.get("idempotency_key") or "") == idempotency_key:
+                return dict(job)
+        return None
+
     def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
         try:
-            expected_job_id = _safe_segment(job_id)
-            for job in self._iter_pipeline_job_records(include_direct=False):
-                if str(job.get("job_id") or "") == expected_job_id:
-                    return _public_scheduler_row(job)
-            direct_job = self._direct_pipeline_job_record(expected_job_id)
-            if direct_job is not None:
-                return _public_scheduler_row(direct_job)
+            job = self._pipeline_job_for_id_unlocked(job_id)
+            if job is not None:
+                return _public_scheduler_row(job)
         except FileOrchestrationJournalError as error:
             return _blocked_query_job(error, job_id=job_id)
         return None
+
+    def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
+        expected_job_id = _safe_segment(job_id)
+        for job in self._iter_pipeline_job_records(include_direct=False):
+            if str(job.get("job_id") or "") == expected_job_id:
+                return dict(job)
+        direct_job = self._direct_pipeline_job_record(expected_job_id)
+        return dict(direct_job) if direct_job is not None else None
 
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         try:
@@ -396,35 +407,61 @@ class FileOrchestrationJournalRepository:
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
-        existing = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None).forecast_cycle
-        if existing is not None:
-            row = dict(existing)
-            changed = False
-            for key, value in (
-                ("cycle_id", _cycle_id_for_file_source(source_id, cycle_time)),
-                ("source_id", source_id),
-                ("cycle_time", _format_utc(cycle_time)),
-                ("issue_time", _format_utc(cycle_time)),
-            ):
-                if row.get(key) in (None, ""):
-                    row[key] = value
-                    changed = True
-            if not changed:
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None).forecast_cycle
+            if existing is not None:
+                row = dict(existing)
+                changed = False
+                for key, value in (
+                    ("cycle_id", _cycle_id_for_file_source(source_id, cycle_time)),
+                    ("source_id", source_id),
+                    ("cycle_time", _format_utc(cycle_time)),
+                    ("issue_time", _format_utc(cycle_time)),
+                ):
+                    if row.get(key) in (None, ""):
+                        row[key] = value
+                        changed = True
+                if not changed:
+                    return _public_scheduler_row(row)
+                row["updated_at"] = _format_utc(_utcnow())
+                self._append_validated_record_unlocked(
+                    "forecast_cycle",
+                    row,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
                 return _public_scheduler_row(row)
-            row["updated_at"] = _format_utc(_utcnow())
-            self._append_validated_record("forecast_cycle", row, source_id=source_id, cycle_time=cycle_time)
+            row = {
+                "cycle_id": _cycle_id_for_file_source(source_id, cycle_time),
+                "source_id": source_id,
+                "cycle_time": _format_utc(cycle_time),
+                "issue_time": _format_utc(cycle_time),
+                "status": "discovered",
+                "created_at": _format_utc(_utcnow()),
+                "updated_at": _format_utc(_utcnow()),
+            }
+            self._append_validated_record_unlocked(
+                "forecast_cycle",
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
             return _public_scheduler_row(row)
-        row = {
-            "cycle_id": _cycle_id_for_file_source(source_id, cycle_time),
-            "source_id": source_id,
-            "cycle_time": _format_utc(cycle_time),
-            "issue_time": _format_utc(cycle_time),
-            "status": "discovered",
-            "created_at": _format_utc(_utcnow()),
-            "updated_at": _format_utc(_utcnow()),
-        }
-        self._append_validated_record("forecast_cycle", row, source_id=source_id, cycle_time=cycle_time)
-        return _public_scheduler_row(row)
+
+    def append_historical_forecast_cycle(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        source_id = _required_source_id(record, "source_id")
+        cycle_time = _parse_cycle_time_field(record, "cycle_time")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None).forecast_cycle
+            if existing is not None:
+                return _public_scheduler_row(existing)
+            self._append_validated_record_unlocked(
+                "forecast_cycle",
+                record,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+        return _public_scheduler_row(record)
 
     def create_hydro_run(self, context: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         init_state = manifest.get("initial_state") if isinstance(manifest.get("initial_state"), Mapping) else {}
@@ -490,6 +527,24 @@ class FileOrchestrationJournalRepository:
                 ) from error
             return _public_scheduler_row(existing)
 
+    def append_historical_hydro_run(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        source_id = _required_source_id(record, "source_id")
+        cycle_time = _parse_cycle_time_field(record, "cycle_time")
+        model_id = _required_safe_identity(record, "model_id")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._hydro_run_for(str(record["run_id"]))
+            if existing is not None:
+                return _public_scheduler_row(existing)
+            self._append_validated_record_unlocked(
+                "hydro_run",
+                record,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                materialize_model_id=model_id,
+            )
+        return _public_scheduler_row(record)
+
     def update_hydro_run_status(
         self,
         run_id: str,
@@ -499,44 +554,63 @@ class FileOrchestrationJournalRepository:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
-        existing = self._hydro_run_for(run_id)
-        if existing is None:
-            raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
-        row = dict(existing)
-        row.update({"status": status, "updated_at": _format_utc(_utcnow())})
-        for key, value in (
-            ("slurm_job_id", slurm_job_id),
-        ):
-            if value is not None:
-                row[key] = value
-        if status in {"pending", "created", "succeeded", "complete", "parsed", "frequency_done", "published"}:
-            row["error_code"] = error_code
-            row["error_message"] = error_message
-        else:
-            if error_code is not None:
+        try:
+            source_id, cycle_time = _source_cycle_from_file_run_id(run_id)
+        except FileOrchestrationJournalError as error:
+            raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}") from error
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._hydro_run_for(run_id)
+            if existing is None:
+                raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
+            row = dict(existing)
+            row.update({"status": status, "updated_at": _format_utc(_utcnow())})
+            for key, value in (
+                ("slurm_job_id", slurm_job_id),
+            ):
+                if value is not None:
+                    row[key] = value
+            if status in {"pending", "created", "succeeded", "complete", "parsed", "frequency_done", "published"}:
                 row["error_code"] = error_code
-            if error_message is not None:
                 row["error_message"] = error_message
-        source_id = _required_source_id(row, "source_id")
-        cycle_time = _parse_cycle_time_field(row, "cycle_time")
-        model_id = _required_safe_identity(row, "model_id")
-        self._append_validated_record(
-            "hydro_run",
-            row,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            model_id=model_id,
-            materialize_model_id=model_id,
-        )
-        return _public_scheduler_row(row)
+            else:
+                if error_code is not None:
+                    row["error_code"] = error_code
+                if error_message is not None:
+                    row["error_message"] = error_message
+            model_id = _required_safe_identity(row, "model_id")
+            self._append_validated_record_unlocked(
+                "hydro_run",
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                materialize_model_id=model_id,
+            )
+            return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
         row = self._pipeline_job_row(record)
-        existing = self.get_pipeline_job(str(row["job_id"]))
-        if existing is not None:
-            row = {**existing, **{key: value for key, value in row.items() if value is not None}}
-            row["updated_at"] = _format_utc(_utcnow())
-        return self._write_pipeline_job(row, exclusive_direct=False)
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        model_id = _optional_safe_identity(row, "model_id")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
+            if existing is not None:
+                row = {**existing, **{key: value for key, value in row.items() if value is not None}}
+                row["updated_at"] = _format_utc(_utcnow())
+                model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def append_historical_pipeline_job(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        row = self._pipeline_job_row(dict(record))
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        model_id = _optional_safe_identity(row, "model_id")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
+            if existing is not None:
+                return _public_scheduler_row(existing)
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
         row = self._pipeline_job_row(
@@ -552,45 +626,62 @@ class FileOrchestrationJournalRepository:
                 "log_uri": None,
             }
         )
-        if (
-            self.query_candidate_state(str(row["idempotency_key"])) is not None
-            or self.get_pipeline_job(str(row["job_id"])) is not None
-        ):
-            return None
-        return self._write_pipeline_job(row, exclusive_direct=True)
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        model_id = _optional_safe_identity(row, "model_id")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            if self._pipeline_job_conflicts_unlocked(row):
+                return None
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=True, model_id=model_id)
 
     def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        idempotency_key = str(record["idempotency_key"])
-        existing = self.query_candidate_state(idempotency_key)
-        if existing is None and record.get("job_id") not in (None, ""):
-            existing = self.get_pipeline_job(str(record["job_id"]))
-        if existing is None:
-            return None
-        if existing.get("slurm_job_id") not in (None, "") or str(existing.get("status") or "") not in {
-            "submission_failed",
-            "reservation_lost",
-        }:
-            return None
-        row = dict(existing)
-        row.update(
-            {
-                "status": "reserved",
-                "slurm_job_id": None,
-                "array_task_id": None,
-                "submitted_at": None,
-                "started_at": None,
-                "finished_at": None,
-                "exit_code": None,
-                "error_code": None,
-                "error_message": None,
-                "idempotency_key": idempotency_key,
-                "updated_at": _format_utc(_utcnow()),
-            }
-        )
-        for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
-            if row.get(key) in (None, "") and record.get(key) not in (None, ""):
-                row[key] = record[key]
-        return self._write_pipeline_job(row, exclusive_direct=False)
+        request_row = self._pipeline_job_row(record)
+        idempotency_key = str(request_row["idempotency_key"])
+        source_id = _source_id_from_job(request_row)
+        cycle_time = _cycle_time_from_job(request_row)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            matched_by_key = existing is not None
+            if existing is None and request_row.get("job_id") not in (None, ""):
+                existing = self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
+            if existing is None:
+                return None
+            existing_status = str(existing.get("status") or "")
+            if matched_by_key:
+                if existing.get("slurm_job_id") not in (None, "") or existing_status not in {
+                    "submission_failed",
+                    "reservation_lost",
+                }:
+                    return None
+            else:
+                if (
+                    existing.get("idempotency_key") not in (None, "")
+                    or existing.get("slurm_job_id") not in (None, "")
+                    or existing_status != "pending"
+                    or self._candidate_job_for_idempotency_unlocked(idempotency_key) is not None
+                ):
+                    return None
+            row = dict(existing)
+            row.update(
+                {
+                    "status": "reserved",
+                    "slurm_job_id": None,
+                    "array_task_id": None,
+                    "submitted_at": None,
+                    "started_at": None,
+                    "finished_at": None,
+                    "exit_code": None,
+                    "error_code": None,
+                    "error_message": None,
+                    "idempotency_key": idempotency_key,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
+                if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
+                    row[key] = request_row[key]
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def bind_pipeline_job_reservation(
         self,
@@ -600,21 +691,28 @@ class FileOrchestrationJournalRepository:
         status: str = "submitted",
         array_task_id: int | None = None,
     ) -> dict[str, Any] | None:
-        existing = self.query_candidate_state(idempotency_key)
-        if existing is None or existing.get("slurm_job_id") not in (None, ""):
+        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+        if initial is None:
             return None
-        row = dict(existing)
-        row.update(
-            {
-                "slurm_job_id": str(slurm_job_id),
-                "status": status,
-                "submitted_at": row.get("submitted_at") or _format_utc(_utcnow()),
-                "updated_at": _format_utc(_utcnow()),
-            }
-        )
-        if array_task_id is not None:
-            row["array_task_id"] = array_task_id
-        return self._write_pipeline_job(row, exclusive_direct=False)
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if existing is None or existing.get("slurm_job_id") not in (None, ""):
+                return None
+            row = dict(existing)
+            row.update(
+                {
+                    "slurm_job_id": str(slurm_job_id),
+                    "status": status,
+                    "submitted_at": row.get("submitted_at") or _format_utc(_utcnow()),
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            if array_task_id is not None:
+                row["array_task_id"] = array_task_id
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def update_pipeline_job_status(
         self,
@@ -628,36 +726,43 @@ class FileOrchestrationJournalRepository:
         error_message: str | None = None,
         log_uri: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
-        existing = self.get_pipeline_job(job_id)
-        if existing is None:
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None:
             raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found: {job_id}")
-        previous_status = str(existing.get("status") or "") or None
-        terminal_guarded = previous_status in {"succeeded", "failed", "cancelled"} and status not in {
-            "partially_failed",
-            "permanently_failed",
-        }
-        if previous_status == "permanently_failed" or terminal_guarded:
-            return previous_status, _public_scheduler_row(existing)
-        row = dict(existing)
-        row["status"] = status
-        for key, value in (
-            ("started_at", started_at),
-            ("finished_at", finished_at),
-            ("exit_code", exit_code),
-            ("log_uri", log_uri),
-        ):
-            if value is not None:
-                row[key] = _format_utc(value) if isinstance(value, datetime) else value
-        if status in {"succeeded", "complete", "published"} and error_code is None:
-            row["error_code"] = None
-        elif error_code is not None:
-            row["error_code"] = error_code
-        if status in {"succeeded", "complete", "published"} and error_message is None:
-            row["error_message"] = None
-        elif error_message is not None:
-            row["error_message"] = error_message
-        row["updated_at"] = _format_utc(_utcnow())
-        return previous_status, self._write_pipeline_job(row, exclusive_direct=False)
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None:
+                raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found: {job_id}")
+            previous_status = str(existing.get("status") or "") or None
+            terminal_guarded = previous_status in {"succeeded", "failed", "cancelled"} and status not in {
+                "partially_failed",
+                "permanently_failed",
+            }
+            if previous_status == "permanently_failed" or terminal_guarded:
+                return previous_status, _public_scheduler_row(existing)
+            row = dict(existing)
+            row["status"] = status
+            for key, value in (
+                ("started_at", started_at),
+                ("finished_at", finished_at),
+                ("exit_code", exit_code),
+                ("log_uri", log_uri),
+            ):
+                if value is not None:
+                    row[key] = _format_utc(value) if isinstance(value, datetime) else value
+            if status in {"succeeded", "complete", "published"} and error_code is None:
+                row["error_code"] = None
+            elif error_code is not None:
+                row["error_code"] = error_code
+            if status in {"succeeded", "complete", "published"} and error_message is None:
+                row["error_message"] = None
+            elif error_message is not None:
+                row["error_message"] = error_message
+            row["updated_at"] = _format_utc(_utcnow())
+            model_id = _optional_safe_identity(row, "model_id")
+            return previous_status, self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
 
     def insert_pipeline_event(
         self,
@@ -687,7 +792,11 @@ class FileOrchestrationJournalRepository:
             "created_at": _format_utc(_utcnow()),
         }
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            event_id = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            event_id = self._next_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
             row["event_id"] = event_id
             self._append_validated_record_unlocked(
                 "pipeline_event",
@@ -724,7 +833,11 @@ class FileOrchestrationJournalRepository:
             rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             event_id = row.get("event_id")
             if event_id in (None, ""):
-                event_id = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+                event_id = self._next_event_id_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
                 row["event_id"] = event_id
             existing = next(
                 (
@@ -1307,21 +1420,25 @@ class FileOrchestrationJournalRepository:
         source_id = _required_source_id(row, "source_id")
         cycle_time = _parse_cycle_time_field(row, "cycle_time")
         model_id = _required_safe_identity(row, "model_id")
-        existing = self._hydro_run_for(str(row["run_id"]))
-        if retriable_only and existing is not None and str(existing.get("status") or "") not in {"failed", "cancelled"}:
-            raise OrchestratorError(
-                "HYDRO_RUN_NOT_RETRIABLE",
-                f"hydro_run already exists and is not retriable: {row['run_id']}",
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._hydro_run_for(str(row["run_id"]))
+            if retriable_only and existing is not None and str(existing.get("status") or "") not in {
+                "failed",
+                "cancelled",
+            }:
+                raise OrchestratorError(
+                    "HYDRO_RUN_NOT_RETRIABLE",
+                    f"hydro_run already exists and is not retriable: {row['run_id']}",
+                )
+            self._append_validated_record_unlocked(
+                "hydro_run",
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                materialize_model_id=model_id,
             )
-        self._append_validated_record(
-            "hydro_run",
-            row,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            model_id=model_id,
-            materialize_model_id=model_id,
-        )
-        return _public_scheduler_row(row)
+            return _public_scheduler_row(row)
 
     def _hydro_run_for(self, run_id: str) -> dict[str, Any] | None:
         safe_run_id = _safe_identity_text(str(run_id), field="run_id")
@@ -1510,6 +1627,18 @@ class FileOrchestrationJournalRepository:
         records = self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time))
         sequences = [_optional_replay_sequence(record) or 0 for record in records]
         return max(sequences, default=0) + 1
+
+    def _next_event_id_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+    ) -> int:
+        sequence_floor = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time) - 1
+        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
+        return max([sequence_floor, *event_ids], default=0) + 1
 
     def _append_journal_record_unlocked(
         self,
@@ -2075,12 +2204,27 @@ class FileJournalRetryService:
         job_ids: list[str] = []
         if retry_job.previous_job_id:
             job_ids.append(str(retry_job.previous_job_id))
+        excluded = set(job_ids)
         if retry_job.run_id:
-            job_ids.extend(
-                str(job.get("job_id"))
-                for job in self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id))
-                if job.get("job_id") not in (None, "")
+            same_run_jobs = sorted(
+                self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id)),
+                key=_db_compatible_pipeline_job_order_key,
             )
+            for job in same_run_jobs:
+                job_id = str(job.get("job_id") or "")
+                if not job_id or job_id in excluded or job_id == retry_job.job_id:
+                    continue
+                if str(job.get("job_type") or "") != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
+                    continue
+                if (
+                    retry_job.cycle_id
+                    and job.get("cycle_id") not in (None, "")
+                    and job.get("cycle_id") != retry_job.cycle_id
+                ):
+                    continue
+                if job.get("manual_retry_marker") is True:
+                    continue
+                job_ids.append(job_id)
         for job_id in job_ids:
             if job_id in seen_job_ids:
                 continue
@@ -2095,6 +2239,8 @@ class FileJournalRetryService:
         job = self.repository.get_pipeline_job(job_id)
         if job is None:
             return []
+        if job.get("manual_retry_marker") is True:
+            return []
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")
@@ -2103,7 +2249,11 @@ class FileJournalRetryService:
         for event in rows.pipeline_events:
             if str(event.get("entity_id") or "") != job_id:
                 continue
+            if str(event.get("event_type") or "") != "submission":
+                continue
             details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+            if _event_details_is_manual_retry_submission(details):
+                continue
             for label, value in (
                 ("details.runtime_root_contract", details.get("runtime_root_contract")),
                 ("details", details),
@@ -2151,9 +2301,9 @@ class FileJournalRetryService:
             "gateway_status": str(payload.get("status")) if payload.get("status") is not None else None,
         }
         if runtime_root_resolution is not None:
-            details["runtime_root_resolution"] = runtime_root_resolution
+            details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
         if runtime_root_contract is not None:
-            details["runtime_root_contract"] = runtime_root_contract
+            details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=job_id,
@@ -2474,6 +2624,18 @@ def _model_id_from_file_run_id(run_id: str | None) -> str | None:
         return match.group(3)
     suffix_match = re.search(r"(?:^|_)(model(?:_[A-Za-z0-9.-]+)+)$", text)
     return suffix_match.group(1) if suffix_match is not None else None
+
+
+def _source_cycle_from_file_run_id(run_id: str) -> tuple[str, datetime]:
+    safe_run_id = _safe_identity_text(str(run_id), field="run_id")
+    match = _FORECAST_RUN_ID_RE.fullmatch(safe_run_id) or _CYCLE_COHORT_RUN_ID_RE.fullmatch(safe_run_id)
+    if match is None:
+        raise FileOrchestrationJournalError("file_journal_invalid_identity", field="run_id")
+    source_id = _normalize_file_source_id(match.group(1), field="run_id")
+    try:
+        return source_id, parse_cycle_time(match.group(2))
+    except (TypeError, ValueError) as error:
+        raise FileOrchestrationJournalError("file_journal_invalid_cycle_time", field="run_id") from error
 
 
 def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
@@ -2842,6 +3004,16 @@ def _optional_replay_sequence(record: Mapping[str, Any]) -> int | None:
         return int(text)
     except ValueError as error:
         raise FileOrchestrationJournalError("file_journal_invalid_field", field="sequence") from error
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _replay_order_key(row: Mapping[str, Any]) -> tuple[int, int] | None:
