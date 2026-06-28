@@ -1217,6 +1217,77 @@ def test_file_journal_download_retry_ignores_stale_manual_retry_runtime_roots(
     assert gateway.requests == []
 
 
+def test_file_journal_download_retry_failure_persists_only_redacted_runtime_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status("cycle_gfs_2026062800", "failed", error_code="SOURCE_CYCLE_UNAVAILABLE")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_download_failed")
+    record.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "retry_count": 3,
+            "idempotency_key": "gfs:gfs_2026062800:download",
+        }
+    )
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_download_failed",
+        "permanently_failed",
+        error_code="SOURCE_CYCLE_UNAVAILABLE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            raise RuntimeError("gateway rejected submission")
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+    raw_journal = (tmp_path / "journal/journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_rendered = "\n".join(
+        path.read_text(encoding="utf-8") for path in (tmp_path / "journal/latest").rglob("*.json")
+    )
+
+    assert retried.status == "submission_failed"
+    assert retried.error_code == "RETRY_SUBMISSION_FAILED"
+    assert gateway.requests
+    assert str(workspace_root) not in raw_journal
+    assert str(object_store_root) not in raw_journal
+    assert str(workspace_root) not in latest_rendered
+    assert str(object_store_root) not in latest_rendered
+    assert "[local-path]" in raw_journal
+
+
 def test_file_orchestration_journal_direct_model_context_must_match_path_model(tmp_path: Path) -> None:
     journal_root = tmp_path / "journal"
     _write_json(journal_root / "models/model_a.json", _direct_model_context_record("model_b"))

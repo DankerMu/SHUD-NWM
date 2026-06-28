@@ -2590,10 +2590,10 @@ def _manual_retry_submission_failure_details(
     }
     runtime_root_resolution = _runtime_root_resolution_from_error(error)
     if runtime_root_resolution is not None:
-        details["runtime_root_resolution"] = runtime_root_resolution
+        details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
     runtime_root_contract = _runtime_root_contract_from_error(error)
     if runtime_root_contract is not None:
-        details["runtime_root_contract"] = runtime_root_contract
+        details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
     return details
 
 
