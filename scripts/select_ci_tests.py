@@ -68,8 +68,47 @@ DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "openspec/changes/direct-grid-forcing/**",
 )
 
+FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
+    "tests/test_file_orchestration_journal.py",
+    "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
+    "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
+    "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
+    "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows",
+    "tests/test_orchestration_chain.py::test_psycopg_has_active_pipeline_includes_queued_pipeline_rows",
+    "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
+    "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
+    "tests/test_production_scheduler.py::test_db_free_injected_collaborators_plan_without_unimplemented_provider_blocker",
+    "tests/test_production_scheduler.py::test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call",
+    "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion",
+    "tests/test_production_scheduler.py::test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call",
+    "tests/test_production_scheduler.py::test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_call",
+    "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_blocks_mutation_before_convert_submission",
+    "tests/test_production_scheduler.py::test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission",
+    "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
+    "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_blocks_mutation_until_file_journal_write_exists",
+    "tests/test_source_cycle_raw_manifest.py",
+)
+
+FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
+    "packages/common/safe_fs.py",
+    "services/orchestrator/chain_repository_state.py",
+    "services/orchestrator/file_orchestration_journal.py",
+    "services/orchestrator/scheduler_core.py",
+    "services/orchestrator/scheduler_runtime.py",
+)
+
 
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        "tests/test_orchestration_chain.py",
+        FILE_JOURNAL_READ_STATE_TESTS,
+        only_when_any_changed=FILE_JOURNAL_READ_STATE_PATH_PATTERNS,
+    ),
+    PathTestRule(
+        "tests/test_production_scheduler.py",
+        FILE_JOURNAL_READ_STATE_TESTS,
+        only_when_any_changed=FILE_JOURNAL_READ_STATE_PATH_PATTERNS,
+    ),
     PathTestRule(
         "tests/test_orchestration_chain.py",
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
@@ -114,6 +153,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         DIRECT_GRID_SURFACE_PATH_PATTERNS[1],
         DIRECT_GRID_SURFACE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[0],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[1],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[2],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[3],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4],
+        FILE_JOURNAL_READ_STATE_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
