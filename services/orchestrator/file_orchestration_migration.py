@@ -9,7 +9,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
-from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from services.orchestrator.file_orchestration_journal import (
+    FileOrchestrationJournalError,
+    FileOrchestrationJournalRepository,
+)
 from services.orchestrator.scheduler_state import _format_utc
 from workers.data_adapters.base import parse_cycle_time
 
@@ -44,20 +47,62 @@ def import_historical_scheduler_state(
     jobs = [_normalized_mapping(row) for row in pipeline_jobs]
     events = [_normalized_mapping(row) for row in pipeline_events]
     repository = FileOrchestrationJournalRepository(journal_root)
+    imported_cycles: list[dict[str, Any]] = []
+    imported_runs: list[dict[str, Any]] = []
+    imported_jobs: list[dict[str, Any]] = []
+    imported_events: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, str]] = []
 
     for row in cycles:
+        skip_reason = _unsupported_forecast_cycle_reason(row)
+        if skip_reason is not None:
+            skipped_rows.append(_skipped_row("forecast_cycles", row, skip_reason))
+            continue
         repository.append_historical_forecast_cycle(row)
+        imported_cycles.append(row)
 
     for row in runs:
+        skip_reason = _unsupported_run_reason(row)
+        if skip_reason is not None:
+            skipped_rows.append(_skipped_row("hydro_runs", row, skip_reason))
+            continue
         repository.append_historical_hydro_run(row)
+        imported_runs.append(row)
 
     for row in jobs:
+        skip_reason = _unsupported_job_reason(row)
+        if skip_reason is not None:
+            skipped_rows.append(_skipped_row("pipeline_jobs", row, skip_reason))
+            continue
         repository.append_historical_pipeline_job(row)
+        imported_jobs.append(row)
 
+    imported_job_ids = {
+        str(row.get("job_id"))
+        for row in imported_jobs
+        if row.get("job_id") not in (None, "")
+    }
+    imported_cycle_ids = {
+        str(row.get("cycle_id"))
+        for row in imported_cycles
+        if row.get("cycle_id") not in (None, "")
+    }
     for row in events:
-        repository.append_historical_pipeline_event(row)
+        skip_reason = _unsupported_event_reason(
+            row,
+            imported_job_ids=imported_job_ids,
+            imported_cycle_ids=imported_cycle_ids,
+        )
+        if skip_reason is not None:
+            skipped_rows.append(_skipped_row("pipeline_events", row, skip_reason))
+            continue
+        written = repository.append_historical_pipeline_event(row)
+        if written is None:
+            skipped_rows.append(_skipped_row("pipeline_events", row, "unsupported_pipeline_event_target"))
+            continue
+        imported_events.append(row)
 
-    replay_status = _migration_replay_status(repository, jobs)
+    replay_status = _migration_replay_status(repository, imported_jobs)
     receipt = {
         "schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION,
         "source": source,
@@ -68,6 +113,13 @@ def import_historical_scheduler_state(
             "pipeline_jobs": len(jobs),
             "pipeline_events": len(events),
         },
+        "imported_row_counts": {
+            "forecast_cycles": len(imported_cycles),
+            "hydro_runs": len(imported_runs),
+            "pipeline_jobs": len(imported_jobs),
+            "pipeline_events": len(imported_events),
+        },
+        "skipped_rows": _skipped_rows_summary(skipped_rows),
         "checksums": {
             "forecast_cycles": _rows_checksum(cycles),
             "hydro_runs": _rows_checksum(runs),
@@ -75,7 +127,7 @@ def import_historical_scheduler_state(
             "pipeline_events": _rows_checksum(events),
         },
         "replay_status": replay_status,
-        "stale_download_source_cycle_supersession": _download_source_cycle_supersession(jobs, events),
+        "stale_download_source_cycle_supersession": _download_source_cycle_supersession(imported_jobs, imported_events),
     }
     return receipt
 
@@ -181,6 +233,96 @@ def _fetch_rows(connection: Any, sql: str, params: Mapping[str, Any]) -> list[di
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
+
+
+def _unsupported_forecast_cycle_reason(row: Mapping[str, Any]) -> str | None:
+    if row.get("cycle_id") in (None, ""):
+        return None
+    try:
+        _source_cycle_from_cycle_id(str(row["cycle_id"]))
+    except (FileOrchestrationJournalError, ValueError):
+        return "unsupported_forecast_cycle_identity"
+    return None
+
+
+def _unsupported_run_reason(row: Mapping[str, Any]) -> str | None:
+    run_id = row.get("run_id")
+    if run_id in (None, ""):
+        return None
+    return None if _run_id_is_file_journal_supported(str(run_id)) else "unsupported_run_identity"
+
+
+def _unsupported_job_reason(row: Mapping[str, Any]) -> str | None:
+    run_id = row.get("run_id")
+    if run_id in (None, ""):
+        return None
+    return None if _run_id_is_file_journal_supported(str(run_id)) else "unsupported_run_identity"
+
+
+def _unsupported_event_reason(
+    row: Mapping[str, Any],
+    *,
+    imported_job_ids: set[str],
+    imported_cycle_ids: set[str],
+) -> str | None:
+    entity_type = str(row.get("entity_type") or "pipeline_job")
+    entity_id = row.get("entity_id")
+    if entity_type == "pipeline_job":
+        if entity_id in (None, ""):
+            return None
+        return None if str(entity_id) in imported_job_ids else "unsupported_pipeline_event_target"
+    if entity_type == "forecast_cycle":
+        if entity_id in (None, ""):
+            return None
+        if str(entity_id) in imported_cycle_ids:
+            return None
+        try:
+            _source_cycle_from_cycle_id(str(entity_id))
+        except (FileOrchestrationJournalError, ValueError):
+            return "unsupported_forecast_cycle_event_identity"
+        return None
+    return "unsupported_pipeline_event_entity_type"
+
+
+def _run_id_is_file_journal_supported(run_id: str) -> bool:
+    return run_id.startswith("fcst_") or run_id.startswith("cycle_")
+
+
+def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
+    source, separator, cycle_stamp = cycle_id.rpartition("_")
+    if not separator:
+        raise ValueError(f"Cannot infer source/cycle from cycle_id: {cycle_id}")
+    return source, parse_cycle_time(cycle_stamp)
+
+
+def _skipped_row(relation: str, row: Mapping[str, Any], reason: str) -> dict[str, str]:
+    return {
+        "relation": relation,
+        "reason": reason,
+        "identity": _skipped_row_identity(row),
+    }
+
+
+def _skipped_row_identity(row: Mapping[str, Any]) -> str:
+    for field in ("event_id", "job_id", "run_id", "cycle_id", "entity_id"):
+        value = row.get(field)
+        if value not in (None, ""):
+            return f"{field}:{str(value)[:160]}"
+    return "unknown"
+
+
+def _skipped_rows_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
+    by_relation: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        by_relation[row["relation"]] = by_relation.get(row["relation"], 0) + 1
+        by_reason[row["reason"]] = by_reason.get(row["reason"], 0) + 1
+    return {
+        "count": len(rows),
+        "by_relation": by_relation,
+        "by_reason": by_reason,
+        "samples": rows[:8],
+    }
 
 
 def _validate_historical_node22_database_url(database_url: str, *, allow_historical_node22: bool) -> None:

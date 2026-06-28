@@ -126,6 +126,8 @@ _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
     ("slurm", "manifest"),
 )
 _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE = "pipeline_event_runtime_root_recovery"
+_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT = 32
+_SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES = {"pipeline_job", "forecast_cycle"}
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -819,14 +821,13 @@ class FileOrchestrationJournalRepository:
         message: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        job = self.get_pipeline_job(entity_id)
-        if job is None:
-            raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found for event: {entity_id}")
-        source_id = _source_id_from_job(job)
-        cycle_time = _cycle_time_from_job(job)
-        model_id = _optional_safe_identity(job, "model_id")
+        normalized_entity_type = _pipeline_event_entity_type(entity_type)
+        source_id, cycle_time, model_id = self._pipeline_event_target(
+            entity_type=normalized_entity_type,
+            entity_id=entity_id,
+        )
         row = {
-            "entity_type": entity_type,
+            "entity_type": normalized_entity_type,
             "entity_id": entity_id,
             "event_type": event_type,
             "status_from": status_from,
@@ -851,19 +852,23 @@ class FileOrchestrationJournalRepository:
                 materialize_model_id=model_id,
                 sequence=event_id,
             )
+            if normalized_entity_type == "forecast_cycle":
+                self._materialize_cycle_latest_unlocked(source_id=source_id, cycle_time=cycle_time)
         return _public_scheduler_row(row)
 
     def append_historical_pipeline_event(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        entity_type = _pipeline_event_entity_type(record.get("entity_type") or "pipeline_job")
         entity_id = _required_safe_identity(record, "entity_id")
-        job = self.get_pipeline_job(entity_id)
-        if job is None:
+        try:
+            source_id, cycle_time, model_id = self._pipeline_event_target(
+                entity_type=entity_type,
+                entity_id=entity_id,
+            )
+        except OrchestratorError:
             return None
-        source_id = _source_id_from_job(job)
-        cycle_time = _cycle_time_from_job(job)
-        model_id = _optional_safe_identity(job, "model_id")
         row = {
             "event_id": record.get("event_id"),
-            "entity_type": str(record.get("entity_type") or "pipeline_job"),
+            "entity_type": entity_type,
             "entity_id": entity_id,
             "event_type": str(record["event_type"]),
             "status_from": record.get("status_from"),
@@ -889,6 +894,7 @@ class FileOrchestrationJournalRepository:
                     for event in rows.pipeline_events
                     if str(event.get("event_id") or "") == str(event_id)
                     and str(event.get("entity_id") or "") == entity_id
+                    and str(event.get("entity_type") or "pipeline_job") == entity_type
                 ),
                 None,
             )
@@ -902,7 +908,29 @@ class FileOrchestrationJournalRepository:
                 model_id=model_id,
                 materialize_model_id=model_id,
             )
+            if entity_type == "forecast_cycle":
+                self._materialize_cycle_latest_unlocked(source_id=source_id, cycle_time=cycle_time)
         return _public_scheduler_row(row)
+
+    def _pipeline_event_target(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+    ) -> tuple[str, datetime, str | None]:
+        if entity_type == "pipeline_job":
+            job = self.get_pipeline_job(entity_id)
+            if job is None:
+                raise OrchestratorError("PIPELINE_JOB_NOT_FOUND", f"pipeline_job not found for event: {entity_id}")
+            return _source_id_from_job(job), _cycle_time_from_job(job), _optional_safe_identity(job, "model_id")
+        if entity_type == "forecast_cycle":
+            cycle_id = _safe_identity_text(str(entity_id), field="entity_id")
+            source_id, cycle_time = _source_cycle_from_cycle_id(cycle_id)
+            return source_id, cycle_time, None
+        raise OrchestratorError(
+            "PIPELINE_EVENT_ENTITY_UNSUPPORTED",
+            f"pipeline_event entity_type is not supported by file journal: {entity_type}",
+        )
 
     def update_forecast_cycle_status(
         self,
@@ -1024,7 +1052,15 @@ class FileOrchestrationJournalRepository:
                 if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             }
             rows.pipeline_events = [
-                event for event in rows.pipeline_events if str(event.get("entity_id") or "") in rows.pipeline_jobs
+                event
+                for event in rows.pipeline_events
+                if _event_matches_candidate_rows(
+                    event,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    pipeline_jobs=rows.pipeline_jobs,
+                    forecast_cycle=rows.forecast_cycle,
+                )
             ]
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
         return rows
@@ -1098,7 +1134,7 @@ class FileOrchestrationJournalRepository:
             job = _with_latest_replay_order(job, latest_replay_sequence)
             _upsert_by_key(rows.pipeline_jobs, job, key="job_id")
         for event in _record_list(payload, "pipeline_events", "events", single_key="pipeline_event"):
-            _validate_event_identity(event)
+            _validate_event_identity(event, source_id=source_id, cycle_time=cycle_time)
             event = _with_latest_replay_order(event, latest_replay_sequence)
             rows.pipeline_events.append(event)
         replay = payload.get("replay")
@@ -1148,7 +1184,7 @@ class FileOrchestrationJournalRepository:
             )
             _upsert_by_key(rows.pipeline_jobs, payload, key="job_id")
         elif record_type == "pipeline_event":
-            self._apply_event_record(rows, record)
+            self._apply_event_record(rows, record, source_id=source_id, cycle_time=cycle_time)
         elif record_type in {"hydro_run", "forecast_cycle", "forcing_version", "model_context"}:
             _validate_payload_identity(
                 record_type,
@@ -1161,11 +1197,18 @@ class FileOrchestrationJournalRepository:
         else:
             raise FileOrchestrationJournalError("file_journal_unknown_record_type", field="record_type")
 
-    def _apply_event_record(self, rows: _CycleRows, record: Mapping[str, Any]) -> None:
+    def _apply_event_record(
+        self,
+        rows: _CycleRows,
+        record: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
         payload = _with_replay_order(_payload_or_record_payload(record), record)
         if "event_id" not in payload and record.get("sequence") not in (None, ""):
             payload["event_id"] = record.get("sequence")
-        _validate_event_identity(payload)
+        _validate_event_identity(payload, source_id=source_id, cycle_time=cycle_time)
         rows.pipeline_events.append(dict(payload))
 
     def _read_json(self, path: Path) -> dict[str, Any]:
@@ -1858,6 +1901,31 @@ class FileOrchestrationJournalRepository:
             latest,
         )
 
+    def _materialize_cycle_latest_unlocked(self, *, source_id: str, cycle_time: datetime) -> None:
+        for model_id in self._cycle_materialization_model_ids_unlocked(source_id=source_id, cycle_time=cycle_time):
+            self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    def _cycle_materialization_model_ids_unlocked(self, *, source_id: str, cycle_time: datetime) -> list[str]:
+        model_ids: set[str] = set()
+        source_segment = _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
+        cycle_segment = format_cycle_time(cycle_time)
+        for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
+            model_ids.add(_safe_segment(path.stem))
+        try:
+            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+        except FileOrchestrationJournalError:
+            return sorted(model_ids)
+        for job in rows.pipeline_jobs.values():
+            model_id = _optional_safe_identity(job, "model_id")
+            if model_id is not None:
+                model_ids.add(model_id)
+        for row in (rows.hydro_run, rows.forcing_version, rows.model_context):
+            if isinstance(row, Mapping):
+                model_id = _optional_safe_identity(row, "model_id")
+                if model_id is not None:
+                    model_ids.add(model_id)
+        return sorted(model_ids)
+
     def _atomic_write_json_unlocked(self, path: Path, payload: Mapping[str, Any]) -> None:
         self._atomic_write_bytes_unlocked(path, _json_bytes(payload))
 
@@ -2436,24 +2504,29 @@ class FileJournalRetryService:
             manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
         excluded = set(provenance_job_ids)
         if retry_job.run_id:
-            same_run_jobs = sorted(
-                self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id)),
-                key=_db_compatible_pipeline_job_order_key,
-            )
-            for job in same_run_jobs:
-                job_id = str(job.get("job_id") or "")
-                if not job_id or job_id in excluded or job_id == retry_job.job_id:
-                    continue
-                if str(job.get("job_type") or "") != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
-                    continue
-                if (
+            same_run_jobs = [
+                job
+                for job in sorted(
+                    self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id)),
+                    key=_db_compatible_pipeline_job_order_key,
+                )
+                if str(job.get("job_id") or "")
+                and str(job.get("job_id") or "") not in excluded
+                and str(job.get("job_id") or "") != retry_job.job_id
+                and str(job.get("job_type") or "") == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE
+                and not (
                     retry_job.cycle_id
                     and job.get("cycle_id") not in (None, "")
                     and job.get("cycle_id") != retry_job.cycle_id
-                ):
-                    continue
-                if job.get("manual_retry_marker") is True:
-                    continue
+                )
+                and job.get("manual_retry_marker") is not True
+            ]
+            same_run_scan_jobs = same_run_jobs[:_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT]
+            same_run_jobs_omitted = max(len(same_run_jobs) - len(same_run_scan_jobs), 0)
+            event_rows_total_count += len(same_run_jobs)
+            event_rows_omitted_count += same_run_jobs_omitted
+            for job in same_run_scan_jobs:
+                job_id = str(job.get("job_id") or "")
                 if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
                     break
                 event_batch = self._file_retry_event_runtime_root_candidates(
@@ -2695,8 +2768,6 @@ class FileJournalRetryService:
             return None, None
         latest_job = safe_jobs[-1]
         latest_status = str(latest_job.get("status") or "")
-        if latest_status in TERMINAL_SUCCESS_RETRY_STATUSES:
-            return None, None
         if latest_status in MANUAL_RETRY_SOURCE_STATUSES:
             return latest_job, None
         if durable_status is not None and (
@@ -2707,6 +2778,8 @@ class FileJournalRetryService:
                 None,
             )
             return failed_job, None
+        if latest_status in TERMINAL_SUCCESS_RETRY_STATUSES:
+            return None, None
         return None, None
 
 
@@ -2756,6 +2829,8 @@ def _public_pipeline_event_payload(payload: Mapping[str, Any]) -> dict[str, Any]
     row = dict(payload)
     details = row.get("details")
     row["details"] = _public_evidence(details) if isinstance(details, Mapping) else _public_evidence(details or {})
+    if "message" in row:
+        row["message"] = _public_message(row.get("message"))
     return row
 
 
@@ -3238,6 +3313,8 @@ def _sanitize_public_evidence(value: Any) -> Any:
 
 def _sanitize_public_field(key: str, value: Any) -> Any:
     lowered = key.lower()
+    if lowered == "message" or lowered.endswith("_message"):
+        return _public_message(value)
     if lowered.endswith("_path") or lowered.endswith("_root") or lowered in {"path", "root"}:
         return "[local-path]" if value not in (None, "") else value
     if lowered.endswith("_uri") or lowered in {"uri", "object_uri", "manifest_uri"}:
@@ -3258,6 +3335,56 @@ def _sanitize_public_scalar(value: Any) -> Any:
     ):
         return _sanitize_file_provider_evidence_scalar("uri", value)
     return value
+
+
+def _public_message(value: Any) -> Any:
+    if value in (None, ""):
+        return value
+    if not isinstance(value, str):
+        return _sanitize_public_evidence(value)
+    redacted = _safe_error_message(value)
+    return _sanitize_public_text_tokens(redacted)
+
+
+def _sanitize_public_text_tokens(value: str) -> str:
+    rendered: list[str] = []
+    token = ""
+    for char in value:
+        if char.isspace():
+            if token:
+                rendered.append(_sanitize_public_text_token(token))
+                token = ""
+            rendered.append(char)
+        else:
+            token += char
+    if token:
+        rendered.append(_sanitize_public_text_token(token))
+    return "".join(rendered)
+
+
+def _sanitize_public_text_token(value: str) -> str:
+    prefix_length = 0
+    suffix_length = 0
+    while prefix_length < len(value) and value[prefix_length] in "'\"([{<":
+        prefix_length += 1
+    while suffix_length < len(value) - prefix_length and value[len(value) - suffix_length - 1] in "'\".,;:!?)]}>":
+        suffix_length += 1
+    prefix = value[:prefix_length]
+    suffix = value[len(value) - suffix_length :] if suffix_length else ""
+    core = value[prefix_length : len(value) - suffix_length if suffix_length else len(value)]
+    if not core:
+        return value
+    sanitized = _sanitize_public_scalar(core)
+    if sanitized == core:
+        for separator in ("=", ":"):
+            key, found, nested = core.partition(separator)
+            if not found or not key or not nested:
+                continue
+            sanitized_nested = _sanitize_public_scalar(nested)
+            if sanitized_nested != nested:
+                sanitized = f"{key}{found}{sanitized_nested}"
+                break
+    return f"{prefix}{sanitized}{suffix}" if sanitized != core else value
 
 
 def _blocked_query_job(
@@ -3319,6 +3446,44 @@ def _job_matches_source_cycle(job: Mapping[str, Any], *, source_id: str, cycle_t
     return run_id == f"cycle_{source_id.lower()}_{cycle_stamp}" or run_id.startswith(
         f"fcst_{source_id.lower()}_{cycle_stamp}_"
     )
+
+
+def _event_matches_candidate_rows(
+    event: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    pipeline_jobs: Mapping[str, Mapping[str, Any]],
+    forecast_cycle: Mapping[str, Any] | None,
+) -> bool:
+    entity_type = str(event.get("entity_type") or "pipeline_job")
+    entity_id = str(event.get("entity_id") or "")
+    if entity_type == "pipeline_job":
+        return entity_id in pipeline_jobs
+    if entity_type == "forecast_cycle":
+        expected_cycle_id = _cycle_id_for_file_source(source_id, cycle_time)
+        if entity_id != expected_cycle_id:
+            return False
+        return forecast_cycle is None or str(forecast_cycle.get("cycle_id") or "") == expected_cycle_id
+    return False
+
+
+def _pipeline_event_entity_type(value: Any) -> str:
+    entity_type = _scalar_text(
+        "pipeline_job" if value in (None, "") else value,
+        field="entity_type",
+        invalid_reason="file_journal_invalid_identity",
+    )
+    if entity_type not in _SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES:
+        raise FileOrchestrationJournalError(
+            "file_journal_event_entity_type_mismatch",
+            field="entity_type",
+            evidence={
+                "expected": "|".join(sorted(_SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES)),
+                "actual": entity_type[:80],
+            },
+        )
+    return entity_type
 
 
 def _row_matches_candidate(
@@ -4026,16 +4191,23 @@ def _validate_pipeline_job_identity(
         )
 
 
-def _validate_event_identity(row: Mapping[str, Any]) -> None:
+def _validate_event_identity(
+    row: Mapping[str, Any],
+    *,
+    source_id: str | None = None,
+    cycle_time: datetime | None = None,
+) -> None:
     _optional_text(row, "event_id")
-    _required_safe_identity(row, "entity_id")
-    entity_type = _optional_text(row, "entity_type", invalid_reason="file_journal_invalid_identity")
-    if entity_type not in (None, "", "pipeline_job"):
-        raise FileOrchestrationJournalError(
-            "file_journal_event_entity_type_mismatch",
-            field="entity_type",
-            evidence={"expected": "pipeline_job", "actual": str(entity_type)[:80]},
-        )
+    entity_id = _required_safe_identity(row, "entity_id")
+    entity_type = _pipeline_event_entity_type(row.get("entity_type") or "pipeline_job")
+    if entity_type == "forecast_cycle" and source_id is not None and cycle_time is not None:
+        expected_cycle_id = _cycle_id_for_file_source(source_id, cycle_time)
+        if entity_id != expected_cycle_id:
+            raise FileOrchestrationJournalError(
+                "file_journal_event_entity_mismatch",
+                field="entity_id",
+                evidence={"expected": expected_cycle_id, "actual": entity_id[:80]},
+            )
     _validate_scheduler_visible_fields(row)
 
 

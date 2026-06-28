@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -645,6 +646,37 @@ def _pipeline_reservation_record(
     }
 
 
+def _reserve_pipeline_job_process(
+    journal_root: str,
+    cycle_time_text: str,
+    job_id: str,
+    idempotency_key: str,
+    hold_before_append: bool,
+    ready_queue: Any,
+    release_event: Any,
+    result_queue: Any,
+) -> None:
+    try:
+        cycle_time = _dt(cycle_time_text)
+        repository = FileOrchestrationJournalRepository(Path(journal_root))
+        record = _pipeline_reservation_record(cycle_time, job_id=job_id)
+        record["idempotency_key"] = idempotency_key
+        if hold_before_append:
+            append = repository._append_journal_record_unlocked
+
+            def blocking_append(*args: Any, **kwargs: Any) -> None:
+                ready_queue.put({"status": "holding", "job_id": job_id})
+                if not release_event.wait(10):
+                    raise TimeoutError("timed out waiting to release overlapping journal writer")
+                append(*args, **kwargs)
+
+            setattr(repository, "_append_journal_record_unlocked", blocking_append)
+        written = repository.reserve_pipeline_job(record)
+        result_queue.put({"ok": True, "job_id": None if written is None else written["job_id"]})
+    except BaseException as error:
+        result_queue.put({"ok": False, "error": repr(error)})
+
+
 def test_file_orchestration_journal_lifecycle_writes_materialize_latest_and_replay(
     tmp_path: Path,
 ) -> None:
@@ -928,6 +960,101 @@ def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp
     assert object_store_prefix in private_rendered
 
 
+def test_pipeline_event_public_surfaces_redact_message_text(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(cycle_time, job_id="job_public_message_redaction")
+    repository.reserve_pipeline_job(record)
+
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_public_message_redaction",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        message=(
+            "submission used /secret/workspace/job.sh and s3://nhms-prod/raw/gfs.grib "
+            "manifest=/secret/manifest.json object=s3://nhms-prod/raw/assigned.grib "
+            "token=raw-token-123 Authorization: Bearer live-token-123"
+        ),
+        details={"note": "safe"},
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_rendered = "\n".join(path.read_text(encoding="utf-8") for path in (journal_root / "latest").rglob("*.json"))
+    public_rendered = "\n".join(
+        [
+            raw_journal,
+            latest_rendered,
+            json.dumps(inserted, sort_keys=True),
+            json.dumps(state, sort_keys=True),
+        ]
+    )
+
+    assert state is not None
+    for raw in (
+        "/secret/workspace",
+        "/secret/manifest.json",
+        "s3://nhms-prod/raw/gfs.grib",
+        "s3://nhms-prod/raw/assigned.grib",
+        "raw-token-123",
+        "live-token-123",
+    ):
+        assert raw not in public_rendered
+    assert "[local-path]" in public_rendered
+    assert "[object-uri]" in public_rendered
+    assert "[redacted]" in public_rendered
+
+
+def test_forecast_cycle_pipeline_event_persists_replays_and_materializes_latest(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+
+    inserted = repository.insert_pipeline_event(
+        entity_type="forecast_cycle",
+        entity_id=cycle_id_for("gfs", cycle_time),
+        event_type="canonical_converter_version_stale",
+        status_from="canonical_ready",
+        status_to="canonical_stale",
+        message="canonical demotion read /secret/canonical.json from s3://nhms/raw/canonical.json token=stale-token",
+        details={"cycle_id": cycle_id_for("gfs", cycle_time), "manifest_uri": "s3://nhms/raw/canonical.json"},
+    )
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    latest = json.loads((journal_root / "latest/gfs/2026062800/model_a.json").read_text(encoding="utf-8"))
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    public_rendered = json.dumps({"inserted": inserted, "state": state, "latest": latest}, sort_keys=True)
+
+    assert inserted["entity_type"] == "forecast_cycle"
+    assert inserted["entity_id"] == cycle_id_for("gfs", cycle_time)
+    assert repository.get_pipeline_job(cycle_id_for("gfs", cycle_time)) is None
+    assert state is not None
+    assert state["pipeline_jobs_total"] == 0
+    assert state["pipeline_events"][0]["entity_type"] == "forecast_cycle"
+    assert latest["pipeline_events"][0]["entity_type"] == "forecast_cycle"
+    for raw in ("/secret/canonical.json", "s3://nhms/raw/canonical.json", "stale-token"):
+        assert raw not in raw_journal
+        assert raw not in public_rendered
+    assert "[local-path]" in public_rendered
+    assert "[object-uri]" in public_rendered
+    assert "[redacted]" in public_rendered
+
+
 def test_file_orchestration_journal_reservation_append_failure_leaves_no_direct_only_blocker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -975,6 +1102,76 @@ def test_file_orchestration_journal_two_repositories_allocate_unique_event_ids(t
     assert first["event_id"] != second["event_id"]
     assert state is not None
     assert state["pipeline_events_total"] == 2
+
+
+def test_file_orchestration_journal_overlapping_repositories_serialize_cycle_writes(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    context = get_context("spawn")
+    ready_queue = context.Queue()
+    result_queue = context.Queue()
+    release_event = context.Event()
+    first = context.Process(
+        target=_reserve_pipeline_job_process,
+        args=(
+            str(journal_root),
+            cycle_time.isoformat(),
+            "job_overlap_first",
+            "gfs:gfs_2026062800:basin_a:overlap_first",
+            True,
+            ready_queue,
+            release_event,
+            result_queue,
+        ),
+    )
+    second = context.Process(
+        target=_reserve_pipeline_job_process,
+        args=(
+            str(journal_root),
+            cycle_time.isoformat(),
+            "job_overlap_second",
+            "gfs:gfs_2026062800:basin_a:overlap_second",
+            False,
+            ready_queue,
+            release_event,
+            result_queue,
+        ),
+    )
+
+    first.start()
+    try:
+        assert ready_queue.get(timeout=10) == {"status": "holding", "job_id": "job_overlap_first"}
+        second.start()
+        release_event.set()
+        first.join(10)
+        second.join(10)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        outcomes = [result_queue.get(timeout=5), result_queue.get(timeout=5)]
+    finally:
+        release_event.set()
+        for process in (first, second):
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+    assert all(outcome["ok"] for outcome in outcomes)
+    assert {outcome["job_id"] for outcome in outcomes} == {"job_overlap_first", "job_overlap_second"}
+    repository = FileOrchestrationJournalRepository(journal_root)
+    jobs = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    records = [
+        json.loads(line)
+        for line in (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    latest = json.loads((journal_root / "latest/gfs/2026062800/model_a.json").read_text(encoding="utf-8"))
+
+    assert {job["job_id"] for job in jobs} == {"job_overlap_first", "job_overlap_second"}
+    assert state is not None
+    assert state["pipeline_jobs_total"] == 2
+    assert latest["replay"]["job_count"] == 2
+    assert len({record["sequence"] for record in records}) == 2
+    assert {record["payload"]["job_id"] for record in records} == {"job_overlap_first", "job_overlap_second"}
 
 
 def test_file_orchestration_journal_reclaims_dead_reservation_and_keeps_permanent_failure_sticky(
@@ -1234,6 +1431,116 @@ def test_file_journal_manual_retry_refuses_old_failure_after_later_success(tmp_p
         service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
 
     assert gateway.requests == []
+
+
+def test_file_journal_manual_retry_uses_failed_source_when_durable_hydro_is_partial_after_later_success(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status(
+        "fcst_gfs_2026062800_model_a",
+        "partially_failed",
+        error_code="OUTPUT_INCOMPLETE",
+    )
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_partial_failed_source")
+    failed.update(
+        {
+            "status": "failed",
+            "error_code": "OUTPUT_INCOMPLETE",
+            "created_at": "2026-06-28T00:00:00Z",
+            "updated_at": "2026-06-28T00:05:00Z",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    success = _pipeline_reservation_record(cycle_time, job_id="job_later_success")
+    success.update(
+        {
+            "idempotency_key": "gfs:gfs_2026062800:basin_a:later_success",
+            "status": "succeeded",
+            "retry_count": 1,
+            "created_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:20:00Z",
+            "finished_at": "2026-06-28T00:20:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(failed)
+    repository.upsert_pipeline_job(success)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    repair = service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.job_id == "job_partial_failed_source"
+    assert repair.status == "manual_repair_requested"
+    assert state is not None
+    event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_partial_failed_source")
+    assert event["details"]["previous_job_id"] == "job_partial_failed_source"
+    assert event["details"]["prior_failure_reason"] == "OUTPUT_INCOMPLETE"
+
+
+def test_file_journal_active_manual_retry_blocks_repair_and_submission_without_mutation(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_manual_conflict_failed")
+    failed.update({"status": "failed", "error_code": "SLURM_TIMEOUT", "finished_at": "2026-06-28T00:05:00Z"})
+    active_retry = _pipeline_reservation_record(cycle_time, job_id="fcst_gfs_2026062800_model_a_retry_active")
+    active_retry.update(
+        {
+            "status": "pending",
+            "retry_count": 2,
+            "manual_retry_marker": True,
+            "previous_job_id": "job_manual_conflict_failed",
+            "idempotency_key": "manual_retry:fcst_gfs_2026062800_model_a:2",
+            "created_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:10:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(failed)
+    repository.upsert_pipeline_job(active_retry)
+    before_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7099", "status": "submitted"}
+
+    gateway = Gateway()
+
+    with pytest.raises(journal_module.RetryConflictError):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    with pytest.raises(journal_module.RetryConflictError):
+        service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+
+    after_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert gateway.requests == []
+    assert after_records == before_records
+    assert state is not None
+    assert state["pipeline_events_total"] == 0
+    assert {job["job_id"] for job in state["pipeline_jobs"]} == {
+        "job_manual_conflict_failed",
+        "fcst_gfs_2026062800_model_a_retry_active",
+    }
 
 
 def test_file_journal_manual_retry_truth_sort_uses_created_at_before_retry_count(tmp_path: Path) -> None:
@@ -1900,6 +2207,73 @@ def test_file_journal_download_retry_recovers_original_contract_through_stale_re
     evidence = submission_event["details"]["runtime_root_resolution"]
     assert "job_download_original" in evidence["resolved"]["workspace_dir"]["source"]
     assert evidence["candidate_counts"]["manual_retry_event_rows_ignored"] == 1
+
+
+def test_file_journal_download_retry_same_run_runtime_root_scan_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    for name in (
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    for index in range(journal_module._RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT + 40):
+        job = _pipeline_reservation_record(cycle_time, job_id=f"job_download_no_candidate_{index:03d}")
+        job.update(
+            {
+                "run_id": "cycle_gfs_2026062800",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "model_id": None,
+                "status": "failed",
+                "retry_count": index,
+                "idempotency_key": f"gfs:gfs_2026062800:download-no-candidate-{index:03d}",
+                "error_code": "SOURCE_CYCLE_UNAVAILABLE",
+                "created_at": f"2026-06-28T00:{index % 60:02d}:00Z",
+                "updated_at": f"2026-06-28T00:{index % 60:02d}:30Z",
+                "finished_at": f"2026-06-28T00:{index % 60:02d}:30Z",
+            }
+        )
+        repository.upsert_pipeline_job(job)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=100, backoff_schedule=[0]))
+    scanned_job_ids: list[str] = []
+    original_candidates = service._file_retry_event_runtime_root_candidates
+
+    def counting_candidates(job_id: str, *, candidate_budget: int) -> Any:
+        scanned_job_ids.append(job_id)
+        return original_candidates(job_id, candidate_budget=candidate_budget)
+
+    monkeypatch.setattr(service, "_file_retry_event_runtime_root_candidates", counting_candidates)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7011", "status": "submitted"}
+
+    gateway = Gateway()
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+    events = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+    failure_event = next(
+        event
+        for event in events
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submission_failed"
+    )
+    candidate_counts = failure_event["details"]["runtime_root_resolution"]["candidate_counts"]
+
+    assert retried.status == "submission_failed"
+    assert retried.error_code == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+    assert gateway.requests == []
+    assert len(scanned_job_ids) <= journal_module._RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT + 1
+    assert candidate_counts["event_rows_omitted"] >= 39
 
 
 def test_file_journal_download_retry_failure_persists_only_redacted_runtime_roots(

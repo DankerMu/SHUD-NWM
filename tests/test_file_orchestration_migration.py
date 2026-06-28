@@ -225,6 +225,100 @@ def test_historical_scheduler_state_import_is_idempotent_for_replay_decisions(tm
     assert scheduler_module._manual_retry_payload(first_state) == scheduler_module._manual_retry_payload(second_state)
 
 
+def test_historical_pipeline_event_messages_are_redacted_in_journal_latest_and_public_reads(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["pipeline_events"][0]["message"] = (
+        "historical repair read /secret/historical/path and s3://nhms-historical/raw/file.grib "
+        "manifest=/secret/historical/manifest.json object=s3://nhms-historical/raw/assigned.grib "
+        "token=historical-token Authorization: Bearer historical-bearer"
+    )
+    journal_root = tmp_path / "journal"
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    state = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
+    raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_rendered = "\n".join(path.read_text(encoding="utf-8") for path in (journal_root / "latest").rglob("*.json"))
+    public_rendered = json.dumps(state, sort_keys=True)
+
+    for rendered in (raw_journal, latest_rendered, public_rendered):
+        for raw in (
+            "/secret/historical/path",
+            "/secret/historical/manifest.json",
+            "s3://nhms-historical/raw/file.grib",
+            "s3://nhms-historical/raw/assigned.grib",
+            "historical-token",
+            "historical-bearer",
+        ):
+            assert raw not in rendered
+    assert "[local-path]" in raw_journal
+    assert "[object-uri]" in raw_journal
+    assert "[redacted]" in raw_journal
+
+
+def test_historical_scheduler_state_import_skips_unsupported_non_forecast_rows(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["hydro_runs"].append(
+        {
+            "run_id": "hindcast_gfs_2026062800_model_a",
+            "run_type": "hindcast",
+            "scenario_id": "scenario_hindcast",
+            "model_id": "model_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "status": "failed",
+        }
+    )
+    rows["pipeline_jobs"].append(
+        _job(
+            job_id="job_hindcast_legacy",
+            run_id="hindcast_gfs_2026062800_model_a",
+            cycle_time=cycle_time,
+            model_id="model_a",
+            status="failed",
+        )
+    )
+    rows["pipeline_events"].append(
+        {
+            "event_id": 201,
+            "entity_type": "pipeline_job",
+            "entity_id": "job_hindcast_legacy",
+            "event_type": "retry",
+            "status_from": "failed",
+            "status_to": "manual_repair_requested",
+            "details": {"manual_retry_marker": True},
+            "created_at": "2026-06-28T00:07:00Z",
+        }
+    )
+
+    receipt = import_historical_scheduler_state(
+        journal_root=tmp_path / "journal",
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        **rows,
+    )
+    state = _candidate_state(
+        FileOrchestrationJournalRepository(tmp_path / "journal"),
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    assert receipt["row_counts"]["hydro_runs"] == 2
+    assert receipt["row_counts"]["pipeline_jobs"] == 4
+    assert receipt["row_counts"]["pipeline_events"] == 3
+    assert receipt["imported_row_counts"]["hydro_runs"] == 1
+    assert receipt["imported_row_counts"]["pipeline_jobs"] == 3
+    assert receipt["imported_row_counts"]["pipeline_events"] == 2
+    assert receipt["skipped_rows"]["count"] == 3
+    assert receipt["skipped_rows"]["by_reason"] == {
+        "unsupported_pipeline_event_target": 1,
+        "unsupported_run_identity": 2,
+    }
+    assert state["pipeline_status"] == "permanently_failed"
+    assert all(job["job_id"] != "job_hindcast_legacy" for job in state["pipeline_jobs"])
+
+
 def test_historical_scheduler_state_reimport_does_not_override_newer_live_success(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     rows = _historical_rows(cycle_time)
@@ -401,6 +495,91 @@ def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_sql: list[str] = []
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    exported_rows = [
+        [
+            {
+                "cycle_id": cycle_id_for("gfs", cycle_time),
+                "source_id": "gfs",
+                "cycle_time": cycle_time,
+                "status": "forecast_running",
+                "created_at": "2026-06-28T00:00:00Z",
+            }
+        ],
+        [
+            {
+                "run_id": "fcst_gfs_2026062800_model_a",
+                "run_type": "forecast",
+                "scenario_id": "scenario_a",
+                "model_id": "model_a",
+                "basin_version_id": "basin_a_v1",
+                "forcing_version_id": "forc_gfs_2026062800_model_a",
+                "source_id": "gfs",
+                "cycle_time": cycle_time,
+                "start_time": cycle_time,
+                "end_time": cycle_time,
+                "status": "failed",
+                "error_code": "INVALID_MANIFEST",
+                "created_at": "2026-06-28T00:00:00Z",
+                "updated_at": "2026-06-28T00:05:00Z",
+            }
+        ],
+        [
+            _job(
+                job_id="job_export_model_a_failed",
+                run_id="fcst_gfs_2026062800_model_a",
+                cycle_time=cycle_time,
+                model_id="model_a",
+                status="permanently_failed",
+                retry_count=3,
+                error_code="INVALID_MANIFEST",
+            ),
+            _job(
+                job_id="job_export_download_failed",
+                run_id="cycle_gfs_2026062800",
+                cycle_time=cycle_time,
+                model_id=None,
+                status="failed",
+                job_type="download_source_cycle",
+                retry_count=3,
+                error_code="SOURCE_CYCLE_UNAVAILABLE",
+            ),
+        ],
+        [
+            {
+                "event_id": 301,
+                "entity_type": "pipeline_job",
+                "entity_id": "job_export_model_a_failed",
+                "event_type": "retry",
+                "status_from": "permanently_failed",
+                "status_to": "manual_repair_requested",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "previous_job_id": "job_export_model_a_failed",
+                    "previous_error": "INVALID_MANIFEST",
+                    "prior_failure_reason": "INVALID_MANIFEST",
+                },
+                "created_at": "2026-06-28T00:06:00Z",
+            },
+            {
+                "event_id": 302,
+                "entity_type": "pipeline_job",
+                "entity_id": "job_export_download_failed",
+                "event_type": "retry",
+                "status_from": "failed",
+                "status_to": "manual_repair_requested",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "previous_job_id": "job_export_download_failed",
+                    "previous_error": "SOURCE_CYCLE_UNAVAILABLE",
+                    "prior_failure_reason": "SOURCE_CYCLE_UNAVAILABLE",
+                },
+                "created_at": "2026-06-28T00:07:00Z",
+            },
+        ],
+    ]
 
     class Cursor:
         def __enter__(self) -> "Cursor":
@@ -413,7 +592,7 @@ def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order
             captured_sql.append(sql)
 
         def fetchall(self) -> list[dict[str, Any]]:
-            return []
+            return [dict(row) for row in exported_rows[(len(captured_sql) - 1) % 4]]
 
     class Connection:
         def __enter__(self) -> "Connection":
@@ -445,6 +624,25 @@ def test_export_scheduler_state_from_postgres_uses_node22_guard_and_stable_order
     )
 
     assert receipt["source"] == "localhost:55433"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    state = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
+
+    assert receipt["row_counts"] == {
+        "forecast_cycles": 1,
+        "hydro_runs": 1,
+        "pipeline_jobs": 2,
+        "pipeline_events": 2,
+    }
+    assert receipt["imported_row_counts"] == receipt["row_counts"]
+    assert receipt["skipped_rows"]["count"] == 0
+    assert all(value.startswith("sha256:") for value in receipt["checksums"].values())
+    assert receipt["replay_status"]["status"] == "ok"
+    assert receipt["stale_download_source_cycle_supersession"]["count"] == 1
+    assert state["pipeline_status"] == "permanently_failed"
+    assert [event["event_id"] for event in state["pipeline_events"]] == [301, 302]
+    cycle_rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None)
+    assert [event["event_id"] for event in cycle_rows.pipeline_events] == [301, 302]
+
     documented_receipt = export_scheduler_state_from_postgres(
         database_url="postgresql://nwm@10.0.2.100:55433/nhms",
         journal_root=tmp_path / "journal-documented-host",
