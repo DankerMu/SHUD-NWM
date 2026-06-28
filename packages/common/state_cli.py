@@ -129,6 +129,7 @@ def save_state_for_run(
     run_context: StateRunContext | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict[str, Any]:
+    _db_free_state_save_enabled()
     workspace = Path(workspace_root or os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
     object_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace))).expanduser().resolve()
     object_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
@@ -284,9 +285,12 @@ def _state_run_repository_from_env_for_save() -> StateRunRepository:
 
 
 def _db_free_state_save_enabled() -> bool:
-    return _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED") and os.getenv(
-        "NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""
-    ).strip().lower() == "file"
+    if not _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED"):
+        return False
+    backend = os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "").strip().lower()
+    if backend != "file":
+        raise StateManagerError("DB-free state save requires NHMS_SCHEDULER_STATE_INDEX_BACKEND=file.")
+    return True
 
 
 def _require_db_free_state_index_destination() -> None:

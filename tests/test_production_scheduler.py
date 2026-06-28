@@ -2490,6 +2490,68 @@ def test_ready_nfs_raw_manifest_identity_mismatch_blocks_reuse(
     assert "raw_manifest_reuse" not in blocked["state_evidence"]
 
 
+@pytest.mark.parametrize(
+    ("missing_fields", "field_updates"),
+    [
+        (("source_id",), {}),
+        (("cycle_id",), {}),
+        (("cycle_time",), {}),
+        ((), {"source_id": "ifs"}),
+        ((), {"cycle_id": "gfs_2026052100"}),
+        ((), {"cycle_time": "not-a-time"}),
+        ((), {"cycle_time": "2026-05-21T00:00:00Z"}),
+    ],
+)
+def test_redacted_nfs_raw_manifest_identity_mismatch_blocks_reuse(
+    tmp_path: Path,
+    missing_fields: tuple[str, ...],
+    field_updates: dict[str, Any],
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    state = _raw_ready_state(cycle_time)
+    nfs_raw_manifest = {
+        **state["nfs_raw_manifest"],
+        "manifest_uri": "[object-uri]",
+        **field_updates,
+    }
+    for field_name in missing_fields:
+        nfs_raw_manifest.pop(field_name, None)
+    state["nfs_raw_manifest"] = nfs_raw_manifest
+    forcing_producer = FakeForcingProducer(error=RuntimeError("redacted raw manifest mismatch must block"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeCandidateStateRepository(state),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "nfs_raw_manifest_identity_mismatch"
+    assert blocked["state_evidence"]["nfs_raw_manifest"]["manifest_uri"] == "[object-uri]"
+    assert "raw_manifest_reuse" not in blocked["state_evidence"]
+
+
 def test_partial_canonical_still_blocks_not_fresh_full_chain(tmp_path: Path) -> None:
     # candidate_row_count > 0 but identity/variable incomplete must keep the
     # existing hard block; it is NOT a fresh full-chain ingestion.

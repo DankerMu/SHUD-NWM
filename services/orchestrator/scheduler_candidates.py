@@ -988,7 +988,12 @@ def _nfs_raw_manifest_matches_source_cycle(
     if manifest_uri in (None, ""):
         return False
     manifest_text = str(manifest_uri)
-    if manifest_text != "[object-uri]" and not _raw_manifest_uri_matches_source_cycle(
+    redacted_manifest_uri = manifest_text == "[object-uri]"
+    if redacted_manifest_uri:
+        for field_name in ("source_id", "cycle_id", "cycle_time"):
+            if evidence.get(field_name) in (None, ""):
+                return False
+    elif not _raw_manifest_uri_matches_source_cycle(
         manifest_text,
         source_id=candidate.source_id,
         cycle_time=candidate.cycle_time_utc,

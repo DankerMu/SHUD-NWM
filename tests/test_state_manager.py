@@ -1731,6 +1731,73 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     assert snapshot.model_package_checksum == "package-sha"
 
 
+@pytest.mark.parametrize("selector_value", [None, "", "postgres", "psycopg"])
+def test_db_free_state_save_required_rejects_non_file_backend_before_db_or_upload(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector_value: str | None,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.invalid/nhms")
+    if selector_value is None:
+        monkeypatch.delenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", selector_value)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free state save selector validation must run before PostgreSQL run lookup"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail("DB-free state save selector validation must run before DB snapshot factory"),
+    )
+    monkeypatch.setattr(
+        LocalObjectStore,
+        "write_bytes_atomic",
+        lambda *_args, **_kwargs: pytest.fail("DB-free state save selector validation must run before upload"),
+    )
+
+    with pytest.raises(StateManagerError, match="NHMS_SCHEDULER_STATE_INDEX_BACKEND"):
+        state_cli.save_state_for_run("fcst_gfs_2026052106_model_a", workspace_root=tmp_path / "workspace")
+
+
+@pytest.mark.parametrize("selector_value", [None, "", "postgres", "psycopg"])
+def test_db_free_state_save_cli_rejects_non_file_backend_before_db_or_upload(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    selector_value: str | None,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "objects"))
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.invalid/nhms")
+    if selector_value is None:
+        monkeypatch.delenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", selector_value)
+    monkeypatch.setattr(
+        "packages.common.state_cli.StateRunRepository.from_env",
+        lambda: pytest.fail("DB-free state save CLI must validate selector before PostgreSQL run lookup"),
+    )
+    monkeypatch.setattr(
+        "packages.common.state_cli.PsycopgStateSnapshotRepository.from_env",
+        lambda: pytest.fail("DB-free state save CLI must validate selector before DB snapshot factory"),
+    )
+    monkeypatch.setattr(
+        LocalObjectStore,
+        "write_bytes_atomic",
+        lambda *_args, **_kwargs: pytest.fail("DB-free state save CLI must validate selector before upload"),
+    )
+
+    result_code = _state_cli_exit_code(["save", "--run-id", "fcst_gfs_2026052106_model_a"])
+    stderr = capsys.readouterr().err
+
+    assert result_code == 1
+    assert "NHMS_SCHEDULER_STATE_INDEX_BACKEND" in stderr
+    assert not (tmp_path / "objects" / "states").exists()
+
+
 @pytest.mark.parametrize(
     "missing_env",
     [
