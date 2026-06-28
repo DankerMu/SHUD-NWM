@@ -894,6 +894,71 @@ def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_p
     assert retry_event["details"]["failure"]["retryable"] is True
 
 
+def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast")
+    record["retry_count"] = 1
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3001")
+    repository.update_pipeline_job_status(
+        "job_forecast",
+        "failed",
+        error_code="NODE_FAILURE",
+        error_message="node failed",
+        finished_at=cycle_time,
+    )
+    stale_retry = _pipeline_reservation_record(cycle_time, job_id="job_forecast_retry_2", status="submission_failed")
+    stale_retry.update(
+        {
+            "run_id": record["run_id"],
+            "idempotency_key": "gfs:gfs_2026062800:basin_a:forecast_retry_2",
+            "candidate_id": "candidate_stale_retry",
+            "slurm_job_id": None,
+            "array_task_id": None,
+            "submitted_at": "2026-06-28T00:03:00Z",
+            "started_at": "2026-06-28T00:04:00Z",
+            "finished_at": "2026-06-28T00:05:00Z",
+            "exit_code": 1,
+            "retry_count": 2,
+            "error_code": "SUBMIT_INTERRUPTED",
+            "error_message": "submission interrupted",
+            "log_uri": "s3://logs/stale",
+        }
+    )
+    repository.upsert_pipeline_job(stale_retry)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retry = service.schedule_auto_retry(repository.get_pipeline_job("job_forecast"))
+    persisted = repository.get_pipeline_job("job_forecast_retry_2")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    direct_record = json.loads(
+        (tmp_path / "journal/pipeline-jobs/job_forecast_retry_2.json").read_text(encoding="utf-8")
+    )["payload"]
+
+    assert retry.job_id == "job_forecast_retry_2"
+    assert retry.status == "pending"
+    assert persisted is not None
+    for row in (vars(retry), persisted, direct_record):
+        assert row["slurm_job_id"] is None
+        assert row["array_task_id"] is None
+        assert row["submitted_at"] is None
+        assert row["started_at"] is None
+        assert row["finished_at"] is None
+        assert row["exit_code"] is None
+        assert row["idempotency_key"] is None
+        assert row["candidate_id"] is None
+        assert row["error_code"] is None
+        assert row["error_message"] is None
+        assert row["log_uri"] is None
+    assert state is not None
+    retry_event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_forecast_retry_2")
+    assert retry_event["details"]["reused_existing_retry_job"] is True
+    assert retry_event["details"]["previous_job_id"] == "job_forecast"
+
+
 def test_file_journal_retry_service_exhaustion_records_permanent_failure(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
@@ -1029,6 +1094,75 @@ def test_file_journal_manual_retry_refuses_old_failure_after_later_success(tmp_p
     assert gateway.requests == []
 
 
+def test_file_journal_manual_retry_submission_failure_redacts_persisted_event_and_job_records(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    secret_message = (
+        "sbatch failed for https://alice:pass123@slurm.example/sbatch?"
+        "X-Amz-Signature=sig123&token=tok123 token=tok123 password=pass123 "
+        "Authorization: Bearer live-token-123 authorization=Basic basic-secret-123 "
+        "{\"Authorization\": \"Bearer json-retry-token-123\"} "
+        "Proxy-Authorization='Basic proxy-retry-secret-123' "
+        "stderr=\"Bearer bare-retry-token-123\" Basic bare-basic-retry-secret-123; next field"
+    )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_secret_failed")
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_secret_failed",
+        "failed",
+        error_code="SLURM_UNAVAILABLE",
+        error_message="slurm unavailable",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            raise RuntimeError(secret_message)
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+    raw_journal = (tmp_path / "journal/journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    latest_files = sorted((tmp_path / "journal/latest").rglob("*.json"))
+    latest_rendered = "\n".join(path.read_text(encoding="utf-8") for path in latest_files)
+    direct_rendered = (tmp_path / f"journal/pipeline-jobs/{retried.job_id}.json").read_text(encoding="utf-8")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submission_failed"
+    )
+    event_output = json.dumps(event, sort_keys=True)
+
+    assert retried.status == "submission_failed"
+    assert retried.error_code == "RETRY_SUBMISSION_FAILED"
+    assert gateway.requests
+    assert latest_files
+    for rendered in (raw_journal, latest_rendered, direct_rendered, event_output, retried.error_message):
+        for raw_secret in (
+            "alice:pass123",
+            "pass123",
+            "sig123",
+            "tok123",
+            "live-token-123",
+            "basic-secret-123",
+            "json-retry-token-123",
+            "proxy-retry-secret-123",
+            "bare-retry-token-123",
+            "bare-basic-retry-secret-123",
+        ):
+            assert raw_secret not in rendered
+        assert "[redacted]" in rendered
+
+
 def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1137,6 +1271,91 @@ def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
     assert str(workspace_root) not in rendered_submission
     assert str(object_store_root) not in rendered_submission
     assert "[local-path]" in rendered_submission
+
+
+def test_file_journal_download_retry_recovers_runtime_roots_from_historical_manifest_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    for name in (
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_download_failed")
+    record.update(
+        {
+            "run_id": "cycle_gfs_2026062800",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "model_id": None,
+            "retry_count": 1,
+            "idempotency_key": "gfs:gfs_2026062800:download",
+        }
+    )
+    repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_download_failed",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "request_manifest": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(workspace_root),
+                "object_store_prefix": "request-prefix",
+            },
+            "slurm": {
+                "manifest": {
+                    "workspace_dir": str(workspace_root),
+                    "object_store_root": str(object_store_root),
+                    "object_store_prefix": "s3://nhms-prod",
+                }
+            },
+        },
+    )
+    repository.update_pipeline_job_status(
+        "job_download_failed",
+        "permanently_failed",
+        error_code="SOURCE_CYCLE_UNAVAILABLE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7004", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
+
+    assert retried.status == "submitted"
+    assert gateway.requests
+    assert gateway.requests[0].manifest["workspace_dir"] == str(workspace_root)
+    assert gateway.requests[0].manifest["object_store_root"] == str(object_store_root)
+    assert gateway.requests[0].manifest["object_store_prefix"] == "s3://nhms-prod"
+    submission_event = next(
+        event
+        for event in repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    evidence = submission_event["details"]["runtime_root_resolution"]
+    assert "slurm.manifest" in evidence["resolved"]["workspace_dir"]["source"]
+    assert any(item["reason"] == "resolves_to_workspace_dir" for item in evidence["rejected"])
+    assert evidence["candidate_counts"]["event_candidates_total"] >= 2
 
 
 def test_file_journal_download_retry_ignores_stale_manual_retry_runtime_roots(

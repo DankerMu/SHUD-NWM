@@ -34,6 +34,8 @@ from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
 from services.orchestrator.retry import (
     _REQUIRED_RUNTIME_ROOT_FIELDS,
+    _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
+    _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
     _RUNTIME_ROOT_FIELDS,
     _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT,
     ACTIVE_RETRY_STATUSES,
@@ -52,6 +54,8 @@ from services.orchestrator.retry import (
     _attach_retry_runtime_root_contract,
     _attach_retry_runtime_root_resolution,
     _event_details_is_manual_retry_submission,
+    _has_runtime_root_field,
+    _mapping_at,
     _resolve_runtime_root_candidate,
     _retry_submission_manifest,
     _RetryRuntimeRootResolutionError,
@@ -62,6 +66,7 @@ from services.orchestrator.retry import (
     _runtime_root_resolution_from_error,
     _RuntimeRootCandidate,
     _RuntimeRootCandidateBatch,
+    _safe_error_message,
     classify_failure,
     compute_backoff_seconds,
 )
@@ -89,6 +94,34 @@ _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
 _REPLAY_ORDER_FIELD = "_file_journal_replay_order"
+_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
+    "slurm_job_id",
+    "array_task_id",
+    "model_id",
+    "status",
+    "stage",
+    "idempotency_key",
+    "candidate_id",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "retry_count",
+    "manual_retry_marker",
+    "error_code",
+    "error_message",
+    "log_uri",
+)
+_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
+    ("runtime_root_contract",),
+    ("submission_manifest",),
+    ("submitted_manifest",),
+    ("request_manifest",),
+    ("slurm_submission_manifest",),
+    ("manifest",),
+    ("gateway_response", "manifest"),
+    ("slurm", "manifest"),
+)
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -596,7 +629,12 @@ class FileOrchestrationJournalRepository:
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
             if existing is not None:
-                row = {**existing, **{key: value for key, value in row.items() if value is not None}}
+                explicit_fields = set(record)
+                incoming = row
+                row = dict(existing)
+                for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
+                    if key in explicit_fields:
+                        row[key] = incoming[key]
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
@@ -2248,6 +2286,13 @@ class FileJournalRetryService:
         candidates: list[_RuntimeRootCandidate] = []
         seen_job_ids: set[str] = set()
         job_ids: list[str] = []
+        event_candidate_returned_count = 0
+        event_candidate_total_count = 0
+        event_candidate_omitted_count = 0
+        event_rows_scanned_count = 0
+        event_rows_total_count = 0
+        event_rows_omitted_count = 0
+        manual_retry_event_rows_ignored = 0
         if retry_job.previous_job_id:
             job_ids.append(str(retry_job.previous_job_id))
         excluded = set(job_ids)
@@ -2274,45 +2319,107 @@ class FileJournalRetryService:
         for job_id in job_ids:
             if job_id in seen_job_ids:
                 continue
+            if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
+                break
             seen_job_ids.add(job_id)
-            candidates.extend(self._file_retry_event_runtime_root_candidates(job_id))
+            event_batch = self._file_retry_event_runtime_root_candidates(
+                job_id,
+                candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
+            )
+            candidates.extend(event_batch.candidates)
+            event_candidate_returned_count += event_batch.event_candidate_returned_count
+            event_candidate_total_count += event_batch.event_candidate_total_count
+            event_candidate_omitted_count += event_batch.event_candidate_omitted_count
+            event_rows_scanned_count += event_batch.event_rows_scanned_count
+            event_rows_total_count += event_batch.event_rows_total_count
+            event_rows_omitted_count += event_batch.event_rows_omitted_count
+            manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
         env_candidate = _runtime_root_env_candidate()
         if env_candidate:
             candidates.append(_RuntimeRootCandidate("runtime_config:environment", env_candidate))
-        return _RuntimeRootCandidateBatch(candidates=candidates)
+        return _RuntimeRootCandidateBatch(
+            candidates=candidates,
+            event_candidate_returned_count=event_candidate_returned_count,
+            event_candidate_total_count=event_candidate_total_count,
+            event_candidate_omitted_count=event_candidate_omitted_count,
+            event_rows_scanned_count=event_rows_scanned_count,
+            event_rows_total_count=event_rows_total_count,
+            event_rows_omitted_count=event_rows_omitted_count,
+            manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
+        )
 
-    def _file_retry_event_runtime_root_candidates(self, job_id: str) -> list[_RuntimeRootCandidate]:
+    def _file_retry_event_runtime_root_candidates(
+        self,
+        job_id: str,
+        *,
+        candidate_budget: int,
+    ) -> _RuntimeRootCandidateBatch:
         job = self.repository.get_pipeline_job(job_id)
         if job is None:
-            return []
-        if job.get("manual_retry_marker") is True:
-            return []
+            return _RuntimeRootCandidateBatch(candidates=[])
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")
         rows = self.repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        submission_events = [
+            event
+            for event in rows.pipeline_events
+            if str(event.get("entity_id") or "") == job_id
+            and str(event.get("event_type") or "") == "submission"
+        ]
+        event_rows_total_count = len(submission_events)
+        if job.get("manual_retry_marker") is True:
+            return _RuntimeRootCandidateBatch(
+                candidates=[],
+                event_rows_total_count=event_rows_total_count,
+                manual_retry_event_rows_ignored=event_rows_total_count,
+            )
+        events = sorted(
+            submission_events,
+            key=lambda event: _optional_positive_int(event.get("event_id")) or 0,
+            reverse=True,
+        )[:_RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT]
         candidates: list[_RuntimeRootCandidate] = []
-        for event in rows.pipeline_events:
-            if str(event.get("entity_id") or "") != job_id:
-                continue
-            if str(event.get("event_type") or "") != "submission":
-                continue
+        event_candidate_total_count = 0
+        manual_retry_event_rows_ignored = 0
+        for event in events:
             details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
             if _event_details_is_manual_retry_submission(details):
+                manual_retry_event_rows_ignored += 1
                 continue
-            for label, value in (
-                ("details.runtime_root_contract", details.get("runtime_root_contract")),
-                ("details", details),
-            ):
-                if isinstance(value, Mapping) and _mapping_has_runtime_root_fields(value):
-                    event_id = event.get("event_id")
+
+            event_id = event.get("event_id")
+            event_source = f"file_journal_event:{job_id}:{event_id}"
+            for path in _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS:
+                candidate = _mapping_at(details, path)
+                if candidate and _has_runtime_root_field(candidate):
+                    event_candidate_total_count += 1
+                    if len(candidates) < candidate_budget:
+                        candidates.append(
+                            _RuntimeRootCandidate(
+                                f"{event_source}:{'.'.join(path)}",
+                                candidate,
+                            )
+                        )
+            if _has_runtime_root_field(details):
+                event_candidate_total_count += 1
+                if len(candidates) < candidate_budget:
                     candidates.append(
                         _RuntimeRootCandidate(
-                            f"file_journal_event:{job_id}:{event_id}:{label}",
-                            value,
+                            f"{event_source}:details",
+                            details,
                         )
                     )
-        return candidates
+        return _RuntimeRootCandidateBatch(
+            candidates=candidates,
+            event_candidate_returned_count=len(candidates),
+            event_candidate_total_count=event_candidate_total_count,
+            event_candidate_omitted_count=max(event_candidate_total_count - len(candidates), 0),
+            event_rows_scanned_count=len(events),
+            event_rows_total_count=event_rows_total_count,
+            event_rows_omitted_count=max(event_rows_total_count - len(events), 0),
+            manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
+        )
 
     def _record_manual_retry_submission_success(
         self,
@@ -2372,7 +2479,7 @@ class FileJournalRetryService:
 
     def _record_manual_retry_submission_failure(self, job_id: str, error: Exception) -> dict[str, Any]:
         error_code = str(getattr(error, "code", None) or "RETRY_SUBMISSION_FAILED")
-        error_message = str(getattr(error, "message", None) or error)
+        error_message = _safe_error_message(str(getattr(error, "message", None) or error))
         _previous_status, written = self.repository.update_pipeline_job_status(
             job_id,
             "submission_failed",
