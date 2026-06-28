@@ -157,9 +157,9 @@
 ## 5. File State Snapshot Index And DB-Free State Save
 
 - [x] 5.1 Define the file-backed state snapshot index contract.
-  Evidence floor: index maps `model_id + source_id + valid_time` to usable
-  state URI, checksum, source identity, schema version, generated_at, and
-  object existence evidence.
+  Evidence floor: index maps `model_id + source_id + valid_time + cycle_id +
+  lead_hours` to usable state URI, checksum, source/cycle identity, schema
+  version, generated_at, model package lineage, and object existence evidence.
 - [x] 5.2 Add exact-match strict warm-start lookup.
   Evidence floor: exact successor checkpoint succeeds; missing, stale, checksum
   mismatch, wrong source/model/time, and unusable state fail closed without
@@ -175,12 +175,20 @@
 Scenario evidence rows for section 5:
 
 - Valid state-index entry with matching `model_id`, normalized `source_id`,
-  `valid_time`, model package checksum, usable flag, and object checksum ->
-  strict lookup returns ready `candidate_state` evidence with state URI,
-  checksum, lineage, schema version, and entry/object evidence.
+  `valid_time`, expected `cycle_id`, required `lead_hours`, model package
+  checksum, usable flag, and object checksum -> strict lookup returns ready
+  `candidate_state` evidence with state URI, checksum, lineage, schema version,
+  and entry/object evidence.
 - Missing exact entry for `model_id + source_id + valid_time` -> scheduler
   candidate blocks with `state_snapshot_index_exact_checkpoint_missing`; latest
   usable fallback is not called.
+- Entry for the same `model_id + source_id + valid_time` but missing/wrong
+  expected `cycle_id` or wrong `lead_hours` -> scheduler candidate blocks with
+  stable lineage evidence; latest usable fallback is not called.
+- Overlapping state checkpoints for the same `valid_time` but different
+  producing cycles/leads -> state IDs/object keys/index identities stay
+  distinct and strict lookup selects the requested lead's expected producer
+  cycle.
 - Missing state object after index publish -> lookup blocks with
   `state_snapshot_index_object_missing`.
 - Mutated state object checksum -> lookup blocks with
@@ -201,6 +209,12 @@ Scenario evidence rows for section 5:
   context -> writes a usable file-index record with state checksum, source,
   cycle, valid-time, and model package evidence; `StateRunRepository.from_env()`
   and `PsycopgStateSnapshotRepository.from_env()` are not constructed.
+- DB-free `state_cli save` with missing required `NHMS_*` lineage env -> exits
+  before DB repository construction or object upload, and stderr names the
+  missing fields.
+- Same-checksum DB-free state save rerun with missing older lineage/package
+  metadata -> repairs the record metadata and requires QC before strict
+  readiness.
 - Legacy non-DB-free `state_cli save --manifest-index --task-id` with old
   manifest entries containing only `run_id` -> still resolves `run_id` and
   delegates to the legacy repository path.

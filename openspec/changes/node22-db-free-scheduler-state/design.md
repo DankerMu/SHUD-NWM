@@ -175,7 +175,7 @@ idempotent replay status, and supersession evidence for stale
 The file-backed state index maps exact strict warm-start lookup keys:
 
 ```text
-model_id + source_id + valid_time -> state_uri + checksum + usable_flag
+model_id + source_id + valid_time + cycle_id + lead_hours -> state_uri + checksum + usable_flag
 ```
 
 The scheduler may not fall back to latest usable state when strict successor
@@ -678,7 +678,8 @@ Must add/change:
 
 - Add `FileStateSnapshotIndexRepository` and publisher behavior for
   `nhms.scheduler.file_state_snapshot_index.v1`.
-- Exact lookups use only `model_id + source_id + valid_time`; source-less or
+- Strict exact lookups use `model_id + source_id + valid_time + expected
+  cycle_id + required lead_hours`; source-less, wrong-cycle, wrong-lead, or
   latest-state lookup is not an accepted DB-free substitute.
 - Index validation checks schema version, generated time, checksum, entry
   count, JSON complexity, usable flag, object existence, object checksum,
@@ -767,13 +768,14 @@ Invariant Matrix:
 
 - Governing invariant: in DB-free strict warm-start mode, a scheduler candidate
   may proceed only when the file state index proves the exact
-  `model_id + source_id + valid_time` checkpoint, its object checksum, usable
-  flag, and model/source lineage; otherwise the candidate blocks before any DB
-  fallback, latest-state fallback, Slurm submission, or orchestrator mutation.
+  `model_id + source_id + valid_time + expected cycle_id + required lead_hours`
+  checkpoint, its object checksum, usable flag, and model/source/package
+  lineage; otherwise the candidate blocks before any DB fallback, latest-state
+  fallback, Slurm submission, or orchestrator mutation.
 - Source-of-truth identity/contract: state-index schema version,
   `model_id`, normalized `source_id`, `valid_time`, `state_uri`, state object
-  checksum, `usable_flag`, `lead_hours`, model package URI/checksum,
-  generated_at, and index checksum.
+  checksum, `usable_flag`, expected `cycle_id`, `lead_hours`, model package
+  URI/checksum, generated_at, and index checksum.
 - Producers: `state_cli.save_state_for_run()` and
   `publish_state_snapshot_index()` write index records after QC/object evidence.
 - Validators/preflight: `FileStateSnapshotIndexRepository` schema/checksum/time
@@ -811,6 +813,13 @@ Invariant Matrix:
     update preserves both entries.
   - Wrong source/model/time/package or stale/unsupported index -> fail-closed
     state-index blocker, no DB fallback.
+  - Missing or wrong expected `cycle_id`, or wrong `lead_hours` for a matching
+    `valid_time` -> fail-closed lineage blocker, no DB/latest fallback.
+  - Two state checkpoints share `model_id + source_id + valid_time` but have
+    different producing cycles/leads -> strict lookup selects the checkpoint
+    matching the requested lead and expected producer cycle.
+  - Same-checksum DB-free state save rerun with missing older lineage/package
+    metadata -> repairs metadata before strict readiness can pass.
   - DB-free `state_cli save` with manifest-index and no `DATABASE_URL` ->
     writes usable state-index record without `StateRunRepository.from_env()` or
     `PsycopgStateSnapshotRepository`.
