@@ -188,6 +188,12 @@ class _CycleRows:
     replay: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _CycleSourceDiscovery:
+    source_id: str
+    source_segment: str
+
+
 @dataclass
 class _RecordBudget:
     limit: int
@@ -987,7 +993,7 @@ class FileOrchestrationJournalRepository:
         statuses: list[dict[str, Any]] = []
         if source_id is None:
             try:
-                source_ids = self._cycle_source_ids(cycle_time=cycle_time)
+                sources = self._cycle_source_discoveries(cycle_time=cycle_time)
             except FileOrchestrationJournalError as error:
                 return [
                     _blocked_stage_status(
@@ -997,12 +1003,13 @@ class FileOrchestrationJournalRepository:
                         model_id=model_id,
                     )
                 ]
-            for candidate_source_id in source_ids:
+            for source in sources:
                 statuses.extend(
                     self._list_stage_statuses_for_source(
-                        source_id=candidate_source_id,
+                        source_id=source.source_id,
                         cycle_time=cycle_time,
                         model_id=model_id,
+                        source_segment_override=source.source_segment,
                     )
                 )
             statuses.sort(key=_db_compatible_stage_status_order_key)
@@ -1021,10 +1028,16 @@ class FileOrchestrationJournalRepository:
         source_id: str,
         cycle_time: datetime,
         model_id: str | None,
+        source_segment_override: str | None = None,
     ) -> list[dict[str, Any]]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         try:
-            rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            rows = self._cycle_rows(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                source_segment_override=source_segment_override,
+            )
         except FileOrchestrationJournalError as error:
             return [_blocked_stage_status(error, source_id=source_id, cycle_time=cycle_time, model_id=model_id)]
         return [
@@ -1052,8 +1065,11 @@ class FileOrchestrationJournalRepository:
         ]
 
     def _cycle_source_ids(self, *, cycle_time: datetime) -> list[str]:
+        return sorted({source.source_id for source in self._cycle_source_discoveries(cycle_time=cycle_time)})
+
+    def _cycle_source_discoveries(self, *, cycle_time: datetime) -> list[_CycleSourceDiscovery]:
         cycle_segment = format_cycle_time(cycle_time)
-        source_ids: set[str] = set()
+        sources: dict[str, _CycleSourceDiscovery] = {}
         for path in sorted(
             _iter_regular_json_files(
                 self.root / "latest",
@@ -1065,7 +1081,8 @@ class FileOrchestrationJournalRepository:
         ):
             parts = path.relative_to(self.root).parts
             if len(parts) == 4 and parts[0] == "latest" and parts[2] == cycle_segment:
-                source_ids.add(_normalize_file_source_id(parts[1], field="source_id"))
+                source = _cycle_source_discovery_from_segment(parts[1])
+                sources.setdefault(source.source_id, source)
         for surface in ("journal", "pipeline-events"):
             for path in sorted(
                 _iter_jsonl_files(
@@ -1077,16 +1094,33 @@ class FileOrchestrationJournalRepository:
             ):
                 parts = path.relative_to(self.root).parts
                 if len(parts) == 3 and parts[0] == surface and Path(parts[2]).stem == cycle_segment:
-                    source_ids.add(_normalize_file_source_id(parts[1], field="source_id"))
+                    source = _cycle_source_discovery_from_segment(parts[1])
+                    sources.setdefault(source.source_id, source)
+        file_source_ids = set(sources)
         for job in self._iter_direct_pipeline_job_records():
             if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
-                source_ids.add(_source_id_from_job(job))
-        return sorted(source_ids)
+                source_id = _source_id_from_job(job)
+                if source_id not in file_source_ids:
+                    sources.setdefault(
+                        source_id,
+                        _CycleSourceDiscovery(source_id=source_id, source_segment=_safe_segment(source_id)),
+                    )
+        return sorted(sources.values(), key=lambda source: (source.source_id, source.source_segment))
 
-    def _cycle_rows(self, *, source_id: str, cycle_time: datetime, model_id: str | None) -> _CycleRows:
+    def _cycle_rows(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+        source_segment_override: str | None = None,
+    ) -> _CycleRows:
         rows = _CycleRows()
         source_id = _normalize_file_source_id(source_id, field="source_id")
-        source_segment = _safe_segment(source_id)
+        source_segment = _cycle_read_source_segment(
+            source_id=source_id,
+            source_segment_override=source_segment_override,
+        )
         cycle_segment = format_cycle_time(cycle_time)
         latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
         for path in latest_paths:
@@ -3875,6 +3909,28 @@ def _normalize_file_source_id(value: Any, *, field: str) -> str:
             field=field,
             evidence={"actual": text[:80]},
         ) from error
+
+
+def _cycle_source_discovery_from_segment(source_segment: str) -> _CycleSourceDiscovery:
+    source_segment = _safe_segment(source_segment)
+    return _CycleSourceDiscovery(
+        source_id=_normalize_file_source_id(source_segment, field="source_id"),
+        source_segment=source_segment,
+    )
+
+
+def _cycle_read_source_segment(*, source_id: str, source_segment_override: str | None) -> str:
+    if source_segment_override is None:
+        return _safe_segment(source_id)
+    source_segment = _safe_segment(source_segment_override)
+    segment_source_id = _normalize_file_source_id(source_segment, field="source_id")
+    if segment_source_id != source_id:
+        raise FileOrchestrationJournalError(
+            "file_journal_source_mismatch",
+            field="source_id",
+            evidence={"expected": source_id, "actual": segment_source_id[:80]},
+        )
+    return source_segment
 
 
 def _required_source_id(row: Mapping[str, Any], field: str) -> str:

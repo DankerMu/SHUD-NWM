@@ -2482,7 +2482,10 @@ def test_file_orchestration_journal_list_stage_statuses_returns_blocked_row(tmp_
     ]
 
 
-def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(tmp_path: Path) -> None:
+def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
     gfs_job = _source_job(cycle_time, source_id="gfs", job_id="job_gfs_forecast")
@@ -2495,13 +2498,28 @@ def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(tm
         journal_root / "latest/ifs/2026062800/model_a.json",
         _latest_view(source_id="ifs", cycle_time=cycle_time, jobs=[ifs_job]),
     )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    read_paths: list[Path] = []
+    original_read_optional_json = repository._read_optional_json
 
-    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+    def read_optional_json(path: Path) -> dict[str, Any] | None:
+        read_paths.append(path.relative_to(journal_root))
+        return original_read_optional_json(path)
+
+    monkeypatch.setattr(repository, "_read_optional_json", read_optional_json)
+
+    rows = repository.list_stage_statuses(
         source_id=None,
         cycle_time=cycle_time,
         model_id="model_a",
     )
 
+    assert {
+        (source.source_id, source.source_segment)
+        for source in repository._cycle_source_discoveries(cycle_time=cycle_time)
+    } == {("gfs", "gfs"), ("IFS", "ifs")}
+    assert Path("latest/ifs/2026062800/model_a.json") in read_paths
+    assert Path("latest/IFS/2026062800/model_a.json") not in read_paths
     assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "job_ifs_forecast"]
     assert {row["cycle_id"] for row in rows} == {
         cycle_id_for("gfs", cycle_time),
@@ -2545,6 +2563,7 @@ def test_file_orchestration_journal_list_stage_statuses_preserves_db_stage_order
 
 def test_file_orchestration_journal_list_stage_statuses_all_sources_blocks_malformed_source(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -2562,14 +2581,25 @@ def test_file_orchestration_journal_list_stage_statuses_all_sources_blocks_malfo
             "model_id": "model_a",
         },
     )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    read_paths: list[Path] = []
+    original_read_optional_json = repository._read_optional_json
 
-    rows = FileOrchestrationJournalRepository(journal_root).list_stage_statuses(
+    def read_optional_json(path: Path) -> dict[str, Any] | None:
+        read_paths.append(path.relative_to(journal_root))
+        return original_read_optional_json(path)
+
+    monkeypatch.setattr(repository, "_read_optional_json", read_optional_json)
+
+    rows = repository.list_stage_statuses(
         source_id=None,
         cycle_time=cycle_time,
         model_id="model_a",
     )
     rendered = json.dumps(rows, sort_keys=True)
 
+    assert Path("latest/ifs/2026062800/model_a.json") in read_paths
+    assert Path("latest/IFS/2026062800/model_a.json") not in read_paths
     assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "file_journal_read_blocked"]
     assert rows[1]["cycle_id"] == cycle_id_for("ifs", cycle_time)
     assert rows[1]["error_code"] == "file_journal_schema_mismatch"
