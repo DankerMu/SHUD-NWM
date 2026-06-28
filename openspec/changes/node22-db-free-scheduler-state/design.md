@@ -829,6 +829,124 @@ Invariant Matrix:
   - Ready strict state evidence on scheduler candidate -> basin manifest can
     receive `init_state_*` through the existing `candidate_state` contract.
 
+## Issue #836 Fixture
+
+Fixture level: expanded/live-deployment
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- Deployment entrypoints and static guardrails decide whether node-22 scheduler
+  receives `DATABASE_URL` at runtime.
+- `infra/env/compute.example`, `infra/compose.compute.yml`, systemd comments,
+  and runbooks are operator-facing contracts for the DB-free cutover.
+- Local no-DB tests must cover file lock, registry, canonical readiness, raw
+  handoff, file journal, retry, state index, and Slurm preflight without
+  PostgreSQL factory reachability.
+- Live evidence must prove one GFS and one IFS cycle progress through
+  `convert-or-later` while `:55433` remains online only as rollback.
+
+Must preserve:
+
+- `compute-api` may still receive a writer-capable `DATABASE_URL`; this issue
+  removes scheduler runtime dependency, not every compute-side DB credential.
+- Non-DB runtime roots, manifest paths, secret handling, template roots,
+  workspace/object-store/temp/evidence roots, and allowed-root checks stay
+  strict.
+- `:55433` is not stopped or disabled by #836; archive/stop is #837.
+- Existing display/node-27 readonly and ingest responsibilities do not move to
+  node-22.
+- Scheduler evidence remains bounded and must not reveal raw DB URLs, tokens,
+  local private roots, or object-store secrets.
+
+Must add/change:
+
+- `scheduler-once` compose runtime omits `DATABASE_URL` and carries the full
+  canonical DB-free env matrix.
+- Static compose/env checks fail if DB-free `scheduler-once` receives
+  `DATABASE_URL`, if selectors drift from `file`, or if required
+  registry/readiness/journal/state-index paths are missing or empty.
+- Compute env/runbook/systemd guidance distinguishes `compute-api` DB/rollback
+  credentials from DB-free scheduler runtime.
+- Node-22 cutover receipts record frozen timer state, env/unit backups,
+  migration artifacts, rollback commands, bounded no-DB scheduler evidence, and
+  live GFS/IFS `convert-or-later` proof.
+
+Risk packs considered for #836:
+
+- Public API / CLI / script entry: selected - `docker compose run
+  scheduler-once`, systemd units, and scheduler CLI are production entrypoints.
+- Config / project setup: selected - env files, compose interpolation, and
+  systemd comments govern runtime shape.
+- File IO / path safety / overwrite: selected - deployment paths, journal root,
+  manifest/index paths, and evidence roots cross host/container boundaries.
+- Schema / field names: selected - DB-free env matrix field names and evidence
+  keys are operator contracts.
+- Auth / permissions / secrets: selected - `DATABASE_URL` must be absent from
+  scheduler env while still redacted/allowed for compute-api rollback.
+- Concurrency / shared state / ordering: selected - timer freeze and file lock
+  avoid concurrent migration/live scheduler mutation.
+- Resource limits / discovery: selected - static and runtime evidence remain
+  bounded; local no-DB tests cover discovery providers.
+- Legacy compatibility / rollback: selected - node-22 `:55433` stays online
+  during #836 as rollback.
+- Error handling / partial outputs: selected - failed preflight/live evidence
+  blocks merge rather than claiming readiness.
+- Slurm production lifecycle / mock-vs-real parity: selected - live receipts
+  must show downstream Slurm submission without `download_source_cycle`.
+- External hydro-met providers / snapshot reproducibility: selected - GFS and
+  IFS receipts must bind source/cycle identity and node-27 raw handoff.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `scripts/validate_two_node_docker_runtime.py`,
+  scheduler DB-free preflight helpers, and file provider tests.
+- Public entrypoints: `infra/compose.compute.yml` `scheduler-once`,
+  `infra/env/compute.example`, `infra/systemd/nhms-compute-compose.service`,
+  and node-22 scheduler timer/service.
+- Read surfaces: env files, compose interpolation, registry/readiness/state
+  index files, file journal, raw manifest handoff, and live scheduler evidence.
+- Write surfaces: local docs/specs/tests, node-22 env backup/deploy files,
+  scheduler evidence root, migration receipts, and file journal writes.
+- Staging/rollback surfaces: timer freeze, env/unit backup, DB-free env deploy,
+  migration artifacts, rollback commands, and `:55433` left online.
+- Unchanged downstream consumers: compute-api DB env, node-27 display/ingest,
+  and #837 DB archive/stop runbook.
+
+Invariant Matrix:
+
+- Governing invariant: during #836, node-22 scheduler runtime either proves a
+  full file-backed DB-free environment with `DATABASE_URL` absent or blocks
+  before mutation; `:55433` remains online solely as rollback/historical state.
+- Source-of-truth contract: canonical DB-free env matrix, compose service env,
+  node-22 timer/env/unit receipts, scheduler evidence `database_url_configured`
+  and `lock_type=file`, and source/cycle live receipts.
+- Producers: compose/static checker, local no-DB tests, node-22 deployment
+  commands, scheduler evidence writer, file journal/state-index providers, and
+  live GFS/IFS scheduler passes.
+- Validators/preflight: static compose/env checker, source-trust preflight,
+  DB-free scheduler runtime preflight, Slurm preflight, and OpenSpec validate.
+- Failure paths/rollback: missing/forbidden DB-free env, stale migration,
+  raw handoff missing/invalid, Slurm preflight blockers, no live GFS/IFS cycle,
+  or timer/env backup missing all block merge and keep `:55433` online.
+- Evidence/audit/readiness: focused local no-DB pytest, static compose/env PASS,
+  ruff, OpenSpec strict validation, bounded scheduler pass receipt, live GFS
+  receipt, live IFS receipt, and rollback receipt.
+- Regression rows:
+  - Checked-in compute compose renders `compute-api` with `DATABASE_URL` but
+    renders `scheduler-once` without it.
+  - Adding `DATABASE_URL` to DB-free `scheduler-once` fails static validation.
+  - Changing any scheduler backend selector away from `file` fails static
+    validation.
+  - Empty registry/readiness/journal/state-index paths fail static validation.
+  - Local DB-free scheduler pass uses file lock/registry/readiness/journal/state
+    index with DB-backed factories patched to fail.
+  - DB-free Slurm preflight with missing `DATABASE_URL` does not emit
+    `SLURM_PREFLIGHT_DATABASE_URL_MISSING`.
+  - Live GFS and IFS cycles reach `convert-or-later` with node-27 raw handoff,
+    file-backed scheduler state, no scheduler PostgreSQL, and no
+    `download_source_cycle` submission.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains

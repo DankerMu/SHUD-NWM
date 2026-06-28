@@ -230,12 +230,12 @@ Scenario evidence rows for section 5:
   Evidence floor: with DB-free mode and Slurm enabled, missing `DATABASE_URL`
   does not produce `SLURM_PREFLIGHT_DATABASE_URL_MISSING`; non-DB root,
   manifest, secret, and template safety checks still run.
-- [ ] 6.2 Update compute deployment entrypoints for DB-free scheduler mode.
+- [x] 6.2 Update compute deployment entrypoints for DB-free scheduler mode.
   Evidence floor: `infra/env/compute.example`, DB-free env template/runbook,
   systemd guidance, and `infra/compose.compute.yml` support scheduler runtime
   without mandatory `DATABASE_URL` while preserving DB requirements for
   non-DB-free lanes.
-- [ ] 6.3 Run local focused no-DB integration tests.
+- [x] 6.3 Run local focused no-DB integration tests.
   Evidence floor: with `DATABASE_URL` absent, scheduler planning and fake
   submission use file lock, registry, readiness, raw handoff, journal, retry,
   and state index; static guardrails prove no psycopg factories are called.

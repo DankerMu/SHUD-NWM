@@ -3085,6 +3085,74 @@ def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_
     assert "COMPUTE_WORKSPACE_MOUNT_MISSING" not in scheduler_codes
 
 
+def test_checked_in_compute_scheduler_once_is_db_free_without_database_url() -> None:
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    compute_api_env = docker_runtime._service_environment(compose["services"]["compute-api"], compute_env)
+    scheduler_env = docker_runtime._service_environment(compose["services"]["scheduler-once"], compute_env)
+
+    assert "DATABASE_URL" in compute_api_env
+    assert "DATABASE_URL" not in scheduler_env
+    assert scheduler_env["NHMS_SCHEDULER_DB_FREE_REQUIRED"] == "true"
+    for key in docker_runtime.COMPUTE_DB_FREE_SCHEDULER_SELECTOR_ENV:
+        assert scheduler_env[key] == "file"
+    for key in docker_runtime.COMPUTE_DB_FREE_SCHEDULER_PATH_ENV:
+        assert scheduler_env[key].strip()
+
+
+def test_static_checker_rejects_scheduler_once_database_url_in_db_free_mode(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"]["DATABASE_URL"] = (
+        "${DATABASE_URL:?set compute api writer database url}"
+    )
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_SCHEDULER_DATABASE_URL_FORBIDDEN"
+        and finding.service == "scheduler-once"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected_code"),
+    [
+        (
+            "NHMS_SCHEDULER_LOCK_BACKEND",
+            "postgres",
+            "COMPUTE_SCHEDULER_DB_FREE_SELECTOR_INVALID",
+        ),
+        (
+            "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+            "",
+            "COMPUTE_RUNTIME_ENV_EMPTY",
+        ),
+    ],
+)
+def test_static_checker_rejects_scheduler_once_db_free_matrix_drift(
+    tmp_path: Path,
+    key: str,
+    value: str,
+    expected_code: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["scheduler-once"]["environment"][key] = value
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == expected_code
+        and finding.service == "scheduler-once"
+        and finding.details.get("key") == key
+        for finding in result.findings
+    )
+
+
 def test_static_checker_requires_compute_host_gateway_extra_host(tmp_path: Path) -> None:
     compose = _safe_compute_compose()
     compose["services"]["compute-api"].pop("extra_hosts", None)

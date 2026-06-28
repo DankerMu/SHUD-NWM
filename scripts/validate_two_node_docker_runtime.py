@@ -164,6 +164,17 @@ COMPUTE_REQUIRED_ENV = {
 COMPUTE_SCHEDULER_ENV = frozenset(
     {
         "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_DB_FREE_REQUIRED",
+        "NHMS_SCHEDULER_STATE_BACKEND",
+        "NHMS_SCHEDULER_LOCK_BACKEND",
+        "NHMS_SCHEDULER_REGISTRY_BACKEND",
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        "NHMS_SCHEDULER_JOURNAL_BACKEND",
+        "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
+        "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
         "NHMS_SCHEDULER_RUNTIME_ROOT",
         "NHMS_SCHEDULER_TEMP_ROOT",
@@ -186,6 +197,17 @@ COMPUTE_ADAPTER_ENV = frozenset(
 COMPUTE_SCHEDULER_REQUIRED_ENV = frozenset(
     {
         "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_DB_FREE_REQUIRED",
+        "NHMS_SCHEDULER_STATE_BACKEND",
+        "NHMS_SCHEDULER_LOCK_BACKEND",
+        "NHMS_SCHEDULER_REGISTRY_BACKEND",
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        "NHMS_SCHEDULER_JOURNAL_BACKEND",
+        "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
+        "NHMS_SCHEDULER_STATE_INDEX",
         "NHMS_SCHEDULER_EVIDENCE_ROOT",
         "NHMS_SCHEDULER_RUNTIME_ROOT",
         "NHMS_SCHEDULER_TEMP_ROOT",
@@ -229,6 +251,25 @@ COMPUTE_REQUIRED_RUNTIME_ENV = frozenset(
         "SLURM_GATEWAY_WORKSPACE_DIR",
     }
 )
+COMPUTE_SCHEDULER_ONCE_REQUIRED_RUNTIME_ENV = COMPUTE_REQUIRED_RUNTIME_ENV - frozenset({"DATABASE_URL"})
+COMPUTE_DB_FREE_SCHEDULER_SELECTOR_ENV = frozenset(
+    {
+        "NHMS_SCHEDULER_STATE_BACKEND",
+        "NHMS_SCHEDULER_LOCK_BACKEND",
+        "NHMS_SCHEDULER_REGISTRY_BACKEND",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND",
+        "NHMS_SCHEDULER_JOURNAL_BACKEND",
+        "NHMS_SCHEDULER_STATE_INDEX_BACKEND",
+    }
+)
+COMPUTE_DB_FREE_SCHEDULER_PATH_ENV = frozenset(
+    {
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        "NHMS_SCHEDULER_JOURNAL_ROOT",
+        "NHMS_SCHEDULER_STATE_INDEX",
+    }
+)
 DISPLAY_REQUIRED_RUNTIME_ENV = frozenset(
     {
         "NHMS_SERVICE_ROLE",
@@ -266,7 +307,7 @@ NONEMPTY_RUNTIME_ENV = frozenset(
         "NHMS_MODEL_ASSET_ROOT",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "SLURM_GATEWAY_WORKSPACE_DIR",
-        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        *COMPUTE_SCHEDULER_REQUIRED_ENV,
         "NHMS_LOG_TAIL_MAX_BYTES",
         "NHMS_ARTIFACT_BACKEND",
     }
@@ -2279,16 +2320,23 @@ def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mappi
         return [Finding("COMPUTE_SERVICE_MISSING", "compute compose must define services.", path=str(path))]
     for service_name, service in services.items():
         service_env = _service_environment(service, env)
+        required_runtime_env = (
+            COMPUTE_SCHEDULER_ONCE_REQUIRED_RUNTIME_ENV
+            if service_name == "scheduler-once"
+            else COMPUTE_REQUIRED_RUNTIME_ENV
+        )
         findings.extend(
             _runtime_env_findings(
                 path=path,
                 service=service_name,
                 service_env=service_env,
-                required_keys=COMPUTE_REQUIRED_RUNTIME_ENV,
+                required_keys=required_runtime_env,
                 expected_values=COMPUTE_REQUIRED_ENV,
                 role="compute",
             )
         )
+        if service_name == "scheduler-once":
+            findings.extend(_compute_scheduler_once_db_free_findings(path, service_env))
         findings.extend(_compute_runtime_env_contract_findings(path, service_name, service, env))
         findings.extend(_compute_extra_hosts_findings(path, service_name, service))
         if service_env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
@@ -2337,6 +2385,61 @@ def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mappi
                 details={"actual": _command_list(scheduler.get("command"))},
             )
         )
+    return findings
+
+
+def _compute_scheduler_once_db_free_findings(path: Path, service_env: Mapping[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    db_free_required = service_env.get("NHMS_SCHEDULER_DB_FREE_REQUIRED", "").strip().lower()
+    if db_free_required != "true":
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_DB_FREE_REQUIRED_INVALID",
+                "scheduler-once must run with NHMS_SCHEDULER_DB_FREE_REQUIRED=true.",
+                path=str(path),
+                service="scheduler-once",
+                details={
+                    "key": "NHMS_SCHEDULER_DB_FREE_REQUIRED",
+                    "expected": "true",
+                    "actual": service_env.get("NHMS_SCHEDULER_DB_FREE_REQUIRED"),
+                },
+            )
+        )
+    if service_env.get("DATABASE_URL", "").strip():
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_DATABASE_URL_FORBIDDEN",
+                "DB-free scheduler-once runtime must not receive DATABASE_URL.",
+                path=str(path),
+                service="scheduler-once",
+                details={"key": "DATABASE_URL"},
+            )
+        )
+    for key in sorted(COMPUTE_DB_FREE_SCHEDULER_SELECTOR_ENV):
+        actual = service_env.get(key)
+        if actual is None:
+            continue
+        if actual.strip().lower() != "file":
+            findings.append(
+                Finding(
+                    "COMPUTE_SCHEDULER_DB_FREE_SELECTOR_INVALID",
+                    "DB-free scheduler-once selectors must be file.",
+                    path=str(path),
+                    service="scheduler-once",
+                    details={"key": key, "expected": "file", "actual": actual},
+                )
+            )
+    for key in sorted(COMPUTE_DB_FREE_SCHEDULER_PATH_ENV):
+        if not service_env.get(key, "").strip():
+            findings.append(
+                Finding(
+                    "COMPUTE_SCHEDULER_DB_FREE_PATH_MISSING",
+                    "DB-free scheduler-once paths must be configured.",
+                    path=str(path),
+                    service="scheduler-once",
+                    details={"key": key},
+                )
+            )
     return findings
 
 

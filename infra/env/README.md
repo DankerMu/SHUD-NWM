@@ -38,12 +38,20 @@ Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 Compute role, node 22:
 
 - Required: `NHMS_SERVICE_ROLE=compute_control`,
-  `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL`,
+  `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL` for
+  `compute-api` and rollback only,
   `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`,
   `NHMS_OBJECT_STORE_COPYBACK_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
   `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`. `OBJECT_STORE_ROOT` is the
   compute-visible staging root; `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the
   shared object-store mirror used after publish.
+- The production `scheduler-once` service is DB-free: `infra/compose.compute.yml`
+  does not pass `DATABASE_URL` to it. It must set
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, every scheduler backend selector to
+  `file`, and the registry/readiness/journal/state-index path variables from
+  the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
+  `compute.env` while `:55433` is online as rollback, but it is not scheduler
+  runtime env.
 - Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
   `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
   `NHMS_SCHEDULER_TEMP_ROOT`, non-empty `NHMS_SCHEDULER_ALLOWED_ROOTS`, and
