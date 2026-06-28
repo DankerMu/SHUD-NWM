@@ -1636,7 +1636,7 @@ class FileOrchestrationJournalRepository:
         model_id: str | None,
     ) -> int:
         sequence_floor = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time) - 1
-        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
         event_ids = [_optional_positive_int(event.get("event_id")) or 0 for event in rows.pipeline_events]
         return max([sequence_floor, *event_ids], default=0) + 1
 
@@ -1934,109 +1934,24 @@ class FileJournalRetryService:
                 decision.reason,
                 {"run_id": run_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
             )
-        failed_job, active_job = self._manual_retry_source_for_run(run_id)
-        if active_job is not None:
-            raise RetryConflictError(run_id, _file_retry_namespace(active_job))
-        if failed_job is None:
-            raise RetryNotFoundError(run_id)
+        source_id, cycle_time = _source_cycle_from_file_run_id(run_id)
+        with self.repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            failed_job, active_job = self._manual_retry_source_for_run(run_id)
+            if active_job is not None:
+                raise RetryConflictError(run_id, _file_retry_namespace(active_job))
+            if failed_job is None:
+                raise RetryNotFoundError(run_id)
 
-        previous_error = failed_job.get("error_code") or (
-            "cancelled" if failed_job.get("status") == "cancelled" else None
-        )
-        next_retry_count = int(failed_job.get("retry_count") or 0) + 1
-        details: dict[str, Any] = {
-            "trigger": "manual",
-            "retry_count": next_retry_count,
-            "previous_error": previous_error,
-            "previous_job_id": failed_job["job_id"],
-            "slurm_job_id": None,
-            "manual_retry_marker": True,
-            "prior_failure_reason": previous_error,
-            "failure": classify_failure(
-                previous_error,
-                attempt=next_retry_count,
-                retry_limit=self.config.max_retries,
-                manual=True,
-            ),
-        }
-        if requested_by not in (None, ""):
-            details["requested_by"] = requested_by
-        if request_id not in (None, ""):
-            details["request_id"] = request_id
-        if reason not in (None, ""):
-            details["reason"] = reason
-        details["policy_decision"] = decision.to_dict()
-        self.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=str(failed_job["job_id"]),
-            event_type="retry",
-            status_from=str(failed_job.get("status") or ""),
-            status_to="manual_repair_requested",
-            details=details,
-        )
-        marker = {
-            "job_id": failed_job["job_id"],
-            "run_id": run_id,
-            "cycle_id": failed_job.get("cycle_id"),
-            "job_type": failed_job.get("job_type"),
-            "model_id": failed_job.get("model_id"),
-            "stage": failed_job.get("stage"),
-            "status": "manual_repair_requested",
-            "retry_count": next_retry_count,
-            "manual_retry_marker": True,
-            "previous_job_id": failed_job["job_id"],
-            "prior_failure_reason": previous_error,
-        }
-        return _file_retry_namespace(marker)
-
-    def _create_pending_manual_retry_job(self, run_id: str) -> SimpleNamespace:
-        failed_job, active_job = self._manual_retry_source_for_run(run_id)
-        if active_job is not None:
-            raise RetryConflictError(run_id, _file_retry_namespace(active_job))
-        if failed_job is None:
-            raise RetryNotFoundError(run_id)
-
-        previous_error = failed_job.get("error_code") or (
-            "cancelled" if failed_job.get("status") == "cancelled" else None
-        )
-        next_retry_count = int(failed_job.get("retry_count") or 0) + 1
-        retry_job_id = _next_file_manual_retry_job_id_for_run(self.repository, run_id)
-        retry_record = {
-            **failed_job,
-            "job_id": retry_job_id,
-            "status": "pending",
-            "slurm_job_id": None,
-            "array_task_id": None,
-            "submitted_at": None,
-            "started_at": None,
-            "finished_at": None,
-            "exit_code": None,
-            "retry_count": next_retry_count,
-            "manual_retry_marker": True,
-            "idempotency_key": f"manual_retry:{run_id}:{next_retry_count}",
-            "candidate_id": None,
-            "error_code": None,
-            "error_message": None,
-            "log_uri": None,
-            "updated_at": _format_utc(_utcnow()),
-        }
-        written = self.repository.reserve_pipeline_job(retry_record)
-        if written is None:
-            _failed_job, active_job = self._manual_retry_source_for_run(run_id)
-            conflict = active_job or self.repository.get_pipeline_job(retry_job_id) or retry_record
-            raise RetryConflictError(run_id, _file_retry_namespace(conflict))
-        self.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=retry_job_id,
-            event_type="retry",
-            status_from=str(failed_job.get("status") or ""),
-            status_to="pending",
-            details={
+            previous_error = failed_job.get("error_code") or (
+                "cancelled" if failed_job.get("status") == "cancelled" else None
+            )
+            next_retry_count = int(failed_job.get("retry_count") or 0) + 1
+            details: dict[str, Any] = {
                 "trigger": "manual",
                 "retry_count": next_retry_count,
                 "previous_error": previous_error,
                 "previous_job_id": failed_job["job_id"],
-                "slurm_job_id": written.get("slurm_job_id"),
+                "slurm_job_id": None,
                 "manual_retry_marker": True,
                 "prior_failure_reason": previous_error,
                 "failure": classify_failure(
@@ -2045,9 +1960,140 @@ class FileJournalRetryService:
                     retry_limit=self.config.max_retries,
                     manual=True,
                 ),
-            },
+            }
+            if requested_by not in (None, ""):
+                details["requested_by"] = requested_by
+            if request_id not in (None, ""):
+                details["request_id"] = request_id
+            if reason not in (None, ""):
+                details["reason"] = reason
+            details["policy_decision"] = decision.to_dict()
+            self._append_pipeline_event_unlocked(
+                failed_job,
+                event_type="retry",
+                status_from=str(failed_job.get("status") or ""),
+                status_to="manual_repair_requested",
+                details=details,
+            )
+            marker = {
+                "job_id": failed_job["job_id"],
+                "run_id": run_id,
+                "cycle_id": failed_job.get("cycle_id"),
+                "job_type": failed_job.get("job_type"),
+                "model_id": failed_job.get("model_id"),
+                "stage": failed_job.get("stage"),
+                "status": "manual_repair_requested",
+                "retry_count": next_retry_count,
+                "manual_retry_marker": True,
+                "previous_job_id": failed_job["job_id"],
+                "prior_failure_reason": previous_error,
+            }
+            return _file_retry_namespace(marker)
+
+    def _create_pending_manual_retry_job(self, run_id: str) -> SimpleNamespace:
+        source_id, cycle_time = _source_cycle_from_file_run_id(run_id)
+        with self.repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            failed_job, active_job = self._manual_retry_source_for_run(run_id)
+            if active_job is not None:
+                raise RetryConflictError(run_id, _file_retry_namespace(active_job))
+            if failed_job is None:
+                raise RetryNotFoundError(run_id)
+
+            previous_error = failed_job.get("error_code") or (
+                "cancelled" if failed_job.get("status") == "cancelled" else None
+            )
+            next_retry_count = int(failed_job.get("retry_count") or 0) + 1
+            retry_job_id = _next_file_manual_retry_job_id_for_run(self.repository, run_id)
+            retry_record = {
+                **failed_job,
+                "job_id": retry_job_id,
+                "status": "pending",
+                "slurm_job_id": None,
+                "array_task_id": None,
+                "submitted_at": None,
+                "started_at": None,
+                "finished_at": None,
+                "exit_code": None,
+                "retry_count": next_retry_count,
+                "manual_retry_marker": True,
+                "idempotency_key": f"manual_retry:{run_id}:{next_retry_count}",
+                "candidate_id": None,
+                "error_code": None,
+                "error_message": None,
+                "log_uri": None,
+                "updated_at": _format_utc(_utcnow()),
+            }
+            retry_row = self.repository._pipeline_job_row(retry_record)
+            if self.repository._pipeline_job_conflicts_unlocked(retry_row):
+                conflict = active_job or self.repository._pipeline_job_for_id_unlocked(retry_job_id) or retry_record
+                raise RetryConflictError(run_id, _file_retry_namespace(conflict))
+            written = self.repository._write_pipeline_job_unlocked(
+                retry_row,
+                exclusive_direct=True,
+                model_id=_optional_safe_identity(retry_row, "model_id"),
+            )
+            if written is None:
+                conflict = active_job or self.repository._pipeline_job_for_id_unlocked(retry_job_id) or retry_record
+                raise RetryConflictError(run_id, _file_retry_namespace(conflict))
+            self._append_pipeline_event_unlocked(
+                written,
+                event_type="retry",
+                status_from=str(failed_job.get("status") or ""),
+                status_to="pending",
+                details={
+                    "trigger": "manual",
+                    "retry_count": next_retry_count,
+                    "previous_error": previous_error,
+                    "previous_job_id": failed_job["job_id"],
+                    "slurm_job_id": written.get("slurm_job_id"),
+                    "manual_retry_marker": True,
+                    "prior_failure_reason": previous_error,
+                    "failure": classify_failure(
+                        previous_error,
+                        attempt=next_retry_count,
+                        retry_limit=self.config.max_retries,
+                        manual=True,
+                    ),
+                },
+            )
+            return _file_retry_namespace(written)
+
+    def _append_pipeline_event_unlocked(
+        self,
+        job: Mapping[str, Any],
+        *,
+        event_type: str,
+        status_from: str | None,
+        status_to: str | None,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_id = _source_id_from_job(job)
+        cycle_time = _cycle_time_from_job(job)
+        model_id = _optional_safe_identity(job, "model_id")
+        row = {
+            "event_id": self.repository._next_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            ),
+            "entity_type": "pipeline_job",
+            "entity_id": str(job["job_id"]),
+            "event_type": event_type,
+            "status_from": status_from,
+            "status_to": status_to,
+            "message": None,
+            "details": details,
+            "created_at": _format_utc(_utcnow()),
+        }
+        self.repository._append_validated_record_unlocked(
+            "pipeline_event",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            materialize_model_id=model_id,
         )
-        return _file_retry_namespace(written)
+        return _public_scheduler_row(row)
 
     def attempt_manual_retry(
         self,

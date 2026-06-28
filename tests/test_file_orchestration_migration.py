@@ -281,6 +281,38 @@ def test_historical_event_ids_do_not_collide_with_new_file_events(tmp_path: Path
     assert scheduler_module._manual_retry_requested(state) is True
 
 
+def test_historical_event_ids_do_not_collide_across_models(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    rows = _historical_rows(cycle_time)
+    rows["pipeline_events"] = [
+        {**rows["pipeline_events"][0], "event_id": 3},
+        {
+            **rows["pipeline_events"][0],
+            "event_id": 8,
+            "entity_id": "job_model_b_completed",
+            "status_from": "running",
+            "status_to": "succeeded",
+            "details": {"model_id": "model_b"},
+        },
+    ]
+    journal_root = tmp_path / "journal"
+
+    import_historical_scheduler_state(journal_root=journal_root, cutoff_time=cycle_time, **rows)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_model_a_permanent",
+        event_type="operator_note",
+        status_from="permanently_failed",
+        status_to="manual_repair_requested",
+        details={"note": "post-migration event"},
+    )
+    cycle_rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None)
+
+    assert inserted["event_id"] > 8
+    assert {event["event_id"] for event in cycle_rows.pipeline_events} >= {3, 8, inserted["event_id"]}
+
+
 def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_path: Path) -> None:
     receipt = {"schema_version": MIGRATION_RECEIPT_SCHEMA_VERSION}
     journal_root = tmp_path / "journal"

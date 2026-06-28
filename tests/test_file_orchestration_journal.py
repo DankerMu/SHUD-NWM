@@ -1013,6 +1013,21 @@ def test_file_journal_manual_retry_refuses_old_failure_after_later_success(tmp_p
     with pytest.raises(RetryNotFoundError):
         service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
 
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7003", "status": "submitted"}
+
+    gateway = Gateway()
+
+    with pytest.raises(RetryNotFoundError):
+        service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+
+    assert gateway.requests == []
+
 
 def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
     tmp_path: Path,
