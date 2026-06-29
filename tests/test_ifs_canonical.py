@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import math
 from datetime import datetime
 from pathlib import Path
@@ -187,6 +188,13 @@ def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
     assert pressure["variable"] == "surface_pressure"
     assert pressure["unit"] == "Pa"
     assert read_product_values(store, pressure, "surface_pressure") == pytest.approx([100125.0])
+    catalog_path = store.resolve_path("canonical/IFS/2026050100/_catalog/catalog.json")
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog_pressure = next(
+        row for row in catalog["products"] if row["canonical_product_id"] == pressure["canonical_product_id"]
+    )
+    assert catalog_pressure["variable"] == "surface_pressure"
+    assert catalog_pressure["unit"] == "Pa"
 
 
 def test_precipitation_cumulative_m_to_mm_per_step(tmp_path: Path) -> None:

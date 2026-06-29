@@ -1404,7 +1404,7 @@ class CanonicalConverter:
                 "valid_time": _json_time(product.valid_time),
                 "lead_time_hours": product.lead_time_hours,
                 "variable": product.variable,
-                "unit": unit_for_standard_variable(product.variable),
+                "unit": self._unit_for_standard_variable(product.variable),
                 "grid_id": self.config.grid_id,
                 "grid_definition_uri": self.config.grid_definition_uri,
                 "native_time_resolution": self.config.native_time_resolution,
