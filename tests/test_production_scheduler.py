@@ -17066,6 +17066,78 @@ def test_file_canonical_readiness_provider_uses_product_catalog_when_index_produ
     assert evidence["readiness_index"]["canonical_product_catalog"]["product_row_count"] == len(products)
 
 
+def test_file_canonical_readiness_provider_uses_product_catalog_when_identity_is_missing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    forecast_hours = (0, 3)
+    policy_identity = {"source": "gfs", "forecast_hours": list(forecast_hours)}
+    source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    products = _file_readiness_products(
+        roots,
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=forecast_hours,
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+    )
+    catalog_rows: list[dict[str, Any]] = []
+    for product in products:
+        row = dict(product)
+        row["cycle_time"] = _format_iso_z(row["cycle_time"])
+        row["valid_time"] = _format_iso_z(row["valid_time"])
+        catalog_rows.append(row)
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    store.write_bytes_atomic(
+        f"canonical/gfs/{format_cycle_time(cycle_time)}/_catalog/catalog.json",
+        json.dumps(
+            {
+                "schema_version": "nhms.canonical.product_catalog.v1",
+                "source_id": "gfs",
+                "cycle_time": _format_iso_z(cycle_time),
+                "products": catalog_rows,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    scheduler_module.publish_canonical_readiness_index(
+        [],
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+    )
+    provider = scheduler_module.FileCanonicalReadinessProvider(
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+    )
+
+    evidence = provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=forecast_hours,
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+        canonical_product_id=f"canon_gfs_{format_cycle_time(cycle_time)}",
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+
+    assert evidence["ready"] is True
+    assert evidence["status"] == "canonical_ready"
+    assert evidence["row_count"] == len(products)
+    assert evidence["readiness_index"]["entry_status"] == "missing"
+    assert evidence["readiness_index"]["entry_product_source"] == "catalog"
+    assert evidence["readiness_index"]["entry_product_row_count"] == len(products)
+    assert evidence["readiness_index"]["canonical_product_catalog"]["status"] == "ready"
+
+
 def test_file_canonical_readiness_provider_missing_identity_is_fresh_zero_row(
     monkeypatch: Any,
     tmp_path: Path,

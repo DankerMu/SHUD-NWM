@@ -243,10 +243,41 @@ class FileCanonicalReadinessProvider:
         entry = self._entries.get(key)
         requested_hours = sorted({int(hour) for hour in forecast_hours})
         if entry is None:
+            missing_entry = {
+                "source_id": source_id,
+                "cycle_time": cycle_time,
+                "model_id": model_id,
+                "basin_id": basin_id,
+                "canonical_product_id": canonical_product_id,
+                "forecast_hours": requested_hours,
+                "policy_identity": dict(policy_identity),
+                "source_object_identity": dict(source_object_identity),
+                "products": [],
+            }
+            try:
+                products, product_source_evidence = _readiness_products_from_catalog(missing_entry, roots=self._roots)
+            except SchedulerFileProviderError as error:
+                return _file_readiness_unavailable(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    forecast_hours=forecast_hours,
+                    policy_identity=policy_identity,
+                    source_object_identity=source_object_identity,
+                    canonical_product_id=canonical_product_id,
+                    model_id=model_id,
+                    basin_id=basin_id,
+                    reason=error.reason,
+                    index_evidence={
+                        **index_evidence,
+                        "entry_status": "missing_catalog_unavailable",
+                        "catalog": _provider_blocker(error.reason, error.field, evidence=error.evidence),
+                    },
+                    retryable=True,
+                )
             result = evaluate_canonical_readiness(
                 source_id=source_id,
                 cycle_time=cycle_time,
-                products=[],
+                products=products,
                 forecast_hours=requested_hours,
                 policy_identity=policy_identity,
                 source_object_identity=source_object_identity,
@@ -259,10 +290,13 @@ class FileCanonicalReadinessProvider:
                 {
                     **index_evidence,
                     "entry_status": "missing",
-                    "entry_product_row_count": 0,
-                    "entry_product_source": "missing_identity_zero_rows",
+                    "entry_product_row_count": len(products),
+                    "entry_product_source": product_source_evidence.get("source")
+                    if products
+                    else "missing_identity_zero_rows",
                     "entry_forecast_hours": requested_hours[:200],
                     "entry_forecast_hour_count": len(requested_hours),
+                    "canonical_product_catalog": product_source_evidence,
                 }
             )
             return _evidence_safe(result)
