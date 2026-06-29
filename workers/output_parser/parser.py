@@ -1096,8 +1096,24 @@ def _read_shud_riv_indices(path: Path) -> tuple[int, ...]:
     lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if len(lines) < 3:
         raise OutputParsingError("MODEL_RIVER_FILE_EMPTY", f"SHUD river file is empty or incomplete: {path}")
+    header_tokens = _split_row(lines[0])
+    try:
+        expected_count = int(header_tokens[0])
+    except (IndexError, ValueError) as error:
+        raise OutputParsingError(
+            "MODEL_RIVER_FILE_MALFORMED",
+            f"Invalid SHUD river file count header: {lines[0]!r}",
+        ) from error
+    if expected_count <= 0:
+        raise OutputParsingError("MODEL_RIVER_FILE_MALFORMED", f"SHUD river count must be positive: {expected_count}")
+    data_lines = lines[2 : 2 + expected_count]
+    if len(data_lines) != expected_count:
+        raise OutputParsingError(
+            "MODEL_RIVER_FILE_MALFORMED",
+            f"SHUD river file declares {expected_count} rows but only {len(data_lines)} were found.",
+        )
     indices: list[int] = []
-    for line_number, line in enumerate(lines[2:], start=3):
+    for line_number, line in enumerate(data_lines, start=3):
         tokens = _split_row(line)
         token = tokens[0] if tokens else ""
         try:

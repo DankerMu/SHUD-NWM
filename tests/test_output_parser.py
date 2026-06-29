@@ -262,7 +262,10 @@ def test_output_parser_db_free_writes_object_store_artifacts(
         "2\t6\n"
         "Index\tDown\tType\tSlope\tLength\tBC\n"
         "1\t2\t2\t0.1\t100\t0\n"
-        "2\t0\t2\t0.2\t200\t0\n",
+        "2\t0\t2\t0.2\t200\t0\n"
+        "1\t2\n"
+        "Index\tDepth\n"
+        "1\t6\n",
         encoding="utf-8",
     )
     output_dir = object_root / "runs" / "run_001" / "output"
