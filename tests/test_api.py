@@ -210,6 +210,7 @@ async def test_protected_mutation_pre_body_malformed_json_rejects_before_store_c
             "body.operation",
         ),
     ],
+    ids=["active-content-length", "lifecycle-content-length", "preflight-content-length"],
 )
 async def test_protected_mutation_oversized_body_with_content_length_stops_before_receive_and_store_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +265,7 @@ async def test_protected_mutation_oversized_body_with_content_length_stops_befor
             "body.operation",
         ),
     ],
+    ids=["active-stream", "lifecycle-stream", "preflight-stream"],
 )
 async def test_protected_mutation_oversized_stream_without_content_length_stops_before_store_call(
     monkeypatch: pytest.MonkeyPatch,
