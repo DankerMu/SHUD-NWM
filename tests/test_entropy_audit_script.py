@@ -4789,6 +4789,30 @@ def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical
     _assert_unallowlisted_budget_counted_gate_eligible_finding(topology_findings[0])
 
 
+def test_entropy_audit_topology_guardrails_do_not_allow_current_local_pg_use_after_retirement_banner(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/node22-db-retirement-runbook.md",
+        """
+        # Node-22 Historical DB Retirement Runbook
+
+        This runbook tracks retirement of the historical PostgreSQL listener on node-22 `:55433`.
+
+        ## Current operator steps
+
+        Use node-22 local PostgreSQL on :55433 for current production state checks.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/node22-db-retirement-runbook.md", 7)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [

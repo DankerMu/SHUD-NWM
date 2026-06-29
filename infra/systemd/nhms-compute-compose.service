@@ -3,8 +3,10 @@
 # Operator edits required before install:
 # - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 22.
 # - Create infra/env/compute.env from infra/env/compute.example with real
-#   writer DB credentials, workspace/object-store/published/scheduler roots,
-#   Basins/model paths, source/model filters, and image tag.
+#   compute-api DB credentials, DB-free scheduler backend/path selectors,
+#   workspace/object-store/published/scheduler roots, Basins/model paths,
+#   source/model filters, and image tag. The scheduler-once compose service must
+#   not receive DATABASE_URL; keep that value only for compute-api / rollback.
 # - Ensure the docker compose plugin is installed at /usr/bin/docker or update
 #   ExecStart/ExecStop/ExecReload to the local docker binary path.
 # - Before enable/start/reload/restart, run
@@ -16,7 +18,9 @@
 #   docker compose --env-file env/compute.env -f compose.compute.yml run --rm scheduler-once
 #   It runs nhms-pipeline plan-production --plan without --workspace-root,
 #   --lock-path, or --evidence-dir. Those roots must come from compute.env;
-#   explicit root flags are diagnostic compatibility only.
+#   explicit root flags are diagnostic compatibility only. Its runtime env must
+#   show NHMS_SCHEDULER_DB_FREE_REQUIRED=true, every scheduler backend selector
+#   set to file, and DATABASE_URL absent.
 # - Optional bounded scheduler timer lane uses the same compute.env roots and
 #   filters. Example companion units:
 #     nhms-compute-scheduler.service:

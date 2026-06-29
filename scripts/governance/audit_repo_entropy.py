@@ -1648,6 +1648,10 @@ def _topology_line_context(lines: list[str], line_no: int, *, before: int = 7, a
 def _topology_forward_claim_context(lines: list[str], line_no: int, *, after: int) -> str:
     start = line_no - 1
     end = min(len(lines), line_no + after)
+    for index in range(start + 1, end):
+        if not lines[index].strip():
+            end = index
+            break
     return _topology_normalized("\n".join(lines[start:end]))
 
 
@@ -1933,15 +1937,27 @@ def _topology_local_postgres_context_is_allowed(
     *,
     claim_context: str | None = None,
 ) -> bool:
+    line_only_context = _topology_normalized(line)
     local_claim_context = _topology_normalized(claim_context or line)
     line_context = _topology_normalized(f"{line}\n{context}")
+    if _topology_context_is_retirement_or_rejection_boundary(line_only_context):
+        return True
     if _topology_context_is_non_current(local_claim_context):
         return True
     if _topology_context_has_negative_node22_writer_boundary(local_claim_context):
         return True
+    if _topology_context_has_current_node22_local_postgres_use(line_only_context) or (
+        _topology_context_has_node22_local_postgres_use_action(line_only_context)
+        and _topology_context_has_current_node22_local_postgres_use(local_claim_context)
+    ):
+        return False
     if _topology_context_is_guardrail_or_test_meta(local_claim_context):
         return True
     if _topology_context_is_guardrail_or_test_meta(line_context):
+        return True
+    if _topology_context_is_retirement_or_rejection_boundary(local_claim_context):
+        return True
+    if _topology_context_is_retirement_or_rejection_boundary(line_context):
         return True
     if _topology_context_is_historical_receipt_evidence(line_context):
         return True
@@ -1979,6 +1995,9 @@ def _topology_context_is_non_current(context: str) -> bool:
             "history",
             "legacy",
             "old local",
+            "rollback",
+            "retire",
+            "retirement",
             "retired",
             "superseded",
             "deprecated",
@@ -2001,6 +2020,8 @@ def _topology_context_is_non_current(context: str) -> bool:
             "not current topology",
             "out of current",
             "outside current",
+            "not scheduler runtime env",
+            "not scheduler-owned",
             "不要连",
             "不应连接",
             "不作为当前",
@@ -2017,14 +2038,111 @@ def _topology_context_is_non_current(context: str) -> bool:
             "removal",
             "remove",
             "delete",
+            "archive",
+            "archived",
+            "stop",
+            "stopping",
             "待删",
             "待删除",
             "删除",
             "迁移",
         )
     )
-    return (has_historical and (has_do_not_connect or has_sunset)) or (
+    has_dependency_only = any(
+        token in context
+        for token in (
+            "remains online only because",
+            "online only because",
+            "retained only because",
+            "kept only because",
+        )
+    )
+    return (has_historical and (has_do_not_connect or has_sunset or has_dependency_only)) or (
         has_do_not_connect and has_sunset
+    )
+
+
+def _topology_context_has_current_node22_local_postgres_use(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if _topology_context_has_negative_node22_writer_boundary(normalized):
+        return False
+    has_current = any(
+        token in normalized
+        for token in (
+            "current",
+            "active",
+            "production state",
+            "production db",
+            "current checks",
+            "当前",
+            "生产",
+        )
+    )
+    return has_current and _topology_context_has_node22_local_postgres_use_action(normalized)
+
+
+def _topology_context_has_node22_local_postgres_use_action(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return any(
+        token in normalized
+        for token in (
+            "use node-22 local postgresql",
+            "connect to node-22 local postgresql",
+            "query node-22 local postgresql",
+            "read node-22 local postgresql",
+            "use :55433",
+            "connect to :55433",
+            "query :55433",
+            "read :55433",
+            "使用 node-22",
+            "连接 node-22",
+            "查询 node-22",
+        )
+    )
+
+
+def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if _topology_context_has_current_node22_local_postgres_use(normalized):
+        return False
+    if not (
+        ":55433" in normalized
+        or " 55433" in normalized
+        or "node-22 historical postgresql" in normalized
+        or "historical postgresql listener on node-22" in normalized
+    ):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "archive",
+            "archived",
+            "before stopping",
+            "blocker",
+            "database_url absent",
+            "db-free",
+            "do not stop",
+            "fails unless",
+            "grep 55433",
+            "guardrail",
+            "historical",
+            "latest live evidence",
+            "latest scheduler evidence",
+            "must not use",
+            "never point",
+            "no database_url",
+            "no scheduler postgresql",
+            "not scheduler runtime env",
+            "not scheduler-owned",
+            "reject",
+            "rejection",
+            "retire",
+            "retirement",
+            "rollback",
+            "stop gate",
+            "stopped only after",
+            "without scheduler postgresql",
+        )
     )
 
 
@@ -2100,6 +2218,7 @@ def _topology_context_is_structured_node22_local_pg_boundary(context: str) -> bo
             "node22_local_postgres" in normalized
             or "historical_node22_pg_status" in normalized
             or "node-22 local postgresql" in normalized
+            or "postgresql listener on node-22" in normalized
         )
         and ":55433" in normalized
         and (

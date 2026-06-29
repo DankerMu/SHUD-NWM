@@ -6,7 +6,6 @@ x-compute-env: &compute-env
   NHMS_AUTH_MODE: ${NHMS_AUTH_MODE:-production}
   NHMS_REQUIRE_FORECAST_WARM_START: ${NHMS_REQUIRE_FORECAST_WARM_START:-true}
   UV_CACHE_DIR: /tmp/nhms-uv-cache
-  DATABASE_URL: ${DATABASE_URL:?set compute writer database url}
   WORKSPACE_ROOT: ${WORKSPACE_ROOT:?set compute workspace root}
   OBJECT_STORE_ROOT: ${OBJECT_STORE_ROOT:-}
   OBJECT_STORE_PREFIX: ${OBJECT_STORE_PREFIX:-}
@@ -16,6 +15,17 @@ x-compute-env: &compute-env
   NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
   NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
   NHMS_SCHEDULER_LOCK_ROOT: ${NHMS_SCHEDULER_LOCK_ROOT:?set scheduler lock root under WORKSPACE_ROOT}
+  NHMS_SCHEDULER_DB_FREE_REQUIRED: ${NHMS_SCHEDULER_DB_FREE_REQUIRED:?set scheduler DB-free mode guard}
+  NHMS_SCHEDULER_STATE_BACKEND: ${NHMS_SCHEDULER_STATE_BACKEND:?set scheduler state backend}
+  NHMS_SCHEDULER_LOCK_BACKEND: ${NHMS_SCHEDULER_LOCK_BACKEND:?set scheduler lock backend}
+  NHMS_SCHEDULER_REGISTRY_BACKEND: ${NHMS_SCHEDULER_REGISTRY_BACKEND:?set scheduler registry backend}
+  NHMS_SCHEDULER_REGISTRY_MANIFEST: ${NHMS_SCHEDULER_REGISTRY_MANIFEST:?set scheduler registry manifest}
+  NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND: ${NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND:?set scheduler canonical readiness backend}
+  NHMS_SCHEDULER_CANONICAL_READINESS_INDEX: ${NHMS_SCHEDULER_CANONICAL_READINESS_INDEX:?set scheduler canonical readiness index}
+  NHMS_SCHEDULER_JOURNAL_BACKEND: ${NHMS_SCHEDULER_JOURNAL_BACKEND:?set scheduler journal backend}
+  NHMS_SCHEDULER_JOURNAL_ROOT: ${NHMS_SCHEDULER_JOURNAL_ROOT:?set scheduler journal root}
+  NHMS_SCHEDULER_STATE_INDEX_BACKEND: ${NHMS_SCHEDULER_STATE_INDEX_BACKEND:?set scheduler state index backend}
+  NHMS_SCHEDULER_STATE_INDEX: ${NHMS_SCHEDULER_STATE_INDEX:?set scheduler state index}
   NHMS_SCHEDULER_EVIDENCE_ROOT: ${NHMS_SCHEDULER_EVIDENCE_ROOT:?set scheduler evidence root under WORKSPACE_ROOT}
   NHMS_SCHEDULER_RUNTIME_ROOT: ${NHMS_SCHEDULER_RUNTIME_ROOT:?set scheduler runtime root}
   NHMS_SCHEDULER_TEMP_ROOT: ${NHMS_SCHEDULER_TEMP_ROOT:?set scheduler temp root}
@@ -75,7 +85,9 @@ services:
       - "${NHMS_SUPPLEMENTAL_GID:-1107}"
     working_dir: /app
     init: true
-    environment: *compute-env
+    environment:
+      <<: *compute-env
+      DATABASE_URL: ${DATABASE_URL:?set compute api writer database url}
     volumes: *compute-volumes
     extra_hosts:
       - "host.docker.internal:host-gateway"

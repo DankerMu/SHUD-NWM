@@ -16,6 +16,9 @@ NHMS_AUTH_MODE=production
 NHMS_REQUIRE_FORECAST_WARM_START=true
 UV_CACHE_DIR=/tmp/nhms-uv-cache
 
+# Compute API / rollback DB. The scheduler-once compose service does not inherit
+# DATABASE_URL in DB-free mode; keep this only for compute-api and historical
+# rollback until node-22 :55433 is archived.
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms
 
 WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace
@@ -37,7 +40,17 @@ NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 # diagnostic-only bring-up fallbacks (M24 §5 / #293), not driven by these vars.
 # The NHMS_SCHEDULER_* keys configure that daemon's lock/evidence/roots + cohort.
 NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/locks
-NHMS_SCHEDULER_LOCK_BACKEND=postgres
+NHMS_SCHEDULER_DB_FREE_REQUIRED=true
+NHMS_SCHEDULER_STATE_BACKEND=file
+NHMS_SCHEDULER_LOCK_BACKEND=file
+NHMS_SCHEDULER_REGISTRY_BACKEND=file
+NHMS_SCHEDULER_REGISTRY_MANIFEST=/ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json
+NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
+NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=/ghdc/data/nwm/object-store/scheduler/canonical-readiness/index-last.json
+NHMS_SCHEDULER_JOURNAL_BACKEND=file
+NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/journal
+NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
+NHMS_SCHEDULER_STATE_INDEX=/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
 NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
 NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp

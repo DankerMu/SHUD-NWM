@@ -7,6 +7,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from scripts import create_qhh_shud_manifest as qhh_manifest
+from services.orchestrator.chain import ForecastOrchestrator
 from workers.model_registry import qhh_production_bootstrap
 
 # M24 §5.1 diagnostic-retirement guardrail: QHH diagnostic scripts are
@@ -65,11 +66,10 @@ def test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts() -> None:
                 )
 
     # Mirror the spec's "manifest builder is the chain" requirement: the production
-    # runtime-manifest assembly lives in the chain, not the diagnostic script.
-    chain_text = Path("services/orchestrator/chain.py").read_text(encoding="utf-8")
-    assert "_build_forecast_runtime_manifest" in chain_text, (
-        "production runtime-manifest assembly must live in services/orchestrator/chain.py"
-    )
+    # runtime-manifest assembly stays in the chain cohort, not the diagnostic script.
+    manifest_text = Path("services/orchestrator/chain_manifests.py").read_text(encoding="utf-8")
+    assert "_build_forecast_runtime_manifest" in manifest_text
+    assert ForecastOrchestrator._build_forecast_runtime_manifest.__name__ == "_build_forecast_runtime_manifest"
 
 
 def test_backend_smoke_exports_package_version_before_seed_helpers() -> None:

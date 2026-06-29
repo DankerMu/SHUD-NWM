@@ -230,21 +230,21 @@ Scenario evidence rows for section 5:
   Evidence floor: with DB-free mode and Slurm enabled, missing `DATABASE_URL`
   does not produce `SLURM_PREFLIGHT_DATABASE_URL_MISSING`; non-DB root,
   manifest, secret, and template safety checks still run.
-- [ ] 6.2 Update compute deployment entrypoints for DB-free scheduler mode.
+- [x] 6.2 Update compute deployment entrypoints for DB-free scheduler mode.
   Evidence floor: `infra/env/compute.example`, DB-free env template/runbook,
   systemd guidance, and `infra/compose.compute.yml` support scheduler runtime
   without mandatory `DATABASE_URL` while preserving DB requirements for
   non-DB-free lanes.
-- [ ] 6.3 Run local focused no-DB integration tests.
+- [x] 6.3 Run local focused no-DB integration tests.
   Evidence floor: with `DATABASE_URL` absent, scheduler planning and fake
   submission use file lock, registry, readiness, raw handoff, journal, retry,
   and state index; static guardrails prove no psycopg factories are called.
-- [ ] 6.4 Freeze node-22 scheduler timer and deploy DB-free env with `:55433`
+- [x] 6.4 Freeze node-22 scheduler timer and deploy DB-free env with `:55433`
   still online.
   Evidence floor: receipt records stopped/frozen timer state, env/unit backup,
   DB-free env, migration artifacts, rollback commands, and a bounded scheduler
   pass with no scheduler `DATABASE_URL` and `lock_type=file`.
-- [ ] 6.5 Observe live GFS and IFS cycles through `convert-or-later`.
+- [x] 6.5 Observe live GFS and IFS cycles through `convert-or-later`.
   Evidence floor: one GFS and one IFS cycle use node-27 raw, node-22 file-backed
   scheduler state, downstream Slurm submission, no scheduler PostgreSQL, and no
   `download_source_cycle` submission.

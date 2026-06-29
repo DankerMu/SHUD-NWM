@@ -49,8 +49,10 @@ def test_e2e_m3_complete_cycle_monitoring_api(tmp_path: Path, monkeypatch: Any) 
 
         assert stages_response.status_code == 200
         stages = stages_response.json()["data"]
-        assert [stage["stage"] for stage in stages] == [stage.stage for stage in M3_STAGES]
-        assert {stage["display_status"] for stage in stages} == {"succeeded"}
+        assert [stage["stage"] for stage in stages] == ["download", *(stage.stage for stage in M3_STAGES)]
+        stage_statuses = {stage["stage"]: stage["display_status"] for stage in stages}
+        assert stage_statuses["download"] == "pending"
+        assert {stage_statuses[stage.stage] for stage in M3_STAGES} == {"succeeded"}
 
         assert jobs_response.status_code == 200
         jobs = jobs_response.json()["data"]["items"]
@@ -103,8 +105,8 @@ def test_e2e_m3_retry_chain_and_manual_conflict(tmp_path: Path, monkeypatch: Any
     with _store() as store:
         repository = _SqliteCycleRepository(store)
         slurm = FakeCycleSlurmClient(
-            failures_before_success_by_stage={"download": 1},
-            error_code_by_stage={"download": "SLURM_TIMEOUT"},
+            failures_before_success_by_stage={"convert": 1},
+            error_code_by_stage={"convert": "SLURM_TIMEOUT"},
         )
         retry_service = RetryService(store, RetryConfig(max_retries=1, backoff_schedule=[0]))
         cycle_time = _dt("2026-05-01T12:00:00Z")
@@ -115,27 +117,27 @@ def test_e2e_m3_retry_chain_and_manual_conflict(tmp_path: Path, monkeypatch: Any
         assert result.status == "complete"
         retry_jobs = [job for job in store.query_jobs_by_run(result.run_id) if job.retry_count == 1]
         assert len(retry_jobs) == 1
-        assert retry_jobs[0].stage == "download"
+        assert retry_jobs[0].stage == "convert"
         assert retry_jobs[0].status == "succeeded"
 
         store.create_job(
             job_id="manual_failed",
             run_id="manual_conflict",
             cycle_id=result.cycle_id,
-            job_type="download_source_cycle",
+            job_type="convert_canonical",
             slurm_job_id="manual_1",
             model_id="model_0",
-            stage="download",
+            stage="convert",
             status="failed",
         )
         store.create_job(
             job_id="manual_pending",
             run_id="manual_conflict",
             cycle_id=result.cycle_id,
-            job_type="download_source_cycle",
+            job_type="convert_canonical",
             slurm_job_id=None,
             model_id="model_0",
-            stage="download",
+            stage="convert",
             status="pending",
         )
 

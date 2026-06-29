@@ -28,7 +28,7 @@
 
 | 节点 | 角色 | 能力 | 禁止事项 |
 | --- | --- | --- | --- |
-| 22 | `compute_control` | writer DB、writable workspace、writable published artifacts、writable shared object-store mirror、scheduler-once、Slurm/Gateway 访问 | 不暴露公网控制入口 |
+| 22 | `compute_control` | compute-api writer DB/rollback env、DB-free scheduler-once、writable workspace、writable published artifacts、writable shared object-store mirror、Slurm/Gateway 访问 | 不暴露公网控制入口；scheduler-once 不继承 `DATABASE_URL` |
 | 27 | `display_readonly` | readonly DB、readonly published artifacts、readonly shared object-store mirror、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
 
 共享面只允许是 PostgreSQL、published artifacts 和只读 shared object-store mirror。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
@@ -98,6 +98,23 @@ NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
 NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published
 NHMS_BASINS_ROOT=<node-22-basins-root>
 NHMS_MODEL_ASSET_ROOT=<node-22-model-assets-root>
+```
+
+`DATABASE_URL` 只供 `compute-api` 和 DB rollback 使用；DB-free `scheduler-once`
+容器环境不得包含它。scheduler runtime 还必须显式设置：
+
+```bash
+NHMS_SCHEDULER_DB_FREE_REQUIRED=true
+NHMS_SCHEDULER_STATE_BACKEND=file
+NHMS_SCHEDULER_LOCK_BACKEND=file
+NHMS_SCHEDULER_REGISTRY_BACKEND=file
+NHMS_SCHEDULER_REGISTRY_MANIFEST=<trusted-registry-manifest>
+NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
+NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=<trusted-readiness-index>
+NHMS_SCHEDULER_JOURNAL_BACKEND=file
+NHMS_SCHEDULER_JOURNAL_ROOT=<node-22-writable-journal-root>
+NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
+NHMS_SCHEDULER_STATE_INDEX=<trusted-state-index>
 ```
 
 27 必须显式设置：
@@ -295,12 +312,12 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_R
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" down
 ```
 
-Linux Docker 上如果 `DATABASE_URL` 指向 22 host 上的 DB/Gateway 服务，可以使用
-`host.docker.internal`；`infra/compose.compute.yml` 已把它映射到 `host-gateway`。如果本地 E2E 的
-PostgreSQL 本身也是 Docker 容器，优先把该 DB 容器加入 `nhms-compute_default` 网络，并在未提交的
-`infra/env/compute.env` 中使用 DB 容器名和容器端口，例如
-`postgresql://<user>:<redacted>@nhms-22-e2e-db:5432/nhms`。不要为了本机测试把明文 DSN 写入
-checked-in example，也不要把测试 DB 产物放进仓库。
+Linux Docker 上如果 `compute-api` 的 `DATABASE_URL` 指向 22 host 上的 DB/Gateway 服务，可以使用
+`host.docker.internal`；`infra/compose.compute.yml` 已把它映射到 `host-gateway`。DB-free
+`scheduler-once` 不会继承该变量。如果本地 E2E 的 PostgreSQL 本身也是 Docker 容器，优先把该 DB
+容器加入 `nhms-compute_default` 网络，并在未提交的 `infra/env/compute.env` 中使用 DB 容器名和容器端口，例如
+`postgresql://<user>:<redacted>@nhms-22-e2e-db:5432/nhms`。不要为了本机测试把明文 DSN 写入 checked-in
+example，也不要把测试 DB 产物放进仓库。
 
 22 scheduler-once 手工执行：
 
@@ -737,7 +754,7 @@ artifacts/
 | Evidence | 记录内容 | PASS 边界 |
 | --- | --- | --- |
 | `docker-preflight/` | DockerRootDir、cache/space、TMPDIR、evidence root | 只证明 Docker 环境可继续，不证明 E2E |
-| `22-compute/` | compute compose config/up/ps/logs、scheduler-once、writer DB、published artifact write | 只证明 22 compute lane |
+| `22-compute/` | compute compose config/up/ps/logs、DB-free scheduler-once、compute-api writer DB/rollback env、published artifact write | 只证明 22 compute lane；scheduler proof 必须显示无 `DATABASE_URL` |
 | `27-display/` | display compose config/up/ps/logs、runtime config、readonly mount | 只证明 27 display lane |
 | `db/` | readonly DB role、`current_user`、permission probes、redacted DSN | 真实 readonly DB 缺失时 BLOCKED |
 | `api/` | health、runtime config、models、stations、latest-product、ops/jobs/logs | strict identity 缺失时不得 PASS |
