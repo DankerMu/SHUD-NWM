@@ -47,7 +47,9 @@ __all__ = (
     "nfs_raw_manifest_readiness",
     "nfs_raw_manifest_readiness_from_env",
     "nfs_raw_manifest_source_object_identity_from_env",
+    "nfs_raw_manifest_source_policy_from_env",
     "source_object_identity_from_raw_manifest_readiness",
+    "source_policy_from_raw_manifest_readiness",
     "stage_nfs_raw_manifest_from_env",
     "stage_nfs_raw_manifest_to_object_store",
 )
@@ -247,7 +249,34 @@ def nfs_raw_manifest_source_object_identity_from_env(source_id: str, cycle_time:
     return source_object_identity_from_raw_manifest_readiness(readiness)
 
 
+def nfs_raw_manifest_source_policy_from_env(source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
+    readiness = nfs_raw_manifest_readiness_from_env(source_id, cycle_time)
+    if not isinstance(readiness, Mapping):
+        return None
+    return source_policy_from_raw_manifest_readiness(readiness)
+
+
 def source_object_identity_from_raw_manifest_readiness(readiness: Mapping[str, Any]) -> dict[str, Any] | None:
+    metadata = _metadata_from_raw_manifest_readiness(readiness)
+    if metadata is None:
+        return None
+    source_object_identity = metadata.get("source_object_identity")
+    if not isinstance(source_object_identity, Mapping) or not source_object_identity:
+        return None
+    return dict(source_object_identity)
+
+
+def source_policy_from_raw_manifest_readiness(readiness: Mapping[str, Any]) -> dict[str, Any] | None:
+    metadata = _metadata_from_raw_manifest_readiness(readiness)
+    if metadata is None:
+        return None
+    source_policy = metadata.get("source_policy")
+    if not isinstance(source_policy, Mapping) or not source_policy:
+        return None
+    return dict(source_policy)
+
+
+def _metadata_from_raw_manifest_readiness(readiness: Mapping[str, Any]) -> dict[str, Any] | None:
     if readiness.get("status") != "ready":
         return None
     manifest_path = readiness.get("manifest_path")
@@ -268,10 +297,7 @@ def source_object_identity_from_raw_manifest_readiness(readiness: Mapping[str, A
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping):
         return None
-    source_object_identity = metadata.get("source_object_identity")
-    if not isinstance(source_object_identity, Mapping) or not source_object_identity:
-        return None
-    return dict(source_object_identity)
+    return dict(metadata)
 
 
 def stage_nfs_raw_manifest_from_env(state_evidence: Mapping[str, Any]) -> dict[str, Any] | None:

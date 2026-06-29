@@ -87,11 +87,17 @@ def test_source_object_identity_from_raw_manifest_readiness_uses_manifest_metada
         "manifest_digest": "persisted-digest",
         "raw_entry_digest": "raw-entry-digest",
     }
+    source_policy = {
+        "source": "gfs",
+        "policy_schema_version": "nhms.gfs.source_policy.v3",
+        "cycle_hours_utc": [0, 6, 12, 18],
+    }
     _write_manifest(
         tmp_path,
         metadata={
             "physical_file_count": 1,
             "source_object_identity": source_object_identity,
+            "source_policy": source_policy,
         },
     )
     readiness = nfs_raw_manifest_readiness(
@@ -102,9 +108,13 @@ def test_source_object_identity_from_raw_manifest_readiness_uses_manifest_metada
         required=True,
     )
 
-    from services.orchestrator.source_cycle_raw_manifest import source_object_identity_from_raw_manifest_readiness
+    from services.orchestrator.source_cycle_raw_manifest import (
+        source_object_identity_from_raw_manifest_readiness,
+        source_policy_from_raw_manifest_readiness,
+    )
 
     assert source_object_identity_from_raw_manifest_readiness(readiness) == source_object_identity
+    assert source_policy_from_raw_manifest_readiness(readiness) == source_policy
 
 
 def test_nfs_raw_manifest_readiness_accepts_ifs_uppercase_storage(tmp_path: Path) -> None:

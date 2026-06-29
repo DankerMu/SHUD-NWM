@@ -2179,6 +2179,12 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
         "manifest_digest": "persisted-nfs-manifest-digest",
         "raw_entry_digest": "persisted-raw-entry-digest",
     }
+    persisted_policy = {
+        "source": "gfs",
+        "policy_schema_version": "nhms.gfs.source_policy.v3",
+        "cycle_hours_utc": [0, 6, 12, 18],
+        "forecast_hours": [0, 3],
+    }
     manifest = {
         "source_id": "gfs",
         "cycle_time": "2026-05-21T06:00:00+00:00",
@@ -2186,6 +2192,7 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
         "metadata": {
             "physical_file_count": 1,
             "source_object_identity": persisted_source_object,
+            "source_policy": persisted_policy,
         },
         "entries": [
             {
@@ -2236,6 +2243,7 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
             "gfs": FakeAdapter(
                 "gfs",
                 [("2026-05-21T06:00:00Z", True)],
+                policy_identity={"source": "gfs", "cycle_hours_utc": [0, 12], "forecast_hours": [0, 3]},
                 source_object_identity={"source": "gfs", "manifest_digest": "adapter-digest"},
             )
         },
@@ -2259,8 +2267,10 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
     assert result.status == "planned"
     assert provider.calls
     assert provider.calls[0]["source_object_identity"] == persisted_source_object
+    assert provider.calls[0]["policy_identity"] == persisted_policy
     canonical = result.evidence["candidates"][0]["state_evidence"]["canonical_readiness"]
     assert canonical["source_object_identity"]["manifest_digest"] == "persisted-nfs-manifest-digest"
+    assert canonical["policy_identity"]["cycle_hours_utc"] == [0, 6, 12, 18]
 
 
 def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_path: Path) -> None:
