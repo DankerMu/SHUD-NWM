@@ -97,6 +97,7 @@ INGEST_STAGE_SHAPE = (
 )
 DISPLAY_HEALTH_SEPARATION = "display_api_health_is_readonly_consumer_health_not_ingest_writer_readiness"
 DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
+DATABASE_URL_NODE22_HISTORICAL_ENDPOINT = "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -105,6 +106,17 @@ DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
         "sslmode",
     }
 )
+NODE22_HISTORICAL_DB_HOSTS = frozenset(
+    {
+        "210.77.77.22",
+        "10.0.2.100",
+        "node-22",
+        "node22",
+        "compute-control",
+        "compute_control",
+    }
+)
+NODE22_HISTORICAL_DB_PORT = 55433
 
 NO_FORCING_HANDOFF_MODE = "object_store_forcing_domain_handoff_missing"
 ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV = "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR"
@@ -199,6 +211,11 @@ def _database_port(value: str | None) -> int | None:
         return None
 
 
+def _database_url_points_to_historical_node22(host: str | None, port: int | None) -> bool:
+    normalized_host = (host or "").strip().lower()
+    return normalized_host in NODE22_HISTORICAL_DB_HOSTS or port == NODE22_HISTORICAL_DB_PORT
+
+
 def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
     raw = (database_url or "").strip()
     if not raw:
@@ -263,6 +280,14 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
                 "DATABASE_URL must include PostgreSQL scheme, host, and database name.",
             )
         ]
+    if _database_url_points_to_historical_node22(host, port):
+        blockers.append(
+            _preflight_blocker(
+                DATABASE_URL_NODE22_HISTORICAL_ENDPOINT,
+                "DATABASE_URL",
+                "DATABASE_URL must target the node-27 ingest writer, not node-22 historical PostgreSQL.",
+            )
+        )
     if identity["username_class"] == "missing":
         blockers.append(
             _preflight_blocker(
@@ -798,11 +823,18 @@ def _process_forcing_stage(
             "reason": reason,
         }
 
+    # Archived rollback mirror contract: compatibility-only, explicit DSN via
+    # child environment, allow-flagged, and sunset-bound after object-store
+    # forcing-domain handoff covers old pre-contract runs. Never pass raw DSN argv.
+    mirror_env = env
     mirror = [PY, str(REPO_ROOT / "scripts" / "node27_mirror_forcing.py"), "--run-id", run_id]
     if node22_url:
-        mirror.extend(["--node22-url", node22_url])
+        mirror_env = dict(env)
+        # Compatibility-only archived rollback mirror: explicit DSN, allow flag, sunset/removal.
+        mirror_env["N22_DSN"] = node22_url
+        mirror_env["NHMS_NODE22_DSN_SOURCE"] = "cli:--node22-url"
     mirror.append("--allow-archived-node22-db-rollback-mirror")
-    rc, out, err = _run(mirror, env)
+    rc, out, err = _run(mirror, mirror_env)
     payload = _last_json(out) or {}
     if rc == 2:
         reason = payload.get("reason", "FORCING_NOT_ON_NODE22")

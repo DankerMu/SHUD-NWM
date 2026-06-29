@@ -43,7 +43,7 @@ def test_missing_explicit_node22_dsn_returns_skip_without_display_fallback(
     assert "display-env-secret" not in rendered
 
 
-def test_cli_node22_dsn_is_used_and_report_records_transitional_boundary(
+def test_parent_node22_dsn_env_is_used_and_report_records_transitional_boundary(
     monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     node22_dsn = "postgresql://n22_user:n22-secret@node22.example:55432/nhms?sslpassword=top-secret"
@@ -60,7 +60,8 @@ def test_cli_node22_dsn_is_used_and_report_records_transitional_boundary(
             "station_timeseries": {"local_rows": 12},
         }
 
-    monkeypatch.delenv("N22_DSN", raising=False)
+    monkeypatch.setenv("N22_DSN", node22_dsn)
+    monkeypatch.setenv("NHMS_NODE22_DSN_SOURCE", "cli:--node22-url")
     monkeypatch.setattr(mirror, "mirror_forcing", fake_mirror_forcing)
 
     rc = mirror.main(
@@ -69,8 +70,6 @@ def test_cli_node22_dsn_is_used_and_report_records_transitional_boundary(
             "run-cli",
             "--object-store-root",
             str(tmp_path),
-            "--node22-url",
-            node22_dsn,
             "--allow-archived-node22-db-rollback-mirror",
         ]
     )
@@ -100,6 +99,38 @@ def test_cli_node22_dsn_is_used_and_report_records_transitional_boundary(
     assert node22_dsn not in rendered
     assert "n22-secret" not in rendered
     assert "top-secret" not in rendered
+
+
+def test_historical_node22_destination_database_url_blocks_before_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example:55432/nhms")
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("node-22 historical DATABASE_URL must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(
+        [
+            "--run-id",
+            "run-node22-destination",
+            "--object-store-root",
+            str(tmp_path),
+            "--database-url",
+            "postgresql://node27_writer:writer-secret@210.77.77.22:55433/nhms",
+        ]
+    )
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON
+    assert payload["mirror_boundary"]["dsn"]["source"] == "env:N22_DSN"
+    rendered = json.dumps(payload)
+    assert "writer-secret" not in rendered
+    assert "n22-secret" not in rendered
 
 
 def test_env_node22_dsn_source_and_credential_redaction(

@@ -16,10 +16,10 @@ contract between compute artifacts and data-plane ingestion. Pre-#837, the
 clearest code symptom was `scripts/node27_mirror_forcing.py`: it treated
 node-22 DB rows as the authoritative source for forcing-domain metadata and
 could fall back to `infra/env/display.env`, even though node-22's local DB was
-historical and display env belongs to the read-only display runtime. After
-#837, that mirror path is archived/stopped rollback-only and requires explicit
-DSN plus `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` or the matching CLI
-allow flag.
+historical and display env belongs to the read-only display runtime. After issue
+837, that mirror path is archived/stopped rollback-only and requires explicit DSN
+plus `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` or the matching CLI allow
+flag.
 
 ## Goals / Non-Goals
 
@@ -58,8 +58,10 @@ allow flag.
 
 2. **The node-22 DB mirror is archived rollback-only, compatibility-only,
    explicit, allow-flagged, and sunset-bound.** The normal importer path is
-   object-store handoff. Any rollback mirror drill must require `--node22-url`
-   or `N22_DSN` plus `--allow-archived-node22-db-rollback-mirror` or
+   object-store handoff. Any autopipeline rollback mirror drill may configure
+   the source through parent `--node22-url` or env `N22_DSN`, but the mirror
+   subprocess itself reads source DSN only from `N22_DSN`; the drill also
+   requires `--allow-archived-node22-db-rollback-mirror` or
    `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR`, must never read
    `infra/env/display.env`, must emit a stable unavailable reason when no
    explicit mirror DSN is configured, and must retain removal/sunset wording.
@@ -167,7 +169,7 @@ Selected risk packs:
 - Concurrency / shared state / ordering: not selected - no runtime state machine
   changes in #641.
 - Legacy compatibility / examples: selected - existing manifest identity fields
-  and transitional mirror assumptions must remain understandable.
+  and archived rollback mirror assumptions must remain understandable.
 - Error handling / rollback / partial outputs: selected - incomplete fixture
   reasons become the oracle for later stable failures.
 - Release / packaging / dependency compatibility: not selected - no dependency or
@@ -599,9 +601,12 @@ Must add/change:
 - A run whose declared handoff manifest file is absent is a pre-contract or
   compatibility case. It may use the archived rollback mirror only when
   `N22_DSN` is set or the autopipeline `--node22-url` option is provided and the
-  archived-rollback allow flag is explicitly enabled; autopipeline must pass
-  `--node22-url` through to `scripts/node27_mirror_forcing.py` when provided.
-  The mirror fallback must be labeled
+  archived-rollback allow flag is explicitly enabled. Autopipeline must pass any
+  `--node22-url` value to `scripts/node27_mirror_forcing.py` through the child
+  environment as `N22_DSN` plus `NHMS_NODE22_DSN_SOURCE=cli:--node22-url`, never
+  as a raw DSN argv entry. The mirror script itself accepts source DSN only from
+  `N22_DSN`, and its destination `DATABASE_URL` must reject node-22 historical
+  hosts and port `:55433`. The mirror fallback must be labeled
   `archived_node22_rollback_forcing_mirror` and recorded as compatibility
   evidence.
 - A run whose handoff manifest is declared/present but whose parser/apply report

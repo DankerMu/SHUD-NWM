@@ -4893,6 +4893,54 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
+def test_entropy_audit_topology_guardrails_flag_node22_database_url_scan_runbook(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/forcing-copyback-backfill.md",
+        """
+        # Current Forcing Copyback Backfill
+
+        In the node-22 checkout root:
+
+        ```bash
+        cd /scratch/frd_muziyao/NWM
+        source infra/env/compute.host.env
+        DATABASE_URL=<writer-or-readable-production-dsn>
+        ```
+
+        dry-run scans hydro.hydro_run and met.forcing_version.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/forcing-copyback-backfill.md", 8)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_flag_incomplete_mirror_implementation_contract(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "scripts/node27_mirror_forcing.py",
+        """
+        parser.add_argument("--node22-url", help="Explicit node-22 mirror DSN")
+        mirror.extend(["--node22-url", node22_url])
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/node27_mirror_forcing.py", 1),
+        ("scripts/node27_mirror_forcing.py", 2),
+    ]
+    assert all(finding["gate_eligible"] is True for finding in findings)
+
+
 def test_entropy_audit_topology_guardrails_scan_active_openspec_but_skip_archive(
     tmp_path: Path,
 ) -> None:

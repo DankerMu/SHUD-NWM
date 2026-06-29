@@ -313,17 +313,33 @@ def test_no_declared_handoff_uses_explicit_mirror_fallback_and_normalizes_counts
     assert "n22-secret" not in rendered
 
 
-def test_node22_url_is_passed_to_explicit_mirror_fallback(
+def test_node22_url_is_passed_to_explicit_mirror_fallback_via_child_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("N22_DSN", raising=False)
     node22_url = "postgresql://n22_user:n22-secret@node22.example/nhms"
+    mirror_envs: list[dict[str, str]] = []
+
+    def command_handler(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        command = " ".join(argv)
+        if "node27_mirror_forcing.py" in command:
+            mirror_envs.append(dict(env))
+            return 0, json.dumps(_mirror_success()) + "\n", ""
+        if "node27_ingest_run.py" in command:
+            return 0, json.dumps({"status": "registered"}) + "\n", ""
+        if "workers.output_parser.cli" in command:
+            return 0, json.dumps({"status": "parsed", "rows_written": len(argv[-1])}) + "\n", ""
+        if "node27_refresh_coverage.py" in command:
+            return 0, json.dumps({"refreshed": True}) + "\n", ""
+        raise AssertionError(f"unexpected command: {argv}")
+
     object_store_root, calls, _published_calls = _prepare_autopipe(
         monkeypatch,
         tmp_path,
         runs={RUN_A: False},
+        command_handler=command_handler,
     )
 
     rc, summary = _run_main(
@@ -337,8 +353,11 @@ def test_node22_url_is_passed_to_explicit_mirror_fallback(
     assert rc == 0
     mirror_call = next(argv for argv in calls if "node27_mirror_forcing.py" in " ".join(argv))
     assert "--allow-archived-node22-db-rollback-mirror" in mirror_call
-    node22_index = mirror_call.index("--node22-url")
-    assert mirror_call[node22_index : node22_index + 2] == ["--node22-url", node22_url]
+    assert "--node22-url" not in mirror_call
+    assert node22_url not in mirror_call
+    assert len(mirror_envs) == 1
+    assert mirror_envs[0]["N22_DSN"] == node22_url
+    assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "cli:--node22-url"
     assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
     rendered = json.dumps(summary)
     assert "n22-secret" not in rendered

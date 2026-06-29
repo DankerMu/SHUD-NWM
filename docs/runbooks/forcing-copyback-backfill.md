@@ -1,18 +1,29 @@
 # Historical Forcing Copyback Backfill
 
+> Status: historical, not current production runbook. This document is retained
+> for audit evidence from the pre-#837 copyback period. Do not run DB-backed
+> scan steps from node-22; current production DB reads must run on node-27
+> against its local `:55432` writer/readable operational DSN. Node-22 is now
+> compute/artifact producer only and may only participate in file copyback work
+> from a node-27-produced manifest or a separately approved rollback drill.
+
 最后更新：2026-06-16
-适用范围：node-22 计算控制面，用于补拷历史已发布 q_down run 引用的 forcing package 到 shared object-store copy root。
+适用范围：历史记录。pre-#837 时该流程在 node-22 计算控制面补拷历史已发布 q_down
+run 引用的 forcing package 到 shared object-store copy root；当前不得从 node-22
+执行 DB-backed scan。
 
 ## 结论
 
-默认命令只做 dry-run，不写目标目录。只有显式加 `--apply` 才会把通过校验的
-`forcing/<source>/<cycle>/<basin_version_id>/<model_id>/` 包复制到 `NHMS_OBJECT_STORE_COPYBACK_ROOT`。
+历史默认命令只做 dry-run，不写目标目录。只有显式加 `--apply` 才会把通过校验的
+`forcing/<source>/<cycle>/<basin_version_id>/<model_id>/` 包复制到
+`NHMS_OBJECT_STORE_COPYBACK_ROOT`。这些命令保留用于解释历史证据；当前如需
+copyback，应先在 node-27 生成候选 manifest，再让 node-22 只执行文件层复制。
 
 该工具不修改数据库、不推进 `hydro` 或 `met` 状态；审计证据来自 stdout JSON 报告。
 
 ## 环境变量
 
-在 node-22 checkout root 执行，先加载计算控制面环境：
+历史 pre-#837 命令曾在 node-22 checkout root 执行并加载计算控制面环境：
 
 ```bash
 cd /scratch/frd_muziyao/NWM
@@ -21,10 +32,10 @@ source infra/env/compute.host.env
 set +a
 ```
 
-必须具备：
+历史命令曾要求：
 
 ```bash
-DATABASE_URL=<writer-or-readable-production-dsn>
+# Historical pre-#837 DB DSN removed after #837; run DB scans on node-27.
 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
 ```
@@ -49,7 +60,8 @@ uv run python -m services.tile_publisher.forcing_copyback_backfill \
   > /scratch/frd_muziyao/nhms-prod/workspace/forcing-copyback-backfill-dry-run.json
 ```
 
-dry-run 会扫描：
+历史 dry-run 会扫描数据库表；当前这类 DB scan 必须改在 node-27 对 `:55432`
+执行，node-22 不再提供 `DATABASE_URL`：
 
 - `hydro.hydro_run.status IN ('parsed', 'frequency_done', 'published')`
 - `hydro.river_timeseries.variable = 'q_down'`

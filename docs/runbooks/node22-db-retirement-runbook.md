@@ -117,6 +117,14 @@ Post-drill cleanup commands:
 
 ```bash
 docker stop nhms-22-e2e-db
-docker ps --filter name=nhms-22-e2e-db --format '{{.ID}} {{.Names}} {{.Status}} {{.Ports}}'
-ss -ltnp 2>/dev/null | grep 55433 || true
+if docker ps --filter name=nhms-22-e2e-db --format '{{.Names}} {{.Status}}' | grep -q .; then
+  echo "BLOCKED: nhms-22-e2e-db still running after rollback cleanup" >&2
+  docker ps --filter name=nhms-22-e2e-db --format '{{.ID}} {{.Names}} {{.Status}} {{.Ports}}'
+  exit 1
+fi
+if ss -ltnp 2>/dev/null | grep -q 55433; then
+  echo "BLOCKED: node-22 historical PostgreSQL :55433 still listening" >&2
+  ss -ltnp 2>/dev/null | grep 55433
+  exit 1
+fi
 ```

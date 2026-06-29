@@ -1431,8 +1431,16 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                             ),
                         )
                     )
-            if _topology_line_has_node22_local_postgres_or_mirror_drift(line):
+            has_node22_pg_or_mirror_drift = _topology_line_has_node22_local_postgres_or_mirror_drift(line)
+            has_node22_database_url_scan_drift = False
+            contract_context = ""
+            if has_node22_pg_or_mirror_drift or "database_url" in _topology_normalized(line):
                 contract_context = _topology_contract_context(lines, index)
+                has_node22_database_url_scan_drift = _topology_line_has_node22_database_url_scan_drift(
+                    line,
+                    contract_context,
+                )
+            if has_node22_pg_or_mirror_drift or has_node22_database_url_scan_drift:
                 claim_context = _topology_forward_claim_context(lines, index, after=4)
                 if _topology_local_postgres_context_is_allowed(
                     line,
@@ -1487,7 +1495,7 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                     title="Display runtime env is reused for data-plane writer or mirror authority",
                     description=(
                         "An active script or runbook sources infra/env/display.env for a data-plane writer or "
-                        "transitional mirror path."
+                        "archived rollback mirror path."
                     ),
                     recommendation=(
                         "Use the node-27 ingest env for writer work and an explicit mirror DSN for "
@@ -1923,6 +1931,38 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
     return _topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)
 
 
+def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -> bool:
+    line_lower = _topology_normalized(line)
+    if "database_url" not in line_lower:
+        return False
+    context_lower = _topology_normalized(f"{line}\n{context}")
+    if _topology_context_is_guardrail_or_test_meta(context_lower):
+        return False
+    has_node22_runtime = any(
+        token in context_lower
+        for token in (
+            "/scratch/frd_muziyao/nwm",
+            "compute.host.env",
+            "node-22 checkout",
+            "node22 checkout",
+            "node-22 compute",
+            "计算控制面",
+        )
+    )
+    has_database_scan = any(
+        token in context_lower
+        for token in (
+            "writer-or-readable-production-dsn",
+            "production dsn",
+            "db scan",
+            "database scan",
+            "hydro.",
+            "met.",
+        )
+    )
+    return has_node22_runtime and has_database_scan
+
+
 def _topology_line_mentions_mirror(text: str) -> bool:
     lowered = _topology_normalized(text)
     return "mirror" in lowered or "镜像" in lowered
@@ -2355,6 +2395,8 @@ def _topology_context_is_historical_receipt_evidence(context: str) -> bool:
 
 def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
     normalized = _topology_normalized(context)
+    if not _topology_context_is_compatibility_mirror_contract(normalized):
+        return False
     has_explicit_mirror = (
         _topology_line_mentions_mirror(normalized)
         and any(token in normalized for token in ("explicit", "--node22-url", "n22_dsn"))

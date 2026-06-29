@@ -315,6 +315,32 @@ def test_preflight_rejects_database_url_query_overrides_before_work_and_redacts(
         assert forbidden not in rendered
 
 
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://node27_writer:writer-secret@210.77.77.22:55432/nhms",
+        "postgresql://node27_writer:writer-secret@db.example:55433/nhms",
+    ],
+)
+def test_preflight_rejects_node22_historical_database_url_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    database_url: str,
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root, database_url))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert autopipe.DATABASE_URL_NODE22_HISTORICAL_ENDPOINT in _blocker_codes(summary)
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "writer-secret" not in rendered
+
+
 def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
