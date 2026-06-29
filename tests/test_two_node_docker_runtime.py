@@ -3100,11 +3100,19 @@ def test_checked_in_compute_scheduler_once_is_db_free_without_database_url() -> 
         assert scheduler_env[key].strip()
 
 
-def test_static_checker_rejects_scheduler_once_database_url_in_db_free_mode(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "database_url_value",
+    [
+        "${DATABASE_URL:?set compute api writer database url}",
+        "",
+    ],
+)
+def test_static_checker_rejects_scheduler_once_database_url_in_db_free_mode(
+    tmp_path: Path,
+    database_url_value: str,
+) -> None:
     compose = _safe_compute_compose()
-    compose["services"]["scheduler-once"]["environment"]["DATABASE_URL"] = (
-        "${DATABASE_URL:?set compute api writer database url}"
-    )
+    compose["services"]["scheduler-once"]["environment"]["DATABASE_URL"] = database_url_value
     compute_compose = _write_compute_compose(tmp_path, compose)
 
     result = _run_compute_static_check(compute_compose)

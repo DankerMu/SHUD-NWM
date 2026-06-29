@@ -2405,7 +2405,7 @@ def _compute_scheduler_once_db_free_findings(path: Path, service_env: Mapping[st
                 },
             )
         )
-    if service_env.get("DATABASE_URL", "").strip():
+    if "DATABASE_URL" in service_env:
         findings.append(
             Finding(
                 "COMPUTE_SCHEDULER_DATABASE_URL_FORBIDDEN",
