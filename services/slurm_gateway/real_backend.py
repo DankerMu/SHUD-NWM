@@ -87,6 +87,7 @@ MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
+DB_RUNTIME_ENV_KEYS = ("DATABASE_URL", "PIPELINE_DATABASE_URL")
 
 FREEFORM_STRING_FIELDS = {
     "script",
@@ -886,7 +887,10 @@ class RealSlurmGateway(SlurmGateway):
             "SHUD_THREADS": context.get("shud_threads", ""),
             "OMP_NUM_THREADS": context.get("shud_threads", ""),
         }
-        lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+        lines: list[str] = []
+        if _db_free_slurm_runtime(context):
+            lines.extend(f"unset {key}" for key in DB_RUNTIME_ENV_KEYS)
+        lines.extend(f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items())
         lines.extend(_python_runtime_export_lines())
         lines.extend(_grib_runtime_export_lines())
         return lines
@@ -1624,6 +1628,18 @@ def _grib_runtime_export_lines() -> list[str]:
         f"export PATH={quoted_root}/bin:$PATH",
         f"export LD_LIBRARY_PATH={quoted_root}/lib:${{LD_LIBRARY_PATH:-}}",
     ]
+
+
+def _db_free_slurm_runtime(context: Mapping[str, Any]) -> bool:
+    return _truthy(context.get("scheduler_db_free_required")) or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+
+
+def _env_flag(name: str) -> bool:
+    return _truthy(os.getenv(name))
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _safe_output_detail(value: str, *, truncated: bool) -> dict[str, Any]:

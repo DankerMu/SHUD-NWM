@@ -244,6 +244,37 @@ def test_template_rendering_includes_profile_and_manifest_variables(tmp_path):
     assert "run_001 cycle_001 run_shud_forecast_array 4" in rendered
 
 
+def test_db_free_template_unsets_inherited_database_urls(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    gateway = _production_gateway(tmp_path)
+
+    rendered = gateway.render_template(
+        "produce_forcing_array",
+        {
+            "run_id": "cycle_gfs_2026062118_convert_basins_qhh_shud",
+            "model_id": "basins_qhh_shud",
+            "cycle_id": "gfs_2026062118",
+            "cycle_time": "2026-06-21T18:00:00Z",
+            "source_id": "gfs",
+            "stage_name": "forcing",
+            "stage": "forcing",
+            "job_type": "produce_forcing_array",
+            "manifest_index_path": "/tmp/index.json",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "object_store_root": str(tmp_path / "object-store"),
+            "scheduler_db_free_required": True,
+        },
+        "/tmp/index.json",
+    )
+
+    assert "unset DATABASE_URL" in rendered
+    assert "unset PIPELINE_DATABASE_URL" in rendered
+    assert "10.0.2.100" not in rendered
+    assert "secret" not in rendered
+
+
 def test_array_validation_rejects_zero_tasks(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
