@@ -14,6 +14,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from workers.shud_runtime.runtime import (
+    DbFreeHydroRunRepository,
     SHUDRuntime,
     SHUDRuntimeConfig,
     SHUDRuntimeError,
@@ -2385,11 +2386,28 @@ def test_manifest_path_components_are_rejected_before_db_updates(
 
 def test_runtime_from_env_requires_database_url_in_normal_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("NHMS_SHUD_DB_FREE", raising=False)
 
     with pytest.raises(SHUDRuntimeError) as exc_info:
         SHUDRuntime.from_env()
 
     assert exc_info.value.error_code == "DATABASE_URL_MISSING"
+
+
+def test_runtime_from_env_uses_db_free_repository_without_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+
+    runtime = SHUDRuntime.from_env()
+
+    assert isinstance(runtime.repository, DbFreeHydroRunRepository)
+    assert runtime.state_manager is None
 
 
 def test_runtime_from_env_allows_missing_database_url_only_for_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:

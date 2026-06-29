@@ -58,6 +58,14 @@ MAX_DIRECT_GRID_SP_ATT_LINES = 2_000_000
 MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _db_free_runtime_enabled() -> bool:
+    return _env_flag("NHMS_SHUD_DB_FREE") or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+
+
 @dataclass(frozen=True)
 class SHUDRuntimeConfig:
     workspace_root: Path | str
@@ -117,6 +125,22 @@ class SHUDExecutionResult:
 
 class DryRunHydroRunRepository:
     """Repository used only when the CLI is invoked with --dry-run."""
+
+    def create_run(self, _manifest: dict[str, Any], _run_manifest_uri: str) -> dict[str, Any]:
+        return {}
+
+    def update_status(self, _run_id: str, _status: str, **_fields: Any) -> dict[str, Any]:
+        return {}
+
+    def mark_failed(self, _run_id: str, _error_code: str, _error_message: str, **_fields: Any) -> dict[str, Any]:
+        return {}
+
+    def update_init_state(self, _run_id: str, _init_state_id: str | None) -> dict[str, Any]:
+        return {}
+
+
+class DbFreeHydroRunRepository:
+    """No-op hydro_run writer for DB-free compute-node SHUD jobs."""
 
     def create_run(self, _manifest: dict[str, Any], _run_manifest_uri: str) -> dict[str, Any]:
         return {}
@@ -297,15 +321,18 @@ class SHUDRuntime:
     ) -> None:
         self.config = config
         self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        db_free_runtime = _db_free_runtime_enabled()
         if repository is not None:
             self.repository = repository
         elif config.dry_run:
             self.repository = DryRunHydroRunRepository()
+        elif db_free_runtime:
+            self.repository = DbFreeHydroRunRepository()
         else:
             self.repository = PsycopgHydroRunRepository.from_env()
         if state_manager is not None:
             self.state_manager = state_manager
-        elif config.dry_run or repository is not None:
+        elif config.dry_run or repository is not None or db_free_runtime:
             self.state_manager = None
         else:
             self.state_manager = StateManager(
