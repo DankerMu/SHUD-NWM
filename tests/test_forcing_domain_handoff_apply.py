@@ -144,6 +144,7 @@ def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
     envelope = _parse_complete()
     placeholder = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
     placeholder["source_id"] = "gfs"
+    placeholder["end_time"] = "2026-06-20T16:00:00Z"
     placeholder["station_count"] = 0
     placeholder["checksum"] = None
     placeholder["lineage_json"] = {"seed": "node27_ingest_run"}
@@ -154,6 +155,12 @@ def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
 
     assert report["status"] == "applied"
     assert len(connection.tables["met.forcing_version"]) == 1
+    assert connection.tables["met.forcing_version"][0]["start_time"] == envelope["parsed"]["met.forcing_version"][0][
+        "start_time"
+    ]
+    assert connection.tables["met.forcing_version"][0]["end_time"] == envelope["parsed"]["met.forcing_version"][0][
+        "end_time"
+    ]
     assert connection.tables["met.forcing_version"][0]["station_count"] == 2
     assert connection.tables["met.forcing_version"][0]["checksum"] == (
         "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5"
@@ -630,20 +637,27 @@ class _FakeCursor:
             self.connection.state["met.forcing_version"].append(record)
             self._fetchone = {"forcing_version_id": record["forcing_version_id"]}
             return
-        compatible = all(
+        identity_compatible = all(
             existing[key] == record[key]
             for key in (
                 "model_id",
                 "source_id",
                 "cycle_time",
-                "start_time",
-                "end_time",
                 "forcing_package_uri",
             )
-        ) and existing.get("checksum") in (None, record["checksum"])
+        )
+        placeholder_compatible = existing.get("checksum") is None
+        finalized_compatible = (
+            existing.get("checksum") == record["checksum"]
+            and existing["start_time"] == record["start_time"]
+            and existing["end_time"] == record["end_time"]
+        )
+        compatible = identity_compatible and (placeholder_compatible or finalized_compatible)
         if not compatible:
             self._fetchone = None
             return
+        existing["start_time"] = record["start_time"]
+        existing["end_time"] = record["end_time"]
         existing["station_count"] = record["station_count"]
         existing["checksum"] = record["checksum"]
         existing["lineage_json"] = record["lineage_json"]

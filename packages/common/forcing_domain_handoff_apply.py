@@ -574,18 +574,22 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (forcing_version_id) DO UPDATE SET
+            start_time = EXCLUDED.start_time,
+            end_time = EXCLUDED.end_time,
             station_count = EXCLUDED.station_count,
             checksum = EXCLUDED.checksum,
             lineage_json = EXCLUDED.lineage_json
         WHERE met.forcing_version.model_id = EXCLUDED.model_id
           AND met.forcing_version.source_id = EXCLUDED.source_id
           AND met.forcing_version.cycle_time IS NOT DISTINCT FROM EXCLUDED.cycle_time
-          AND met.forcing_version.start_time = EXCLUDED.start_time
-          AND met.forcing_version.end_time = EXCLUDED.end_time
           AND met.forcing_version.forcing_package_uri = EXCLUDED.forcing_package_uri
           AND (
               met.forcing_version.checksum IS NULL
-              OR met.forcing_version.checksum = EXCLUDED.checksum
+              OR (
+                  met.forcing_version.checksum = EXCLUDED.checksum
+                  AND met.forcing_version.start_time = EXCLUDED.start_time
+                  AND met.forcing_version.end_time = EXCLUDED.end_time
+              )
           )
         RETURNING forcing_version_id
         """,
