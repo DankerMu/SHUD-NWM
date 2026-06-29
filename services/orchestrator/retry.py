@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
+from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineEvent, PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
@@ -1016,7 +1017,7 @@ def _retry_submission_manifest(
     if runtime_root_fields:
         manifest.update(runtime_root_fields)
     cycle_identity = _source_cycle_identity(retry_job.cycle_id)
-    if retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE and cycle_identity is not None:
+    if cycle_identity is not None:
         source_id, cycle_time = cycle_identity
         manifest["source_id"] = source_id
         manifest["cycle_time"] = cycle_time
@@ -1029,7 +1030,7 @@ def _source_cycle_identity(cycle_id: str | None) -> tuple[str, str] | None:
     match = re.fullmatch(r"(?P<source>[A-Za-z0-9]+)_(?P<cycle>[0-9]{10})", cycle_id)
     if match is None:
         return None
-    return match.group("source"), match.group("cycle")
+    return normalize_source_id(match.group("source")), match.group("cycle")
 
 
 def _coerce_gateway_payload(value: Any) -> dict[str, Any]:

@@ -1339,6 +1339,51 @@ def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_p
     assert retry_event["details"]["failure"]["retryable"] is True
 
 
+def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_cycle_ifs_2026062800_convert_convert")
+    record.update(
+        {
+            "run_id": "cycle_ifs_2026062800_convert_basins_qhh_shud",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "IFS",
+            "job_type": "convert_canonical",
+            "stage": "convert",
+            "idempotency_key": "IFS:ifs_2026062800:convert",
+        }
+    )
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "permanently_failed",
+        error_code="SLURM_JOB_FAILED",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7007", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry(
+        "cycle_ifs_2026062800_convert_basins_qhh_shud",
+        gateway,
+        trusted_internal=True,
+    )
+
+    assert retried.status == "submitted"
+    assert gateway.requests[0].manifest["cycle_id"] == "ifs_2026062800"
+    assert gateway.requests[0].manifest["source_id"] == "IFS"
+    assert gateway.requests[0].manifest["cycle_time"] == "2026062800"
+
+
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
     tmp_path: Path,
 ) -> None:
