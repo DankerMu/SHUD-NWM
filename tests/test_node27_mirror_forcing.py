@@ -7,12 +7,14 @@ import pytest
 import scripts.node27_mirror_forcing as mirror
 
 NODE22_ROLLBACK_DSN = "postgresql://n22_user:n22-secret@210.77.77.22:55433/nhms"
+NODE27_WRITER_DSN = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
 
 
 @pytest.fixture(autouse=True)
 def _clear_libpq_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in mirror.LIBPQ_CONNECTION_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DATABASE_URL", NODE27_WRITER_DSN)
 
 
 def test_missing_explicit_node22_dsn_returns_skip_without_display_fallback(
@@ -180,16 +182,28 @@ def test_non_archived_node22_source_dsn_blocks_before_connection(
     assert "n22-secret" not in rendered
 
 
-@pytest.mark.parametrize("env_var", ["PGHOSTADDR", "PGSERVICEFILE"])
+@pytest.mark.parametrize(
+    ("env_var", "env_value"),
+    [
+        ("PGHOSTADDR", "127.0.0.99"),
+        ("PGSERVICEFILE", "/tmp/pg_service.conf"),
+        ("PGAPPNAME", "ambient-app"),
+        ("PGREQUIREAUTH", "scram-sha-256"),
+        ("PGSSLNEGOTIATION", "direct"),
+        ("PGSSLMINPROTOCOLVERSION", "TLSv1.3"),
+        ("PGSYSCONFDIR", "/tmp/pg-sysconf"),
+    ],
+)
 def test_ambient_libpq_env_blocks_before_connection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     capsys: pytest.CaptureFixture[str],
     env_var: str,
+    env_value: str,
 ) -> None:
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
-    monkeypatch.setenv(env_var, "127.0.0.99" if env_var == "PGHOSTADDR" else "/tmp/pg_service.conf")
+    monkeypatch.setenv(env_var, env_value)
 
     def fail_mirror_forcing(**_: object) -> dict[str, object]:
         pytest.fail("ambient libpq env must block before mirror_forcing is called")
@@ -205,8 +219,82 @@ def test_ambient_libpq_env_blocks_before_connection(
     assert {blocker["env_var"] for blocker in payload["blockers"]} == {env_var}
     rendered = json.dumps(payload)
     assert "n22-secret" not in rendered
-    assert "127.0.0.99" not in rendered
-    assert "/tmp/pg_service.conf" not in rendered
+    assert env_value not in rendered
+
+
+def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_url = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
+    monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("raw DATABASE_URL argv must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(
+        [
+            "--run-id",
+            "run-raw-database-url",
+            "--object-store-root",
+            str(tmp_path),
+            "--database-url",
+            secret_url,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.DATABASE_URL_ARGV_FORBIDDEN_REASON
+    assert mirror.DATABASE_URL_ARGV_FORBIDDEN_REASON in {blocker["code"] for blocker in payload["blockers"]}
+    rendered = json.dumps(payload)
+    assert "postgresql://" not in rendered
+    assert "writer-secret" not in rendered
+    assert "n22-secret" not in rendered
+
+
+def test_database_url_file_must_be_owner_only_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_url_file = tmp_path / "node27-writer-dsn.txt"
+    database_url_file.write_text(NODE27_WRITER_DSN + "\n", encoding="utf-8")
+    database_url_file.chmod(0o644)
+    monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("unsafe DATABASE_URL file must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(
+        [
+            "--run-id",
+            "run-unsafe-database-url-file",
+            "--object-store-root",
+            str(tmp_path),
+            "--database-url-file",
+            str(database_url_file),
+        ]
+    )
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.DATABASE_URL_FILE_UNSAFE_REASON
+    rendered = json.dumps(payload)
+    assert "writer-secret" not in rendered
+    assert "n22-secret" not in rendered
 
 
 def test_historical_node22_destination_database_url_blocks_before_connection(
@@ -214,22 +302,14 @@ def test_historical_node22_destination_database_url_blocks_before_connection(
 ) -> None:
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://node27_writer:writer-secret@210.77.77.22:55433/nhms")
 
     def fail_mirror_forcing(**_: object) -> dict[str, object]:
         pytest.fail("node-22 historical DATABASE_URL must block before mirror_forcing is called")
 
     monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
 
-    rc = mirror.main(
-        [
-            "--run-id",
-            "run-node22-destination",
-            "--object-store-root",
-            str(tmp_path),
-            "--database-url",
-            "postgresql://node27_writer:writer-secret@210.77.77.22:55433/nhms",
-        ]
-    )
+    rc = mirror.main(["--run-id", "run-node22-destination", "--object-store-root", str(tmp_path)])
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
@@ -249,22 +329,17 @@ def test_query_override_destination_database_url_blocks_before_connection(
 ) -> None:
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms?host=210.77.77.22",
+    )
 
     def fail_mirror_forcing(**_: object) -> dict[str, object]:
         pytest.fail("query-overridden DATABASE_URL must block before mirror_forcing is called")
 
     monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
 
-    rc = mirror.main(
-        [
-            "--run-id",
-            "run-query-override",
-            "--object-store-root",
-            str(tmp_path),
-            "--database-url",
-            "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms?host=210.77.77.22",
-        ]
-    )
+    rc = mirror.main(["--run-id", "run-query-override", "--object-store-root", str(tmp_path)])
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
@@ -283,22 +358,14 @@ def test_non_node27_destination_database_url_blocks_before_connection(
 ) -> None:
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://node27_writer:writer-secret@db.example:55432/nhms")
 
     def fail_mirror_forcing(**_: object) -> dict[str, object]:
         pytest.fail("non-node27 DATABASE_URL must block before mirror_forcing is called")
 
     monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
 
-    rc = mirror.main(
-        [
-            "--run-id",
-            "run-non-node27-destination",
-            "--object-store-root",
-            str(tmp_path),
-            "--database-url",
-            "postgresql://node27_writer:writer-secret@db.example:55432/nhms",
-        ]
-    )
+    rc = mirror.main(["--run-id", "run-non-node27-destination", "--object-store-root", str(tmp_path)])
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
@@ -331,22 +398,14 @@ def test_destination_database_url_identity_blocks_before_connection(
 ) -> None:
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    monkeypatch.setenv("DATABASE_URL", database_url)
 
     def fail_mirror_forcing(**_: object) -> dict[str, object]:
         pytest.fail("unsafe destination identity must block before mirror_forcing is called")
 
     monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
 
-    rc = mirror.main(
-        [
-            "--run-id",
-            "run-destination-identity",
-            "--object-store-root",
-            str(tmp_path),
-            "--database-url",
-            database_url,
-        ]
-    )
+    rc = mirror.main(["--run-id", "run-destination-identity", "--object-store-root", str(tmp_path)])
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)

@@ -102,6 +102,9 @@ DISPLAY_HEALTH_SEPARATION = "display_api_health_is_readonly_consumer_health_not_
 DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
 DATABASE_URL_NODE22_HISTORICAL_ENDPOINT = "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT"
 DATABASE_URL_ENDPOINT_NOT_NODE27 = "DATABASE_URL_ENDPOINT_NOT_NODE27"
+DATABASE_URL_ARGV_FORBIDDEN = "DATABASE_URL_ARGV_FORBIDDEN"
+DATABASE_URL_FILE_INVALID = "DATABASE_URL_FILE_INVALID"
+DATABASE_URL_FILE_UNSAFE = "DATABASE_URL_FILE_UNSAFE"
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
@@ -142,6 +145,14 @@ FORCING_TABLE_KEYS = (
 
 @dataclass(frozen=True)
 class MirrorDsnConfig:
+    url: str | None
+    source: str | None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class DatabaseUrlConfig:
     url: str | None
     source: str | None
     error_code: str | None = None
@@ -371,6 +382,92 @@ def _database_preflight(database_url: str | None, env: dict[str, str]) -> tuple[
     return identity, []
 
 
+def _raw_database_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--database-url" or arg.startswith("--database-url=") for arg in argv)
+
+
+def _argv_option_value(argv: list[str], option: str) -> str | None:
+    prefix = f"{option}="
+    for index, arg in enumerate(argv):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == option and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
+    raw = _non_empty(path_value)
+    if raw is None:
+        return DatabaseUrlConfig(url=None, source=None)
+    path = Path(raw)
+    source = f"file:{path}"
+    if not path.is_absolute():
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file path must be absolute.",
+        )
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message=f"Node-27 writer DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
+        )
+    if not stat.S_ISREG(info.st_mode):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file must be a regular file.",
+        )
+    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file must be owner-only readable/writable.",
+        )
+    if not (info.st_mode & stat.S_IRUSR):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file must be readable by its owner.",
+        )
+    try:
+        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message=f"Node-27 writer DSN file cannot be read: {exc.strerror or type(exc).__name__}.",
+        )
+    if len(lines) != 1:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message="Node-27 writer DSN file must contain exactly one non-empty line.",
+        )
+    return DatabaseUrlConfig(url=lines[0], source=source)
+
+
+def _database_url_config(database_url_file: str | None, env: dict[str, str]) -> DatabaseUrlConfig:
+    file_config = _database_url_file_config(database_url_file)
+    if file_config.url or file_config.error_code:
+        return file_config
+    env_url = _non_empty(env.get("DATABASE_URL"))
+    if env_url:
+        return DatabaseUrlConfig(url=env_url, source="env:DATABASE_URL")
+    return DatabaseUrlConfig(url=None, source=None)
+
+
 def _role_preflight(env: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
     service_role = (env.get("NHMS_SERVICE_ROLE") or "").strip().lower()
     ingest_role = (env.get("NHMS_NODE27_INGEST_ROLE") or "").strip().lower()
@@ -418,6 +515,9 @@ def _ingest_config_source(env: dict[str, str]) -> str:
 def _preflight_ingest_config(
     *,
     database_url: str | None,
+    database_url_source: str | None = None,
+    database_url_error_code: str | None = None,
+    database_url_error_message: str | None = None,
     object_store_root: str | None,
     basins_root: str | None,
     env: dict[str, str],
@@ -426,8 +526,20 @@ def _preflight_ingest_config(
     role, role_blockers = _role_preflight(env)
     blockers.extend(role_blockers)
 
-    database, database_blockers = _database_preflight(database_url, env)
-    blockers.extend(database_blockers)
+    if database_url_error_code:
+        database = {"configured": True, "source": database_url_source}
+        blockers.append(
+            _preflight_blocker(
+                database_url_error_code,
+                "DATABASE_URL",
+                database_url_error_message or database_url_error_code,
+            )
+        )
+    else:
+        database, database_blockers = _database_preflight(database_url, env)
+        if database_url_source:
+            database["source"] = database_url_source
+        blockers.extend(database_blockers)
 
     object_store, object_store_blockers = _path_preflight("OBJECT_STORE_ROOT", object_store_root)
     blockers.extend(object_store_blockers)
@@ -1216,10 +1328,46 @@ def _process_run(
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     global WORK_ROOT
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    env = dict(os.environ)
+
+    if _raw_database_url_arg_present(raw_argv):
+        preflight = _preflight_ingest_config(
+            database_url=None,
+            database_url_source="argv:--database-url",
+            database_url_error_code=DATABASE_URL_ARGV_FORBIDDEN,
+            database_url_error_message=(
+                "Pass the node-27 writer DSN through env DATABASE_URL or owner-only "
+                "--database-url-file; raw writer DSNs are forbidden in argv."
+            ),
+            object_store_root=_argv_option_value(raw_argv, "--object-store-root") or env.get("OBJECT_STORE_ROOT"),
+            basins_root=_argv_option_value(raw_argv, "--basins-root") or env.get("BASINS_ROOT"),
+            env=env,
+        )
+        _emit_json_summary(
+            {
+                "schema": INGEST_SUMMARY_SCHEMA,
+                "status": "preflight_blocked",
+                "return_code": PREFLIGHT_BLOCKED_RC,
+                "ingest": _ingest_evidence(preflight),
+                "object_store_root": _argv_option_value(raw_argv, "--object-store-root"),
+                "basins_root": _argv_option_value(raw_argv, "--basins-root"),
+                "sources": [],
+                "discovered_runs": 0,
+                "basins": [],
+                "seed": _empty_seed_summary(),
+                "runs": _empty_runs_summary(),
+            }
+        )
+        return PREFLIGHT_BLOCKED_RC
 
     parser = argparse.ArgumentParser(description="Basin-agnostic node-27 autopipeline.")
     parser.add_argument("--object-store-root", default=os.environ.get("OBJECT_STORE_ROOT"))
-    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    parser.add_argument(
+        "--database-url-file",
+        default=None,
+        help="Owner-only file containing the node-27 writer DSN. Defaults to env DATABASE_URL.",
+    )
     parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT"))
     parser.add_argument("--sources", default="gfs,ifs", help="Comma list of sources (default gfs,ifs).")
     parser.add_argument("--only-basin", default=None, help="Restrict to a single basin slug (e.g. heihe).")
@@ -1246,17 +1394,20 @@ def main(argv: list[str] | None = None) -> int:
             "This is not normal node-27 ingest operation."
         ),
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
 
-    env = dict(os.environ)
     allow_archived_node22_db_rollback_mirror = bool(
         args.allow_archived_node22_db_rollback_mirror
         or _truthy_env(env.get(ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV))
     )
+    database_config = _database_url_config(args.database_url_file, env)
     preflight = _preflight_ingest_config(
-        database_url=args.database_url,
+        database_url=database_config.url,
+        database_url_source=database_config.source,
+        database_url_error_code=database_config.error_code,
+        database_url_error_message=database_config.error_message,
         object_store_root=args.object_store_root,
         basins_root=args.basins_root,
         env=env,
@@ -1281,7 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
 
     object_store_root = Path(args.object_store_root)
     basins_root = Path(args.basins_root)
-    database_url = args.database_url
+    database_url = database_config.url or ""
     WORK_ROOT = str(Path(env["AUTOPIPE_WORK_ROOT"]))
     mirror_dsn = _mirror_dsn_config(args.node22_dsn_file, env)
 

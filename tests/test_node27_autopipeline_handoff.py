@@ -71,6 +71,7 @@ def _prepare_autopipe(
     monkeypatch.setenv("NHMS_NODE27_INGEST_ROLE", autopipe.INGEST_ROLE)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", autopipe.INGEST_ROLE)
     monkeypatch.setenv("NHMS_NODE27_INGEST_CONFIG_SOURCE", "pytest")
+    monkeypatch.setenv("DATABASE_URL", NODE27_DATABASE_URL)
 
     def fake_publish(database_url: str) -> int:
         published_calls.append(database_url)
@@ -118,8 +119,6 @@ def _run_main(capsys: pytest.CaptureFixture[str], object_store_root: Path, *extr
             str(object_store_root),
             "--basins-root",
             str(object_store_root.parent / "Basins"),
-            "--database-url",
-            NODE27_DATABASE_URL,
             *extra,
         ]
     )
@@ -324,8 +323,17 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
 ) -> None:
     monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
     monkeypatch.setenv("NHMS_NODE22_DSN_SOURCE", "cli:--node22-url")
-    monkeypatch.setenv("PGHOSTADDR", "127.0.0.99")
-    monkeypatch.setenv("PGSERVICEFILE", "/tmp/unsafe-pg-service.conf")
+    ambient_libpq = {
+        "PGHOSTADDR": "127.0.0.99",
+        "PGSERVICEFILE": "/tmp/unsafe-pg-service.conf",
+        "PGAPPNAME": "ambient-app",
+        "PGREQUIREAUTH": "scram-sha-256",
+        "PGSSLNEGOTIATION": "direct",
+        "PGSSLMINPROTOCOLVERSION": "TLSv1.3",
+        "PGSYSCONFDIR": "/tmp/pg-sysconf",
+    }
+    for key, value in ambient_libpq.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
     mirror_envs: list[dict[str, str]] = []
 
@@ -354,8 +362,8 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
     assert rc == 0
     assert len(mirror_envs) == 1
     assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "env:N22_DSN"
-    assert "PGHOSTADDR" not in mirror_envs[0]
-    assert "PGSERVICEFILE" not in mirror_envs[0]
+    for key in ambient_libpq:
+        assert key not in mirror_envs[0]
     assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
 
 

@@ -66,7 +66,10 @@ def _args(object_store_root: Path, basins_root: Path, database_url: str | None =
         str(basins_root),
     ]
     if database_url is not None:
-        args.extend(["--database-url", database_url])
+        database_url_file = object_store_root.parent / "node27-writer-dsn.txt"
+        database_url_file.write_text(database_url + "\n", encoding="utf-8")
+        database_url_file.chmod(0o600)
+        args.extend(["--database-url-file", str(database_url_file)])
     return args
 
 
@@ -109,6 +112,41 @@ def test_missing_database_url_blocks_before_seed_run_publish_and_redacts(
     assert "preflight-secret-token" not in rendered
 
 
+def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    secret_url = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc = autopipe.main(
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            "--database-url",
+            secret_url,
+        ]
+    )
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert captured.err == ""
+    assert summary["status"] == "preflight_blocked"
+    assert autopipe.DATABASE_URL_ARGV_FORBIDDEN in _blocker_codes(summary)
+    assert summary["ingest"]["preflight"]["database"] == {
+        "configured": True,
+        "source": "argv:--database-url",
+    }
+    assert "postgresql://" not in captured.out
+    assert "writer-secret" not in captured.out
+
+
 def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -145,6 +183,7 @@ def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "display_readonly")
     monkeypatch.setenv("AUTOPIPE_WORK_ROOT", "relative-work")
     monkeypatch.setenv("AUTOPIPE_LOG_ROOT", "relative-log")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms_display_ro:readonly-secret@127.0.0.1:55432/nhms")
 
     rc, summary, rendered = _run_main(
         capsys,
@@ -153,8 +192,6 @@ def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
             "",
             "--basins-root",
             "",
-            "--database-url",
-            "postgresql://nhms_display_ro:readonly-secret@127.0.0.1:55432/nhms",
         ],
     )
 
@@ -181,6 +218,35 @@ def test_preflight_reports_malformed_database_url_with_stable_code(
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
     assert _blocker_codes(summary) == {"DATABASE_URL_INVALID"}
+
+
+def test_database_url_file_must_be_owner_only_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    database_url_file = tmp_path / "node27-writer-dsn.txt"
+    database_url_file.write_text(NODE27_DATABASE_URL + "\n", encoding="utf-8")
+    database_url_file.chmod(0o644)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            "--database-url-file",
+            str(database_url_file),
+        ],
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {autopipe.DATABASE_URL_FILE_UNSAFE}
+    assert "writer-secret" not in rendered
 
 
 def test_preflight_rejects_database_url_without_username_before_libpq_ambient_identity(
@@ -374,14 +440,13 @@ def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
 ) -> None:
     object_store_root, _basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
     monkeypatch.delenv("BASINS_ROOT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", NODE27_DATABASE_URL)
 
     rc, summary, _rendered = _run_main(
         capsys,
         [
             "--object-store-root",
             str(object_store_root),
-            "--database-url",
-            NODE27_DATABASE_URL,
         ],
     )
 
@@ -445,6 +510,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
         "host": "127.0.0.1",
         "port": 55432,
         "scheme": "postgresql",
+        "source": f"file:{object_store_root.parent / 'node27-writer-dsn.txt'}",
         "password_present": True,
         "username_class": "writer_candidate",
         "username_present": True,
@@ -587,12 +653,9 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "N22_DSN",
         "NHMS_NODE22_DSN_SOURCE",
         "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
-        "PGUSER",
-        "PGPASSWORD",
-        "PGPASSFILE",
-        "PGSERVICE",
-        "PGSERVICEFILE",
     ):
+        assert f"unset {required_key}" in script
+    for required_key in autopipe.LIBPQ_CONNECTION_ENV_KEYS:
         assert f"unset {required_key}" in script
     assert "--database-url" not in script
 

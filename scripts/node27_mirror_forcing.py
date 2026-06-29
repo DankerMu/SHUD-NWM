@@ -27,7 +27,8 @@ child environment instead of argv. The DSN is ignored unless
 ``NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=true`` is also set. This archived
 rollback mirror never reads display runtime configuration
 (``infra/env/display.env`` or display ``DATABASE_URL``) as the node-22 source.
-Local DSN: ``--database-url`` -> env ``DATABASE_URL``, and it must not point at
+Local DSN: env ``DATABASE_URL`` or owner-only ``--database-url-file``; raw
+writer DSNs are never accepted in argv, and the resolved DSN must not point at
 node-22 historical PostgreSQL.
 
 Exit / return contract: returns a report dict. If node-22 has no forcing_version
@@ -42,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,7 +57,6 @@ from psycopg2.extras import Json, RealDictCursor, execute_values
 from packages.common.redaction import redact_payload
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
 NODE22_DSN_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_MISSING"
 NODE22_DSN_INVALID_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_INVALID"
 NODE22_DSN_QUERY_OVERRIDE_FORBIDDEN_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_QUERY_OVERRIDE_FORBIDDEN"
@@ -68,6 +69,9 @@ DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON = "DATABASE_URL_NODE22_HISTORICAL
 DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
 DATABASE_URL_ENDPOINT_NOT_NODE27_REASON = "DATABASE_URL_ENDPOINT_NOT_NODE27"
 DATABASE_URL_INVALID_REASON = "DATABASE_URL_INVALID"
+DATABASE_URL_ARGV_FORBIDDEN_REASON = "DATABASE_URL_ARGV_FORBIDDEN"
+DATABASE_URL_FILE_INVALID_REASON = "DATABASE_URL_FILE_INVALID"
+DATABASE_URL_FILE_UNSAFE_REASON = "DATABASE_URL_FILE_UNSAFE"
 DATABASE_URL_USERNAME_MISSING_REASON = "DATABASE_URL_USERNAME_MISSING"
 DATABASE_URL_READONLY_IDENTITY_REASON = "DATABASE_URL_READONLY_IDENTITY"
 DATABASE_URL_PASSWORD_MISSING_REASON = "DATABASE_URL_PASSWORD_MISSING"
@@ -82,28 +86,50 @@ DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
 )
 LIBPQ_CONNECTION_ENV_KEYS = frozenset(
     {
+        "PGAPPNAME",
         "PGCHANNELBINDING",
+        "PGCLIENTENCODING",
         "PGCONNECT_TIMEOUT",
         "PGDATABASE",
+        "PGDATESTYLE",
+        "PGGEQO",
+        "PGGSSDELEGATION",
+        "PGGSSENCMODE",
+        "PGGSSLIB",
         "PGHOST",
         "PGHOSTADDR",
+        "PGKRBSRVNAME",
+        "PGLOCALEDIR",
         "PGLOADBALANCEHOSTS",
+        "PGMAXPROTOCOLVERSION",
+        "PGMINPROTOCOLVERSION",
         "PGOPTIONS",
         "PGPASSFILE",
         "PGPASSWORD",
         "PGPORT",
+        "PGREQUIREAUTH",
+        "PGREQUIREPEER",
         "PGREQUIRESSL",
         "PGSERVICE",
         "PGSERVICEFILE",
         "PGSSL_CERT_FILE",
         "PGSSL_KEY_FILE",
         "PGSSL_ROOT_CERT_FILE",
+        "PGSSLCERTMODE",
+        "PGSSLCOMPRESSION",
         "PGSSLCRL",
+        "PGSSLCRLDIR",
         "PGSSLCERT",
         "PGSSLKEY",
+        "PGSSLMAXPROTOCOLVERSION",
+        "PGSSLMINPROTOCOLVERSION",
         "PGSSLMODE",
+        "PGSSLNEGOTIATION",
         "PGSSLROOTCERT",
+        "PGSSLSNI",
+        "PGSYSCONFDIR",
         "PGTARGETSESSIONATTRS",
+        "PGTZ",
         "PGUSER",
     }
 )
@@ -173,11 +199,105 @@ class Node22MirrorSource:
     source: str
 
 
+@dataclass(frozen=True)
+class DatabaseUrlConfig:
+    url: str | None
+    source: str | None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 def _non_empty(value: str | None) -> str | None:
     if value is None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _raw_database_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--database-url" or arg.startswith("--database-url=") for arg in argv)
+
+
+def _argv_option_value(argv: list[str], option: str) -> str | None:
+    prefix = f"{option}="
+    for index, arg in enumerate(argv):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == option and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
+    raw = _non_empty(path_value)
+    if raw is None:
+        return DatabaseUrlConfig(url=None, source=None)
+    path = Path(raw)
+    source = f"file:{path}"
+    if not path.is_absolute():
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+            error_message="Node-27 writer DSN file path must be absolute.",
+        )
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID_REASON,
+            error_message=f"Node-27 writer DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
+        )
+    if not stat.S_ISREG(info.st_mode):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+            error_message="Node-27 writer DSN file must be a regular file.",
+        )
+    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+            error_message="Node-27 writer DSN file must be owner-only readable/writable.",
+        )
+    if not (info.st_mode & stat.S_IRUSR):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+            error_message="Node-27 writer DSN file must be readable by its owner.",
+        )
+    try:
+        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID_REASON,
+            error_message=f"Node-27 writer DSN file cannot be read: {exc.strerror or type(exc).__name__}.",
+        )
+    if len(lines) != 1:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID_REASON,
+            error_message="Node-27 writer DSN file must contain exactly one non-empty line.",
+        )
+    return DatabaseUrlConfig(url=lines[0], source=source)
+
+
+def _database_url_config(database_url_file: str | None) -> DatabaseUrlConfig:
+    file_config = _database_url_file_config(database_url_file)
+    if file_config.url or file_config.error_code:
+        return file_config
+    env_url = _non_empty(os.environ.get("DATABASE_URL"))
+    if env_url:
+        return DatabaseUrlConfig(url=env_url, source="env:DATABASE_URL")
+    return DatabaseUrlConfig(url=None, source=None)
 
 
 def _node22_dsn_source_from_env() -> str:
@@ -596,6 +716,29 @@ def _destination_forbidden_report(
     )
 
 
+def _database_url_argv_forbidden_report(run_id: str) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "failed": True,
+            "reason": DATABASE_URL_ARGV_FORBIDDEN_REASON,
+            "detail": (
+                "Pass the node-27 writer DSN through env DATABASE_URL or owner-only "
+                "--database-url-file; raw writer DSNs are forbidden in argv."
+            ),
+            "destination": {"configured": False, "source": "argv:--database-url"},
+            "blockers": [
+                {
+                    "code": DATABASE_URL_ARGV_FORBIDDEN_REASON,
+                    "env_var": "DATABASE_URL",
+                    "message": "Raw node-27 writer DSNs must not be passed through argv.",
+                }
+            ],
+        },
+        dsn_source="env:N22_DSN" if _non_empty(os.environ.get("N22_DSN")) else None,
+    )
+
+
 def _failed_node22_mirror_report(run_id: str, error: Exception, *, dsn_source: str) -> dict[str, Any]:
     return _with_mirror_boundary(
         {
@@ -913,6 +1056,11 @@ def mirror_forcing(
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if _raw_database_url_arg_present(raw_argv):
+        _dump_json(_database_url_argv_forbidden_report(_argv_option_value(raw_argv, "--run-id") or "unknown"))
+        return 2
+
     parser = argparse.ArgumentParser(description="Archived rollback forcing-domain mirror to node-27 local DB.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument(
@@ -920,7 +1068,11 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("OBJECT_STORE_ROOT"),
         help="Object-store filesystem root. Defaults to OBJECT_STORE_ROOT.",
     )
-    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL") or LOCAL_DEFAULT)
+    parser.add_argument(
+        "--database-url-file",
+        default=None,
+        help="Owner-only file containing the node-27 writer DSN. Defaults to env DATABASE_URL.",
+    )
     parser.add_argument(
         "--allow-archived-node22-db-rollback-mirror",
         action="store_true",
@@ -930,7 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
             "This is not normal node-27 ingest operation."
         ),
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     try:
         node22_source = _resolve_node22_source()
@@ -952,6 +1104,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    database_url = _database_url_config(args.database_url_file)
+    if database_url.error_code:
+        _dump_json(
+            _destination_forbidden_report(
+                args.run_id,
+                dsn_source=node22_source.source,
+                destination={"configured": True, "source": database_url.source},
+                blockers=[
+                    {
+                        "code": database_url.error_code,
+                        "env_var": "DATABASE_URL",
+                        "message": database_url.error_message or database_url.error_code,
+                    }
+                ],
+            )
+        )
+        return 2
+
     source, source_blockers = _source_preflight(node22_source.url)
     if source_blockers:
         _dump_json(
@@ -966,7 +1136,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.object_store_root:
         parser.error("OBJECT_STORE_ROOT or --object-store-root is required.")
-    destination, destination_blockers = _destination_preflight(args.database_url)
+    destination, destination_blockers = _destination_preflight(database_url.url)
+    destination["source"] = database_url.source
     if destination_blockers:
         _dump_json(
             _destination_forbidden_report(
@@ -982,7 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
         report = mirror_forcing(
             run_id=args.run_id,
             object_store_root=Path(args.object_store_root),
-            local_url=args.database_url,
+            local_url=database_url.url,
             node22_url=node22_source.url,
             node22_dsn_source=node22_source.source,
         )

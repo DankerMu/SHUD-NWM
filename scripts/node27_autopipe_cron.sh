@@ -63,11 +63,51 @@ if [ -f "$INGEST_ENV" ]; then
     unset N22_DSN
     unset NHMS_NODE22_DSN_SOURCE
     unset NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR
-    unset PGUSER
-    unset PGPASSWORD
+    unset PGAPPNAME
+    unset PGCHANNELBINDING
+    unset PGCLIENTENCODING
+    unset PGCONNECT_TIMEOUT
+    unset PGDATABASE
+    unset PGDATESTYLE
+    unset PGGEQO
+    unset PGGSSDELEGATION
+    unset PGGSSENCMODE
+    unset PGGSSLIB
+    unset PGHOST
+    unset PGHOSTADDR
+    unset PGKRBSRVNAME
+    unset PGLOCALEDIR
+    unset PGLOADBALANCEHOSTS
+    unset PGMAXPROTOCOLVERSION
+    unset PGMINPROTOCOLVERSION
+    unset PGOPTIONS
     unset PGPASSFILE
+    unset PGPASSWORD
+    unset PGPORT
+    unset PGREQUIREAUTH
+    unset PGREQUIREPEER
+    unset PGREQUIRESSL
     unset PGSERVICE
     unset PGSERVICEFILE
+    unset PGSSL_CERT_FILE
+    unset PGSSL_KEY_FILE
+    unset PGSSL_ROOT_CERT_FILE
+    unset PGSSLCERT
+    unset PGSSLCERTMODE
+    unset PGSSLCOMPRESSION
+    unset PGSSLCRL
+    unset PGSSLCRLDIR
+    unset PGSSLKEY
+    unset PGSSLMAXPROTOCOLVERSION
+    unset PGSSLMINPROTOCOLVERSION
+    unset PGSSLMODE
+    unset PGSSLNEGOTIATION
+    unset PGSSLROOTCERT
+    unset PGSSLSNI
+    unset PGSYSCONFDIR
+    unset PGTARGETSESSIONATTRS
+    unset PGTZ
+    unset PGUSER
   fi
   set -a
   # shellcheck disable=SC1090
