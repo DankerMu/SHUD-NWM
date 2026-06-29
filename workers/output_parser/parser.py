@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import math
 import os
@@ -38,17 +39,21 @@ class OutputParsingError(RuntimeError):
 @dataclass(frozen=True)
 class OutputParserConfig:
     object_store_root: Path | str
+    workspace_root: Path | str | None = None
     object_store_prefix: str = ""
     max_flow_m3s: float = 100_000.0
     batch_size: int = 1000
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
+        if self.workspace_root is not None:
+            object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
 
     @classmethod
     def from_env(cls) -> OutputParserConfig:
         workspace_root = os.getenv("WORKSPACE_ROOT", ".")
         return cls(
+            workspace_root=workspace_root,
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             max_flow_m3s=float(os.getenv("OUTPUT_PARSER_MAX_FLOW_M3S", "100000")),
@@ -153,7 +158,14 @@ class OutputParser:
     @classmethod
     def from_env(cls) -> OutputParser:
         config = OutputParserConfig.from_env()
-        return cls(config=config, repository=PsycopgOutputParserRepository.from_env())
+        object_store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        if _db_free_output_parser_enabled():
+            return cls(
+                config=config,
+                repository=FileOutputParserRepository(config=config, object_store=object_store),
+                object_store=object_store,
+            )
+        return cls(config=config, repository=PsycopgOutputParserRepository.from_env(), object_store=object_store)
 
     def parse_run(self, run_id: str) -> OutputParsingResult:
         context = self.repository.load_run_context(run_id)
@@ -231,6 +243,163 @@ class OutputParser:
         if not candidates:
             raise OutputParsingError("RIVQDOWN_NOT_FOUND", f"No .rivqdown file found under {output_uri}")
         return candidates[0]
+
+
+@dataclass
+class FileOutputParserRepository:
+    config: OutputParserConfig
+    object_store: LocalObjectStore
+    _manifest_by_run_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _manifest_by_river_network: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _last_rows_written: dict[str, int] = field(default_factory=dict)
+    _last_qc_uri: dict[str, str] = field(default_factory=dict)
+    _last_timeseries_uri: dict[str, str] = field(default_factory=dict)
+
+    def load_run_context(self, run_id: str) -> HydroRunContext:
+        manifest = self._load_run_manifest(run_id)
+        identity = _mapping(manifest.get("identity"))
+        model = _mapping(manifest.get("model"))
+        outputs = _mapping(manifest.get("outputs"))
+        run_type = str(manifest.get("run_type") or "forecast")
+        cycle_time_value = manifest.get("cycle_time") or identity.get("cycle_time")
+        cycle_time = _parse_time(cycle_time_value) if cycle_time_value not in (None, "") else None
+        if cycle_time is None and run_type != "analysis":
+            raise OutputParsingError("CYCLE_TIME_MISSING", f"hydro_run {run_id} has no cycle_time.")
+        context = HydroRunContext(
+            run_id=str(manifest.get("run_id") or identity.get("run_id") or run_id),
+            model_id=str(model.get("model_id") or identity.get("model_id") or ""),
+            basin_version_id=str(model.get("basin_version_id") or identity.get("basin_version_id") or ""),
+            river_network_version_id=str(
+                model.get("river_network_version_id") or identity.get("river_network_version_id") or ""
+            ),
+            source_id=manifest.get("source_id") or identity.get("source_id") or identity.get("source"),
+            cycle_id=identity.get("cycle_id"),
+            cycle_time=cycle_time,
+            start_time=_parse_time(manifest.get("start_time") or identity.get("start_time")),
+            output_uri=outputs.get("output_uri") or manifest.get("output_uri"),
+            run_type=run_type,
+            scenario_id=manifest.get("scenario_id") or identity.get("scenario_id"),
+        )
+        for field_name, value in (
+            ("model_id", context.model_id),
+            ("basin_version_id", context.basin_version_id),
+            ("river_network_version_id", context.river_network_version_id),
+        ):
+            if value == "":
+                raise OutputParsingError("RUN_CONTEXT_INCOMPLETE", f"DB-free run manifest is missing {field_name}.")
+        self._manifest_by_run_id[context.run_id] = manifest
+        self._manifest_by_river_network[context.river_network_version_id] = manifest
+        return context
+
+    def load_river_segments(self, river_network_version_id: str) -> tuple[RiverSegmentOrder, ...]:
+        manifest = self._manifest_by_river_network.get(river_network_version_id)
+        if manifest is None:
+            raise OutputParsingError(
+                "RUN_CONTEXT_MISSING",
+                "DB-free output parser must load run context before river segments.",
+            )
+        model = _mapping(manifest.get("model"))
+        identity = _mapping(manifest.get("identity"))
+        model_id = str(model.get("model_id") or identity.get("model_id") or "")
+        model_package_uri = str(model.get("model_package_uri") or identity.get("model_package_uri") or "")
+        project_name = str(model.get("project_name") or model.get("shud_input_name") or "")
+        if not model_id or not model_package_uri:
+            raise OutputParsingError(
+                "MODEL_PACKAGE_CONTEXT_MISSING",
+                "DB-free output parser requires model_id and model_package_uri in the run manifest.",
+            )
+        riv_path = self._resolve_model_riv_path(model_package_uri, project_name)
+        return tuple(
+            RiverSegmentOrder(
+                river_segment_id=f"{model_id}_shud_riv_{index:06d}",
+                river_network_version_id=river_network_version_id,
+                segment_order=index,
+            )
+            for index in _read_shud_riv_indices(riv_path)
+        )
+
+    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+        del batch_size
+        if not rows:
+            return
+        run_id = rows[0].run_id
+        payload = "\n".join(json.dumps(_timeseries_row_payload(row), sort_keys=True) for row in rows) + "\n"
+        uri = self.object_store.write_bytes_atomic(f"runs/{run_id}/output/parsed/q_down.jsonl", payload.encode("utf-8"))
+        self._last_rows_written[run_id] = len(rows)
+        self._last_timeseries_uri[run_id] = uri
+
+    def insert_qc_result(self, record: QCResultRecord) -> dict[str, Any]:
+        payload = _qc_result_payload(record)
+        uri = self.object_store.write_bytes_atomic(
+            f"runs/{record.run_id}/output/parsed/qc_result.json",
+            json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"),
+        )
+        self._last_qc_uri[record.run_id] = uri
+        return {"uri": uri, **payload}
+
+    def mark_run_parsed(self, run_id: str) -> dict[str, Any]:
+        payload = {
+            "run_id": run_id,
+            "status": "parsed",
+            "rows_written": self._last_rows_written.get(run_id, 0),
+            "timeseries_uri": self._last_timeseries_uri.get(run_id),
+            "qc_result_uri": self._last_qc_uri.get(run_id),
+            "parsed_at": _format_time(datetime.now(UTC)),
+            "repository": "file",
+        }
+        uri = self.object_store.write_bytes_atomic(
+            f"runs/{run_id}/output/parsed/parse_result.json",
+            json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"),
+        )
+        return {"uri": uri, **payload}
+
+    def mark_run_failed(self, run_id: str, error_code: str, error_message: str) -> dict[str, Any]:
+        payload = {
+            "run_id": run_id,
+            "status": "failed",
+            "error_code": error_code,
+            "error_message": error_message,
+            "failed_at": _format_time(datetime.now(UTC)),
+            "repository": "file",
+        }
+        uri = self.object_store.write_bytes_atomic(
+            f"runs/{run_id}/output/parsed/parse_result.json",
+            json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"),
+        )
+        return {"uri": uri, **payload}
+
+    @contextmanager
+    def transaction(self) -> Iterator[FileOutputParserRepository]:
+        yield self
+
+    def _load_run_manifest(self, run_id: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.object_store.read_bytes(f"runs/{run_id}/input/manifest.json").decode("utf-8"))
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            return payload
+        workspace_root = self.config.workspace_root
+        if workspace_root is not None:
+            path = Path(workspace_root) / "runs" / run_id / "input" / "manifest.json"
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return payload
+        raise OutputParsingError("RUN_MANIFEST_NOT_FOUND", f"DB-free run manifest not found for {run_id}.")
+
+    def _resolve_model_riv_path(self, model_package_uri: str, project_name: str) -> Path:
+        package_path = self.object_store.resolve_path(model_package_uri)
+        if not package_path.exists() or not package_path.is_dir():
+            raise OutputParsingError("MODEL_PACKAGE_NOT_FOUND", f"model package not found: {model_package_uri}")
+        candidates: list[Path] = []
+        if project_name:
+            candidates.append(package_path / f"{project_name}.sp.riv")
+        candidates.extend(sorted(package_path.glob("*.sp.riv")))
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        raise OutputParsingError("MODEL_RIVER_FILE_NOT_FOUND", f"No *.sp.riv file found under {model_package_uri}")
 
 
 def parse_rivqdown_file(
@@ -906,6 +1075,81 @@ def _qc_row(row: RiverTimeseriesRow) -> dict[str, Any]:
         "valid_time": _format_time(row.valid_time),
         "value": row.value,
     }
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _parse_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if value in (None, ""):
+        raise OutputParsingError("TIME_MISSING", "Required time value is missing from DB-free run manifest.")
+    try:
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError as error:
+        raise OutputParsingError("INVALID_TIME_VALUE", f"Invalid manifest time value: {value!r}") from error
+
+
+def _read_shud_riv_indices(path: Path) -> tuple[int, ...]:
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 3:
+        raise OutputParsingError("MODEL_RIVER_FILE_EMPTY", f"SHUD river file is empty or incomplete: {path}")
+    indices: list[int] = []
+    for line_number, line in enumerate(lines[2:], start=3):
+        tokens = _split_row(line)
+        token = tokens[0] if tokens else ""
+        try:
+            index = int(token)
+        except ValueError as error:
+            raise OutputParsingError(
+                "MODEL_RIVER_FILE_MALFORMED",
+                f"Invalid SHUD river index on line {line_number}: {token!r}",
+            ) from error
+        if index <= 0:
+            raise OutputParsingError("MODEL_RIVER_FILE_MALFORMED", f"SHUD river index must be positive: {index}")
+        indices.append(index)
+    if not indices:
+        raise OutputParsingError("MODEL_RIVER_FILE_EMPTY", f"No SHUD river rows found in {path}")
+    return tuple(indices)
+
+
+def _timeseries_row_payload(row: RiverTimeseriesRow) -> dict[str, Any]:
+    return {
+        "run_id": row.run_id,
+        "basin_version_id": row.basin_version_id,
+        "river_network_version_id": row.river_network_version_id,
+        "river_segment_id": row.river_segment_id,
+        "valid_time": _format_time(row.valid_time),
+        "lead_time_hours": row.lead_time_hours,
+        "variable": row.variable,
+        "value": row.value,
+        "unit": row.unit,
+        "quality_flag": row.quality_flag,
+    }
+
+
+def _qc_result_payload(record: QCResultRecord) -> dict[str, Any]:
+    return {
+        "qc_checkpoint": record.qc_checkpoint,
+        "target_type": record.target_type,
+        "target_id": record.target_id,
+        "run_id": record.run_id,
+        "cycle_id": record.cycle_id,
+        "passed": record.passed,
+        "severity": record.severity,
+        "checks_json": record.checks_json,
+        "message": record.message,
+    }
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _db_free_output_parser_enabled() -> bool:
+    return _env_flag("NHMS_OUTPUT_PARSER_DB_FREE") or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
 
 
 def _is_float(value: str) -> bool:

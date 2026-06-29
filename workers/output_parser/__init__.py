@@ -1,4 +1,5 @@
 from .parser import (
+    FileOutputParserRepository,
     HydroRunContext,
     OutputParser,
     OutputParserConfig,
@@ -11,6 +12,7 @@ from .parser import (
 
 __all__ = [
     "HydroRunContext",
+    "FileOutputParserRepository",
     "OutputParser",
     "OutputParserConfig",
     "OutputParsingError",

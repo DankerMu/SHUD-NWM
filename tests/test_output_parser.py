@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,86 @@ def test_reparse_replaces_stale_timeseries_window(tmp_path: Path) -> None:
     assert len(repository.rows) == 1
     assert _row_key("seg_a", "2026-05-01T00:00:00Z") not in repository.rows
     assert repository.rows[_row_key("seg_a", "2026-05-01T01:00:00Z")].value == pytest.approx(2.0)
+
+
+def test_output_parser_from_env_requires_database_url_without_db_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("NHMS_OUTPUT_PARSER_DB_FREE", raising=False)
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        OutputParser.from_env()
+
+    assert exc_info.value.error_code == "DATABASE_URL_MISSING"
+
+
+def test_output_parser_db_free_writes_object_store_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    model_package = object_root / "models" / "model_001" / "v1" / "package"
+    model_package.mkdir(parents=True)
+    (model_package / "demo.sp.riv").write_text(
+        "2\t6\n"
+        "Index\tDown\tType\tSlope\tLength\tBC\n"
+        "1\t2\t2\t0.1\t100\t0\n"
+        "2\t0\t2\t0.2\t200\t0\n",
+        encoding="utf-8",
+    )
+    output_dir = object_root / "runs" / "run_001" / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / "demo.rivqdown").write_text(
+        "time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "run_id": "run_001",
+        "run_type": "forecast",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-01T00:00:00Z",
+        "start_time": "2026-05-01T00:00:00Z",
+        "model": {
+            "model_id": "model_001",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "rivnet_v1",
+            "model_package_uri": "s3://nhms/models/model_001/v1/package/",
+            "project_name": "demo",
+        },
+        "outputs": {
+            "output_uri": "s3://nhms/runs/run_001/output/",
+        },
+        "identity": {"cycle_id": "gfs_2026050100"},
+    }
+    manifest_path = object_root / "runs" / "run_001" / "input" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    parser = OutputParser.from_env()
+    result = parser.parse_run("run_001")
+
+    assert result.status == "parsed"
+    assert result.rows_written == 2
+    q_down_path = object_root / "runs" / "run_001" / "output" / "parsed" / "q_down.jsonl"
+    rows = [line for line in q_down_path.read_text(encoding="utf-8").splitlines() if line]
+    payloads = [json.loads(line) for line in rows]
+    assert [row["river_segment_id"] for row in payloads] == [
+        "model_001_shud_riv_000001",
+        "model_001_shud_riv_000002",
+    ]
+    assert payloads[0]["value"] == pytest.approx(1.0)
+    parse_result = json.loads(
+        (object_root / "runs" / "run_001" / "output" / "parsed" / "parse_result.json").read_text(encoding="utf-8")
+    )
+    assert parse_result["status"] == "parsed"
+    assert parse_result["rows_written"] == 2
 
 
 def test_s3_output_uri_must_match_configured_bucket_and_prefix(tmp_path: Path) -> None:
