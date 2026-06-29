@@ -324,6 +324,8 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
 ) -> None:
     monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
     monkeypatch.setenv("NHMS_NODE22_DSN_SOURCE", "cli:--node22-url")
+    monkeypatch.setenv("PGHOSTADDR", "127.0.0.99")
+    monkeypatch.setenv("PGSERVICEFILE", "/tmp/unsafe-pg-service.conf")
     monkeypatch.setenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
     mirror_envs: list[dict[str, str]] = []
 
@@ -352,6 +354,8 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
     assert rc == 0
     assert len(mirror_envs) == 1
     assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "env:N22_DSN"
+    assert "PGHOSTADDR" not in mirror_envs[0]
+    assert "PGSERVICEFILE" not in mirror_envs[0]
     assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
 
 
@@ -562,6 +566,61 @@ def test_configured_mirror_rc2_skip_and_nonzero_failure_are_run_isolated(
     assert details[RUN_A]["forcing_stage"]["reason_codes"] == ["FORCING_NOT_ON_NODE22"]
     assert details[RUN_B]["outcome"] == "failed"
     assert details[RUN_B]["forcing_stage"]["reason_codes"] == ["NODE22_TRANSITIONAL_MIRROR_FAILED"]
+
+
+def test_configured_mirror_rc2_failed_payload_is_run_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
+    monkeypatch.setenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def handler(argv: list[str], _env: dict[str, str]) -> tuple[int, str, str]:
+        command = " ".join(argv)
+        if "node27_ingest_run.py" in command:
+            return 0, "{}", ""
+        if "node27_mirror_forcing.py" in command:
+            return (
+                2,
+                json.dumps(
+                    {
+                        "failed": True,
+                        "reason": "NODE22_TRANSITIONAL_MIRROR_DSN_ENDPOINT_NOT_ARCHIVED_NODE22",
+                        "blockers": [
+                            {
+                                "code": "NODE22_TRANSITIONAL_MIRROR_DSN_ENDPOINT_NOT_ARCHIVED_NODE22",
+                                "env_var": "N22_DSN",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {argv}")
+
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: False},
+        command_handler=handler,
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert _command_kinds(calls) == ["register", "mirror"]
+    assert published_calls == []
+    detail = summary["runs"]["details"][0]
+    assert detail["outcome"] == "failed"
+    assert detail["stage"] == "forcing_handoff"
+    assert detail["forcing_stage"]["status"] == "failed"
+    assert detail["forcing_stage"]["reason_codes"] == [
+        "NODE22_TRANSITIONAL_MIRROR_DSN_ENDPOINT_NOT_ARCHIVED_NODE22"
+    ]
+    assert summary["runs"]["failed"] == 1
+    assert summary["return_code"] == 1
 
 
 def test_parse_and_coverage_failures_preserve_forcing_evidence_and_isolation(

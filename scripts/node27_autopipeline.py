@@ -67,6 +67,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.redaction import redact_payload, redact_text
 from scripts.node27_mirror_forcing import (
+    LIBPQ_CONNECTION_ENV_KEYS,
     NODE22_MIRROR_FAILED_REASON,
     TRANSITIONAL_MIRROR_MODE,
 )
@@ -964,6 +965,8 @@ def _process_forcing_stage(
     # child environment, allow-flagged, and sunset-bound after object-store
     # forcing-domain handoff covers old pre-contract runs. Never pass raw DSN argv.
     mirror_env = dict(env)
+    for key in LIBPQ_CONNECTION_ENV_KEYS:
+        mirror_env.pop(key, None)
     mirror_env["N22_DSN"] = mirror_dsn.url or ""
     mirror_env["NHMS_NODE22_DSN_SOURCE"] = mirror_dsn.source or "env:N22_DSN"
     mirror = [PY, str(REPO_ROOT / "scripts" / "node27_mirror_forcing.py"), "--run-id", run_id]
@@ -972,6 +975,16 @@ def _process_forcing_stage(
     payload = _last_json(out) or {}
     if rc == 2:
         reason = payload.get("reason", "FORCING_NOT_ON_NODE22")
+        if payload.get("failed") is True or payload.get("blockers"):
+            return {
+                "outcome": "failed",
+                "stage": FORCING_STAGE,
+                "forcing_stage": _forcing_stage_from_mirror(
+                    {**payload, "reason": reason},
+                    status="failed",
+                ),
+                "error": reason,
+            }
         return {
             "outcome": "skipped",
             "stage": FORCING_STAGE,

@@ -2416,15 +2416,9 @@ def _topology_context_is_pre_cutover_historical_evidence(context: str) -> bool:
             "historical pre-cutover evidence only",
         )
     )
-    has_current_action = any(
-        token in normalized
-        for token in (
-            "current production db checks should use",
-            "current production state checks",
-            "current checks should use",
-            "use node-22 local postgresql",
-            "connect to node-22 local postgresql",
-        )
+    has_current_action = (
+        _topology_context_has_current_node22_local_postgres_use(normalized)
+        or _topology_context_has_node22_local_postgres_use_action(normalized)
     )
     return has_pre_cutover_marker and has_not_yet_retired_state and not has_current_action
 

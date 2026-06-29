@@ -43,6 +43,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,34 @@ DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
         "sslmode",
     }
 )
+LIBPQ_CONNECTION_ENV_KEYS = frozenset(
+    {
+        "PGCHANNELBINDING",
+        "PGCONNECT_TIMEOUT",
+        "PGDATABASE",
+        "PGHOST",
+        "PGHOSTADDR",
+        "PGLOADBALANCEHOSTS",
+        "PGOPTIONS",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGREQUIRESSL",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSL_CERT_FILE",
+        "PGSSL_KEY_FILE",
+        "PGSSL_ROOT_CERT_FILE",
+        "PGSSLCRL",
+        "PGSSLCERT",
+        "PGSSLKEY",
+        "PGSSLMODE",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+    }
+)
+LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON = "LIBPQ_AMBIENT_ENV_FORBIDDEN"
 TRANSITIONAL_MIRROR_MODE = "archived_node22_rollback_forcing_mirror"
 TRANSITIONAL_MIRROR_PURPOSE = "compatibility_only"
 ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV = "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR"
@@ -184,6 +213,21 @@ def _database_username_class(username: str | None) -> str:
     if "display" in normalized or "readonly" in normalized or normalized.endswith("_ro") or normalized.endswith("ro"):
         return "display_readonly_like"
     return "writer_candidate"
+
+
+def _ambient_libpq_env_blockers(env: Mapping[str, str] | None = None) -> list[dict[str, str]]:
+    source = os.environ if env is None else env
+    blockers: list[dict[str, str]] = []
+    for key in sorted(LIBPQ_CONNECTION_ENV_KEYS):
+        if (source.get(key) or "").strip():
+            blockers.append(
+                {
+                    "code": LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+                    "env_var": key,
+                    "message": f"{key} must be unset so explicit DSNs cannot be overridden by libpq ambient state.",
+                }
+            )
+    return blockers
 
 
 def _dsn_query_blockers(
@@ -586,6 +630,24 @@ def _source_forbidden_report(
     )
 
 
+def _ambient_libpq_env_forbidden_report(
+    run_id: str,
+    *,
+    dsn_source: str,
+    blockers: list[dict[str, str]],
+) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "failed": True,
+            "reason": LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+            "detail": "Ambient libpq connection environment must be unset for archived rollback mirror execution.",
+            "blockers": blockers,
+        },
+        dsn_source=dsn_source,
+    )
+
+
 def _dump_json(payload: dict[str, Any]) -> None:
     json.dump(redact_payload(payload), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
@@ -877,6 +939,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not _archived_rollback_mirror_allowed(args.allow_archived_node22_db_rollback_mirror):
         _dump_json(_rollback_mirror_not_allowed_report(args.run_id, dsn_source=node22_source.source))
+        return 2
+
+    ambient_blockers = _ambient_libpq_env_blockers()
+    if ambient_blockers:
+        _dump_json(
+            _ambient_libpq_env_forbidden_report(
+                args.run_id,
+                dsn_source=node22_source.source,
+                blockers=ambient_blockers,
+            )
+        )
         return 2
 
     source, source_blockers = _source_preflight(node22_source.url)

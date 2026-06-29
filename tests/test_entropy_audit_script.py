@@ -4829,6 +4829,30 @@ def test_entropy_audit_topology_guardrails_reject_negated_archived_stopped_bound
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
+@pytest.mark.parametrize("action", ["query :55433", "connect to :55433", "read :55433"])
+def test_entropy_audit_topology_guardrails_reject_current_actions_inside_pre_cutover_context(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    _write(
+        tmp_path / "openspec/changes/node22-db-free-scheduler-state/design.md",
+        f"""
+        Initial context before #836/#837: the historical do-not-connect node-22
+        PostgreSQL `:55433` rollback listener was not yet archived/stopped only
+        because the scheduler still used it for lock/state/model reads.
+
+        Current operator steps should {action} for production state checks.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("openspec/changes/node22-db-free-scheduler-state/design.md", 5)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
 def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical_banner(
     tmp_path: Path,
 ) -> None:

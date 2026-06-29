@@ -9,6 +9,12 @@ import scripts.node27_mirror_forcing as mirror
 NODE22_ROLLBACK_DSN = "postgresql://n22_user:n22-secret@210.77.77.22:55433/nhms"
 
 
+@pytest.fixture(autouse=True)
+def _clear_libpq_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in mirror.LIBPQ_CONNECTION_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_missing_explicit_node22_dsn_returns_skip_without_display_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -172,6 +178,35 @@ def test_non_archived_node22_source_dsn_blocks_before_connection(
     }
     rendered = json.dumps(payload)
     assert "n22-secret" not in rendered
+
+
+@pytest.mark.parametrize("env_var", ["PGHOSTADDR", "PGSERVICEFILE"])
+def test_ambient_libpq_env_blocks_before_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+    env_var: str,
+) -> None:
+    monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    monkeypatch.setenv(env_var, "127.0.0.99" if env_var == "PGHOSTADDR" else "/tmp/pg_service.conf")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("ambient libpq env must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(["--run-id", "run-ambient-libpq", "--object-store-root", str(tmp_path)])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON
+    assert {blocker["env_var"] for blocker in payload["blockers"]} == {env_var}
+    rendered = json.dumps(payload)
+    assert "n22-secret" not in rendered
+    assert "127.0.0.99" not in rendered
+    assert "/tmp/pg_service.conf" not in rendered
 
 
 def test_historical_node22_destination_database_url_blocks_before_connection(
