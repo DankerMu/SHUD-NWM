@@ -9,6 +9,7 @@ from services.orchestrator.scheduler_state_evidence_owner import _candidate_stat
 from services.orchestrator.scheduler_state_failure import (
     _cancelled_state_evidence,
     _canonical_downstream_stage,
+    _completed_upstream_stage_retry_evidence,
     _downstream_retry_evidence,
     _manual_retry_state_evidence,
     _missing_raw_manifest_repair_evidence,
@@ -125,6 +126,10 @@ def _candidate_state_decision(
                 "publish_resubmitted": False,
             },
         )
+
+    completed_stage_retry = _completed_upstream_stage_retry_evidence(candidate, decision_state, evidence)
+    if completed_stage_retry is not None:
+        return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 
     if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
         candidate,

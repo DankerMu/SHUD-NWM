@@ -114,6 +114,9 @@ def _candidate_state_evidence(candidate: SchedulerCandidateLike, state: Mapping[
     repaired_stage = state.get("repaired_stage_evidence")
     if isinstance(repaired_stage, Mapping):
         evidence["repaired_stage_evidence"] = _evidence_safe(dict(repaired_stage))
+    completed_stage = state.get("completed_stage_evidence")
+    if isinstance(completed_stage, Mapping):
+        evidence["completed_stage_evidence"] = _evidence_safe(dict(completed_stage))
     source_cycle_repair = state.get("source_cycle_repair_evidence")
     if isinstance(source_cycle_repair, Mapping):
         evidence["source_cycle_repair_evidence"] = _evidence_safe(dict(source_cycle_repair))

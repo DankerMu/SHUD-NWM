@@ -56,6 +56,7 @@ SCHEDULER_STATE_COMPAT_REEXPORT_NAMES = (
     "_coerce_int",
     "_coerce_mapping_for_state",
     "_coerce_optional_nonnegative_int",
+    "_completed_upstream_stage_retry_evidence",
     "_downstream_failure_restartable",
     "_downstream_retry_evidence",
     "_durable_shud_output_exists",

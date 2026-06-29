@@ -269,6 +269,49 @@ def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
         return False
     return True
 
+
+def _completed_upstream_stage_retry_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    completed_stage = state.get("completed_stage_evidence")
+    if not isinstance(completed_stage, Mapping):
+        return None
+    restart_stage = _canonical_downstream_stage(
+        str(
+            state.get("restart_stage")
+            or state.get("restart_from_stage")
+            or completed_stage.get("restart_stage")
+            or completed_stage.get("restart_from_stage")
+            or ""
+        )
+    )
+    if restart_stage is None:
+        return None
+    if _state_has_failure_signal(state):
+        return None
+    return {
+        **base_evidence,
+        "decision": "retry_after_completed_stage",
+        "reason": "resume_after_completed_stage",
+        "restart_stage": restart_stage,
+        "restart_from_stage": restart_stage,
+        "native_shud_resubmitted": restart_stage == "forecast",
+        "completed_stage_evidence": _evidence_safe(dict(completed_stage)),
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "attempt": _state_retry_attempt(state),
+            "retry_limit": _state_retry_limit(state),
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
 def _missing_raw_manifest_repair_evidence(
     candidate: SchedulerCandidateLike,
     state: Mapping[str, Any],

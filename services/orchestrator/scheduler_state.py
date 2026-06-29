@@ -38,6 +38,7 @@ from services.orchestrator.scheduler_state_evidence_owner import (  # noqa: F401
 from services.orchestrator.scheduler_state_failure import (  # noqa: F401
     _cancelled_state_evidence,
     _canonical_downstream_stage,
+    _completed_upstream_stage_retry_evidence,
     _downstream_failure_restartable,
     _downstream_retry_evidence,
     _durable_shud_output_exists,

@@ -5985,6 +5985,126 @@ def test_psycopg_candidate_state_source_cycle_multihop_retry_repairs_failed_ance
     assert successful_retry_job["repairs_job_ids"] == [original_job_id, failed_retry_job_id]
 
 
+def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -> None:
+    from services.orchestrator.chain_repository_state import candidate_state_from_rows
+    from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+
+    failed_job_id = "job_cycle_gfs_2026050100_forcing_model_b_forcing_retry_1"
+    retry_job_id = "cycle_gfs_2026050100_forcing_model_b_retry_2"
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    state = candidate_state_from_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        hydro_run=None,
+        forcing_version=None,
+        forecast_cycle={
+            "cycle_id": "gfs_2026050100",
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "status": "failed_forcing",
+            "error_code": "SLURM_JOB_FAILED",
+            "error_message": "old aggregate failure",
+        },
+        pipeline_jobs=[
+            {
+                "job_id": failed_job_id,
+                "run_id": "cycle_gfs_2026050100_forcing_model_b",
+                "cycle_id": "gfs_2026050100",
+                "job_type": "produce_forcing_array",
+                "stage": "forcing",
+                "model_id": "model_b",
+                "status": "permanently_failed",
+                "slurm_job_id": "6101",
+                "retry_count": 1,
+                "error_code": "SLURM_JOB_FAILED",
+                "created_at": "2026-05-01T00:00:00Z",
+                "updated_at": "2026-05-01T00:20:00Z",
+            },
+            {
+                "job_id": retry_job_id,
+                "run_id": "cycle_gfs_2026050100_forcing_model_b",
+                "cycle_id": "gfs_2026050100",
+                "job_type": "produce_forcing_array",
+                "stage": "forcing",
+                "model_id": "model_b",
+                "status": "succeeded",
+                "slurm_job_id": "6102",
+                "retry_count": 2,
+                "manual_retry_marker": True,
+                "previous_job_id": failed_job_id,
+                "created_at": "2026-05-01T00:30:00Z",
+                "updated_at": "2026-05-01T00:45:00Z",
+            },
+        ],
+        pipeline_events=[
+            {
+                "event_id": 30,
+                "entity_type": "pipeline_job",
+                "entity_id": failed_job_id,
+                "event_type": "status_change",
+                "status_from": "submitted",
+                "status_to": "permanently_failed",
+                "created_at": "2026-05-01T00:20:00Z",
+                "details": {"error_code": "SLURM_JOB_FAILED", "stage": "forcing"},
+            },
+            {
+                "event_id": 31,
+                "entity_type": "pipeline_job",
+                "entity_id": retry_job_id,
+                "event_type": "retry",
+                "status_from": "permanently_failed",
+                "status_to": "pending",
+                "created_at": "2026-05-01T00:30:00Z",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "previous_job_id": failed_job_id,
+                    "retry_count": 2,
+                    "stage": "forcing",
+                    "job_type": "produce_forcing_array",
+                },
+            },
+        ],
+        retry_limit=3,
+    )
+
+    assert state is not None
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["error_code"] is None
+    assert state["restart_stage"] == "forecast"
+    assert state["completed_stage_evidence"]["stage"] == "forcing"
+    failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == failed_job_id)
+    retry_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == retry_job_id)
+    assert failed_job["repair_status"] == "repaired"
+    assert failed_job["active_blocker"] is False
+    assert retry_job["repair_status"] == "repair_succeeded"
+
+    candidate = types.SimpleNamespace(
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        cycle_time_utc=cycle_time,
+        model_id="model_b",
+        basin_id="basin_b",
+        basin_version_id="basin_v1",
+        river_network_version_id="river_v1",
+        scenario_id="forecast_gfs_deterministic",
+        resource_profile={},
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+    )
+    decision = _candidate_state_decision(candidate, state)
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_after_completed_stage"
+    assert decision.evidence["restart_stage"] == "forecast"
+
+
 def test_psycopg_candidate_state_prefixed_s3_manifest_repairs_stale_failed_source_cycle() -> None:
     state = _source_cycle_retry_state(
         jobs=[

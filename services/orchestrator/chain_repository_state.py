@@ -10,6 +10,7 @@ DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+_FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc", "frequency", "publish")
 _bounded_candidate_state_event = chain_source_cycle._bounded_candidate_state_event
 _candidate_failed_task_from_events = chain_source_cycle._candidate_failed_task_from_events
 _datetime_sort_key = chain_source_cycle._datetime_sort_key
@@ -21,6 +22,233 @@ _pipeline_job_truth_sort_key = chain_source_cycle._pipeline_job_truth_sort_key
 _source_cycle_download_repair_state = chain_source_cycle._source_cycle_download_repair_state
 _source_cycle_repair_evidence = chain_source_cycle._source_cycle_repair_evidence
 _successful_sibling_task_count = chain_source_cycle._successful_sibling_task_count
+_coerce_int = chain_source_cycle._coerce_int
+
+
+def _stage_after(stage: str | None) -> str | None:
+    if stage not in _FORECAST_STAGE_ORDER:
+        return None
+    index = _FORECAST_STAGE_ORDER.index(stage)
+    if index + 1 >= len(_FORECAST_STAGE_ORDER):
+        return None
+    return _FORECAST_STAGE_ORDER[index + 1]
+
+
+def _manual_retry_previous_job_ids(events: list[dict[str, Any]]) -> dict[str, tuple[str, dict[str, Any]]]:
+    previous: dict[str, tuple[str, dict[str, Any]]] = {}
+    for event in events:
+        if event.get("event_type") not in {"retry", "manual_retry"}:
+            continue
+        entity_id = str(event.get("entity_id") or "")
+        if not entity_id:
+            continue
+        details = event.get("details")
+        if not isinstance(details, Mapping):
+            continue
+        previous_job_id = details.get("previous_job_id") or details.get("failed_job_id")
+        if previous_job_id in (None, ""):
+            continue
+        previous[entity_id] = (str(previous_job_id), event)
+    return previous
+
+
+def _manual_retry_event_for_job(job_id: str, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    matches = [
+        event
+        for event in events
+        if str(event.get("entity_id") or "") == job_id and event.get("event_type") in {"retry", "manual_retry"}
+    ]
+    if not matches:
+        return None
+    return max(
+        matches,
+        key=lambda event: (
+            _datetime_sort_key(event.get("created_at")),
+            _numeric_sort_key(event.get("event_id")),
+        ),
+    )
+
+
+def _job_stage_key(job: Mapping[str, Any]) -> tuple[str, str]:
+    return str(job.get("stage") or ""), str(job.get("job_type") or "")
+
+
+def _jobs_share_stage(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_stage, left_type = _job_stage_key(left)
+    right_stage, right_type = _job_stage_key(right)
+    return bool((left_stage and left_stage == right_stage) or (left_type and left_type == right_type))
+
+
+def _linked_manual_retry_chain(
+    retry_job: Mapping[str, Any],
+    *,
+    jobs_by_id: Mapping[str, Mapping[str, Any]],
+    previous_by_job_id: Mapping[str, tuple[str, dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    chain: list[dict[str, Any]] = []
+    event: dict[str, Any] | None = None
+    seen = {str(retry_job.get("job_id") or "")}
+    current = retry_job
+    for _ in range(16):
+        previous_job_id = current.get("previous_job_id")
+        current_event = None
+        current_job_id = str(current.get("job_id") or "")
+        if previous_job_id in (None, "") and current_job_id in previous_by_job_id:
+            previous_job_id, current_event = previous_by_job_id[current_job_id]
+        if previous_job_id in (None, ""):
+            break
+        previous_job_id = str(previous_job_id)
+        if previous_job_id in seen:
+            break
+        previous = jobs_by_id.get(previous_job_id)
+        if previous is None or not _jobs_share_stage(retry_job, previous):
+            break
+        seen.add(previous_job_id)
+        chain.append(dict(previous))
+        if current_event is not None:
+            event = current_event
+        current = previous
+    return chain, event
+
+
+def _annotated_manual_stage_repair_jobs(
+    jobs: list[dict[str, Any]],
+    repaired_by_failed_job_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not repaired_by_failed_job_id:
+        return None
+    repaired_failed_ids_by_retry_job_id: dict[str, list[str]] = {}
+    for repair in sorted(
+        repaired_by_failed_job_id.values(),
+        key=lambda item: _pipeline_job_truth_sort_key(item["failed_job"]),
+    ):
+        retry_job_id = str(repair["retry_job"].get("job_id") or "")
+        failed_job_id = str(repair["failed_job"].get("job_id") or "")
+        if retry_job_id and failed_job_id:
+            repaired_failed_ids_by_retry_job_id.setdefault(retry_job_id, []).append(failed_job_id)
+    annotated: list[dict[str, Any]] = []
+    changed = False
+    for job in jobs:
+        payload = dict(job)
+        job_id = str(payload.get("job_id") or "")
+        repair = repaired_by_failed_job_id.get(job_id)
+        if repair is not None:
+            retry_job_id = str(repair["retry_job"].get("job_id") or "")
+            payload["repair_status"] = "repaired"
+            payload["superseded_by_job_id"] = retry_job_id
+            payload["repaired_by_job_id"] = retry_job_id
+            payload["active_blocker"] = False
+            changed = True
+        elif job_id in repaired_failed_ids_by_retry_job_id:
+            payload["repair_status"] = "repair_succeeded"
+            payload["repairs_job_id"] = repaired_failed_ids_by_retry_job_id[job_id][0]
+            payload["repairs_job_ids"] = repaired_failed_ids_by_retry_job_id[job_id]
+            changed = True
+        annotated.append(payload)
+    return annotated if changed else None
+
+
+def _manual_stage_repaired_evidence(
+    failed_job: Mapping[str, Any],
+    retry_job: Mapping[str, Any],
+    event: Mapping[str, Any] | None,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any]:
+    stage = str(retry_job.get("stage") or failed_job.get("stage") or "")
+    restart_stage = _stage_after(stage)
+    payload = {
+        "status": "repaired",
+        "repair_status": "repaired",
+        "stage": stage,
+        "job_type": str(retry_job.get("job_type") or failed_job.get("job_type") or ""),
+        "original_failed_job_id": failed_job.get("job_id"),
+        "repairing_retry_job_id": retry_job.get("job_id"),
+        "manual_retry_event_id": event.get("event_id") if isinstance(event, Mapping) else None,
+        "manual_retry_marker": True,
+        "source_id": source_id,
+        "cycle_id": cycle_id,
+        "cycle_time": cycle_time.isoformat().replace("+00:00", "Z"),
+    }
+    if restart_stage is not None:
+        payload["restart_stage"] = restart_stage
+        payload["restart_from_stage"] = restart_stage
+    return payload
+
+
+def _candidate_manual_stage_repair_state(
+    jobs: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+    run_id: str,
+    model_id: str,
+) -> dict[str, Any]:
+    candidate_jobs = [job for job in jobs if _job_belongs_to_candidate(job, run_id=run_id, model_id=model_id)]
+    if not candidate_jobs:
+        return {}
+    jobs_by_id = {str(job.get("job_id") or ""): job for job in candidate_jobs if job.get("job_id") not in (None, "")}
+    previous_by_job_id = _manual_retry_previous_job_ids(events)
+    repaired_by_failed_job_id: dict[str, dict[str, Any]] = {}
+    repair_events: dict[str, dict[str, Any] | None] = {}
+    successful_retry_jobs = [
+        job
+        for job in candidate_jobs
+        if job.get("manual_retry_marker") is True
+        and str(job.get("status") or "") in TERMINAL_PIPELINE_SUCCESS_STATUSES
+        and str(job.get("stage") or "") in _FORECAST_STAGE_ORDER
+    ]
+    for retry_job in sorted(successful_retry_jobs, key=_pipeline_job_truth_sort_key, reverse=True):
+        chain, chain_event = _linked_manual_retry_chain(
+            retry_job,
+            jobs_by_id=jobs_by_id,
+            previous_by_job_id=previous_by_job_id,
+        )
+        failed_jobs = [
+            job
+            for job in chain
+            if str(job.get("status") or "") in FAILED_PIPELINE_STATUSES
+            or (
+                str(job.get("status") or "") == "pending"
+                and job.get("slurm_job_id") in (None, "")
+                and _coerce_int(job.get("retry_count"), default=0) > 0
+            )
+        ]
+        if not failed_jobs:
+            continue
+        event = _manual_retry_event_for_job(str(retry_job.get("job_id") or ""), events) or chain_event
+        for failed_job in failed_jobs:
+            failed_job_id = str(failed_job.get("job_id") or "")
+            if failed_job_id:
+                repaired_by_failed_job_id[failed_job_id] = {"failed_job": failed_job, "retry_job": retry_job}
+                repair_events[failed_job_id] = event
+        break
+    if not repaired_by_failed_job_id:
+        return {}
+    annotated_jobs = _annotated_manual_stage_repair_jobs(jobs, repaired_by_failed_job_id)
+    latest_repair = max(
+        repaired_by_failed_job_id.values(),
+        key=lambda item: (
+            _pipeline_job_truth_sort_key(item["retry_job"]),
+            _pipeline_job_truth_sort_key(item["failed_job"]),
+        ),
+    )
+    failed_job_id = str(latest_repair["failed_job"].get("job_id") or "")
+    return {
+        "annotated_jobs": annotated_jobs,
+        "repaired_stage_evidence": _manual_stage_repaired_evidence(
+            latest_repair["failed_job"],
+            latest_repair["retry_job"],
+            repair_events.get(failed_job_id),
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        ),
+    }
 
 
 def _forecast_cycle_has_ready_raw_manifest(
@@ -337,6 +565,17 @@ def candidate_state_from_rows(
     )
     if source_cycle_download_state.get("annotated_jobs"):
         jobs = list(source_cycle_download_state["annotated_jobs"])
+    manual_stage_repair_state = _candidate_manual_stage_repair_state(
+        jobs,
+        events,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        cycle_id=cycle_id,
+        run_id=run_id,
+        model_id=model_id,
+    )
+    if manual_stage_repair_state.get("annotated_jobs"):
+        jobs = list(manual_stage_repair_state["annotated_jobs"])
     candidate_jobs = [job for job in jobs if _job_belongs_to_candidate(job, run_id=run_id, model_id=model_id)]
     failed_task = _candidate_failed_task_from_events(
         events,
@@ -375,6 +614,8 @@ def candidate_state_from_rows(
         latest_failed_job = {}
     active_source_cycle_failure = source_cycle_download_state.get("active_failure_job")
     repaired_stage_evidence = source_cycle_download_state.get("repaired_stage_evidence")
+    if not isinstance(repaired_stage_evidence, Mapping):
+        repaired_stage_evidence = manual_stage_repair_state.get("repaired_stage_evidence")
     if failed_task is None and not candidate_jobs and isinstance(active_source_cycle_failure, Mapping):
         latest_failed_job = dict(active_source_cycle_failure)
         exposed_latest_job = latest_failed_job
@@ -431,6 +672,16 @@ def candidate_state_from_rows(
     }
     if isinstance(repaired_stage_evidence, Mapping):
         state["repaired_stage_evidence"] = dict(repaired_stage_evidence)
+        restart_stage = repaired_stage_evidence.get("restart_stage")
+        if restart_stage not in (None, ""):
+            state["completed_stage_evidence"] = dict(repaired_stage_evidence)
+            state["restart_stage"] = str(restart_stage)
+            state["restart_from_stage"] = str(restart_stage)
+            state["pipeline_status"] = None
+            state["stage"] = None
+            state["failed_stage"] = None
+            state["error_code"] = None
+            state["error_message"] = None
     source_cycle_repair_evidence = _source_cycle_repair_evidence(source_cycle_download_state)
     if source_cycle_repair_evidence:
         state["source_cycle_repair_evidence"] = source_cycle_repair_evidence
