@@ -130,6 +130,15 @@ _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
 _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE = "pipeline_event_runtime_root_recovery"
 _RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT = 32
 _SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES = {"pipeline_job", "forecast_cycle"}
+_ARRAY_MANUAL_RETRY_JOB_TYPES = frozenset(
+    {
+        "hindcast",
+        "produce_forcing_array",
+        "run_shud_forecast_array",
+        "parse_output_array",
+        "compute_frequency_array",
+    }
+)
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -176,6 +185,15 @@ class FileOrchestrationJournalError(RuntimeError):
         self.reason = reason
         self.field = field
         self.evidence = dict(evidence or {})
+
+
+def _submit_file_manual_retry_job(gateway: Any, request: SubmitJobRequest) -> Any:
+    job_type = request.resolved_job_type()
+    if job_type in _ARRAY_MANUAL_RETRY_JOB_TYPES:
+        submit_job_array = getattr(gateway, "submit_job_array", None)
+        if callable(submit_job_array):
+            return submit_job_array(request)
+    return gateway.submit_job(request)
 
 
 @dataclass
@@ -2503,7 +2521,7 @@ class FileJournalRetryService:
         runtime_root_contract: dict[str, str] | None = None
         try:
             request, runtime_root_resolution, runtime_root_contract = self._manual_retry_submission_request(retry_job)
-            submitted = gateway.submit_job(request)
+            submitted = _submit_file_manual_retry_job(gateway, request)
         except Exception as error:
             if runtime_root_resolution is not None:
                 _attach_retry_runtime_root_resolution(error, runtime_root_resolution)

@@ -1403,6 +1403,57 @@ def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert
     assert gateway.requests[0].manifest["object_store_prefix"] == "s3://nhms-prod"
 
 
+def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_cycle_gfs_2026062800_forcing_forcing")
+    record.update(
+        {
+            "run_id": "cycle_gfs_2026062800_forcing_basins_qhh_shud",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "source_id": "gfs",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "model_id": "basins_qhh_shud",
+            "idempotency_key": "gfs:gfs_2026062800:forcing",
+        }
+    )
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "permanently_failed",
+        error_code="SLURM_JOB_FAILED",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.single_requests: list[Any] = []
+            self.array_requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.single_requests.append(request)
+            raise AssertionError("array job must not use the single-job endpoint")
+
+        def submit_job_array(self, request: Any) -> dict[str, Any]:
+            self.array_requests.append(request)
+            return {"job_id": "7008", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry(
+        "cycle_gfs_2026062800_forcing_basins_qhh_shud",
+        gateway,
+        trusted_internal=True,
+    )
+
+    assert retried.status == "submitted"
+    assert gateway.single_requests == []
+    assert gateway.array_requests
+    assert gateway.array_requests[0].resolved_job_type() == "produce_forcing_array"
+
+
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
     tmp_path: Path,
 ) -> None:
