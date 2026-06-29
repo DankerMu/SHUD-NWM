@@ -24,9 +24,11 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 
 REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
 CANONICAL_READINESS_INDEX_SCHEMA_VERSION = "nhms.scheduler.canonical_readiness_index.v1"
+CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION = "nhms.canonical.product_catalog.v1"
 MAX_REGISTRY_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_MODEL_PACKAGE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_READINESS_INDEX_BYTES = 16 * 1024 * 1024
+MAX_CANONICAL_PRODUCT_CATALOG_BYTES = 16 * 1024 * 1024
 MAX_REGISTRY_MODELS = 500
 MAX_READINESS_ENTRIES = 5000
 MAX_READINESS_PRODUCT_ROWS = 250000
@@ -295,10 +297,34 @@ class FileCanonicalReadinessProvider:
                 retryable=True,
             )
 
+        try:
+            products, product_source_evidence = _readiness_entry_products(
+                entry,
+                roots=self._roots,
+            )
+        except SchedulerFileProviderError as error:
+            return _file_readiness_unavailable(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                forecast_hours=forecast_hours,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+                canonical_product_id=canonical_product_id,
+                model_id=model_id,
+                basin_id=basin_id,
+                reason=error.reason,
+                index_evidence={
+                    **index_evidence,
+                    "entry_status": "catalog_unavailable",
+                    "catalog": _provider_blocker(error.reason, error.field, evidence=error.evidence),
+                },
+                retryable=True,
+            )
+
         result = evaluate_canonical_readiness(
             source_id=source_id,
             cycle_time=cycle_time,
-            products=list(entry.get("products") or []),
+            products=products,
             forecast_hours=requested_hours,
             policy_identity=policy_identity,
             source_object_identity=source_object_identity,
@@ -311,9 +337,11 @@ class FileCanonicalReadinessProvider:
             {
                 **index_evidence,
                 "entry_status": "ready",
-                "entry_product_row_count": len(entry.get("products") or []),
+                "entry_product_row_count": len(products),
+                "entry_product_source": product_source_evidence.get("source"),
                 "entry_forecast_hours": entry_hours[:200],
                 "entry_forecast_hour_count": len(entry_hours),
+                "canonical_product_catalog": product_source_evidence,
             }
         )
         return _evidence_safe(result)
@@ -733,6 +761,131 @@ def _normalize_readiness_entry(item: Mapping[str, Any], *, index: int, roots: _P
         "product_row_count": len(products),
         "object_count": object_count,
     }
+
+
+def _readiness_entry_products(
+    entry: Mapping[str, Any],
+    *,
+    roots: _ProviderRoots,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    products = list(entry.get("products") or [])
+    if products:
+        return products, {"status": "not_needed", "source": "index", "product_row_count": len(products)}
+
+    catalog_products, catalog_evidence = _readiness_products_from_catalog(entry, roots=roots)
+    if catalog_products:
+        return catalog_products, catalog_evidence
+    return products, catalog_evidence
+
+
+def _readiness_products_from_catalog(
+    entry: Mapping[str, Any],
+    *,
+    roots: _ProviderRoots,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    source_id = normalize_source_id(str(entry["source_id"]))
+    cycle_time = parse_cycle_time(entry["cycle_time"])
+    catalog_uris = _canonical_product_catalog_uris(source_id=source_id, cycle_time=cycle_time, roots=roots)
+    missing_uris: list[str] = []
+    for catalog_uri in catalog_uris:
+        try:
+            payload, content = _read_json_mapping(
+                catalog_uri,
+                roots=roots,
+                max_bytes=MAX_CANONICAL_PRODUCT_CATALOG_BYTES,
+            )
+        except SchedulerFileProviderError as error:
+            if error.reason == "file_manifest_missing":
+                missing_uris.append(_uri_evidence(catalog_uri))
+                continue
+            raise
+        products = _normalize_catalog_products(
+            payload,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            entry=entry,
+            roots=roots,
+        )
+        return products, {
+            "status": "ready",
+            "source": "catalog",
+            "schema_version": CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION,
+            "catalog": _uri_evidence(catalog_uri),
+            "catalog_bytes": len(content),
+            "product_row_count": len(products),
+        }
+    return [], {
+        "status": "missing",
+        "source": "index_empty",
+        "schema_version": CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION,
+        "catalogs_checked": missing_uris,
+        "product_row_count": 0,
+    }
+
+
+def _canonical_product_catalog_uris(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    roots: _ProviderRoots,
+) -> list[str]:
+    catalog_key = f"canonical/{source_id}/{format_cycle_time(cycle_time)}/_catalog/catalog.json"
+    uris: list[str] = []
+    object_store_prefix = str(roots.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX") or "").strip()
+    if object_store_prefix:
+        uris.append(f"{object_store_prefix.rstrip('/')}/{catalog_key}")
+    object_store_root = roots.object_store_root or os.getenv("OBJECT_STORE_ROOT")
+    if object_store_root not in (None, ""):
+        uris.append(str(Path(object_store_root).expanduser() / catalog_key))
+    if not uris:
+        uris.append(catalog_key)
+    return list(dict.fromkeys(uris))
+
+
+def _normalize_catalog_products(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    entry: Mapping[str, Any],
+    roots: _ProviderRoots,
+) -> list[dict[str, Any]]:
+    _require_schema(payload, CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION, field="schema_version")
+    payload_source = normalize_source_id(str(payload.get("source_id") or source_id))
+    if payload_source != source_id:
+        raise SchedulerFileProviderError("canonical_product_catalog_source_mismatch", field="source_id")
+    payload_cycle = parse_cycle_time(payload.get("cycle_time", cycle_time))
+    if format_cycle_time(payload_cycle) != format_cycle_time(cycle_time):
+        raise SchedulerFileProviderError("canonical_product_catalog_cycle_mismatch", field="cycle_time")
+
+    products_value = payload.get("products")
+    if not isinstance(products_value, Sequence) or isinstance(products_value, str | bytes | bytearray):
+        raise SchedulerFileProviderError("canonical_product_catalog_products_invalid", field="products")
+
+    products: list[dict[str, Any]] = []
+    policy_identity = _mapping(entry.get("policy_identity"))
+    source_object_identity = _mapping(entry.get("source_object_identity"))
+    canonical_product_id = str(entry["canonical_product_id"])
+    for product_index, product in enumerate(products_value):
+        if not isinstance(product, Mapping):
+            raise SchedulerFileProviderError(
+                "canonical_product_catalog_product_not_object",
+                field=f"products[{product_index}]",
+            )
+        products.append(
+            _normalize_product_row(
+                product,
+                index=0,
+                product_index=product_index,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                canonical_product_id=canonical_product_id,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+                roots=roots,
+            )
+        )
+    return products
 
 
 def _normalize_product_row(

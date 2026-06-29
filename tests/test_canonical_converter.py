@@ -120,7 +120,7 @@ def test_from_env_uses_no_repository_when_scheduler_db_free_required(
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
 
     def fail_db_factory() -> None:
         pytest.fail("DB-free canonical converter must not construct PsycopgMetStore")
@@ -138,7 +138,7 @@ def test_source_specific_from_env_uses_no_repository_when_canonical_db_free(
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setenv("NHMS_CANONICAL_DB_FREE", "true")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
 
     def fail_db_factory() -> None:
         pytest.fail("DB-free canonical converter must not construct PsycopgMetStore")

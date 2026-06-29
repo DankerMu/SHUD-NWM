@@ -454,6 +454,7 @@ def test_from_env_uses_file_repository_when_scheduler_requires_db_free(
         raise AssertionError("DB-free forcing must not construct PsycopgMetStore")
 
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setattr("workers.forcing_producer.producer.PsycopgMetStore.from_env", fail_database_lookup)

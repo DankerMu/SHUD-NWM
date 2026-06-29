@@ -244,10 +244,18 @@ def test_template_rendering_includes_profile_and_manifest_variables(tmp_path):
     assert "run_001 cycle_001 run_shud_forecast_array 4" in rendered
 
 
-def test_db_free_template_unsets_inherited_database_urls(monkeypatch, tmp_path):
+def test_db_free_template_exports_file_backends_without_scrubbing_database_urls(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
     monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        str(tmp_path / "object-store" / "scheduler" / "registry" / "manifest-last.json"),
+    )
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        str(tmp_path / "object-store" / "scheduler" / "canonical-readiness" / "index-last.json"),
+    )
     gateway = _production_gateway(tmp_path)
 
     rendered = gateway.render_template(
@@ -269,8 +277,17 @@ def test_db_free_template_unsets_inherited_database_urls(monkeypatch, tmp_path):
         "/tmp/index.json",
     )
 
-    assert "unset DATABASE_URL" in rendered
-    assert "unset PIPELINE_DATABASE_URL" in rendered
+    assert "unset DATABASE_URL" not in rendered
+    assert "unset PIPELINE_DATABASE_URL" not in rendered
+    assert "export NHMS_CANONICAL_DB_FREE=true" in rendered
+    assert "export NHMS_CANONICAL_REPOSITORY_BACKEND=file" in rendered
+    assert "export NHMS_FORCING_DB_FREE=true" in rendered
+    assert "export NHMS_FORCING_REPOSITORY_BACKEND=file" in rendered
+    assert "export NHMS_SCHEDULER_REGISTRY_BACKEND=file" in rendered
+    assert "export NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file" in rendered
+    assert "export NHMS_SCHEDULER_STATE_INDEX_BACKEND=file" in rendered
+    assert "export NHMS_SCHEDULER_REGISTRY_MANIFEST=" in rendered
+    assert "export NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=" in rendered
     assert "10.0.2.100" not in rendered
     assert "secret" not in rendered
 

@@ -87,7 +87,6 @@ MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
-DB_RUNTIME_ENV_KEYS = ("DATABASE_URL", "PIPELINE_DATABASE_URL")
 
 FREEFORM_STRING_FIELDS = {
     "script",
@@ -887,9 +886,42 @@ class RealSlurmGateway(SlurmGateway):
             "SHUD_THREADS": context.get("shud_threads", ""),
             "OMP_NUM_THREADS": context.get("shud_threads", ""),
         }
-        lines: list[str] = []
         if _db_free_slurm_runtime(context):
-            lines.extend(f"unset {key}" for key in DB_RUNTIME_ENV_KEYS)
+            export_fields.update(
+                {
+                    "NHMS_CANONICAL_DB_FREE": _first_nonempty(context.get("canonical_db_free"), "true"),
+                    "NHMS_CANONICAL_REPOSITORY_BACKEND": _first_nonempty(
+                        context.get("canonical_repository_backend"),
+                        "file",
+                    ),
+                    "NHMS_FORCING_DB_FREE": _first_nonempty(context.get("forcing_db_free"), "true"),
+                    "NHMS_FORCING_REPOSITORY_BACKEND": _first_nonempty(
+                        context.get("forcing_repository_backend"),
+                        "file",
+                    ),
+                    "NHMS_SCHEDULER_REGISTRY_BACKEND": _first_nonempty(
+                        context.get("scheduler_registry_backend"),
+                        "file",
+                    ),
+                    "NHMS_SCHEDULER_REGISTRY_MANIFEST": _first_nonempty(
+                        context.get("scheduler_registry_manifest"),
+                        os.getenv("NHMS_SCHEDULER_REGISTRY_MANIFEST"),
+                    ),
+                    "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND": _first_nonempty(
+                        context.get("scheduler_canonical_readiness_backend"),
+                        "file",
+                    ),
+                    "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": _first_nonempty(
+                        context.get("scheduler_canonical_readiness_index"),
+                        os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"),
+                    ),
+                    "NHMS_SCHEDULER_STATE_INDEX_BACKEND": _first_nonempty(
+                        context.get("scheduler_state_index_backend"),
+                        "file",
+                    ),
+                }
+            )
+        lines: list[str] = []
         lines.extend(f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items())
         lines.extend(_python_runtime_export_lines())
         lines.extend(_grib_runtime_export_lines())
@@ -1632,6 +1664,13 @@ def _grib_runtime_export_lines() -> list[str]:
 
 def _db_free_slurm_runtime(context: Mapping[str, Any]) -> bool:
     return _truthy(context.get("scheduler_db_free_required")) or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+
+
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return ""
 
 
 def _env_flag(name: str) -> bool:
