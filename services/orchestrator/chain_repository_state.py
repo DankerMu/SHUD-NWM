@@ -220,6 +220,23 @@ def _candidate_manual_stage_repair_state(
         ]
         if not failed_jobs:
             continue
+        linked_failed_job_ids = {str(job.get("job_id") or "") for job in failed_jobs}
+        retry_truth = _pipeline_job_truth_sort_key(retry_job)
+        for job in candidate_jobs:
+            job_id = str(job.get("job_id") or "")
+            if not job_id or job_id in linked_failed_job_ids or job_id == str(retry_job.get("job_id") or ""):
+                continue
+            if not _jobs_share_stage(retry_job, job):
+                continue
+            if _pipeline_job_truth_sort_key(job) > retry_truth:
+                continue
+            status = str(job.get("status") or "")
+            if status in FAILED_PIPELINE_STATUSES or (
+                status == "pending"
+                and job.get("slurm_job_id") in (None, "")
+                and _coerce_int(job.get("retry_count"), default=0) > 0
+            ):
+                failed_jobs.append(job)
         event = _manual_retry_event_for_job(str(retry_job.get("job_id") or ""), events) or chain_event
         for failed_job in failed_jobs:
             failed_job_id = str(failed_job.get("job_id") or "")

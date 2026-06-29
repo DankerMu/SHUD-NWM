@@ -6011,6 +6011,20 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -
         },
         pipeline_jobs=[
             {
+                "job_id": "job_cycle_gfs_2026050100_convert_model_b_forcing",
+                "run_id": "cycle_gfs_2026050100_convert_model_b",
+                "cycle_id": "gfs_2026050100",
+                "job_type": "produce_forcing_array",
+                "stage": "forcing",
+                "model_id": "model_b",
+                "status": "failed",
+                "slurm_job_id": "6099",
+                "retry_count": 0,
+                "error_code": "NODE_FAILURE",
+                "created_at": "2026-05-01T00:00:00Z",
+                "updated_at": "2026-05-01T00:10:00Z",
+            },
+            {
                 "job_id": failed_job_id,
                 "run_id": "cycle_gfs_2026050100_forcing_model_b",
                 "cycle_id": "gfs_2026050100",
@@ -6079,9 +6093,14 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -
     assert state["restart_stage"] == "forecast"
     assert state["completed_stage_evidence"]["stage"] == "forcing"
     failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == failed_job_id)
+    old_failed_job = next(
+        job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_convert_model_b_forcing"
+    )
     retry_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == retry_job_id)
     assert failed_job["repair_status"] == "repaired"
     assert failed_job["active_blocker"] is False
+    assert old_failed_job["repair_status"] == "repaired"
+    assert old_failed_job["active_blocker"] is False
     assert retry_job["repair_status"] == "repair_succeeded"
 
     candidate = types.SimpleNamespace(
