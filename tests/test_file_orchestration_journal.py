@@ -1405,11 +1405,26 @@ def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert
 
 def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    run_id = "cycle_gfs_2026062800_forcing_basins_qhh_shud"
+    tasks = [
+        {
+            "task_id": 0,
+            "run_id": "fcst_gfs_2026062800_basins_qhh_shud",
+            "model_id": "basins_qhh_shud",
+            "cycle_id": "gfs_2026062800",
+            "cycle_time": "2026062800",
+        }
+    ]
+    index_path = workspace_root / "runs" / run_id / "input" / "forcing_manifest_index.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(json.dumps(tasks), encoding="utf-8")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     record = _pipeline_reservation_record(cycle_time, job_id="job_cycle_gfs_2026062800_forcing_forcing")
     record.update(
         {
-            "run_id": "cycle_gfs_2026062800_forcing_basins_qhh_shud",
+            "run_id": run_id,
             "cycle_id": cycle_id_for("gfs", cycle_time),
             "source_id": "gfs",
             "job_type": "produce_forcing_array",
@@ -1419,6 +1434,20 @@ def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_p
         }
     )
     repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+                "object_store_prefix": "s3://nhms-prod",
+            }
+        },
+    )
     repository.update_pipeline_job_status(
         record["job_id"],
         "permanently_failed",
@@ -1452,6 +1481,7 @@ def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_p
     assert gateway.single_requests == []
     assert gateway.array_requests
     assert gateway.array_requests[0].resolved_job_type() == "produce_forcing_array"
+    assert gateway.array_requests[0].manifest["tasks"] == tasks
 
 
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(

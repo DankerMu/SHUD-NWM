@@ -139,6 +139,13 @@ _ARRAY_MANUAL_RETRY_JOB_TYPES = frozenset(
         "compute_frequency_array",
     }
 )
+_ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES = {
+    "produce_forcing_array": "forcing_manifest_index.json",
+    "run_shud_forecast_array": "forecast_manifest_index.json",
+    "parse_output_array": "parse_manifest_index.json",
+    "compute_frequency_array": "frequency_manifest_index.json",
+    "hindcast": "hindcast_manifest_index.json",
+}
 
 TERMINAL_PIPELINE_STATUSES = {
     "succeeded",
@@ -194,6 +201,42 @@ def _submit_file_manual_retry_job(gateway: Any, request: SubmitJobRequest) -> An
         if callable(submit_job_array):
             return submit_job_array(request)
     return gateway.submit_job(request)
+
+
+def _file_manual_retry_array_tasks(
+    retry_job: _RetrySubmissionJob,
+    runtime_root_fields: Mapping[str, str] | None,
+) -> list[dict[str, Any]] | None:
+    filename = _ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES.get(str(retry_job.job_type or ""))
+    if filename is None:
+        return None
+    run_id = str(retry_job.run_id or "")
+    if not run_id or _SAFE_SEGMENT_RE.fullmatch(run_id) is None:
+        return None
+    workspace_dir = str((runtime_root_fields or {}).get("workspace_dir") or os.getenv("WORKSPACE_ROOT") or "")
+    if not workspace_dir:
+        return None
+    workspace_root = Path(workspace_dir).expanduser().resolve()
+    manifest_index_path = workspace_root / "runs" / run_id / "input" / filename
+    try:
+        payload = json.loads(
+            read_bytes_limited_no_follow(
+                manifest_index_path,
+                max_bytes=MAX_FILE_JOURNAL_JSON_BYTES,
+                containment_root=workspace_root,
+            ).decode("utf-8")
+        )
+    except (FileNotFoundError, OSError, SafeFilesystemError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(payload, list):
+        tasks = payload
+    elif isinstance(payload, Mapping):
+        tasks = payload.get("tasks") or payload.get("manifests") or payload.get("basins")
+    else:
+        return None
+    if not isinstance(tasks, Sequence) or isinstance(tasks, str | bytes | bytearray):
+        return None
+    return [dict(task) for task in tasks if isinstance(task, Mapping)]
 
 
 @dataclass
@@ -2560,6 +2603,9 @@ class FileJournalRetryService:
             model_id=model_id,
             runtime_root_fields=runtime_root_contract,
         )
+        array_tasks = _file_manual_retry_array_tasks(submission_job, runtime_root_contract)
+        if array_tasks is not None:
+            manifest["tasks"] = array_tasks
         return (
             SubmitJobRequest(
                 run_id=retry_job.run_id,
