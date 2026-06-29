@@ -61,6 +61,7 @@ if [ -f "$INGEST_ENV" ]; then
     unset AUTOPIPE_WORK_ROOT
     unset AUTOPIPE_LOG_ROOT
     unset N22_DSN
+    unset NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR
     unset PGUSER
     unset PGPASSWORD
     unset PGPASSFILE

@@ -1,14 +1,29 @@
 # Node-22 Historical DB Retirement Runbook
 
-Last updated: 2026-06-27
+Last updated: 2026-06-29
 
-This runbook defines what must be true before stopping the historical
-PostgreSQL listener on node-22 `:55433`.
+This runbook records the completed stop gate for the historical PostgreSQL
+listener on node-22 `:55433`.
 
-## Current Blocker
+## Current Status
 
-Do not stop `:55433` while node-22 `nhms-compute-scheduler.timer` can still run
-the production scheduler with:
+Node-22 `:55433` was archived and stopped on 2026-06-29 after DB-free scheduler
+evidence passed. The authoritative receipt is
+[`2026-06-29-node22-db-retirement-stop.md`](receipts/2026-06-29-node22-db-retirement-stop.md).
+
+- Archive:
+  `/ghdc/data/nwm/operator-archives/node22-postgres-55433/20260629T025421Z`.
+- Evidence:
+  `/scratch/frd_muziyao/NWM/.agent-evidence/issue-837/20260629T025421Z`.
+- Post-stop state: Docker container `nhms-22-e2e-db` is `exited`, restart
+  policy `no`, and `ss -ltnp | grep 55433` is empty.
+- Active NHMS business DB remains node-27 PostgreSQL `:55432`.
+
+## Historical Blocker
+
+Before #836 and #837, the historical do-not-connect `:55433` rollback listener
+could not be stopped while node-22 `nhms-compute-scheduler.timer` could still
+run the production scheduler with:
 
 ```text
 # Historical blocker evidence only; do-not-connect rollback state.
@@ -16,14 +31,12 @@ DATABASE_URL=...:55433/nhms
 NHMS_SCHEDULER_LOCK_BACKEND=postgres
 ```
 
-Latest live evidence also showed scheduler passes using
-`lock_type=postgres_advisory`. Removing the port before replacing those
-responsibilities would turn the scheduler into a broken control plane, not a
-DB-free one.
+That blocker is now closed. Current scheduler stop-gate evidence shows
+`DATABASE_URL` absent, DB-free selectors set to `file`, and `lock_type=file`.
 
-## Dependencies To Remove
+## Dependencies Removed
 
-Node-22 can stop the historical DB only after these scheduler dependencies have
+Node-22 could stop the historical DB only after these scheduler dependencies had
 DB-free replacements:
 
 1. Scheduler mutual exclusion:
@@ -48,42 +61,62 @@ DB-free replacements:
    DB-free production journal, with explicit migration handling for old
    `download_source_cycle` DB rows.
 
-## Stop Gate
+## Stop Gate Result
 
-All checks below must pass on node-22 before stopping `:55433`:
+All checks below passed on node-22 before or immediately after stopping the
+historical do-not-connect `:55433` rollback listener:
 
 ```text
 DATABASE_URL absent from scheduler runtime env
 NHMS_SCHEDULER_LOCK_BACKEND=file
-latest scheduler evidence lock_type=file
-latest scheduler evidence contains no database_url dependency blocker
-latest scheduler evidence contains no download_source_cycle submission
+post-stop scheduler evidence lock_type=file
+post-stop scheduler evidence contains no database_url dependency blocker
+post-stop scheduler evidence contains no download_source_cycle submission
 one GFS live cycle reaches convert-or-later without PostgreSQL
 one IFS live cycle reaches convert-or-later without PostgreSQL
 ss -ltnp before stop still shows :55433 only as historical DB, not scheduler-owned
 rollback archive exists: pg_dump + checksum + unit/env backup + owner/process notes
+ss -ltnp after stop is empty for :55433
+compute API and Slurm gateway health pass after stop
 ```
 
-## Retirement Sequence
+## Retirement Sequence Record
 
-1. Create a dedicated change for DB-free scheduler state.
-2. Stop `nhms-compute-scheduler.timer` during migration.
-3. Deploy the DB-free scheduler on node-22, leaving `:55433` still running as
+1. Created OpenSpec change `node22-db-free-scheduler-state`.
+2. Froze `nhms-compute-scheduler.timer` during DB-free migration.
+3. Deployed the DB-free scheduler on node-22 while keeping `:55433` online as
    rollback.
-4. Run bounded scheduler passes with no `DATABASE_URL` and capture evidence.
-5. Re-enable `nhms-compute-scheduler.timer` and observe at least one GFS and one
-   IFS production cycle through downstream submission without PostgreSQL.
-6. Archive the historical database with a dump, checksum, unit/env metadata,
-   listener/process snapshot, and rollback command notes.
-7. Stop and disable the PostgreSQL service from the owning account or root
-   context. The project operator account is `frd_muziyao`; previously observed
-   PostgreSQL processes were owned by OS user `laoban`, so stopping may require
-   that owner or an administrator.
-8. Verify `ss -ltnp | grep 55433` is empty and run one final scheduler pass.
+4. Captured bounded scheduler passes with no scheduler `DATABASE_URL`.
+5. Observed GFS and IFS production cycles through downstream submission without
+   scheduler PostgreSQL.
+6. Archived the historical database with a dump, checksum, redacted env
+   metadata, listener/process snapshot, and rollback command notes.
+7. Stopped the Docker-owned PostgreSQL container `nhms-22-e2e-db`. Restart
+   policy was already `no`, so the stopped container is not auto-restarted.
+8. Verified `ss -ltnp | grep 55433` is empty and ran a bounded post-stop
+   scheduler pass with `lock_type=file`.
 
 ## Rollback
 
-If DB-free scheduler evidence regresses before step 7, restore the previous
-scheduler env and timer while keeping `:55433` online. If regression is found
-after stopping the DB, restart the archived PostgreSQL service first, then
-restore the old scheduler env.
+Rollback is an explicit archive recovery path, not normal operations. If a
+DB-free scheduler regression requires temporary rollback, restart the archived
+container first and verify the listener before restoring any old scheduler env.
+Do not reconnect the scheduler to `:55433` unless an operator deliberately
+chooses that rollback path.
+
+Secret-free emergency activation commands:
+
+```bash
+cd /scratch/frd_muziyao/NWM
+docker start nhms-22-e2e-db
+docker inspect --format 'Name={{.Name}} State={{.State.Status}} Restart={{.HostConfig.RestartPolicy.Name}} Image={{.Config.Image}}' nhms-22-e2e-db
+ss -ltnp 2>/dev/null | grep 55433
+```
+
+Post-drill cleanup commands:
+
+```bash
+docker stop nhms-22-e2e-db
+docker ps --filter name=nhms-22-e2e-db --format '{{.ID}} {{.Names}} {{.Status}} {{.Ports}}'
+ss -ltnp 2>/dev/null | grep 55433 || true
+```

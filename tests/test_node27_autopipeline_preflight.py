@@ -533,6 +533,7 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "AUTOPIPE_WORK_ROOT",
         "AUTOPIPE_LOG_ROOT",
         "N22_DSN",
+        "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
         "PGUSER",
         "PGPASSWORD",
         "PGPASSFILE",

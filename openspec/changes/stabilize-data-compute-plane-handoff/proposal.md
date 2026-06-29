@@ -1,17 +1,19 @@
 ## Why
 
 Current production is physically node-27-centric for active data mutation, while
-node-22 is compute/Slurm-only. Three friction points remain in the handoff:
-forcing-domain data still has a node-22 DB mirror path, node-27 ingest is not
-formalized as its own data-plane role, and current docs/guards can still drift
-back toward old node-22-writer assumptions.
+node-22 is compute/Slurm-only. The original handoff had three friction points:
+forcing-domain data still had a node-22 DB mirror path, node-27 ingest was not
+formalized as its own data-plane role, and current docs/guards could still drift
+back toward old node-22-writer assumptions. After #837, that mirror path is
+archived/stopped rollback-only, compatibility-only, sunset-bound, and requires
+explicit DSN plus the archived-rollback allow flag.
 
 ## What Changes
 
 - Define the object-store forcing-domain handoff as the canonical contract for
   node-22 compute outputs consumed by node-27 ingest.
-- Harden the transitional node-22 forcing mirror so it is explicit, audited, and
-  never falls back to display runtime configuration.
+- Harden the archived node-22 rollback forcing mirror so it is explicit,
+  allow-flagged, audited, and never falls back to display runtime configuration.
 - Formalize node-27 ingest as a bounded data-plane writer role that is separate
   from the node-27 display API's `display_readonly` runtime.
 - Add topology guardrails so docs, scripts, and verification routes keep the
@@ -22,8 +24,9 @@ back toward old node-22-writer assumptions.
 
 ### New Capabilities
 
-- `forcing-domain-handoff`: Canonical object-store contract and transitional
-  guardrails for forcing metadata, station series, and interpolation weights.
+- `forcing-domain-handoff`: Canonical object-store contract and archived
+  rollback guardrails for forcing metadata, station series, and interpolation
+  weights.
 - `node27-ingest-boundary`: Runtime and operational boundary for the node-27
   data-plane ingest worker.
 - `production-topology-contract`: Current production topology facts, oracle

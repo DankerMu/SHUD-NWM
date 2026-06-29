@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-06-22
+最后更新：2026-06-29
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -42,9 +42,10 @@
 | node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、Slurm/SHUD compute wrapper | `python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
-node-22 may still expose old local database processes for historical reasons.
-Do not use node-22 local PostgreSQL as current NHMS production state. Current
-database checks and ingest/write checks belong on node-27 against `:55432`.
+Node-22 historical PostgreSQL `:55433` was archived and stopped on 2026-06-29
+and is retained only as an explicit rollback archive. Do not use node-22 local
+PostgreSQL as current NHMS production state. Current database checks and
+ingest/write checks belong on node-27 against `:55432`.
 
 ## 3. 如何拉起和确认服务
 

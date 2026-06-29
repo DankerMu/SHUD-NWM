@@ -8,7 +8,7 @@
 > 本文保留 M22 设计时代的两节点 E2E 证据边界，不是当前生产拓扑操作手册。
 > 当前生产事实是 node-22 只作为 compute/Slurm/SHUD/artifact producer，
 > 不连当前活 DB；node-22 本地 PostgreSQL `:55433` 为 historical、
-> do-not-connect、pending removal。node-27 承担 active PostgreSQL `:55432`、
+> do-not-connect、archived/stopped rollback-only。node-27 承担 active PostgreSQL `:55432`、
 > data-plane ingest、display API 和前端。当前值守与 oracle 路由以
 > [`current-production-ops.md`](current-production-ops.md) 和
 > [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 为准。

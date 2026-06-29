@@ -1446,14 +1446,15 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                         path,
                         line=index,
                         check_id="production-topology-node22-local-postgres",
-                        title="Node-22 local PostgreSQL or transitional mirror lacks non-current boundary",
+                        title="Node-22 local PostgreSQL or rollback mirror lacks non-current boundary",
                         description=(
                             "An active topology surface mentions node-22 local PostgreSQL, port :55433, or a "
-                            "transitional node-22 mirror without the required non-current compatibility wording."
+                            "node-22 rollback mirror without the required archived/stopped compatibility wording."
                         ),
                         recommendation=(
                             "Mark node-22 local PostgreSQL as historical and do-not-connect, and keep any "
-                            "transitional mirror explicit-DSN, compatibility-only, and sunset-bound."
+                            "rollback mirror explicit-DSN, archived-rollback-flagged, compatibility-only, "
+                            "and sunset-bound."
                         ),
                     )
                 )
@@ -1919,11 +1920,7 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
         return True
     if ("n22_dsn" in lowered or "node22-url" in lowered) and _topology_line_mentions_mirror(lowered):
         return True
-    return (
-        _topology_mentions_node22(lowered)
-        and _topology_line_mentions_mirror(lowered)
-        and ("transitional" in lowered or "fallback" in lowered or "compatibility" in lowered)
-    )
+    return _topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)
 
 
 def _topology_line_mentions_mirror(text: str) -> bool:
@@ -1940,6 +1937,18 @@ def _topology_local_postgres_context_is_allowed(
     line_only_context = _topology_normalized(line)
     local_claim_context = _topology_normalized(claim_context or line)
     line_context = _topology_normalized(f"{line}\n{context}")
+    if _topology_context_has_stale_pending_retirement_state(line_context):
+        return False
+    if _topology_line_mentions_mirror(line_only_context):
+        if _topology_context_is_guardrail_or_test_meta(line_context):
+            return True
+        if _topology_context_is_explicit_mirror_implementation(line_context):
+            return True
+        if _topology_context_is_compatibility_mirror_contract(line_context):
+            return True
+        if _topology_context_has_negative_mirror_boundary(line_context):
+            return True
+        return False
     if _topology_context_is_retirement_or_rejection_boundary(line_only_context):
         return True
     if _topology_context_is_non_current(local_claim_context):
@@ -2032,8 +2041,6 @@ def _topology_context_is_non_current(context: str) -> bool:
     has_sunset = any(
         token in context
         for token in (
-            "pending removal",
-            "pending_removal",
             "sunset",
             "removal",
             "remove",
@@ -2042,8 +2049,6 @@ def _topology_context_is_non_current(context: str) -> bool:
             "archived",
             "stop",
             "stopping",
-            "待删",
-            "待删除",
             "删除",
             "迁移",
         )
@@ -2051,7 +2056,6 @@ def _topology_context_is_non_current(context: str) -> bool:
     has_dependency_only = any(
         token in context
         for token in (
-            "remains online only because",
             "online only because",
             "retained only because",
             "kept only because",
@@ -2059,6 +2063,22 @@ def _topology_context_is_non_current(context: str) -> bool:
     )
     return (has_historical and (has_do_not_connect or has_sunset or has_dependency_only)) or (
         has_do_not_connect and has_sunset
+    )
+
+
+def _topology_context_has_stale_pending_retirement_state(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return any(
+        token in normalized
+        for token in (
+            "pending removal",
+            "pending_removal",
+            "pending deletion",
+            "pending_deletion",
+            "已弃用待删",
+            "待删",
+            "待删除",
+        )
     )
 
 
@@ -2126,8 +2146,6 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
             "grep 55433",
             "guardrail",
             "historical",
-            "latest live evidence",
-            "latest scheduler evidence",
             "must not use",
             "never point",
             "no database_url",
@@ -2167,20 +2185,75 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
         token in combined
         for token in (
             "sunset",
+            "sunset-bound",
             "removal",
+            "removed",
+            "fully removed",
             "remove this mirror",
             "remove the mirror",
-            "pending removal",
             "after object-store",
             "declared handoff",
             "handoff manifest",
             "handoff packages",
             "pre-contract",
             "移除",
-            "待删除",
         )
     )
-    return has_mirror and has_compatibility and has_explicit_dsn and has_sunset
+    has_allow_flag = any(
+        token in combined
+        for token in (
+            "archived-rollback allow flag",
+            "archived rollback allow flag",
+            "archived-rollback allow-flagged",
+            "allow-flagged",
+            "allow flagged",
+            "nhms_allow_archived_node22_db_rollback_mirror",
+            "--allow-archived-node22-db-rollback-mirror",
+            "allow flag",
+            "显式允许",
+        )
+    )
+    has_archived_or_stopped = any(
+        token in combined
+        for token in (
+            "archived",
+            "archive",
+            "stopped",
+            "stop",
+            "rollback-only",
+            "rollback only",
+        )
+    )
+    return (
+        has_mirror
+        and has_compatibility
+        and has_explicit_dsn
+        and has_allow_flag
+        and has_archived_or_stopped
+        and has_sunset
+    )
+
+
+def _topology_context_has_negative_mirror_boundary(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if not _topology_line_mentions_mirror(normalized):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "must not use",
+            "must not call",
+            "must not invoke",
+            "must not read",
+            "never read",
+            "never falls back",
+            "no mirror fallback",
+            "without invoking mirror",
+            "does not rely on mirror",
+            "mirror not used",
+            "node22_mirror_used=false",
+        )
+    )
 
 
 def _topology_line_has_non_current_or_compatibility_marker(line: str) -> bool:
@@ -2195,7 +2268,6 @@ def _topology_line_has_non_current_or_compatibility_marker(line: str) -> bool:
             "do not connect",
             "not current",
             "non-current",
-            "pending removal",
             "sunset",
             "removal",
             "explicit",
@@ -2205,7 +2277,6 @@ def _topology_line_has_non_current_or_compatibility_marker(line: str) -> bool:
             "历史",
             "已弃用",
             "不要连",
-            "待删除",
             "显式",
         )
     )
@@ -2288,6 +2359,10 @@ def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
         _topology_line_mentions_mirror(normalized)
         and any(token in normalized for token in ("explicit", "--node22-url", "n22_dsn"))
     )
+    has_explicit_mirror = has_explicit_mirror or (
+        _topology_line_mentions_mirror(normalized)
+        and "--allow-archived-node22-db-rollback-mirror" in normalized
+    )
     return has_explicit_mirror and any(
         token in normalized
         for token in (
@@ -2296,6 +2371,7 @@ def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
             "mirror.extend",
             "parser.add_argument",
             "node22mirrordsnmissing",
+            "node22_rollback_mirror_not_allowed_reason",
             "node22_dsn_missing_reason",
             "source=\"cli:--node22-url\"",
             "source=\"env:n22_dsn\"",

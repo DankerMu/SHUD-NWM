@@ -50,8 +50,8 @@ Compute role, node 22:
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, every scheduler backend selector to
   `file`, and the registry/readiness/journal/state-index path variables from
   the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
-  `compute.env` while `:55433` is online as rollback, but it is not scheduler
-  runtime env.
+  `compute.env` only for `compute-api` or an explicit archived rollback drill;
+  node-22 `:55433` is stopped/archived and is not scheduler runtime env.
 - Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
   `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
   `NHMS_SCHEDULER_TEMP_ROOT`, non-empty `NHMS_SCHEDULER_ALLOWED_ROOTS`, and

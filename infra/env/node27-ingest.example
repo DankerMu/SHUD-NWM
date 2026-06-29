@@ -19,10 +19,11 @@ AUTOPIPE_LOG_ROOT=/home/nwm/autopipe-logs
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
 
-# Optional explicit transitional mirror fallback for pre-contract runs.
-# Compatibility-only and sunset-bound: leave unset unless an operator
-# intentionally provides an explicit node-22 DSN for legacy packages. The
+# Optional archived rollback mirror for pre-contract runs.
+# Compatibility-only and rollback-only: leave unset unless an operator has
+# deliberately restarted the archived node-22 DB container for a rollback drill
+# and also sets NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=true. The
 # historical node-22 local PostgreSQL :55433 instance is do-not-connect for
-# current NHMS production state and is pending removal after object-store
-# forcing-domain handoff packages cover live readiness.
+# current NHMS production state and is archived/stopped.
+# NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=false
 # N22_DSN=postgresql://readonly-user:change-me@210.77.77.22:55433/nhms

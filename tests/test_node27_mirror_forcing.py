@@ -71,6 +71,7 @@ def test_cli_node22_dsn_is_used_and_report_records_transitional_boundary(
             str(tmp_path),
             "--node22-url",
             node22_dsn,
+            "--allow-archived-node22-db-rollback-mirror",
         ]
     )
 
@@ -118,6 +119,7 @@ def test_env_node22_dsn_source_and_credential_redaction(
         }
 
     monkeypatch.setenv("N22_DSN", node22_dsn)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
     monkeypatch.setattr(mirror, "mirror_forcing", fake_mirror_forcing)
 
     rc = mirror.main(["--run-id", "run-env", "--object-store-root", str(tmp_path)])
@@ -146,6 +148,7 @@ def test_unexpected_mirror_failure_is_structured_and_redacted(
         raise RuntimeError(f"connection failed password=leaked {node22_dsn}")
 
     monkeypatch.setenv("N22_DSN", node22_dsn)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
     monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
 
     rc = mirror.main(["--run-id", "run-fail", "--object-store-root", str(tmp_path)])
@@ -165,3 +168,25 @@ def test_unexpected_mirror_failure_is_structured_and_redacted(
     assert "top-secret" not in rendered
     assert "leaked" not in rendered
     assert "[redacted]" in rendered
+
+
+def test_configured_node22_dsn_requires_archived_rollback_allowance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example:55432/nhms")
+    monkeypatch.delenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, raising=False)
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("configured N22_DSN must not be used without archived rollback allowance")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(["--run-id", "run-no-allow", "--object-store-root", str(tmp_path)])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] is True
+    assert payload["reason"] == mirror.NODE22_ROLLBACK_MIRROR_NOT_ALLOWED_REASON
+    assert payload["mirror_boundary"]["dsn"]["source"] == "env:N22_DSN"
+    rendered = json.dumps(payload)
+    assert "n22-secret" not in rendered

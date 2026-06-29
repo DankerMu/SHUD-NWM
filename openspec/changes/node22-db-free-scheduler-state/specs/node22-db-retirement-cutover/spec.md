@@ -10,8 +10,8 @@ DB-free scheduler path is live-proven and archived rollback evidence exists.
 - **WHEN** an operator attempts node-22 DB retirement
 - **THEN** the latest live receipts show scheduler env has no `DATABASE_URL`
 - **AND** `NHMS_SCHEDULER_LOCK_BACKEND=file`
-- **AND** latest scheduler evidence has `lock_type=file`
-- **AND** latest scheduler evidence has no DB dependency blocker and no
+- **AND** DB-free scheduler evidence has `lock_type=file`
+- **AND** DB-free scheduler evidence has no DB dependency blocker and no
   `download_source_cycle` submission
 - **AND** at least one GFS and one IFS live cycle reached `convert-or-later`
   without scheduler PostgreSQL.

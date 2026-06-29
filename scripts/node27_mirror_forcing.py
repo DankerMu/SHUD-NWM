@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Mirror one run's forcing domain from an explicit-DSN, compatibility-only,
-sunset-bound transitional node-22 source.
+"""Mirror one run's forcing domain from an explicit-DSN, allow-flagged,
+sunset-bound, compatibility-only archived rollback node-22 source.
 
-This is a compatibility-only bridge for historical deployments where an
-operator intentionally provides a node-22 forcing-domain DSN. Current NHMS
-production state does not use node-22 as an active database source: the
-node-22 local PostgreSQL instance on ``:55433`` is historical, do-not-connect
-for current production, and pending removal. New production readiness work
-should prefer contracted object-store forcing-domain handoff packages.
+This is a compatibility-only rollback bridge for historical deployments where
+an operator intentionally restarts the archived node-22 PostgreSQL rollback
+container and provides its forcing-domain DSN. Current NHMS production state
+does not use node-22 as an active database source: the node-22 local
+PostgreSQL instance on ``:55433`` is historical, do-not-connect for current
+production, archived, and stopped. New production readiness work should prefer
+contracted object-store forcing-domain handoff packages.
 
 Per ``--run-id`` (reads the object-store manifest for identity), idempotently:
 
@@ -19,8 +20,10 @@ Per ``--run-id`` (reads the object-store manifest for identity), idempotently:
   (c) Ensure ``met.interp_weight`` exists for this run's (model_id, source);
       it is static per model+source, so it is mirrored once and reused.
 
-node-22 DSN resolution order: ``--node22-url`` -> env ``N22_DSN``. This
-transitional compatibility mirror never reads display runtime configuration
+node-22 DSN resolution order: ``--node22-url`` -> env ``N22_DSN``. The DSN is
+ignored unless ``--allow-archived-node22-db-rollback-mirror`` or
+``NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=true`` is also set. This
+archived rollback mirror never reads display runtime configuration
 (``infra/env/display.env`` or display ``DATABASE_URL``) as the node-22 source.
 Local DSN: ``--database-url`` -> env ``DATABASE_URL``.
 
@@ -49,14 +52,18 @@ from packages.common.redaction import redact_payload
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
 NODE22_DSN_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_MISSING"
+NODE22_ROLLBACK_MIRROR_NOT_ALLOWED_REASON = "ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_NOT_ALLOWED"
 NODE22_MIRROR_FAILED_REASON = "NODE22_TRANSITIONAL_MIRROR_FAILED"
-TRANSITIONAL_MIRROR_MODE = "transitional_node22_forcing_mirror"
+TRANSITIONAL_MIRROR_MODE = "archived_node22_rollback_forcing_mirror"
 TRANSITIONAL_MIRROR_PURPOSE = "compatibility_only"
+ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV = "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR"
 TRANSITIONAL_MIRROR_SUNSET = (
-    "Remove this mirror after object-store forcing-domain handoff packages and "
-    "the node-27 DB apply path satisfy display readiness without node-22 DB access."
+    "Use only for an explicit archived rollback drill after intentionally "
+    "restarting nhms-22-e2e-db; remove this mirror after object-store "
+    "forcing-domain handoff packages and the node-27 DB apply path satisfy "
+    "display readiness without node-22 DB access."
 )
-HISTORICAL_NODE22_PG_STATUS = "historical_do_not_connect_pending_removal"
+HISTORICAL_NODE22_PG_STATUS = "historical_do_not_connect_archived_stopped_rollback"
 
 FST_COLUMNS = (
     "forcing_version_id",
@@ -88,7 +95,7 @@ class ForcingNotOnNode22(RuntimeError):
 
 
 class Node22MirrorDsnMissing(RuntimeError):
-    """The transitional mirror was requested without an explicit node-22 DSN."""
+    """The archived rollback mirror was requested without an explicit node-22 DSN."""
 
 
 @dataclass(frozen=True)
@@ -111,11 +118,19 @@ def _resolve_node22_source(cli_value: str | None) -> Node22MirrorSource:
     env_dsn = _non_empty(os.environ.get("N22_DSN"))
     if env_dsn:
         return Node22MirrorSource(url=env_dsn, source="env:N22_DSN")
-    raise Node22MirrorDsnMissing("Explicit transitional node-22 mirror DSN is required.")
+    raise Node22MirrorDsnMissing("Explicit archived node-22 rollback mirror DSN is required.")
 
 
 def _resolve_node22_url(cli_value: str | None) -> str:
     return _resolve_node22_source(cli_value).url
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _archived_rollback_mirror_allowed(cli_allowed: bool) -> bool:
+    return bool(cli_allowed or _truthy_env(os.environ.get(ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV)))
 
 
 def _mirror_boundary_evidence(dsn_source: str | None) -> dict[str, Any]:
@@ -171,9 +186,29 @@ def _missing_node22_dsn_report(run_id: str) -> dict[str, Any]:
             "run_id": run_id,
             "skipped": True,
             "reason": NODE22_DSN_MISSING_REASON,
-            "detail": "Pass --node22-url or set N22_DSN for the transitional node-22 forcing mirror.",
+            "detail": (
+                "Pass --node22-url or set N22_DSN for the archived node-22 "
+                "rollback forcing mirror, plus the explicit rollback allow flag."
+            ),
         },
         dsn_source=None,
+    )
+
+
+def _rollback_mirror_not_allowed_report(run_id: str, *, dsn_source: str) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "skipped": True,
+            "reason": NODE22_ROLLBACK_MIRROR_NOT_ALLOWED_REASON,
+            "detail": (
+                "N22_DSN/--node22-url is configured, but archived node-22 DB "
+                "rollback mirror use requires "
+                f"--allow-archived-node22-db-rollback-mirror or "
+                f"{ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV}=true."
+            ),
+        },
+        dsn_source=dsn_source,
     )
 
 
@@ -243,16 +278,17 @@ def _mirror_forcing_version(n22: Any, local: Any, forcing_version_id: str) -> di
 
 
 def _mirror_met_stations(n22: Any, local: Any, basin_version_id: str) -> dict[str, Any]:
-    """Mirror this basin's ``met.met_station`` rows from node-22 into the local DB.
+    """Mirror station rows in the explicit-DSN, allow-flagged rollback drill.
 
     ``met.forcing_station_timeseries.station_id`` FK-references ``met.met_station``.
     The generic basins registry import seeds geometry/model rows but NOT the
     forcing-grid stations (that was a qhh-bootstrap-specific extra), so without
     this the timeseries insert FK-fails. Stations are static per basin_version,
-    so this is mirrored once and upserted idempotently. node-22 is the source of
-    truth; geom is moved as EWKB to preserve SRID. Short-circuits when the local
-    row count already matches node-22 (stations don't change cycle-to-cycle, so
-    re-running across a basin's 100+ runs skips the per-row upsert after run 1)."""
+    so this is mirrored once and upserted idempotently from the archived
+    compatibility-only node-22 rollback source; geom is moved as EWKB to preserve
+    SRID. Short-circuits when the local row count already matches node-22
+    (stations do not change cycle-to-cycle, so re-running across a basin's 100+
+    runs skips the per-row upsert after run 1)."""
     with n22.cursor() as ncur:
         ncur.execute(
             "SELECT count(*) FROM met.met_station WHERE basin_version_id = %s",
@@ -465,7 +501,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--node22-url",
         default=None,
-        help="Explicit node-22 read-only DSN for the transitional mirror; else N22_DSN.",
+        help=(
+            "Explicit node-22 read-only DSN for the archived rollback mirror; "
+            "else N22_DSN. Ignored unless rollback mirror use is explicitly allowed."
+        ),
+    )
+    parser.add_argument(
+        "--allow-archived-node22-db-rollback-mirror",
+        action="store_true",
+        help=(
+            "Deliberately allow the explicit-DSN, allow-flagged, compatibility-only, "
+            "sunset-bound archived node-22 DB rollback mirror. "
+            "This is not normal node-27 ingest operation."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -473,6 +521,9 @@ def main(argv: list[str] | None = None) -> int:
         node22_source = _resolve_node22_source(args.node22_url)
     except Node22MirrorDsnMissing:
         _dump_json(_missing_node22_dsn_report(args.run_id))
+        return 2
+    if not _archived_rollback_mirror_allowed(args.allow_archived_node22_db_rollback_mirror):
+        _dump_json(_rollback_mirror_not_allowed_report(args.run_id, dsn_source=node22_source.source))
         return 2
 
     if not args.object_store_root:

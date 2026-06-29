@@ -11,12 +11,15 @@ The verified 2026-06-22 production topology is:
 - node-27 display API runs as `display_readonly` and must not expose compute
   mutations or writer semantics.
 
-The remaining gap is not a single endpoint bug. It is an incomplete handoff
-contract between compute artifacts and data-plane ingestion. The clearest code
-symptom is `scripts/node27_mirror_forcing.py`: it still treats node-22 DB rows
-as the authoritative source for forcing-domain metadata and can fall back to
-`infra/env/display.env`, even though node-22's local DB is historical and
-display env belongs to the read-only display runtime.
+The initial gap was not a single endpoint bug. It was an incomplete handoff
+contract between compute artifacts and data-plane ingestion. Pre-#837, the
+clearest code symptom was `scripts/node27_mirror_forcing.py`: it treated
+node-22 DB rows as the authoritative source for forcing-domain metadata and
+could fall back to `infra/env/display.env`, even though node-22's local DB was
+historical and display env belongs to the read-only display runtime. After
+#837, that mirror path is archived/stopped rollback-only and requires explicit
+DSN plus `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` or the matching CLI
+allow flag.
 
 ## Goals / Non-Goals
 
@@ -24,10 +27,10 @@ display env belongs to the read-only display runtime.
 
 - Make object-store artifacts the canonical handoff between node-22 compute and
   node-27 data-plane ingest for forcing-domain data.
-- Keep the compatibility-only, sunset-bound transitional node-22 mirror safe
-  until the object-store importer is complete: explicit DSN only, no display-env
-  fallback, structured skip/fail reasons, and no silent use of the historical
-  node-22 DB.
+- Keep any compatibility-only archived node-22 rollback mirror safe until it is
+  fully removed: explicit DSN plus archived-rollback allow flag only, no
+  display-env fallback, structured skip/fail reasons, and no silent use of the
+  historical node-22 DB.
 - Give node-27 ingest its own operational contract: env, wrapper preflight before
   seed/import/activate/backfill/register/mirror/parse/coverage/publish writes,
   role label, logging/evidence, and tests.
@@ -53,12 +56,13 @@ display env belongs to the read-only display runtime.
    do-not-connect production state and must have a removal/sunset path rather
    than becoming a permanent compatibility dependency.
 
-2. **The node-22 DB mirror remains transitional, compatibility-only, explicit,
-   and sunset-bound.** Until the importer covers every live forcing package,
-   mirror mode may remain as a controlled fallback. It must require
-   `--node22-url` or `N22_DSN`, must never read `infra/env/display.env`, must
-   emit a stable unavailable reason when no explicit mirror DSN is configured,
-   and must retain removal/sunset wording.
+2. **The node-22 DB mirror is archived rollback-only, compatibility-only,
+   explicit, allow-flagged, and sunset-bound.** The normal importer path is
+   object-store handoff. Any rollback mirror drill must require `--node22-url`
+   or `N22_DSN` plus `--allow-archived-node22-db-rollback-mirror` or
+   `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR`, must never read
+   `infra/env/display.env`, must emit a stable unavailable reason when no
+   explicit mirror DSN is configured, and must retain removal/sunset wording.
 
 3. **Node-27 ingest is a data-plane writer role, not display_readonly.** The
    cron wrapper and scripts should advertise a distinct ingest role and preflight
@@ -77,8 +81,9 @@ display env belongs to the read-only display runtime.
   Mitigation: first inventory the exact missing fields and make the handoff
   manifest explicit before changing ingestion behavior.
 - Cutting off the implicit mirror fallback too early could reduce visible
-  forcing products. Mitigation: keep an explicit transitional mirror mode with a
-  stable skip result and live receipts for qhh/heihe before declaring completion.
+  forcing products. Mitigation: keep only an explicit, archived-rollback mirror
+  drill path with a stable skip result and live receipts for qhh/heihe before
+  declaring completion.
 - Adding a new ingest env could drift from display env or host cron reality.
   Mitigation: source it from a committed template, add preflight tests, and
   include node-27 live evidence in the final issue.
@@ -89,8 +94,8 @@ display env belongs to the read-only display runtime.
 2. Harden the existing mirror path so unsafe fallback is removed before deeper
    importer work begins.
 3. Implement the object-store importer and prefer it in node-27 autopipeline;
-   keep explicit mirror fallback only for runs whose handoff package predates
-   the contract.
+   keep explicit archived-rollback mirror use only for controlled rollback
+   drills whose handoff package predates the contract.
 4. Split node-27 ingest env/wrapper semantics from display runtime env.
 5. Update topology docs and static drift checks, then capture node-27 live
    receipts proving display remains read-only while ingest writes active DB
@@ -479,8 +484,8 @@ Selected risk packs:
   convenience wrapper that delegates to #643 parser; no new object-store scan.
 - Hydro-met time series / forcing windows: selected - station-timeseries rows
   are replaced by forcing version and must preserve units/native resolution.
-- Legacy compatibility / examples: selected - transitional mirror remains
-  available and unchanged until #645.
+- Legacy compatibility / examples: selected - archived rollback mirror remains
+  explicit and unchanged until #645.
 
 Invariant Matrix
 Governing invariant: A DB apply report may claim forcing-domain readiness only
@@ -522,8 +527,8 @@ Regression rows:
 - Failure injected after `forcing_version`, `met_station`, timeseries, or
   interpolation-weight stage -> helper rolls back all four table mutations and
   reports no readiness.
-- `scripts/node27_autopipeline.py` and transitional mirror code -> no behavior
-  change in #644.
+- `scripts/node27_autopipeline.py` and archived rollback mirror code -> no
+  behavior change in #644.
 
 Non-goals:
 - No autopipeline preference/fallback switch; #645 owns policy.
@@ -537,8 +542,8 @@ Review focus:
   global station ids.
 - Coordinate conversion has deterministic consistency rules when both
   lon/lat and geometry exist.
-- Apply evidence distinguishes object-store handoff mode from transitional
-  node-22 mirror mode.
+- Apply evidence distinguishes object-store handoff mode from archived node-22
+  rollback mirror mode.
 
 ## Issue #645 Fixture
 
@@ -550,7 +555,8 @@ Mandatory expanded triggers:
 - `scripts/node27_autopipeline.py` production control-flow change for per-run
   ingest policy.
 - Fallback policy between canonical object-store forcing-domain handoff and
-  explicit, sunset-bound transitional node-22 mirror compatibility mode.
+  explicit-DSN, allow-flagged, sunset-bound archived node-22 rollback mirror
+  compatibility-only mode.
 - Subprocess orchestration and JSON summary stability across register,
   forcing-handoff/mirror, parse, and coverage stages. Publish-status remains the
   existing global post-run phase in #645.
@@ -591,15 +597,18 @@ Must add/change:
 - A complete handoff apply report with `available=true`/`ready=true` advances
   to parse without invoking the mirror script.
 - A run whose declared handoff manifest file is absent is a pre-contract or
-  compatibility case. It may use the transitional mirror only when `N22_DSN` is
-  set or the new autopipeline `--node22-url` option is provided; autopipeline
-  must pass `--node22-url` through to `scripts/node27_mirror_forcing.py` when
-  provided. The mirror fallback must be labeled
-  `transitional_node22_forcing_mirror` and recorded as compatibility evidence.
+  compatibility case. It may use the archived rollback mirror only when
+  `N22_DSN` is set or the autopipeline `--node22-url` option is provided and the
+  archived-rollback allow flag is explicitly enabled; autopipeline must pass
+  `--node22-url` through to `scripts/node27_mirror_forcing.py` when provided.
+  The mirror fallback must be labeled
+  `archived_node22_rollback_forcing_mirror` and recorded as compatibility
+  evidence.
 - A run whose handoff manifest is declared/present but whose parser/apply report
   is `available=false` or `status=failed` is not a compatibility fallback case.
   It must stop at `stage=forcing_handoff` without invoking mirror, even when
-  `N22_DSN` or `--node22-url` is configured.
+  `N22_DSN` or `--node22-url` plus the archived-rollback allow flag is
+  configured.
 - If no declared handoff exists and no explicit mirror DSN is configured, the
   run summary must be `outcome=skipped`, `stage=forcing_handoff`, with a stable
   reason distinguishing no object-store handoff declaration from missing mirror
@@ -644,8 +653,8 @@ Selected risk packs:
   stop before parse when forcing readiness is unavailable.
 - Concurrency / shared state / ordering: selected - stage order and run
   isolation matter.
-- Legacy compatibility / examples: selected - explicit transitional mirror is
-  retained for compatibility only.
+- Legacy compatibility / examples: selected - explicit archived rollback mirror
+  is retained for compatibility-only rollback drills.
 - Database / transaction / migration: selected only through #644 helper
   invocation; no schema changes in #645.
 - Hydro-met time series / forcing windows: selected through handoff readiness
@@ -658,9 +667,9 @@ Selected risk packs:
 Invariant Matrix
 Governing invariant: The autopipeline may proceed to hydro output parse only
 after forcing readiness is provided by a declared canonical object-store handoff
-or, for runs with no declared handoff, by an explicitly configured transitional
-mirror; no implicit historical node-22 DB or display runtime fallback may
-satisfy the forcing stage.
+or, for runs with no declared handoff, by an explicitly configured archived
+rollback mirror with the archived-rollback allow flag; no implicit historical
+node-22 DB or display runtime fallback may satisfy the forcing stage.
 Source-of-truth identity/contract: run id, object-store root/prefix, declared
 handoff manifest path, #643 parser/#644 apply report, #642 mirror report, and
 per-run JSON summary.
@@ -681,9 +690,9 @@ Regression rows:
 - Complete handoff package -> autopipeline calls object-store apply, does not
   call mirror, then runs parse/coverage and reports `outcome=ingested`.
 - No declared handoff + explicit mirror configured through `N22_DSN` or
-  autopipeline `--node22-url` -> autopipeline calls transitional mirror, labels
-  compatibility mode, records the mirror DSN source without the DSN value, then
-  proceeds to parse when mirror succeeds.
+  autopipeline `--node22-url` plus archived-rollback allow flag -> autopipeline
+  calls archived rollback mirror, labels compatibility mode, records the mirror
+  DSN source without the DSN value, then proceeds to parse when mirror succeeds.
 - No declared handoff + no explicit mirror configured -> that run is skipped at
   `forcing_handoff` with stable reason; unrelated runs continue.
 - Declared handoff unavailable (missing required field, malformed payload,
@@ -795,7 +804,8 @@ Selected risk packs:
 - Concurrency / shared state / ordering: selected - flock wrapper behavior and
   global publish ordering must remain unchanged.
 - Legacy compatibility / examples: selected - existing display env examples must
-  remain readonly-only; transitional mirror config stays explicit.
+  remain readonly-only; archived rollback mirror config stays explicit and
+  allow-flagged.
 - Slurm production lifecycle / mock-vs-real parity: not selected - no compute
   scheduling change.
 - Frontend/display behavior: not selected except display health separation.
@@ -866,7 +876,7 @@ Mandatory expanded triggers:
 - Legacy compatibility boundary: historical/archive material must remain
   readable without being mistaken for current operation.
 - Config / project setup boundary for `infra/env/display.env` versus node-27
-  data-plane writer or transitional mirror jobs.
+  data-plane writer or archived rollback mirror jobs.
 
 Change surface:
 - Current operational docs and role-boundary docs.
@@ -885,7 +895,8 @@ Must add/change:
 - Active docs route DB, ingest, display, and frontend live validation to
   node-27; node-22 is compute/Slurm/artifact producer only.
 - Active docs/scripts mark node-22 local PostgreSQL `:55433` as historical,
-  do-not-connect for current NHMS production state, and pending removal/sunset.
+  do-not-connect for current NHMS production state, archived/stopped
+  rollback-only, and sunset-bound.
 - Static guardrails flag active node-22 writer assumptions and active
   `infra/env/display.env` reuse for data-plane writer or mirror authority.
 - Guardrail tests include positive drift fixtures and negative historical,
@@ -933,9 +944,10 @@ Required evidence:
   or sources `infra/env/display.env` for writer/mirror jobs -> guard finding with
   stable category.
 - Static guard positive fixture: active text that mentions node-22 local
-  PostgreSQL, `:55433`, or transitional mirror without historical,
-  do-not-connect, compatibility-only, explicit-DSN, and sunset/removal wording
-  -> guard finding with stable category.
+  PostgreSQL, `:55433`, or archived rollback mirror without historical,
+  do-not-connect, compatibility-only, explicit-DSN, archived-rollback allow flag,
+  archived/stopped rollback-only, and sunset/removal wording -> guard finding
+  with stable category.
 - Static guard negative fixtures: historical/archive/compatibility-only node-22
   DB text and display API readonly env text -> no finding.
 - Current-doc grep or focused test evidence that node-27 owns active DB, ingest,
@@ -984,7 +996,7 @@ Boundary-surface checklist:
 - Static guard scope: scan active governance surfaces and fixtures without
   turning archived evidence into required current behavior.
 - Env-source boundary: display env is valid for display runtime and invalid for
-  data-plane writer or transitional mirror authority.
+  data-plane writer or archived rollback mirror authority.
 - Verification boundary: node-27 is live DB/display oracle; node-22 is Slurm
   scheduling oracle; local checks do not substitute for required live receipts.
 
