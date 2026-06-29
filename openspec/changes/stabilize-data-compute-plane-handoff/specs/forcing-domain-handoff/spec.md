@@ -93,16 +93,17 @@ evidence.
 - **AND** the receipt proves readiness did not depend on implicit node-22 DB
   access or `infra/env/display.env` mirror fallback
 
-### Requirement: Archived node-22 rollback mirror is explicit-DSN, allow-flagged, compatibility-only, and sunset-bound
+### Requirement: Archived/stopped compatibility-only node-22 rollback mirror is explicit-DSN, allow-flagged, and sunset/removal-bound
 
 The system SHALL keep any archived node-22 rollback forcing mirror path
-explicit-DSN, archived-rollback allow-flagged, audited, sunset-bound, and limited
-to operator-controlled compatibility runs.
+explicit-DSN through `N22_DSN` or owner-only file indirection, archived-rollback
+allow-flagged, audited, compatibility-only, archived/stopped, sunset-bound, and
+limited to operator-controlled compatibility runs until removal.
 
 #### Scenario: Mirror does not read display runtime configuration
 
-- **WHEN** node-27 forcing mirror runs without `--node22-url` and without
-  `N22_DSN`
+- **WHEN** node-27 forcing mirror runs without `N22_DSN` or owner-only file
+  indirection
 - **THEN** it MUST NOT read `infra/env/display.env` or any display runtime
   `DATABASE_URL` as a mirror source
 - **AND** it exits or reports a stable skip reason indicating that no explicit

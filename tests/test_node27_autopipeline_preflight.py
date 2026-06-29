@@ -17,6 +17,7 @@ WRAPPER = REPO_ROOT / "scripts" / "node27_autopipe_cron.sh"
 RUN_QHH = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_QHH_NEXT = "fcst_gfs_2026062112_basins_qhh_shud"
 RUN_HEIHE = "fcst_gfs_2026062112_basins_heihe_shud"
+NODE27_DATABASE_URL = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
 
 
 def _prepare_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -121,7 +122,7 @@ def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
@@ -153,7 +154,7 @@ def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
             "--basins-root",
             "",
             "--database-url",
-            "postgresql://nhms_display_ro:readonly-secret@db.example/nhms",
+            "postgresql://nhms_display_ro:readonly-secret@127.0.0.1:55432/nhms",
         ],
     )
 
@@ -341,6 +342,31 @@ def test_preflight_rejects_node22_historical_database_url_before_work_and_redact
     assert "writer-secret" not in rendered
 
 
+def test_preflight_rejects_non_node27_writer_endpoint_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        _args(
+            object_store_root,
+            basins_root,
+            "postgresql://node27_writer:writer-secret@db.example:55432/nhms",
+        ),
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert autopipe.DATABASE_URL_ENDPOINT_NOT_NODE27 in _blocker_codes(summary)
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "writer-secret" not in rendered
+
+
 def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -355,7 +381,7 @@ def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
             "--object-store-root",
             str(object_store_root),
             "--database-url",
-            "postgresql://node27_writer:writer-secret@db.example/nhms",
+            NODE27_DATABASE_URL,
         ],
     )
 
@@ -376,7 +402,7 @@ def test_canonical_root_resolution_blocks_work_and_log_roots_resolving_to_root(
 
     rc, summary, _rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
@@ -403,7 +429,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example:55432/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 0
@@ -416,7 +442,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["ingest"]["preflight"]["database"] == {
         "configured": True,
         "database": "nhms",
-        "host": "db.example",
+        "host": "127.0.0.1",
         "port": 55432,
         "scheme": "postgresql",
         "password_present": True,
@@ -427,7 +453,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["runs"]["already_ingested"] == 1
     assert summary["runs"]["processed"] == 0
     assert summary["runs"]["published"] == 5
-    assert published_calls == ["postgresql://node27_writer:writer-secret@db.example:55432/nhms"]
+    assert published_calls == [NODE27_DATABASE_URL]
     assert "writer-secret" not in rendered
 
 
@@ -453,7 +479,7 @@ def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
         raise AssertionError(f"unexpected seed command: {argv}")
 
     monkeypatch.setattr(autopipe, "_run", fake_run)
-    database_url = "postgresql://node27_writer:writer-secret@db.example/nhms"
+    database_url = NODE27_DATABASE_URL
 
     rc, summary, rendered = _run_main(
         capsys,
@@ -499,7 +525,7 @@ def test_basin_seed_failure_isolated_after_valid_preflight(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 1
@@ -533,7 +559,7 @@ def test_one_run_failure_isolated_after_valid_preflight(
 
     rc, summary, _rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 1
@@ -559,6 +585,7 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "AUTOPIPE_WORK_ROOT",
         "AUTOPIPE_LOG_ROOT",
         "N22_DSN",
+        "NHMS_NODE22_DSN_SOURCE",
         "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
         "PGUSER",
         "PGPASSWORD",

@@ -42,10 +42,10 @@ the source acquisition handoff between the two nodes.
 
 ### Requirement: Historical node-22 PostgreSQL retirement remains separately gated
 
-The system SHALL treat node-22 local PostgreSQL `:55433` as historical and
-sunset-bound, but SHALL NOT stop it as part of the node-27 download / NFS
-handoff change until scheduler-state responsibilities are replaced by a later
-governed change.
+The system SHALL treat node-22 local PostgreSQL `:55433` as historical,
+do-not-connect, archived/stopped rollback-only state after #837; this node-27
+download / NFS handoff change SHALL NOT reintroduce it as an active DB
+dependency.
 
 #### Scenario: Retirement is gated by live evidence
 

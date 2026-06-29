@@ -153,3 +153,12 @@ Node-27 ingest role:
 - Required ingest keys are `DATABASE_URL`, `OBJECT_STORE_ROOT`, `BASINS_ROOT`,
   `AUTOPIPE_WORK_ROOT`, and `AUTOPIPE_LOG_ROOT`. The cron wrapper blocks before
   Python ingest and coverage backstop when the ingest env is missing or unsafe.
+- `NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS` defaults to
+  `127.0.0.1:55432,localhost:55432`; set it only when node-27 ingest must use a
+  different local node-27 PostgreSQL endpoint.
+- The archived node-22 rollback mirror is compatibility-only and must stay
+  explicit: use `N22_DSN` from this owner-only env file, or pass an owner-only
+  file through `scripts/node27_autopipeline.py --node22-dsn-file`. Do not pass a
+  raw DSN in argv, do not source `display.env`, and do not set
+  `NHMS_NODE22_DSN_SOURCE`; the wrapper clears stale source labels in strict mode
+  and the parent records the non-secret source label when invoking the mirror.

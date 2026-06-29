@@ -2,8 +2,9 @@
 
 ### Requirement: Node-22 historical PostgreSQL is stopped only after DB-free proof
 
-The system SHALL stop node-22 historical PostgreSQL `:55433` only after the
-DB-free scheduler path is live-proven and archived rollback evidence exists.
+The system SHALL stop node-22 historical do-not-connect PostgreSQL `:55433` only
+after the DB-free scheduler path is live-proven and archived rollback evidence
+exists.
 
 #### Scenario: Stop gate checks all DB-free evidence
 
@@ -18,16 +19,18 @@ DB-free scheduler path is live-proven and archived rollback evidence exists.
 
 #### Scenario: Pre-stop listener attribution is captured
 
-- **WHEN** node-22 `:55433` is still listening before retirement
+- **WHEN** node-22 historical do-not-connect `:55433` is still listening before
+  retirement and before archived/stopped rollback-only state is reached
 - **THEN** the retirement receipt records `ss -ltnp`, PID, process owner,
   service or unit metadata when available, command line, and active
   client/session attribution
-- **AND** the evidence proves `:55433` is only the historical PostgreSQL
-  rollback target, not a scheduler-owned runtime dependency.
+- **AND** the evidence proves `:55433` is only the historical do-not-connect
+  PostgreSQL rollback target, not a scheduler-owned runtime dependency.
 
 #### Scenario: Archive and rollback evidence exists before stop
 
-- **WHEN** node-22 `:55433` is stopped
+- **WHEN** node-22 historical do-not-connect `:55433` is stopped into
+  archived/stopped rollback-only state
 - **THEN** a dump/archive path, checksum, service/unit metadata, env backup,
   process owner notes, and rollback commands are recorded
 - **AND** the receipt identifies whether stopping required the PostgreSQL owner

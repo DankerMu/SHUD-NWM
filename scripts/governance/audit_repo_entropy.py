@@ -1869,6 +1869,7 @@ def _topology_context_has_negative_node22_writer_boundary(context: str) -> bool:
             "not through",
             "must not be treated",
             "must not read",
+            "must not point",
             "shall not instruct",
             "shall not present",
             "not instruct",
@@ -1926,7 +1927,12 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
         )
     ):
         return True
-    if ("n22_dsn" in lowered or "node22-url" in lowered) and _topology_line_mentions_mirror(lowered):
+    if (
+        "n22_dsn" in lowered
+        or "node22-url" in lowered
+        or "node22-dsn-file" in lowered
+        or "node22_dsn_file" in lowered
+    ) and _topology_line_mentions_mirror(lowered):
         return True
     return _topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)
 
@@ -1991,8 +1997,6 @@ def _topology_local_postgres_context_is_allowed(
         return False
     if _topology_context_is_retirement_or_rejection_boundary(line_only_context):
         return True
-    if _topology_context_is_non_current(local_claim_context):
-        return True
     if _topology_context_has_negative_node22_writer_boundary(local_claim_context):
         return True
     if _topology_context_has_current_node22_local_postgres_use(line_only_context) or (
@@ -2000,6 +2004,10 @@ def _topology_local_postgres_context_is_allowed(
         and _topology_context_has_current_node22_local_postgres_use(local_claim_context)
     ):
         return False
+    if _topology_context_has_complete_node22_local_pg_boundary(local_claim_context):
+        return True
+    if _topology_context_has_complete_node22_local_pg_boundary(line_context):
+        return True
     if _topology_context_is_guardrail_or_test_meta(local_claim_context):
         return True
     if _topology_context_is_guardrail_or_test_meta(line_context):
@@ -2172,12 +2180,15 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
         or "historical postgresql listener on node-22" in normalized
     ):
         return False
+    if _topology_context_has_complete_node22_local_pg_boundary(normalized):
+        return True
+    if _topology_context_has_negative_node22_writer_boundary(normalized):
+        return True
     return any(
         token in normalized
         for token in (
-            "archive",
-            "archived",
             "before stopping",
+            "blocked",
             "blocker",
             "database_url absent",
             "db-free",
@@ -2185,7 +2196,6 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
             "fails unless",
             "grep 55433",
             "guardrail",
-            "historical",
             "must not use",
             "never point",
             "no database_url",
@@ -2194,9 +2204,6 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
             "not scheduler-owned",
             "reject",
             "rejection",
-            "retire",
-            "retirement",
-            "rollback",
             "stop gate",
             "stopped only after",
             "without scheduler postgresql",
@@ -2216,7 +2223,8 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
             "explicit mirror dsn",
             "explicit node-22 dsn",
             "explicit transitional",
-            "--node22-url",
+            "--node22-dsn-file",
+            "owner-only file",
             "n22_dsn",
             "显式",
         )
@@ -2231,11 +2239,8 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
             "fully removed",
             "remove this mirror",
             "remove the mirror",
-            "after object-store",
-            "declared handoff",
-            "handoff manifest",
-            "handoff packages",
-            "pre-contract",
+            "delete this mirror",
+            "delete the mirror",
             "移除",
         )
     )
@@ -2253,11 +2258,18 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
             "显式允许",
         )
     )
-    has_archived_or_stopped = any(
+    has_archived = any(
         token in combined
         for token in (
             "archived",
             "archive",
+            "rollback-only",
+            "rollback only",
+        )
+    )
+    has_stopped = any(
+        token in combined
+        for token in (
             "stopped",
             "stop",
             "rollback-only",
@@ -2269,7 +2281,8 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
         and has_compatibility
         and has_explicit_dsn
         and has_allow_flag
-        and has_archived_or_stopped
+        and has_archived
+        and has_stopped
         and has_sunset
     )
 
@@ -2312,7 +2325,7 @@ def _topology_line_has_non_current_or_compatibility_marker(line: str) -> bool:
             "removal",
             "explicit",
             "n22_dsn",
-            "--node22-url",
+            "--node22-dsn-file",
             "兼容",
             "历史",
             "已弃用",
@@ -2332,15 +2345,81 @@ def _topology_context_is_structured_node22_local_pg_boundary(context: str) -> bo
             or "postgresql listener on node-22" in normalized
         )
         and ":55433" in normalized
-        and (
-            _topology_context_is_non_current(normalized)
-            or "historical_node22_pg_status" in normalized
+        and _topology_context_has_complete_node22_local_pg_boundary(normalized)
+    )
+
+
+def _topology_context_has_complete_node22_local_pg_boundary(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    has_node22_local_pg = (
+        ":55433" in normalized
+        or " 55433" in normalized
+        or "node-22 local postgresql" in normalized
+        or "node-22 local postgres" in normalized
+        or "historical postgresql listener on node-22" in normalized
+        or "postgresql listener on node-22" in normalized
+    )
+    has_historical = any(
+        token in normalized
+        for token in (
+            "historical",
+            "non-current",
+            "not current",
+            "outside current",
+            "out of current",
+            "retired",
+            "历史",
         )
     )
+    has_do_not_connect = any(
+        token in normalized
+        for token in (
+            "do-not-connect",
+            "do_not_connect",
+            "do not connect",
+            "do not use",
+            "must not use",
+            "not current",
+            "non-current",
+            "不要连",
+            "不应连接",
+            "不用于当前",
+        )
+    )
+    has_archived = any(token in normalized for token in ("archived", "archive", "归档"))
+    has_stopped = any(
+        token in normalized
+        for token in (
+            "stopped",
+            "stop",
+            "exited",
+            "not listening",
+            "no listener",
+            "停止",
+        )
+    )
+    return has_node22_local_pg and has_historical and has_do_not_connect and has_archived and has_stopped
 
 
 def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
     normalized = _topology_normalized(context)
+    if (
+        "node22-url" in normalized
+        and any(token in normalized for token in ("parser.add_argument", "mirror.extend"))
+        and not any(
+            token in normalized
+            for token in (
+                "_write(",
+                "assert ",
+                "monkeypatch",
+                "negative fixture",
+                "guardrails flag",
+                "guardrails_flag",
+                "test_entropy",
+            )
+        )
+    ):
+        return False
     return any(
         token in normalized
         for token in (
@@ -2362,6 +2441,27 @@ def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
             "reports display-env writer drift",
             "production-topology-node22-db-writer",
             "production-topology-display-env-writer",
+            "production-topology-node22-local-postgres",
+            "database_url_endpoint_not_node27",
+            "database_url_node22_historical_endpoint",
+            "_node22_dsn_source_from_env",
+            "_resolve_node22_source",
+            "_missing_node22_dsn_report",
+            "mirror_dsn_config",
+            "mirror.append",
+            "parser.add_argument",
+            "node22mirrorsource",
+            "node22mirrordsnmissing",
+            "nhms_node22_dsn_source",
+            "node22_historical_db_hosts",
+            "node22_historical_db_port",
+            "node22_dsn_file_invalid_reason",
+            "node22_dsn_file_unsafe_reason",
+            "node22_mirror_failed_reason",
+            "node22_rollback_mirror_not_allowed_reason",
+            "default_allowed_db_endpoints",
+            "historical_node22_pg_status",
+            "transitional_mirror_sunset",
             "focused tests cover",
             "regression rows",
             "drift in current operational surfaces",
@@ -2399,7 +2499,7 @@ def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
         return False
     has_explicit_mirror = (
         _topology_line_mentions_mirror(normalized)
-        and any(token in normalized for token in ("explicit", "--node22-url", "n22_dsn"))
+        and any(token in normalized for token in ("explicit", "--node22-dsn-file", "n22_dsn"))
     )
     has_explicit_mirror = has_explicit_mirror or (
         _topology_line_mentions_mirror(normalized)
@@ -2410,13 +2510,14 @@ def _topology_context_is_explicit_mirror_implementation(context: str) -> bool:
         for token in (
             "node22mirrorsource",
             "_resolve_node22_source",
+            "mirror_dsn_config",
             "mirror.extend",
             "parser.add_argument",
             "node22mirrordsnmissing",
             "node22_rollback_mirror_not_allowed_reason",
             "node22_dsn_missing_reason",
-            "source=\"cli:--node22-url\"",
             "source=\"env:n22_dsn\"",
+            "source.startswith(\"file:\")",
             "help=\"explicit node-22",
         )
     )

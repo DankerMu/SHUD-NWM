@@ -96,6 +96,7 @@ Rollback is phase-bounded. Before production gate enablement, disable the
 node-27 download cron/wrapper and keep the previous node-22 download path. After
 the required NFS gate is enabled, rollback must explicitly turn off
 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` and record why node-27 download did
-not hold. Node-22 PostgreSQL is no longer an active rollback dependency; any
-archive restore is a separate operator recovery path governed by the #837
-retirement receipt and must not reconnect scheduler runtime to `:55433`.
+not hold. Node-22 PostgreSQL is no longer an active rollback dependency; the
+`:55433` listener is historical do-not-connect archived/stopped rollback-only
+state. Any archive restore is a separate operator recovery path governed by the
+issue #837 retirement receipt and must not reconnect scheduler runtime to `:55433`.

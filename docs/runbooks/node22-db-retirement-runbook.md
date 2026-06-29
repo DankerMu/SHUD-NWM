@@ -22,8 +22,8 @@ evidence passed. The authoritative receipt is
 ## Historical Blocker
 
 Before #836 and #837, the historical do-not-connect `:55433` rollback listener
-could not be stopped while node-22 `nhms-compute-scheduler.timer` could still
-run the production scheduler with:
+was not yet archived/stopped because node-22 `nhms-compute-scheduler.timer`
+could still run the production scheduler with:
 
 ```text
 # Historical blocker evidence only; do-not-connect rollback state.
@@ -64,7 +64,8 @@ DB-free replacements:
 ## Stop Gate Result
 
 All checks below passed on node-22 before or immediately after stopping the
-historical do-not-connect `:55433` rollback listener:
+historical do-not-connect `:55433` rollback listener into archived/stopped
+rollback-only state:
 
 ```text
 DATABASE_URL absent from scheduler runtime env
@@ -116,15 +117,34 @@ ss -ltnp 2>/dev/null | grep 55433
 Post-drill cleanup commands:
 
 ```bash
-docker stop nhms-22-e2e-db
-if docker ps --filter name=nhms-22-e2e-db --format '{{.Names}} {{.Status}}' | grep -q .; then
+set -euo pipefail
+
+docker_stop_output=$(docker stop nhms-22-e2e-db 2>&1) || {
+  echo "BLOCKED: docker stop failed during rollback cleanup" >&2
+  printf '%s\n' "$docker_stop_output" >&2
+  exit 1
+}
+
+docker_ps_output=$(docker ps --filter name=nhms-22-e2e-db --format '{{.Names}} {{.Status}}' 2>&1) || {
+  echo "BLOCKED: docker ps failed during rollback cleanup" >&2
+  printf '%s\n' "$docker_ps_output" >&2
+  exit 1
+}
+if [ -n "$docker_ps_output" ]; then
   echo "BLOCKED: nhms-22-e2e-db still running after rollback cleanup" >&2
-  docker ps --filter name=nhms-22-e2e-db --format '{{.ID}} {{.Names}} {{.Status}} {{.Ports}}'
+  printf '%s\n' "$docker_ps_output" >&2
+  docker ps --filter name=nhms-22-e2e-db --format '{{.ID}} {{.Names}} {{.Status}} {{.Ports}}' >&2
   exit 1
 fi
-if ss -ltnp 2>/dev/null | grep -q 55433; then
-  echo "BLOCKED: node-22 historical PostgreSQL :55433 still listening" >&2
-  ss -ltnp 2>/dev/null | grep 55433
+
+ss_output=$(ss -ltnp 2>&1) || {
+  echo "BLOCKED: ss failed during rollback cleanup" >&2
+  printf '%s\n' "$ss_output" >&2
+  exit 1
+}
+if printf '%s\n' "$ss_output" | grep -Eq '(^|[^0-9])55433([^0-9]|$)'; then
+  echo "BLOCKED: node-22 historical do-not-connect archived/stopped PostgreSQL :55433 still listening" >&2
+  printf '%s\n' "$ss_output" | grep -E '(^|[^0-9])55433([^0-9]|$)' >&2
   exit 1
 fi
 ```

@@ -20,9 +20,9 @@ Per ``--run-id`` (reads the object-store manifest for identity), idempotently:
   (c) Ensure ``met.interp_weight`` exists for this run's (model_id, source);
       it is static per model+source, so it is mirrored once and reused.
 
-node-22 DSN resolution source: env ``N22_DSN`` only. Parent tools that accept a
-convenience ``--node22-url`` option must pass it through the child environment
-instead of argv. The DSN is ignored unless
+node-22 DSN resolution source: env ``N22_DSN`` only. Parent tools may resolve
+the source DSN from ``N22_DSN`` or an owner-only file and pass it through the
+child environment instead of argv. The DSN is ignored unless
 ``--allow-archived-node22-db-rollback-mirror`` or
 ``NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=true`` is also set. This archived
 rollback mirror never reads display runtime configuration
@@ -46,7 +46,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -59,6 +59,18 @@ NODE22_DSN_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_MISSING"
 NODE22_ROLLBACK_MIRROR_NOT_ALLOWED_REASON = "ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_NOT_ALLOWED"
 NODE22_MIRROR_FAILED_REASON = "NODE22_TRANSITIONAL_MIRROR_FAILED"
 DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON = "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT"
+DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
+DATABASE_URL_ENDPOINT_NOT_NODE27_REASON = "DATABASE_URL_ENDPOINT_NOT_NODE27"
+DATABASE_URL_INVALID_REASON = "DATABASE_URL_INVALID"
+DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
+DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
+    {
+        "application_name",
+        "connect_timeout",
+        "fallback_application_name",
+        "sslmode",
+    }
+)
 TRANSITIONAL_MIRROR_MODE = "archived_node22_rollback_forcing_mirror"
 TRANSITIONAL_MIRROR_PURPOSE = "compatibility_only"
 ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV = "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR"
@@ -135,7 +147,7 @@ def _node22_dsn_source_from_env() -> str:
     # Compatibility-only archived rollback mirror: explicit N22_DSN source,
     # allow-flagged activation, and sunset-bound after object-store handoff.
     source_hint = _non_empty(os.environ.get("NHMS_NODE22_DSN_SOURCE"))
-    if source_hint in {"cli:--node22-url", "env:N22_DSN"}:
+    if source_hint and (source_hint == "env:N22_DSN" or source_hint.startswith("file:")):
         return source_hint
     return "env:N22_DSN"
 
@@ -157,18 +169,114 @@ def _database_port(value: str | None) -> int | None:
         return None
 
 
-def _database_url_points_to_historical_node22(database_url: str | None) -> bool:
+def _database_query_blockers(query: str) -> list[dict[str, str]]:
+    if not query:
+        return []
+    query_keys = {key.strip().lower() for key, _value in parse_qsl(query, keep_blank_values=True)}
+    if query_keys and any(key not in DATABASE_URL_ALLOWED_QUERY_KEYS for key in query_keys):
+        return [
+            {
+                "code": DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL query parameters must not override mirror destination or credential source.",
+            }
+        ]
+    return []
+
+
+def _parse_allowed_database_endpoints(value: str | None) -> set[tuple[str, int]]:
+    raw = (value or DEFAULT_ALLOWED_DB_ENDPOINTS).strip()
+    endpoints: set[tuple[str, int]] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        host, port = item.rsplit(":", 1)
+        try:
+            endpoints.add((host.strip().lower(), int(port)))
+        except ValueError:
+            continue
+    return endpoints
+
+
+def _destination_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
     raw = (database_url or "").strip()
     if not raw:
-        return False
+        return {"configured": False}, [
+            {
+                "code": DATABASE_URL_INVALID_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL is required for the node-27 mirror destination.",
+            }
+        ]
     try:
         parsed = urlsplit(raw)
+    except ValueError:
+        return {"configured": True}, [
+            {
+                "code": DATABASE_URL_INVALID_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must be a valid PostgreSQL URL.",
+            }
+        ]
+    query_blockers = _database_query_blockers(parsed.query)
+    try:
         dsn_parameters = psycopg2.extensions.parse_dsn(raw)
-    except (ValueError, psycopg2.Error):
-        return False
-    host = (dsn_parameters.get("host") or parsed.hostname or "").strip().lower()
-    port = _database_port(dsn_parameters.get("port") or (str(parsed.port) if parsed.port else None))
-    return host in NODE22_HISTORICAL_DB_HOSTS or port == NODE22_HISTORICAL_DB_PORT
+    except psycopg2.Error:
+        if query_blockers:
+            return {"configured": True, "scheme": parsed.scheme or None}, query_blockers
+        return {"configured": True, "scheme": parsed.scheme or None}, [
+            {
+                "code": DATABASE_URL_INVALID_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must be a valid PostgreSQL URL.",
+            }
+        ]
+
+    host = dsn_parameters.get("host")
+    port = _database_port(dsn_parameters.get("port"))
+    database = dsn_parameters.get("dbname")
+    identity: dict[str, Any] = {
+        "configured": True,
+        "scheme": parsed.scheme,
+        "host": host,
+        "port": port,
+        "database": database,
+    }
+    blockers = list(query_blockers)
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not host
+        or not database
+        or (dsn_parameters.get("port") and port is None)
+    ):
+        blockers.append(
+            {
+                "code": DATABASE_URL_INVALID_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must include PostgreSQL scheme, host, port, and database name.",
+            }
+        )
+        return identity, blockers
+    normalized_host = str(host).strip().lower()
+    if normalized_host in NODE22_HISTORICAL_DB_HOSTS or port == NODE22_HISTORICAL_DB_PORT:
+        blockers.append(
+            {
+                "code": DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must point to the node-27 writer, not node-22 historical PostgreSQL.",
+            }
+        )
+    allowed = _parse_allowed_database_endpoints(os.environ.get("NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS"))
+    if database != "nhms" or port is None or (normalized_host, port) not in allowed:
+        blockers.append(
+            {
+                "code": DATABASE_URL_ENDPOINT_NOT_NODE27_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must target an allowed node-27 PostgreSQL endpoint.",
+            }
+        )
+    return identity, blockers
 
 
 def _truthy_env(value: str | None) -> bool:
@@ -233,10 +341,10 @@ def _missing_node22_dsn_report(run_id: str) -> dict[str, Any]:
             "skipped": True,
             "reason": NODE22_DSN_MISSING_REASON,
             "detail": (
-                "Set N22_DSN for the compatibility-only, sunset-bound, archived "
-                "node-22 rollback forcing mirror, plus the explicit rollback "
-                "allow flag. Parent tools that accept --node22-url must pass it "
-                "through child environment, not argv."
+                "Set N22_DSN for the compatibility-only, sunset/removal-bound, "
+                "archived/stopped node-22 rollback forcing mirror, plus the explicit rollback "
+                "allow flag. Parent tools must pass any resolved DSN through "
+                "child environment or owner-only file indirection, not argv."
             ),
         },
         dsn_source=None,
@@ -260,13 +368,22 @@ def _rollback_mirror_not_allowed_report(run_id: str, *, dsn_source: str) -> dict
     )
 
 
-def _node22_destination_forbidden_report(run_id: str, *, dsn_source: str) -> dict[str, Any]:
+def _destination_forbidden_report(
+    run_id: str,
+    *,
+    dsn_source: str,
+    destination: dict[str, Any],
+    blockers: list[dict[str, str]],
+) -> dict[str, Any]:
+    reason = blockers[0]["code"] if blockers else DATABASE_URL_ENDPOINT_NOT_NODE27_REASON
     return _with_mirror_boundary(
         {
             "run_id": run_id,
             "failed": True,
-            "reason": DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON,
-            "detail": "DATABASE_URL must point to the node-27 writer, not node-22 historical PostgreSQL.",
+            "reason": reason,
+            "detail": "DATABASE_URL failed node-27 mirror destination preflight.",
+            "destination": destination,
+            "blockers": blockers,
         },
         dsn_source=dsn_source,
     )
@@ -580,8 +697,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.object_store_root:
         parser.error("OBJECT_STORE_ROOT or --object-store-root is required.")
-    if _database_url_points_to_historical_node22(args.database_url):
-        _dump_json(_node22_destination_forbidden_report(args.run_id, dsn_source=node22_source.source))
+    destination, destination_blockers = _destination_preflight(args.database_url)
+    if destination_blockers:
+        _dump_json(
+            _destination_forbidden_report(
+                args.run_id,
+                dsn_source=node22_source.source,
+                destination=destination,
+                blockers=destination_blockers,
+            )
+        )
         return 2
 
     try:

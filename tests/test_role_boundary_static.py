@@ -18,6 +18,8 @@ ROLE_BOUNDARY_DOC = REPO_ROOT / "docs/governance/ROLE_BOUNDARY.md"
 CURRENT_PRODUCTION_OPS_DOC = REPO_ROOT / "docs/runbooks/current-production-ops.md"
 TWO_NODE_DEPLOYMENT_OVERVIEW_DOC = REPO_ROOT / "docs/runbooks/two-node-deployment-overview.md"
 PROJECT_PROFILE_DOC = REPO_ROOT / "openspec/project-profile.md"
+NODE22_RETIREMENT_RUNBOOK = REPO_ROOT / "docs/runbooks/node22-db-retirement-runbook.md"
+NODE22_RETIREMENT_RECEIPT = REPO_ROOT / "docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md"
 
 DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS = frozenset(
     {
@@ -349,6 +351,21 @@ def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() 
     assert "required node-27 live DB/display receipts" in project_profile
 
 
+def test_node22_retirement_cleanup_snippets_fail_closed_on_docker_and_ss_errors() -> None:
+    for path in (NODE22_RETIREMENT_RUNBOOK, NODE22_RETIREMENT_RECEIPT):
+        cleanup = _post_drill_cleanup_snippet(path)
+        assert "set -euo pipefail" in cleanup
+        assert "docker_stop_output=$(docker stop nhms-22-e2e-db 2>&1) || {" in cleanup
+        assert "BLOCKED: docker stop failed during rollback cleanup" in cleanup
+        assert "docker_ps_output=$(docker ps --filter name=nhms-22-e2e-db" in cleanup
+        assert "BLOCKED: docker ps failed during rollback cleanup" in cleanup
+        assert 'if [ -n "$docker_ps_output" ]; then' in cleanup
+        assert "ss_output=$(ss -ltnp 2>&1) || {" in cleanup
+        assert "BLOCKED: ss failed during rollback cleanup" in cleanup
+        assert "docker ps --filter name=nhms-22-e2e-db --format '{{.Names}} {{.Status}}' | grep" not in cleanup
+        assert "ss -ltnp 2>/dev/null | grep -q 55433" not in cleanup
+
+
 def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
     entries: set[GatewayRouteInventoryEntry] = set()
     for route in _iter_routes(app):
@@ -484,6 +501,15 @@ def _normalized_apps_api_import_from_modules(
 
 def _production_orchestrator_sources(root: Path = PRODUCTION_ORCHESTRATOR_ROOT) -> list[Path]:
     return sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+
+
+def _post_drill_cleanup_snippet(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    marker = "Post-drill cleanup"
+    assert marker in text
+    tail = text.split(marker, maxsplit=1)[1]
+    assert "```bash" in tail
+    return tail.split("```bash", maxsplit=1)[1].split("```", maxsplit=1)[0]
 
 
 def _python_sources(roots: tuple[Path, ...], files: tuple[Path, ...]) -> list[Path]:

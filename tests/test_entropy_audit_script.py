@@ -4725,8 +4725,8 @@ def test_entropy_audit_topology_guardrails_allow_non_current_and_readonly_contex
         node-22 local PostgreSQL :55433 is historical, do-not-connect for current NHMS
         production state, archived, and stopped rollback-only.
         The archived node-22 rollback mirror is compatibility-only, requires explicit
-        DSN via --node22-url or N22_DSN plus an archived-rollback allow flag, and has
-        a sunset/removal path after object-store handoff packages replace it.
+        DSN via N22_DSN or owner-only --node22-dsn-file plus an archived-rollback
+        allow flag, is archived/stopped rollback-only, and has a sunset/removal path.
         """,
     )
     _write(
@@ -4763,6 +4763,24 @@ def test_entropy_audit_topology_guardrails_reject_pending_removal_after_retireme
         """
         node-22 local PostgreSQL :55433 is historical, do-not-connect for current NHMS
         production state, and pending removal.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_reject_incomplete_local_pg_boundary(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        node-22 local PostgreSQL :55433 is historical and archived.
         """,
     )
 
@@ -4816,7 +4834,8 @@ def test_entropy_audit_topology_guardrails_do_not_allow_current_local_pg_use_aft
         """
         # Node-22 Historical DB Retirement Runbook
 
-        This runbook tracks retirement of the historical PostgreSQL listener on node-22 `:55433`.
+        This runbook tracks retirement of the historical do-not-connect PostgreSQL listener on
+        node-22 `:55433`, archived and stopped as rollback-only state.
 
         ## Current operator steps
 
@@ -4827,7 +4846,7 @@ def test_entropy_audit_topology_guardrails_do_not_allow_current_local_pg_use_aft
     findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
 
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
-        ("docs/runbooks/node22-db-retirement-runbook.md", 7)
+        ("docs/runbooks/node22-db-retirement-runbook.md", 8)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
@@ -4848,8 +4867,8 @@ def test_entropy_audit_topology_guardrails_do_not_file_allow_key_compatibility_s
         tmp_path / relative_path,
         """
         Compatibility-only archived node-22 rollback mirror requires explicit DSN via
-        --node22-url or N22_DSN plus an archived-rollback allow flag and has a
-        sunset/removal path after object-store handoff packages replace it.
+        N22_DSN or owner-only --node22-dsn-file plus an archived-rollback allow flag,
+        is archived/stopped rollback-only, and has a sunset/removal path.
         Current production DB checks should use :55433 for active state.
         """,
     )
@@ -4868,8 +4887,8 @@ def test_entropy_audit_topology_guardrails_flag_current_use_after_compatibility_
     _write(
         tmp_path / "docs/runbooks/current-production-ops.md",
         "The archived node-22 rollback mirror is compatibility-only, requires explicit DSN via "
-        "--node22-url or N22_DSN plus an archived-rollback allow flag, and has a "
-        "sunset/removal path after object-store handoff packages replace it.\n\n"
+        "N22_DSN or owner-only --node22-dsn-file plus an archived-rollback allow flag, "
+        "is archived/stopped rollback-only, and has a sunset/removal path.\n\n"
         "Current production DB checks should use :55433 for active state.\n",
     )
 
@@ -4877,6 +4896,23 @@ def test_entropy_audit_topology_guardrails_flag_current_use_after_compatibility_
 
     assert [(finding["check_id"], finding["line"]) for finding in findings] == [
         ("production-topology-node22-local-postgres", 3)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_reject_mirror_without_real_sunset_removal(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        "Compatibility-only archived/stopped node-22 rollback mirror requires explicit DSN via "
+        "N22_DSN and the archived-rollback allow flag for pre-contract handoff packages.\n",
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 

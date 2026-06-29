@@ -61,7 +61,8 @@ Live verification on 2026-06-22 found:
   `scripts/ops/start-display-api.sh`, nginx proxy config, and corrected live
   deployment all converge on `127.0.0.1:8080`.
 - Keep node-22 PostgreSQL `:55433` visible only as a historical do-not-connect
-  note. Any current DB query examples must run on node-27 against `:55432`.
+  archived/stopped rollback-only note. Any current DB query examples must run on
+  node-27 against `:55432`.
 
 ## Risks / Trade-offs
 

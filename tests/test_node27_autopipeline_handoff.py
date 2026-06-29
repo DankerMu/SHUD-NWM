@@ -11,6 +11,7 @@ import scripts.node27_autopipeline as autopipe
 
 RUN_A = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
+NODE27_DATABASE_URL = "postgresql://node27_writer:secret@127.0.0.1:55432/nhms"
 
 
 def _argv_run_id(argv: list[str]) -> str:
@@ -118,7 +119,7 @@ def _run_main(capsys: pytest.CaptureFixture[str], object_store_root: Path, *extr
             "--basins-root",
             str(object_store_root.parent / "Basins"),
             "--database-url",
-            "postgresql://node27-writer:secret@db.example/nhms",
+            NODE27_DATABASE_URL,
             *extra,
         ]
     )
@@ -208,7 +209,7 @@ def test_declared_handoff_success_bypasses_mirror_and_records_run_details(
 
     assert rc == 0
     assert _command_kinds(calls) == ["register", "parse", "coverage"]
-    assert published_calls == ["postgresql://node27-writer:secret@db.example/nhms"]
+    assert published_calls == [NODE27_DATABASE_URL]
     detail = summary["runs"]["details"][0]
     assert detail["outcome"] == "ingested"
     assert detail["stage"] == "coverage"
@@ -230,7 +231,7 @@ def test_declared_handoff_success_bypasses_mirror_and_records_run_details(
     assert summary["runs"]["published"] == 7
 
 
-def test_no_declared_handoff_without_explicit_mirror_parses_hydro_outputs(
+def test_no_declared_handoff_without_explicit_mirror_skips_before_parse_publish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -245,15 +246,15 @@ def test_no_declared_handoff_without_explicit_mirror_parses_hydro_outputs(
     rc, summary = _run_main(capsys, object_store_root)
 
     assert rc == 0
-    assert _command_kinds(calls) == ["register", "parse", "coverage"]
-    assert published_calls == ["postgresql://node27-writer:secret@db.example/nhms"]
+    assert _command_kinds(calls) == ["register"]
+    assert published_calls == []
     detail = summary["runs"]["details"][0]
-    assert detail["outcome"] == "ingested"
-    assert detail["stage"] == "coverage"
+    assert detail["outcome"] == "skipped"
+    assert detail["stage"] == "forcing_handoff"
     assert detail["forcing_stage"]["mode"] == autopipe.NO_FORCING_HANDOFF_MODE
     assert detail["forcing_stage"]["reason_codes"] == [autopipe.NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON]
-    assert detail["parse_status"] == "parsed"
-    assert detail["coverage_refresh"] == "refreshed"
+    assert "parse_status" not in detail
+    assert "coverage_refresh" not in detail
 
 
 def test_configured_node22_dsn_without_archived_rollback_allowance_is_not_used(
@@ -263,7 +264,7 @@ def test_configured_node22_dsn_without_archived_rollback_allowance_is_not_used(
 ) -> None:
     monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
     monkeypatch.delenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, raising=False)
-    object_store_root, calls, _published_calls = _prepare_autopipe(
+    object_store_root, calls, published_calls = _prepare_autopipe(
         monkeypatch,
         tmp_path,
         runs={RUN_A: False},
@@ -273,8 +274,11 @@ def test_configured_node22_dsn_without_archived_rollback_allowance_is_not_used(
 
     assert rc == 0
     assert not [argv for argv in calls if "node27_mirror_forcing.py" in " ".join(argv)]
+    assert _command_kinds(calls) == ["register"]
+    assert published_calls == []
     detail = summary["runs"]["details"][0]
-    assert detail["outcome"] == "ingested"
+    assert detail["outcome"] == "skipped"
+    assert detail["stage"] == "forcing_handoff"
     assert detail["forcing_stage"]["mode"] == autopipe.NO_FORCING_HANDOFF_MODE
     assert detail["forcing_stage"]["reason_codes"] == [autopipe.NODE22_MIRROR_ROLLBACK_NOT_ALLOWED_REASON]
     rendered = json.dumps(summary)
@@ -313,13 +317,54 @@ def test_no_declared_handoff_uses_explicit_mirror_fallback_and_normalizes_counts
     assert "n22-secret" not in rendered
 
 
-def test_node22_url_is_passed_to_explicit_mirror_fallback_via_child_env(
+def test_env_mirror_fallback_normalizes_stale_parent_source_label(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
+    monkeypatch.setenv("NHMS_NODE22_DSN_SOURCE", "cli:--node22-url")
+    monkeypatch.setenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+    mirror_envs: list[dict[str, str]] = []
+
+    def command_handler(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        command = " ".join(argv)
+        if "node27_mirror_forcing.py" in command:
+            mirror_envs.append(dict(env))
+            return 0, json.dumps(_mirror_success()) + "\n", ""
+        if "node27_ingest_run.py" in command:
+            return 0, json.dumps({"status": "registered"}) + "\n", ""
+        if "workers.output_parser.cli" in command:
+            return 0, json.dumps({"status": "parsed", "rows_written": len(argv[-1])}) + "\n", ""
+        if "node27_refresh_coverage.py" in command:
+            return 0, json.dumps({"refreshed": True}) + "\n", ""
+        raise AssertionError(f"unexpected command: {argv}")
+
+    object_store_root, _calls, _published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: False},
+        command_handler=command_handler,
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert len(mirror_envs) == 1
+    assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "env:N22_DSN"
+    assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
+
+
+def test_node22_dsn_file_is_passed_to_explicit_mirror_fallback_via_child_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("N22_DSN", raising=False)
     node22_url = "postgresql://n22_user:n22-secret@node22.example/nhms"
+    dsn_file = tmp_path / "node22-dsn.env"
+    dsn_file.write_text(node22_url + "\n", encoding="utf-8")
+    dsn_file.chmod(0o600)
     mirror_envs: list[dict[str, str]] = []
 
     def command_handler(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
@@ -345,20 +390,54 @@ def test_node22_url_is_passed_to_explicit_mirror_fallback_via_child_env(
     rc, summary = _run_main(
         capsys,
         object_store_root,
-        "--node22-url",
-        node22_url,
+        "--node22-dsn-file",
+        str(dsn_file),
         "--allow-archived-node22-db-rollback-mirror",
     )
 
     assert rc == 0
     mirror_call = next(argv for argv in calls if "node27_mirror_forcing.py" in " ".join(argv))
     assert "--allow-archived-node22-db-rollback-mirror" in mirror_call
-    assert "--node22-url" not in mirror_call
+    assert "--node22-dsn-file" not in mirror_call
     assert node22_url not in mirror_call
     assert len(mirror_envs) == 1
     assert mirror_envs[0]["N22_DSN"] == node22_url
-    assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "cli:--node22-url"
+    assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == f"file:{dsn_file}"
     assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
+    rendered = json.dumps(summary)
+    assert "n22-secret" not in rendered
+
+
+def test_node22_dsn_file_must_be_owner_only_before_mirror_parse_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("N22_DSN", raising=False)
+    dsn_file = tmp_path / "node22-dsn.env"
+    dsn_file.write_text("postgresql://n22_user:n22-secret@node22.example/nhms\n", encoding="utf-8")
+    dsn_file.chmod(0o644)
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: False},
+    )
+
+    rc, summary = _run_main(
+        capsys,
+        object_store_root,
+        "--node22-dsn-file",
+        str(dsn_file),
+        "--allow-archived-node22-db-rollback-mirror",
+    )
+
+    assert rc == 1
+    assert _command_kinds(calls) == ["register"]
+    assert published_calls == []
+    detail = summary["runs"]["details"][0]
+    assert detail["outcome"] == "failed"
+    assert detail["stage"] == "forcing_handoff"
+    assert detail["forcing_stage"]["reason_codes"] == [autopipe.NODE22_DSN_FILE_UNSAFE_REASON]
     rendered = json.dumps(summary)
     assert "n22-secret" not in rendered
 
@@ -381,7 +460,7 @@ def test_declared_handoff_unavailable_does_not_fallback_to_configured_mirror(
 
     assert rc == 1
     assert _command_kinds(calls) == ["register"]
-    assert published_calls == ["postgresql://node27-writer:secret@db.example/nhms"]
+    assert published_calls == []
     detail = summary["runs"]["details"][0]
     assert detail["outcome"] == "failed"
     assert detail["stage"] == "forcing_handoff"

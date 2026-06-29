@@ -27,10 +27,11 @@ flag.
 
 - Make object-store artifacts the canonical handoff between node-22 compute and
   node-27 data-plane ingest for forcing-domain data.
-- Keep any compatibility-only archived node-22 rollback mirror safe until it is
-  fully removed: explicit DSN plus archived-rollback allow flag only, no
-  display-env fallback, structured skip/fail reasons, and no silent use of the
-  historical node-22 DB.
+- Keep any compatibility-only archived/stopped node-22 rollback mirror safe
+  until it is fully removed: explicit DSN through `N22_DSN` or owner-only
+  `--node22-dsn-file` plus archived-rollback allow flag only, no display-env
+  fallback, structured skip/fail reasons, and no silent use of the historical
+  do-not-connect node-22 DB.
 - Give node-27 ingest its own operational contract: env, wrapper preflight before
   seed/import/activate/backfill/register/mirror/parse/coverage/publish writes,
   role label, logging/evidence, and tests.
@@ -53,14 +54,15 @@ flag.
    and `met.interp_weight` from object-store package material and manifests.
    This matches the existing shared NFS boundary and removes active DB coupling
    from node-22. The node-22 local PostgreSQL `:55433` process is historical,
-   do-not-connect production state and must have a removal/sunset path rather
-   than becoming a permanent compatibility dependency.
+   do-not-connect, archived/stopped rollback-only production state and must have
+   a removal/sunset path rather than becoming a permanent compatibility
+   dependency.
 
 2. **The node-22 DB mirror is archived rollback-only, compatibility-only,
    explicit, allow-flagged, and sunset-bound.** The normal importer path is
    object-store handoff. Any autopipeline rollback mirror drill may configure
-   the source through parent `--node22-url` or env `N22_DSN`, but the mirror
-   subprocess itself reads source DSN only from `N22_DSN`; the drill also
+   the source through env `N22_DSN` or owner-only `--node22-dsn-file`, but the
+   mirror subprocess itself reads source DSN only from `N22_DSN`; the drill also
    requires `--allow-archived-node22-db-rollback-mirror` or
    `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR`, must never read
    `infra/env/display.env`, must emit a stable unavailable reason when no
@@ -557,7 +559,7 @@ Mandatory expanded triggers:
 - `scripts/node27_autopipeline.py` production control-flow change for per-run
   ingest policy.
 - Fallback policy between canonical object-store forcing-domain handoff and
-  explicit-DSN, allow-flagged, sunset-bound archived node-22 rollback mirror
+  explicit-DSN, allow-flagged, sunset-bound archived/stopped node-22 rollback mirror
   compatibility-only mode.
 - Subprocess orchestration and JSON summary stability across register,
   forcing-handoff/mirror, parse, and coverage stages. Publish-status remains the
@@ -600,19 +602,21 @@ Must add/change:
   to parse without invoking the mirror script.
 - A run whose declared handoff manifest file is absent is a pre-contract or
   compatibility case. It may use the archived rollback mirror only when
-  `N22_DSN` is set or the autopipeline `--node22-url` option is provided and the
-  archived-rollback allow flag is explicitly enabled. Autopipeline must pass any
-  `--node22-url` value to `scripts/node27_mirror_forcing.py` through the child
-  environment as `N22_DSN` plus `NHMS_NODE22_DSN_SOURCE=cli:--node22-url`, never
-  as a raw DSN argv entry. The mirror script itself accepts source DSN only from
-  `N22_DSN`, and its destination `DATABASE_URL` must reject node-22 historical
-  hosts and port `:55433`. The mirror fallback must be labeled
+  `N22_DSN` is set or the autopipeline `--node22-dsn-file` option points to an
+  owner-only file and the archived-rollback allow flag is explicitly enabled.
+  Autopipeline must pass any resolved file value to
+  `scripts/node27_mirror_forcing.py` through the child environment as `N22_DSN`
+  plus a non-secret `NHMS_NODE22_DSN_SOURCE=file:<path>` label, never as a raw
+  DSN argv entry. The mirror script itself accepts source DSN only from
+  `N22_DSN`, and its destination `DATABASE_URL` must reject query overrides,
+  node-22 historical hosts, port `:55433`, and non-node-27 endpoints. The mirror
+  fallback must be labeled
   `archived_node22_rollback_forcing_mirror` and recorded as compatibility
   evidence.
 - A run whose handoff manifest is declared/present but whose parser/apply report
   is `available=false` or `status=failed` is not a compatibility fallback case.
   It must stop at `stage=forcing_handoff` without invoking mirror, even when
-  `N22_DSN` or `--node22-url` plus the archived-rollback allow flag is
+  `N22_DSN` or owner-only `--node22-dsn-file` plus the archived-rollback allow flag is
   configured.
 - If no declared handoff exists and no explicit mirror DSN is configured, the
   run summary must be `outcome=skipped`, `stage=forcing_handoff`, with a stable
@@ -695,9 +699,10 @@ Regression rows:
 - Complete handoff package -> autopipeline calls object-store apply, does not
   call mirror, then runs parse/coverage and reports `outcome=ingested`.
 - No declared handoff + explicit mirror configured through `N22_DSN` or
-  autopipeline `--node22-url` plus archived-rollback allow flag -> autopipeline
-  calls archived rollback mirror, labels compatibility mode, records the mirror
-  DSN source without the DSN value, then proceeds to parse when mirror succeeds.
+  autopipeline owner-only `--node22-dsn-file` plus archived-rollback allow flag
+  -> autopipeline calls archived rollback mirror, labels compatibility mode,
+  records the mirror DSN source without the DSN value, then proceeds to parse
+  when mirror succeeds.
 - No declared handoff + no explicit mirror configured -> that run is skipped at
   `forcing_handoff` with stable reason; unrelated runs continue.
 - Declared handoff unavailable (missing required field, malformed payload,

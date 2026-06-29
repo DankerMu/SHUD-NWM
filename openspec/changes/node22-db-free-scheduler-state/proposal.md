@@ -3,19 +3,19 @@
 Node-22 is now the compute/control node, while node-27 owns the active
 PostgreSQL data plane, download, ingest, display API, and frontend.
 
-Initial context before #836/#837: the historical PostgreSQL listener on
-node-22 `:55433` could not be stopped because the production scheduler still
-read `DATABASE_URL`, used `NHMS_SCHEDULER_LOCK_BACKEND=postgres`, and recorded
-live evidence with `lock_type=postgres_advisory`.
+Initial context before #836/#837: the historical do-not-connect PostgreSQL
+listener on node-22 `:55433` was not yet archived/stopped because the production
+scheduler still read `DATABASE_URL`, used `NHMS_SCHEDULER_LOCK_BACKEND=postgres`,
+and recorded live evidence with `lock_type=postgres_advisory`.
 
 The previous node-27 download migration intentionally left node-22 DB
 retirement as a later gated cleanup. This change turns that gate into concrete
 implementation work: make the node-22 scheduler run without any PostgreSQL
 dependency, prove it with live GFS/IFS scheduler receipts, then archive and stop
-the historical `:55433` listener.
+the historical do-not-connect `:55433` listener.
 
-Current status after #837: node-22 `:55433` is archived/stopped rollback state
-only; the authoritative stop receipt is
+Current status after #837: node-22 `:55433` is historical do-not-connect,
+archived/stopped rollback-only state; the authoritative stop receipt is
 `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`.
 
 ## What Changes

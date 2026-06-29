@@ -23,7 +23,7 @@
 ## 4. Verification
 
 - [x] 4.1 `! rg -n "STALE WARNING" docs/runbooks/current-production-ops.md` PASS.
-- [x] 4.2 `! rg -n "55433|10\\.0\\.2\\.100:55433" docs/runbooks/current-production-ops.md` PASS; any future retained match must be explicitly historical/do-not-connect.
+- [x] 4.2 `! rg -n "55433|10\\.0\\.2\\.100:55433" docs/runbooks/current-production-ops.md` PASS; any future retained match must be explicitly historical/do-not-connect/archived/stopped rollback-only.
 - [x] 4.3 `rg -n "node27_autopipe|scripts/node27_autopipe_cron.sh|scripts/node27_autopipeline.py|/home/nwm/NWM|127\\.0\\.0\\.1:55432|127\\.0\\.0\\.1:8080|https://test\\.nwm\\.ac\\.cn/health" docs/runbooks/current-production-ops.md` shows required node-27 DB/ingest/display facts.
 - [x] 4.4 `! rg -n "services\\.orchestrator\\.cli plan-production|plan-production --submit|/scratch/frd_muziyao/NWM.*plan-production" docs/runbooks/current-production-ops.md` PASS; any future retained match must be explicitly historical.
 - [x] 4.5 `rg -n "services\\.slurm_gateway|/ghdc/data/nwm/object-store|/home/ghdc/nwm/object-store|/ghdc/data/nwm/published|/home/ghdc/nwm/published" docs/runbooks/current-production-ops.md` shows Slurm Gateway and both NFS path perspectives.
