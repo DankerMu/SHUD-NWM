@@ -289,7 +289,10 @@ def _completed_upstream_stage_retry_evidence(
     )
     if restart_stage is None:
         return None
-    if _state_has_failure_signal(state):
+    failure_state = dict(state)
+    failure_state.pop("restart_stage", None)
+    failure_state.pop("restart_from_stage", None)
+    if _state_has_failure_signal(failure_state):
         return None
     return {
         **base_evidence,
