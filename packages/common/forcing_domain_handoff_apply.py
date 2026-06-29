@@ -645,13 +645,7 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
         )
         VALUES %s
         ON CONFLICT (station_id) DO UPDATE SET
-            basin_version_id = EXCLUDED.basin_version_id,
-            station_name = EXCLUDED.station_name,
-            geom = EXCLUDED.geom,
-            elevation_m = EXCLUDED.elevation_m,
-            station_role = EXCLUDED.station_role,
-            active_flag = EXCLUDED.active_flag,
-            properties_json = EXCLUDED.properties_json
+            station_id = met.met_station.station_id
         WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
           AND met.met_station.station_name IS NOT DISTINCT FROM EXCLUDED.station_name
           AND ABS(ST_X(met.met_station.geom) - ST_X(EXCLUDED.geom)) <= {tolerance_sql}
@@ -659,7 +653,6 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
           AND met.met_station.elevation_m IS NOT DISTINCT FROM EXCLUDED.elevation_m
           AND met.met_station.station_role = EXCLUDED.station_role
           AND met.met_station.active_flag = EXCLUDED.active_flag
-          AND met.met_station.properties_json = EXCLUDED.properties_json
         RETURNING station_id
         """,
         rows,
@@ -858,7 +851,6 @@ def _station_rows_compatible(existing: Mapping[str, Any], station: Mapping[str, 
         and _numbers_close(existing.get("elevation_m"), station.get("elevation_m"))
         and existing.get("station_role") == station.get("station_role")
         and existing.get("active_flag") == station.get("active_flag")
-        and dict(existing.get("properties_json") or {}) == dict(station.get("properties_json") or {})
     )
 
 

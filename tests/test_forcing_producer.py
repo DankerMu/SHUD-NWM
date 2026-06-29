@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.forcing_domain_handoff import parse_forcing_domain_handoff_path
 from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from workers.forcing_producer import (
@@ -543,7 +544,7 @@ def test_file_forcing_repository_reads_model_registry_stations_and_canonical_att
         "river_network_version_id": "basins_qhh_rivnet_vbasins",
     }
     stations = repository.load_met_stations(basin_version_id="basins_qhh_vbasins")
-    assert [station.station_id for station in stations] == ["qhh_forc_1", "qhh_forc_2"]
+    assert [station.station_id for station in stations] == ["qhh_forc_001", "qhh_forc_002"]
     assert stations[0].elevation_m == 0.0
     assert stations[1].properties_json["forcing_filename"] == "X101.05Y36.25.csv"
 
@@ -604,6 +605,119 @@ def test_file_forcing_repository_prefers_canonical_product_catalog(tmp_path: Pat
     assert len(products) == 1
     assert products[0].checksum == "abc123"
     assert products[0].lineage_json["policy_identity"] == {"source": "gfs"}
+
+
+def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
+    repository = FileForcingRepository(object_store=store, registry_manifest=tmp_path / "unused-registry.json")
+    cycle_time = parse_cycle_time("2026050700")
+    valid_times = (cycle_time, cycle_time + timedelta(hours=3))
+    forcing_version_id = "forc_gfs_2026050700_demo_model"
+    package_key = "forcing/gfs/2026050700/basin_v1/demo_model"
+    package_uri = store.uri_for_key(package_key)
+    package_manifest_uri = store.uri_for_key(f"{package_key}/forcing_package.json")
+    package_manifest = {
+        "forcing_version_id": forcing_version_id,
+        "model_id": "demo_model",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-07T00:00:00Z",
+        "start_time": "2026-05-07T00:00:00Z",
+        "end_time": "2026-05-07T03:00:00Z",
+        "basin_id": "basin_a",
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rivnet_v1",
+        "station_count": 1,
+        "station_order": [
+            {
+                "station_id": "qhh_forc_001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.00Y38.00.csv",
+                "longitude": 100.0,
+                "latitude": 38.0,
+                "elevation_m": 3000.0,
+            }
+        ],
+        "lineage": {"grid_id": "grid_a"},
+    }
+    package_content = json.dumps(package_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    store.write_bytes_atomic(package_manifest_uri, package_content)
+    package_checksum = sha256_bytes(package_content)
+    station = MetStation(
+        "qhh_forc_001",
+        "basin_v1",
+        100.0,
+        38.0,
+        3000.0,
+        "forcing_grid",
+        station_name="BASIN_A forcing station 001",
+        properties_json={"shud_forcing_index": 1, "forcing_filename": "X100.00Y38.00.csv"},
+    )
+    repository._stations_by_basin_version["basin_v1"] = (station,)
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                source_id="gfs",
+                grid_id="grid_a",
+                model_id="demo_model",
+                station_id="qhh_forc_001",
+                variable="PRCP",
+                grid_cell_id="cell-1",
+                weight=1.0,
+                method="idw",
+                grid_signature="grid-signature",
+            ),
+        )
+    )
+    rows = tuple(
+        ForcingTimeseriesRow(
+            forcing_version_id=forcing_version_id,
+            basin_version_id="basin_v1",
+            station_id="qhh_forc_001",
+            valid_time=valid_time,
+            source_id="gfs",
+            variable="PRCP",
+            value=1.25,
+            unit="mm/day",
+            native_resolution="3h",
+        )
+        for valid_time in valid_times
+    )
+    repository.upsert_forcing_version(
+        {
+            "forcing_version_id": forcing_version_id,
+            "model_id": "demo_model",
+            "source_id": "gfs",
+            "cycle_time": cycle_time,
+            "start_time": valid_times[0],
+            "end_time": valid_times[-1],
+            "basin_id": "basin_a",
+            "basin_version_id": "basin_v1",
+            "station_count": 1,
+            "forcing_package_uri": package_uri,
+            "checksum": None,
+            "lineage_json": {
+                "grid_id": "grid_a",
+                "forcing_package_manifest_uri": package_manifest_uri,
+                "model_package_uri": "s3://nhms/models/demo_model/package/",
+            },
+        }
+    )
+    repository.replace_forcing_timeseries(forcing_version_id, rows)
+
+    repository.finalize_forcing_version(forcing_version_id, package_checksum)
+
+    handoff_path = tmp_path / "runs" / "fcst_gfs_2026050700_demo_model" / "input" / "forcing_domain_handoff.json"
+    assert handoff_path.exists()
+    assert (tmp_path / package_key / "forcing_domain_package.json").exists()
+    parsed = parse_forcing_domain_handoff_path(handoff_path, object_store_root=tmp_path, object_store_prefix="s3://nhms")
+    assert parsed["available"] is True
+    assert {table: len(rows) for table, rows in parsed["parsed"].items()} == {
+        "met.forcing_version": 1,
+        "met.met_station": 1,
+        "met.forcing_station_timeseries": 2,
+        "met.interp_weight": 1,
+    }
+    assert parsed["parsed"]["met.met_station"][0]["station_id"] == "qhh_forc_001"
 
 
 def test_idw_weights_are_normalized_for_station() -> None:

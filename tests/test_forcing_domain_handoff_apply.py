@@ -294,6 +294,33 @@ def test_existing_global_station_conflict_rolls_back_without_overwrite() -> None
     assert connection.tables["met.forcing_version"] == []
 
 
+def test_existing_station_with_richer_metadata_is_preserved() -> None:
+    envelope = _parse_complete()
+    existing_station = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
+    existing_station["properties_json"] = {
+        **existing_station["properties_json"],
+        "seed": "qhh_production_bootstrap",
+        "source_file": "/tmp/qhh/input/qhh/qhh.tsd.forc",
+    }
+    existing_station["geom"] = {
+        "type": "Point",
+        "srid": 4490,
+        "coordinates": [existing_station["longitude"], existing_station["latitude"]],
+    }
+    connection = _FakeConnection()
+    connection.tables["met.met_station"].append(existing_station)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    assert len(connection.tables["met.met_station"]) == 2
+    assert connection.tables["met.met_station"][0]["properties_json"]["seed"] == "qhh_production_bootstrap"
+    assert (
+        connection.tables["met.met_station"][0]["properties_json"]["source_file"]
+        == "/tmp/qhh/input/qhh/qhh.tsd.forc"
+    )
+
+
 def test_station_upsert_returning_shortfall_rolls_back_without_overwrite() -> None:
     envelope = _parse_complete()
     existing_station = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
@@ -679,7 +706,6 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
             returned.append((record["station_id"],))
             continue
         if _fake_station_compatible(existing, record):
-            existing.update(record)
             returned.append((record["station_id"],))
     return returned
 
@@ -694,7 +720,6 @@ def _fake_station_compatible(existing: Mapping[str, Any], record: Mapping[str, A
         and existing_select["elevation_m"] == record["elevation_m"]
         and existing_select["station_role"] == record["station_role"]
         and existing_select["active_flag"] == record["active_flag"]
-        and existing_select["properties_json"] == record["properties_json"]
     )
 
 
