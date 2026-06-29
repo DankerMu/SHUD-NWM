@@ -1354,6 +1354,59 @@ def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_mat
     assert legacy.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
 
 
+def test_cycle_stage_manifest_forwards_db_free_file_provider_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    registry_manifest = tmp_path / "object-store" / "scheduler" / "registry" / "manifest-last.json"
+    readiness_index = tmp_path / "object-store" / "scheduler" / "canonical-readiness" / "index-last.json"
+    state_index = tmp_path / "object-store" / "scheduler" / "state" / "index-last.json"
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(tmp_path))
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", str(registry_manifest))
+    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", str(readiness_index))
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(state_index))
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda _basins: [],
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    manifest = chain_manifests.build_cycle_stage_manifest(orchestrator, stage, context)
+
+    assert manifest["scheduler_db_free_required"] == "true"
+    assert manifest["scheduler_registry_backend"] == "file"
+    assert manifest["scheduler_registry_manifest"] == str(registry_manifest)
+    assert manifest["scheduler_canonical_readiness_backend"] == "file"
+    assert manifest["scheduler_canonical_readiness_index"] == str(readiness_index)
+    assert manifest["scheduler_state_index_backend"] == "file"
+    assert manifest["scheduler_state_index"] == str(state_index)
+
+
 def test_chain_array_accounting_legacy_parse_uses_current_array_task_log_uri_binding(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

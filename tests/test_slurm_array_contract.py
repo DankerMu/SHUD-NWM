@@ -264,6 +264,8 @@ def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expect
 
 
 def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Path) -> None:
+    registry_manifest = tmp_path / "object-store" / "db-free" / "registry-manifest.json"
+    readiness_index = tmp_path / "object-store" / "db-free" / "canonical-readiness-index.json"
     state_index = tmp_path / "object-store" / "db-free" / "state-index.json"
     allowed_roots = os.pathsep.join((str(tmp_path / "workspace"), str(tmp_path / "object-store")))
     rendered = _gateway(tmp_path).render_template(
@@ -272,6 +274,10 @@ def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Pat
             **_render_manifest(tmp_path, "save_state_snapshot_array"),
             "scheduler_db_free_required": "true",
             "scheduler_allowed_roots": allowed_roots,
+            "scheduler_registry_backend": "file",
+            "scheduler_registry_manifest": str(registry_manifest),
+            "scheduler_canonical_readiness_backend": "file",
+            "scheduler_canonical_readiness_index": str(readiness_index),
             "scheduler_state_index_backend": "file",
             "scheduler_state_index": str(state_index),
         },
@@ -280,6 +286,10 @@ def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Pat
 
     assert "export NHMS_SCHEDULER_DB_FREE_REQUIRED=true" in rendered
     assert f"export NHMS_SCHEDULER_ALLOWED_ROOTS={shlex.quote(allowed_roots)}" in rendered
+    assert "export NHMS_SCHEDULER_REGISTRY_BACKEND=file" in rendered
+    assert f"export NHMS_SCHEDULER_REGISTRY_MANIFEST={shlex.quote(str(registry_manifest))}" in rendered
+    assert "export NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file" in rendered
+    assert f"export NHMS_SCHEDULER_CANONICAL_READINESS_INDEX={shlex.quote(str(readiness_index))}" in rendered
     assert "export NHMS_SCHEDULER_STATE_INDEX_BACKEND=file" in rendered
     assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(state_index))}" in rendered
 
