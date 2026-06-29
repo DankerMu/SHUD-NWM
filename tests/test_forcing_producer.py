@@ -35,6 +35,7 @@ from workers.forcing_producer.direct_grid_contract import (
     REQUIRED_MANIFEST_FIELDS,
     REQUIRED_STATION_FIELDS,
 )
+from workers.forcing_producer.file_store import FileForcingRepository
 from workers.forcing_producer.producer import (
     EXPECTED_CANONICAL_UNITS,
     FORCING_VARIABLES,
@@ -443,6 +444,119 @@ class FailingWriteObjectStore(LocalObjectStore):
         if str(key_or_uri).endswith(self.fail_key_suffix):
             raise RuntimeError("object write failed")
         return super().write_bytes_atomic(key_or_uri, content)
+
+
+def test_from_env_uses_file_repository_when_scheduler_requires_db_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_database_lookup() -> Any:
+        raise AssertionError("DB-free forcing must not construct PsycopgMetStore")
+
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setattr("workers.forcing_producer.producer.PsycopgMetStore.from_env", fail_database_lookup)
+
+    producer = ForcingProducer.from_env()
+
+    assert isinstance(producer.repository, FileForcingRepository)
+
+
+def test_file_forcing_repository_reads_model_registry_stations_and_canonical_attrs(tmp_path: Path) -> None:
+    xr = pytest.importorskip("xarray")
+    store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
+    model_root = tmp_path / "models" / "basins_qhh_shud" / "v1"
+    package_root = model_root / "package"
+    package_root.mkdir(parents=True)
+    (package_root / "qhh.tsd.forc").write_text(
+        "\n".join(
+            [
+                "2 19790101",
+                "/legacy/qhh/forcing",
+                "ID\tLon\tLat\tX\tY\tZ\tFilename",
+                "1\t100.95\t36.25\t0\t0\t-9999\tX100.95Y36.25.csv",
+                "2\t101.05\t36.25\t0\t0\t3375\tX101.05Y36.25.csv",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (model_root / "manifest.json").write_text(json.dumps({"basin_slug": "qhh"}), encoding="utf-8")
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model_id": "basins_qhh_shud",
+                        "basin_id": "basins_qhh",
+                        "basin_version_id": "basins_qhh_vbasins",
+                        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+                        "manifest_uri": "s3://nhms/models/basins_qhh_shud/v1/manifest.json",
+                        "model_package_uri": "s3://nhms/models/basins_qhh_shud/v1/package/",
+                        "resource_profile": {"shud_input_name": "qhh"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cycle_time = datetime(2026, 6, 21, 18, tzinfo=UTC)
+    product_path = (
+        tmp_path
+        / "canonical"
+        / "gfs"
+        / "2026062118"
+        / "air_temperature_2m"
+        / "gfs_2026062118_air_temperature_2m_f003.nc"
+    )
+    product_path.parent.mkdir(parents=True)
+    dataset = xr.Dataset(
+        data_vars={"air_temperature_2m": ("point", [12.5])},
+        coords={"point": [0]},
+        attrs={
+            "cycle_time": cycle_time.isoformat(),
+            "valid_time": "2026-06-21T21:00:00+00:00",
+            "lead_time_hours": 3,
+            "unit": "degC",
+            "grid_id": "gfs_0p25",
+            "lineage_json": json.dumps(
+                {
+                    "policy_identity": {"source": "gfs"},
+                    "source_object_identity": {"manifest": "raw/gfs/2026062118/manifest.json"},
+                },
+                sort_keys=True,
+            ),
+        },
+    )
+    try:
+        dataset.to_netcdf(product_path)
+    finally:
+        dataset.close()
+
+    repository = FileForcingRepository(object_store=store, registry_manifest=registry_path)
+
+    assert repository.resolve_model_identity(model_id="basins_qhh_shud") == {
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+    }
+    stations = repository.load_met_stations(basin_version_id="basins_qhh_vbasins")
+    assert [station.station_id for station in stations] == ["qhh_forc_1", "qhh_forc_2"]
+    assert stations[0].elevation_m == 0.0
+    assert stations[1].properties_json["forcing_filename"] == "X101.05Y36.25.csv"
+
+    products = repository.list_canonical_products(source_id="gfs", cycle_time=cycle_time)
+    assert len(products) == 1
+    product = products[0]
+    assert product.canonical_product_id == "gfs_2026062118_air_temperature_2m_f003"
+    assert product.valid_time == datetime(2026, 6, 21, 21, tzinfo=UTC)
+    assert product.lead_time_hours == 3
+    assert product.object_uri == (
+        "s3://nhms/canonical/gfs/2026062118/air_temperature_2m/"
+        "gfs_2026062118_air_temperature_2m_f003.nc"
+    )
+    assert product.lineage_json["policy_identity"] == {"source": "gfs"}
 
 
 def test_idw_weights_are_normalized_for_station() -> None:

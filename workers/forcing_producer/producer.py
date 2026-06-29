@@ -345,11 +345,21 @@ class ForcingProducer:
 
     @classmethod
     def from_env(cls) -> ForcingProducer:
+        config = ForcingProducerConfig()
+        object_store = LocalObjectStore(
+            config.object_store_root,
+            object_store_prefix=config.object_store_prefix,
+        )
+        from .file_store import FileForcingRepository, db_free_repository_enabled
+
+        if db_free_repository_enabled():
+            repository = FileForcingRepository.from_env(object_store=object_store)
+            return cls(config=config, repository=repository, object_store=object_store)
+
         from .store import PsycopgForcingRepository
 
-        config = ForcingProducerConfig()
         repository = PsycopgForcingRepository(PsycopgMetStore.from_env().database_url)
-        return cls(config=config, repository=repository)
+        return cls(config=config, repository=repository, object_store=object_store)
 
     def produce(
         self,

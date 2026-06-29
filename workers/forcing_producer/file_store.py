@@ -1,0 +1,599 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from packages.common.met_store import MetStoreError
+from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.source_identity import normalize_source_id
+from workers.canonical_converter.converter import unit_for_standard_variable
+from workers.forcing_producer.direct_grid_contract import (
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
+from workers.forcing_producer.producer import (
+    CanonicalProduct,
+    ForcingComponent,
+    ForcingTimeseriesRow,
+    InterpolationWeight,
+    MetStation,
+    format_cycle_time,
+    parse_cycle_time,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+_FORECAST_PRODUCT_RE = re.compile(r"^(?P<source>.+)_(?P<cycle>\d{10})_(?P<variable>.+)_f(?P<lead>\d{3})\.nc$")
+_TRUTHY = {"1", "true", "t", "yes", "y", "on"}
+
+
+@dataclass
+class FileForcingRepository:
+    """Object-store/file backed repository for DB-free forcing production."""
+
+    object_store: LocalObjectStore
+    registry_manifest: Path | str | None = None
+    _registry_cache: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
+    _model_manifest_cache: dict[str, Mapping[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _stations_by_basin_version: dict[str, tuple[MetStation, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _weights_by_scope: dict[tuple[str, str, str], tuple[InterpolationWeight, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _forcing_versions: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _forcing_components: dict[str, tuple[ForcingComponent, ...]] = field(default_factory=dict, init=False, repr=False)
+    _forcing_timeseries_summary: dict[str, Mapping[str, Any]] = field(default_factory=dict, init=False, repr=False)
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        object_store: LocalObjectStore | None = None,
+        object_store_root: Path | str | None = None,
+        object_store_prefix: str | None = None,
+    ) -> FileForcingRepository:
+        store = object_store or LocalObjectStore(
+            object_store_root or os.getenv("OBJECT_STORE_ROOT") or os.getenv("WORKSPACE_ROOT") or ".nhms-workspace",
+            object_store_prefix=(
+                object_store_prefix if object_store_prefix is not None else os.getenv("OBJECT_STORE_PREFIX", "")
+            ),
+        )
+        registry_manifest = (
+            os.getenv("NHMS_SCHEDULER_REGISTRY_MANIFEST")
+            or os.getenv("NHMS_FORCING_MODEL_REGISTRY_MANIFEST")
+            or os.getenv("NHMS_FILE_MODEL_REGISTRY_MANIFEST")
+            or "scheduler/registry/manifest-last.json"
+        )
+        return cls(object_store=store, registry_manifest=registry_manifest)
+
+    def resolve_model_identity(self, *, model_id: str) -> dict[str, Any]:
+        model = self._model_entry(model_id)
+        return {
+            "basin_id": str(model["basin_id"]),
+            "basin_version_id": str(model["basin_version_id"]),
+            "river_network_version_id": str(model.get("river_network_version_id") or ""),
+        }
+
+    def resolve_model_basin_version(self, *, model_id: str) -> str:
+        return str(self._model_entry(model_id)["basin_version_id"])
+
+    def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
+        cached = self._stations_by_basin_version.get(basin_version_id)
+        if cached is not None:
+            return cached
+        model = self._model_entry_for_basin_version(basin_version_id)
+        manifest = self._model_manifest(model)
+        stations = self._stations_from_model_manifest(
+            model=model,
+            manifest=manifest,
+            basin_version_id=basin_version_id,
+        )
+        self._stations_by_basin_version[basin_version_id] = stations
+        return stations
+
+    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]:
+        normalized_source = normalize_source_id(source_id)
+        compact_cycle = format_cycle_time(cycle_time)
+        cycle_dir = Path(self.object_store.root) / "canonical" / normalized_source / compact_cycle
+        if not cycle_dir.exists():
+            return ()
+        products: list[CanonicalProduct] = []
+        for product_path in sorted(cycle_dir.glob("*/*.nc")):
+            product = self._canonical_product_from_path(
+                product_path,
+                source_id=normalized_source,
+                cycle_time=parse_cycle_time(compact_cycle),
+            )
+            if product is not None:
+                products.append(product)
+        return tuple(sorted(products, key=lambda item: (item.variable, item.valid_time, item.canonical_product_id)))
+
+    def list_fallback_canonical_products(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        variables: Sequence[str],
+    ) -> tuple[CanonicalProduct, ...]:
+        normalized_source = normalize_source_id(source_id)
+        source_dir = Path(self.object_store.root) / "canonical" / normalized_source
+        if not source_dir.exists() or not variables:
+            return ()
+        selected: dict[tuple[datetime, str], CanonicalProduct] = {}
+        for cycle_dir in sorted(path for path in source_dir.iterdir() if path.is_dir()):
+            for product_path in sorted(cycle_dir.glob("*/*.nc")):
+                product = self._canonical_product_from_path(
+                    product_path,
+                    source_id=normalized_source,
+                    cycle_time=parse_cycle_time(cycle_dir.name),
+                )
+                if product is None or product.variable not in variables:
+                    continue
+                if not start_time <= product.valid_time <= end_time:
+                    continue
+                if product.quality_flag == "fail" or not product.checksum:
+                    continue
+                key = (product.valid_time, product.variable)
+                existing = selected.get(key)
+                if existing is None or _lead_sort_key(product) < _lead_sort_key(existing):
+                    selected[key] = product
+        return tuple(sorted(selected.values(), key=lambda item: (item.variable, item.valid_time)))
+
+    def load_interp_weights(
+        self,
+        *,
+        source_id: str,
+        grid_id: str,
+        model_id: str,
+    ) -> tuple[InterpolationWeight, ...]:
+        return self._weights_by_scope.get((source_id, grid_id, model_id), ())
+
+    def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None:
+        if not weights:
+            return
+        scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
+        if len(scopes) != 1:
+            raise MetStoreError("Interpolation weights must be replaced one source/grid/model scope at a time.")
+        self._weights_by_scope[next(iter(scopes))] = tuple(weights)
+
+    def ensure_direct_grid_met_stations(
+        self,
+        *,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> None:
+        return None
+
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> DirectGridForcingContract | None:
+        model = self._model_entry(model_id)
+        if str(model.get("basin_version_id") or "") != basin_version_id:
+            raise MetStoreError(
+                f"Model instance {model_id!r} for basin_version_id {basin_version_id!r} was not found."
+            )
+        resource_profile = model.get("resource_profile") or {}
+        if not isinstance(resource_profile, Mapping):
+            raise DirectGridContractError(
+                "Model resource_profile must be a JSON object.",
+                details={
+                    "model_id": model_id,
+                    "basin_version_id": basin_version_id,
+                    "actual_type": type(resource_profile).__name__,
+                },
+            )
+        return load_forcing_mapping_contract_from_manifest(
+            resource_profile,
+            source_id=source_id,
+            allow_root_direct_grid=False,
+        )
+
+    def load_direct_grid_validation_assets(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        contract: DirectGridForcingContract,
+    ) -> Mapping[str, Any]:
+        return {"model_input_package_id": contract.model_input_package_id}
+
+    def get_forcing_version(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+    ) -> dict[str, Any] | None:
+        forcing_version_id = f"forc_{normalize_source_id(source_id).lower()}_{format_cycle_time(cycle_time)}_{model_id}"
+        return self._forcing_versions.get(forcing_version_id)
+
+    def upsert_forcing_version(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        forcing_version_id = str(record["forcing_version_id"])
+        stored = dict(record)
+        self._forcing_versions[forcing_version_id] = stored
+        return dict(stored)
+
+    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]:
+        record = dict(self._forcing_versions.get(forcing_version_id) or {"forcing_version_id": forcing_version_id})
+        record["checksum"] = checksum
+        self._forcing_versions[forcing_version_id] = record
+        self._write_forcing_version_sidecar(record)
+        return dict(record)
+
+    def clear_forcing_version_checksum(self, forcing_version_id: str) -> dict[str, Any]:
+        record = dict(self._forcing_versions.get(forcing_version_id) or {"forcing_version_id": forcing_version_id})
+        record["checksum"] = None
+        self._forcing_versions[forcing_version_id] = record
+        return dict(record)
+
+    def verify_forcing_version_children(
+        self,
+        *,
+        forcing_version_id: str,
+        expected_components: Sequence[ForcingComponent],
+        expected_station_ids: Sequence[str],
+        expected_valid_times: Sequence[datetime],
+        expected_variables: Sequence[str],
+    ) -> Mapping[str, Any]:
+        components = self._forcing_components.get(forcing_version_id, ())
+        summary = self._forcing_timeseries_summary.get(forcing_version_id) or {}
+        expected_timeseries_count = len(expected_station_ids) * len(expected_valid_times) * len(expected_variables)
+        complete = (
+            len(components) == len(expected_components)
+            and int(summary.get("row_count") or 0) == expected_timeseries_count
+            and int(summary.get("station_count") or 0) == len(expected_station_ids)
+            and int(summary.get("timestep_count") or 0) == len(expected_valid_times)
+            and int(summary.get("variable_count") or 0) == len(expected_variables)
+        )
+        return {
+            "forcing_version_id": forcing_version_id,
+            "expected_component_count": len(expected_components),
+            "component_count": len(components),
+            "expected_timeseries_row_count": expected_timeseries_count,
+            "timeseries_row_count": int(summary.get("row_count") or 0),
+            "station_count": int(summary.get("station_count") or 0),
+            "timestep_count": int(summary.get("timestep_count") or 0),
+            "variable_count": int(summary.get("variable_count") or 0),
+            "complete": complete,
+        }
+
+    def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None:
+        self._forcing_components[forcing_version_id] = tuple(components)
+
+    def replace_forcing_timeseries(
+        self,
+        forcing_version_id: str,
+        rows: Sequence[ForcingTimeseriesRow],
+    ) -> None:
+        self._forcing_timeseries_summary[forcing_version_id] = {
+            "row_count": len(rows),
+            "station_count": len({row.station_id for row in rows}),
+            "timestep_count": len({row.valid_time for row in rows}),
+            "variable_count": len({row.variable for row in rows}),
+        }
+
+    def update_forecast_cycle(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        status: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any] | None:
+        return {
+            "source_id": normalize_source_id(source_id),
+            "cycle_time": cycle_time,
+            "status": status,
+            "error_code": error_code,
+            "error_message": error_message,
+            "repository_backend": "file",
+        }
+
+    def _registry(self) -> Mapping[str, Any]:
+        if self._registry_cache is None:
+            self._registry_cache = self._read_json_reference(str(self.registry_manifest or ""))
+        return self._registry_cache
+
+    def _model_entry(self, model_id: str) -> Mapping[str, Any]:
+        for model in self._registry_models():
+            if str(model.get("model_id") or "") == model_id:
+                return model
+        raise MetStoreError(f"Model instance {model_id!r} was not found in file model registry.")
+
+    def _model_entry_for_basin_version(self, basin_version_id: str) -> Mapping[str, Any]:
+        for model in self._registry_models():
+            if str(model.get("basin_version_id") or "") == basin_version_id:
+                return model
+        raise MetStoreError(f"Basin version {basin_version_id!r} was not found in file model registry.")
+
+    def _registry_models(self) -> tuple[Mapping[str, Any], ...]:
+        registry = self._registry()
+        models = registry.get("models")
+        if not isinstance(models, Sequence) or isinstance(models, (str, bytes)):
+            raise MetStoreError("File model registry must contain a models array.")
+        return tuple(model for model in models if isinstance(model, Mapping))
+
+    def _model_manifest(self, model: Mapping[str, Any]) -> Mapping[str, Any]:
+        manifest_uri = str(model.get("manifest_uri") or "")
+        if not manifest_uri:
+            resource_profile = model.get("resource_profile") or {}
+            if isinstance(resource_profile, Mapping):
+                manifest_uri = str(resource_profile.get("model_package_manifest_uri") or "")
+        if not manifest_uri:
+            raise MetStoreError(f"Model {model.get('model_id')!r} does not declare a manifest_uri.")
+        cached = self._model_manifest_cache.get(manifest_uri)
+        if cached is not None:
+            return cached
+        manifest = self._read_json_reference(manifest_uri)
+        self._model_manifest_cache[manifest_uri] = manifest
+        return manifest
+
+    def _stations_from_model_manifest(
+        self,
+        *,
+        model: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        basin_version_id: str,
+    ) -> tuple[MetStation, ...]:
+        package_uri = str(model.get("model_package_uri") or "").rstrip("/")
+        resource_profile = model.get("resource_profile") or {}
+        shud_input_name = ""
+        if isinstance(resource_profile, Mapping):
+            shud_input_name = str(resource_profile.get("shud_input_name") or resource_profile.get("project_name") or "")
+        basin_slug = str(manifest.get("basin_slug") or shud_input_name or "model")
+        forc_uri = f"{package_uri}/{shud_input_name or basin_slug}.tsd.forc" if package_uri else ""
+        content: str | None = None
+        if forc_uri:
+            try:
+                content = self.object_store.read_bytes(forc_uri).decode("utf-8")
+            except (ObjectStoreError, UnicodeDecodeError, ValueError):
+                content = None
+        if content is None:
+            forcing = manifest.get("forcing")
+            if isinstance(forcing, Mapping):
+                forcing_dir = str(forcing.get("forcing_dir") or "")
+                if forcing_dir:
+                    candidate = Path(forcing_dir).parent / f"{shud_input_name or basin_slug}.tsd.forc"
+                    if candidate.exists():
+                        content = candidate.read_text(encoding="utf-8")
+        if content is None:
+            raise MetStoreError(
+                f"Model {model.get('model_id')!r} does not expose a readable SHUD forcing index file."
+            )
+        stations = _parse_shud_tsd_forc_stations(
+            content,
+            basin_version_id=basin_version_id,
+            station_prefix=basin_slug,
+        )
+        if not stations:
+            raise MetStoreError(f"Model {model.get('model_id')!r} has no forcing stations in SHUD forcing index.")
+        return stations
+
+    def _canonical_product_from_path(
+        self,
+        product_path: Path,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> CanonicalProduct | None:
+        variable = product_path.parent.name
+        match = _FORECAST_PRODUCT_RE.fullmatch(product_path.name)
+        if match is None:
+            return None
+        canonical_product_id = product_path.stem
+        attrs = self._read_netcdf_attrs(product_path)
+        valid_time = parse_cycle_time(str(attrs.get("valid_time") or cycle_time.isoformat()))
+        lead_time = _int_or_none(attrs.get("lead_time_hours"))
+        if lead_time is None:
+            lead_time = int(match.group("lead"))
+        unit = str(attrs.get("unit") or unit_for_standard_variable(variable))
+        grid_id = str(attrs.get("grid_id") or _grid_id_for_source(source_id))
+        lineage_json = _json_object(attrs.get("lineage_json"))
+        try:
+            object_uri = self.object_store.uri_for_key(str(product_path.relative_to(self.object_store.root)))
+            checksum = self.object_store.checksum(object_uri)
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise MetStoreError(f"Failed to inspect canonical product {product_path}: {error}") from error
+        return CanonicalProduct(
+            canonical_product_id=canonical_product_id,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            valid_time=valid_time,
+            lead_time_hours=lead_time,
+            variable=variable,
+            unit=unit,
+            grid_id=grid_id,
+            grid_definition_uri=_grid_definition_uri_for_source(source_id),
+            native_time_resolution=_native_time_resolution_for_source(source_id),
+            native_spatial_resolution="0.25deg",
+            object_uri=object_uri,
+            checksum=checksum,
+            quality_flag=str(attrs.get("quality_flag") or "ok"),
+            lineage_json=lineage_json,
+        )
+
+    def _read_netcdf_attrs(self, product_path: Path) -> Mapping[str, Any]:
+        try:
+            import xarray as xr
+        except ImportError:
+            LOGGER.warning("xarray is not available; canonical metadata will be inferred from filenames.")
+            return {}
+        dataset = None
+        try:
+            dataset = xr.open_dataset(product_path, decode_times=False)
+            return dict(dataset.attrs)
+        except Exception as error:
+            LOGGER.warning("Failed to read canonical NetCDF attrs from %s: %s", product_path, error)
+            return {}
+        finally:
+            if dataset is not None:
+                dataset.close()
+
+    def _read_json_reference(self, reference: str) -> Mapping[str, Any]:
+        if not reference:
+            raise MetStoreError("File repository JSON reference is empty.")
+        try:
+            if reference.startswith("s3://"):
+                content = self.object_store.read_bytes(reference)
+            elif Path(reference).is_absolute():
+                content = Path(reference).read_bytes()
+            else:
+                try:
+                    content = self.object_store.read_bytes(reference)
+                except (ObjectStoreError, ValueError):
+                    content = (Path(self.object_store.root) / reference).read_bytes()
+            payload = json.loads(content.decode("utf-8"))
+        except (OSError, ObjectStoreError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise MetStoreError(f"Failed to read file repository JSON reference {reference}: {error}") from error
+        if not isinstance(payload, Mapping):
+            raise MetStoreError(f"File repository JSON reference {reference} must contain a JSON object.")
+        return payload
+
+    def _write_forcing_version_sidecar(self, record: Mapping[str, Any]) -> None:
+        package_uri = str(record.get("forcing_package_uri") or "")
+        if not package_uri:
+            return
+        try:
+            package_key = self.object_store.normalize_key(package_uri).strip("/")
+            payload = _json_bytes(_json_safe(record))
+            self.object_store.write_bytes_atomic(f"{package_key}/forcing_version_record.json", payload)
+        except Exception:
+            LOGGER.exception("Failed to write DB-free forcing version sidecar for %s", record.get("forcing_version_id"))
+
+
+def db_free_repository_enabled() -> bool:
+    repository_backend = os.getenv("NHMS_FORCING_REPOSITORY_BACKEND", "").strip().lower()
+    if repository_backend in {"file", "none", "object-store", "object_store", "db-free", "db_free"}:
+        return True
+    return _env_flag("NHMS_FORCING_DB_FREE") or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return raw_value.strip().lower() in _TRUTHY
+
+
+def _parse_shud_tsd_forc_stations(
+    content: str,
+    *,
+    basin_version_id: str,
+    station_prefix: str,
+) -> tuple[MetStation, ...]:
+    stations: list[MetStation] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("ID") or stripped.startswith("/"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 7 or not parts[0].isdigit():
+            continue
+        forcing_index = int(parts[0])
+        try:
+            longitude = float(parts[1])
+            latitude = float(parts[2])
+            elevation = float(parts[5])
+        except ValueError:
+            continue
+        filename = parts[6]
+        if elevation < 0:
+            elevation = 0.0
+        station_id = f"{station_prefix}_forc_{forcing_index}"
+        stations.append(
+            MetStation(
+                station_id=station_id,
+                basin_version_id=basin_version_id,
+                longitude=longitude,
+                latitude=latitude,
+                elevation_m=elevation,
+                station_role="forcing_grid",
+                station_name=f"{station_prefix} forcing grid {forcing_index}",
+                properties_json={
+                    "shud_forcing_index": forcing_index,
+                    "forcing_filename": filename,
+                    "manifest_authority": True,
+                },
+            )
+        )
+    return tuple(stations)
+
+
+def _grid_id_for_source(source_id: str) -> str:
+    return {
+        "gfs": "gfs_0p25",
+        "ERA5": "era5_0p25",
+        "IFS": "ifs_0p25",
+    }[normalize_source_id(source_id)]
+
+
+def _grid_definition_uri_for_source(source_id: str) -> str:
+    normalized = normalize_source_id(source_id)
+    return {
+        "gfs": "canonical/gfs/grid/gfs_0p25/grid.json",
+        "ERA5": "canonical/ERA5/grid/era5_0p25/grid.json",
+        "IFS": "canonical/IFS/grid/ifs_0p25/grid.json",
+    }[normalized]
+
+
+def _native_time_resolution_for_source(source_id: str) -> str:
+    return "1h" if normalize_source_id(source_id) == "ERA5" else "3h"
+
+
+def _lead_sort_key(product: CanonicalProduct) -> tuple[int, datetime, str]:
+    lead_time = product.lead_time_hours if product.lead_time_hours is not None else 999_999
+    return (int(lead_time), product.cycle_time, product.canonical_product_id)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_object(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(nested) for key, nested in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_bytes(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
