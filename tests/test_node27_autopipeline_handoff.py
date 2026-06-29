@@ -323,17 +323,6 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
 ) -> None:
     monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
     monkeypatch.setenv("NHMS_NODE22_DSN_SOURCE", "cli:--node22-url")
-    ambient_libpq = {
-        "PGHOSTADDR": "127.0.0.99",
-        "PGSERVICEFILE": "/tmp/unsafe-pg-service.conf",
-        "PGAPPNAME": "ambient-app",
-        "PGREQUIREAUTH": "scram-sha-256",
-        "PGSSLNEGOTIATION": "direct",
-        "PGSSLMINPROTOCOLVERSION": "TLSv1.3",
-        "PGSYSCONFDIR": "/tmp/pg-sysconf",
-    }
-    for key, value in ambient_libpq.items():
-        monkeypatch.setenv(key, value)
     monkeypatch.setenv(autopipe.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
     mirror_envs: list[dict[str, str]] = []
 
@@ -362,9 +351,51 @@ def test_env_mirror_fallback_normalizes_stale_parent_source_label(
     assert rc == 0
     assert len(mirror_envs) == 1
     assert mirror_envs[0]["NHMS_NODE22_DSN_SOURCE"] == "env:N22_DSN"
+    assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
+
+
+def test_process_forcing_stage_scrubs_libpq_env_for_mirror_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    ambient_libpq = {
+        "PGHOSTADDR": "127.0.0.99",
+        "PGSERVICEFILE": "/tmp/unsafe-pg-service.conf",
+        "PGAPPNAME": "ambient-app",
+        "PGREQUIREAUTH": "scram-sha-256",
+        "PGSSLNEGOTIATION": "direct",
+        "PGSSLMINPROTOCOLVERSION": "TLSv1.3",
+        "PGSYSCONFDIR": "/tmp/pg-sysconf",
+    }
+    mirror_envs: list[dict[str, str]] = []
+
+    def command_handler(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        assert "node27_mirror_forcing.py" in " ".join(argv)
+        mirror_envs.append(dict(env))
+        return 0, json.dumps(_mirror_success()) + "\n", ""
+
+    monkeypatch.setattr(autopipe, "_run", command_handler)
+
+    result = autopipe._process_forcing_stage(
+        run_id=RUN_A,
+        object_store_root=object_store_root,
+        database_url=NODE27_DATABASE_URL,
+        object_store_prefix="s3://nhms",
+        mirror_dsn=autopipe.MirrorDsnConfig(
+            url="postgresql://n22_user:n22-secret@node22.example/nhms",
+            source="env:N22_DSN",
+        ),
+        env={**ambient_libpq, "N22_DSN": "postgresql://old:secret@node22.example/nhms"},
+        allow_archived_node22_db_rollback_mirror=True,
+    )
+
+    assert result["outcome"] == "ready"
+    assert len(mirror_envs) == 1
     for key in ambient_libpq:
         assert key not in mirror_envs[0]
-    assert summary["runs"]["details"][0]["forcing_stage"]["mode"] == autopipe.TRANSITIONAL_MIRROR_MODE
+    assert mirror_envs[0]["N22_DSN"] == "postgresql://n22_user:n22-secret@node22.example/nhms"
 
 
 def test_node22_dsn_file_is_passed_to_explicit_mirror_fallback_via_child_env(
@@ -429,6 +460,42 @@ def test_node22_dsn_file_must_be_owner_only_before_mirror_parse_publish(
     dsn_file = tmp_path / "node22-dsn.env"
     dsn_file.write_text("postgresql://n22_user:n22-secret@node22.example/nhms\n", encoding="utf-8")
     dsn_file.chmod(0o644)
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: False},
+    )
+
+    rc, summary = _run_main(
+        capsys,
+        object_store_root,
+        "--node22-dsn-file",
+        str(dsn_file),
+        "--allow-archived-node22-db-rollback-mirror",
+    )
+
+    assert rc == 1
+    assert _command_kinds(calls) == ["register"]
+    assert published_calls == []
+    detail = summary["runs"]["details"][0]
+    assert detail["outcome"] == "failed"
+    assert detail["stage"] == "forcing_handoff"
+    assert detail["forcing_stage"]["reason_codes"] == [autopipe.NODE22_DSN_FILE_UNSAFE_REASON]
+    rendered = json.dumps(summary)
+    assert "n22-secret" not in rendered
+
+
+def test_node22_dsn_file_symlink_blocks_before_mirror_parse_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("N22_DSN", raising=False)
+    target = tmp_path / "node22-dsn-target.env"
+    target.write_text("postgresql://n22_user:n22-secret@node22.example/nhms\n", encoding="utf-8")
+    target.chmod(0o600)
+    dsn_file = tmp_path / "node22-dsn-link.env"
+    dsn_file.symlink_to(target)
     object_store_root, calls, published_calls = _prepare_autopipe(
         monkeypatch,
         tmp_path,

@@ -67,6 +67,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.redaction import redact_payload, redact_text
 from scripts.node27_mirror_forcing import (
+    LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
     LIBPQ_CONNECTION_ENV_KEYS,
     NODE22_MIRROR_FAILED_REASON,
     TRANSITIONAL_MIRROR_MODE,
@@ -105,6 +106,7 @@ DATABASE_URL_ENDPOINT_NOT_NODE27 = "DATABASE_URL_ENDPOINT_NOT_NODE27"
 DATABASE_URL_ARGV_FORBIDDEN = "DATABASE_URL_ARGV_FORBIDDEN"
 DATABASE_URL_FILE_INVALID = "DATABASE_URL_FILE_INVALID"
 DATABASE_URL_FILE_UNSAFE = "DATABASE_URL_FILE_UNSAFE"
+NODE22_DSN_ARGV_FORBIDDEN = "NODE22_DSN_ARGV_FORBIDDEN"
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
@@ -386,6 +388,10 @@ def _raw_database_url_arg_present(argv: list[str]) -> bool:
     return any(arg == "--database-url" or arg.startswith("--database-url=") for arg in argv)
 
 
+def _raw_node22_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--node22-url" or arg.startswith("--node22-url=") for arg in argv)
+
+
 def _argv_option_value(argv: list[str], option: str) -> str | None:
     prefix = f"{option}="
     for index, arg in enumerate(argv):
@@ -394,6 +400,20 @@ def _argv_option_value(argv: list[str], option: str) -> str | None:
         if arg == option and index + 1 < len(argv):
             return argv[index + 1]
     return None
+
+
+def _ambient_libpq_env_blockers(env: dict[str, str]) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for key in sorted(LIBPQ_CONNECTION_ENV_KEYS):
+        if (env.get(key) or "").strip():
+            blockers.append(
+                _preflight_blocker(
+                    LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+                    key,
+                    f"{key} must be unset so explicit node-27 ingest DSNs cannot be overridden by libpq state.",
+                )
+            )
+    return blockers
 
 
 def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
@@ -410,7 +430,7 @@ def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
             error_message="Node-27 writer DSN file path must be absolute.",
         )
     try:
-        info = path.stat()
+        link_info = path.lstat()
     except OSError as exc:
         return DatabaseUrlConfig(
             url=None,
@@ -418,36 +438,56 @@ def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
             error_code=DATABASE_URL_FILE_INVALID,
             error_message=f"Node-27 writer DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
         )
-    if not stat.S_ISREG(info.st_mode):
+    if stat.S_ISLNK(link_info.st_mode):
         return DatabaseUrlConfig(
             url=None,
             source=source,
             error_code=DATABASE_URL_FILE_UNSAFE,
-            error_message="Node-27 writer DSN file must be a regular file.",
+            error_message="Node-27 writer DSN file must not be a symlink.",
         )
-    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        return DatabaseUrlConfig(
-            url=None,
-            source=source,
-            error_code=DATABASE_URL_FILE_UNSAFE,
-            error_message="Node-27 writer DSN file must be owner-only readable/writable.",
-        )
-    if not (info.st_mode & stat.S_IRUSR):
-        return DatabaseUrlConfig(
-            url=None,
-            source=source,
-            error_code=DATABASE_URL_FILE_UNSAFE,
-            error_message="Node-27 writer DSN file must be readable by its owner.",
-        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be a regular file.",
+            )
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be owner-only readable/writable.",
+            )
+        if not (info.st_mode & stat.S_IRUSR):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be readable by its owner.",
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            contents = handle.read()
     except OSError as exc:
         return DatabaseUrlConfig(
             url=None,
             source=source,
             error_code=DATABASE_URL_FILE_INVALID,
-            error_message=f"Node-27 writer DSN file cannot be read: {exc.strerror or type(exc).__name__}.",
+            error_message=(
+                "Node-27 writer DSN file cannot be opened/read safely: "
+                f"{exc.strerror or type(exc).__name__}."
+            ),
         )
+    finally:
+        if fd is not None:
+            os.close(fd)
+    lines = [line.strip() for line in contents.splitlines() if line.strip()]
     if len(lines) != 1:
         return DatabaseUrlConfig(
             url=None,
@@ -525,6 +565,7 @@ def _preflight_ingest_config(
     blockers: list[dict[str, str]] = []
     role, role_blockers = _role_preflight(env)
     blockers.extend(role_blockers)
+    blockers.extend(_ambient_libpq_env_blockers(env))
 
     if database_url_error_code:
         database = {"configured": True, "source": database_url_source}
@@ -845,7 +886,7 @@ def _mirror_dsn_file_config(path_value: str | None) -> MirrorDsnConfig:
             error_message="Node-22 mirror DSN file path must be absolute.",
         )
     try:
-        info = path.stat()
+        link_info = path.lstat()
     except OSError as exc:
         return MirrorDsnConfig(
             url=None,
@@ -853,36 +894,56 @@ def _mirror_dsn_file_config(path_value: str | None) -> MirrorDsnConfig:
             error_code=NODE22_DSN_FILE_INVALID_REASON,
             error_message=f"Node-22 mirror DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
         )
-    if not stat.S_ISREG(info.st_mode):
+    if stat.S_ISLNK(link_info.st_mode):
         return MirrorDsnConfig(
             url=None,
             source=source,
             error_code=NODE22_DSN_FILE_UNSAFE_REASON,
-            error_message="Node-22 mirror DSN file must be a regular file.",
+            error_message="Node-22 mirror DSN file must not be a symlink.",
         )
-    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        return MirrorDsnConfig(
-            url=None,
-            source=source,
-            error_code=NODE22_DSN_FILE_UNSAFE_REASON,
-            error_message="Node-22 mirror DSN file must be owner-only readable/writable.",
-        )
-    if not (info.st_mode & stat.S_IRUSR):
-        return MirrorDsnConfig(
-            url=None,
-            source=source,
-            error_code=NODE22_DSN_FILE_UNSAFE_REASON,
-            error_message="Node-22 mirror DSN file must be readable by its owner.",
-        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be a regular file.",
+            )
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be owner-only readable/writable.",
+            )
+        if not (info.st_mode & stat.S_IRUSR):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be readable by its owner.",
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            contents = handle.read()
     except OSError as exc:
         return MirrorDsnConfig(
             url=None,
             source=source,
             error_code=NODE22_DSN_FILE_INVALID_REASON,
-            error_message=f"Node-22 mirror DSN file cannot be read: {exc.strerror or type(exc).__name__}.",
+            error_message=(
+                "Node-22 mirror DSN file cannot be opened/read safely: "
+                f"{exc.strerror or type(exc).__name__}."
+            ),
         )
+    finally:
+        if fd is not None:
+            os.close(fd)
+    lines = [line.strip() for line in contents.splitlines() if line.strip()]
     if len(lines) != 1:
         return MirrorDsnConfig(
             url=None,
@@ -1330,6 +1391,39 @@ def main(argv: list[str] | None = None) -> int:
     global WORK_ROOT
     raw_argv = sys.argv[1:] if argv is None else list(argv)
     env = dict(os.environ)
+
+    if _raw_node22_url_arg_present(raw_argv):
+        preflight = _preflight_ingest_config(
+            database_url=env.get("DATABASE_URL"),
+            database_url_source="env:DATABASE_URL" if env.get("DATABASE_URL") else None,
+            object_store_root=_argv_option_value(raw_argv, "--object-store-root") or env.get("OBJECT_STORE_ROOT"),
+            basins_root=_argv_option_value(raw_argv, "--basins-root") or env.get("BASINS_ROOT"),
+            env=env,
+        )
+        preflight["status"] = "blocked"
+        preflight.setdefault("blockers", []).append(
+            _preflight_blocker(
+                NODE22_DSN_ARGV_FORBIDDEN,
+                "N22_DSN",
+                "Raw archived node-22 rollback DSNs must not be passed through argv.",
+            )
+        )
+        _emit_json_summary(
+            {
+                "schema": INGEST_SUMMARY_SCHEMA,
+                "status": "preflight_blocked",
+                "return_code": PREFLIGHT_BLOCKED_RC,
+                "ingest": _ingest_evidence(preflight),
+                "object_store_root": _argv_option_value(raw_argv, "--object-store-root"),
+                "basins_root": _argv_option_value(raw_argv, "--basins-root"),
+                "sources": [],
+                "discovered_runs": 0,
+                "basins": [],
+                "seed": _empty_seed_summary(),
+                "runs": _empty_runs_summary(),
+            }
+        )
+        return PREFLIGHT_BLOCKED_RC
 
     if _raw_database_url_arg_present(raw_argv):
         preflight = _preflight_ingest_config(

@@ -222,12 +222,19 @@ def test_ambient_libpq_env_blocks_before_connection(
     assert env_value not in rendered
 
 
+@pytest.mark.parametrize(
+    "database_url_args",
+    [
+        ["--database-url", NODE27_WRITER_DSN],
+        [f"--database-url={NODE27_WRITER_DSN}"],
+    ],
+)
 def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     capsys: pytest.CaptureFixture[str],
+    database_url_args: list[str],
 ) -> None:
-    secret_url = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
     monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
     monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
 
@@ -242,8 +249,7 @@ def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
             "run-raw-database-url",
             "--object-store-root",
             str(tmp_path),
-            "--database-url",
-            secret_url,
+            *database_url_args,
         ]
     )
 
@@ -257,6 +263,48 @@ def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
     rendered = json.dumps(payload)
     assert "postgresql://" not in rendered
     assert "writer-secret" not in rendered
+    assert "n22-secret" not in rendered
+
+
+@pytest.mark.parametrize(
+    "node22_url_args",
+    [
+        ["--node22-url", NODE22_ROLLBACK_DSN],
+        [f"--node22-url={NODE22_ROLLBACK_DSN}"],
+    ],
+)
+def test_legacy_node22_url_argv_blocks_before_argparse_echo_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+    node22_url_args: list[str],
+) -> None:
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("raw node-22 DSN argv must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(
+        [
+            "--run-id",
+            "run-raw-node22-url",
+            "--object-store-root",
+            str(tmp_path),
+            *node22_url_args,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.NODE22_DSN_ARGV_FORBIDDEN_REASON
+    assert mirror.NODE22_DSN_ARGV_FORBIDDEN_REASON in {blocker["code"] for blocker in payload["blockers"]}
+    rendered = json.dumps(payload)
+    assert "postgresql://" not in rendered
     assert "n22-secret" not in rendered
 
 
@@ -281,6 +329,45 @@ def test_database_url_file_must_be_owner_only_and_redacts(
         [
             "--run-id",
             "run-unsafe-database-url-file",
+            "--object-store-root",
+            str(tmp_path),
+            "--database-url-file",
+            str(database_url_file),
+        ]
+    )
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is True
+    assert payload["reason"] == mirror.DATABASE_URL_FILE_UNSAFE_REASON
+    rendered = json.dumps(payload)
+    assert "writer-secret" not in rendered
+    assert "n22-secret" not in rendered
+
+
+def test_database_url_file_symlink_blocks_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = tmp_path / "node27-writer-target.txt"
+    target.write_text(NODE27_WRITER_DSN + "\n", encoding="utf-8")
+    target.chmod(0o600)
+    database_url_file = tmp_path / "node27-writer-link.txt"
+    database_url_file.symlink_to(target)
+    monkeypatch.setenv("N22_DSN", NODE22_ROLLBACK_DSN)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv(mirror.ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV, "true")
+
+    def fail_mirror_forcing(**_: object) -> dict[str, object]:
+        pytest.fail("symlinked DATABASE_URL file must block before mirror_forcing is called")
+
+    monkeypatch.setattr(mirror, "mirror_forcing", fail_mirror_forcing)
+
+    rc = mirror.main(
+        [
+            "--run-id",
+            "run-symlink-database-url-file",
             "--object-store-root",
             str(tmp_path),
             "--database-url-file",

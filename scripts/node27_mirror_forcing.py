@@ -75,6 +75,7 @@ DATABASE_URL_FILE_UNSAFE_REASON = "DATABASE_URL_FILE_UNSAFE"
 DATABASE_URL_USERNAME_MISSING_REASON = "DATABASE_URL_USERNAME_MISSING"
 DATABASE_URL_READONLY_IDENTITY_REASON = "DATABASE_URL_READONLY_IDENTITY"
 DATABASE_URL_PASSWORD_MISSING_REASON = "DATABASE_URL_PASSWORD_MISSING"
+NODE22_DSN_ARGV_FORBIDDEN_REASON = "NODE22_DSN_ARGV_FORBIDDEN"
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
@@ -218,6 +219,10 @@ def _raw_database_url_arg_present(argv: list[str]) -> bool:
     return any(arg == "--database-url" or arg.startswith("--database-url=") for arg in argv)
 
 
+def _raw_node22_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--node22-url" or arg.startswith("--node22-url=") for arg in argv)
+
+
 def _argv_option_value(argv: list[str], option: str) -> str | None:
     prefix = f"{option}="
     for index, arg in enumerate(argv):
@@ -242,7 +247,7 @@ def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
             error_message="Node-27 writer DSN file path must be absolute.",
         )
     try:
-        info = path.stat()
+        link_info = path.lstat()
     except OSError as exc:
         return DatabaseUrlConfig(
             url=None,
@@ -250,36 +255,56 @@ def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
             error_code=DATABASE_URL_FILE_INVALID_REASON,
             error_message=f"Node-27 writer DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
         )
-    if not stat.S_ISREG(info.st_mode):
+    if stat.S_ISLNK(link_info.st_mode):
         return DatabaseUrlConfig(
             url=None,
             source=source,
             error_code=DATABASE_URL_FILE_UNSAFE_REASON,
-            error_message="Node-27 writer DSN file must be a regular file.",
+            error_message="Node-27 writer DSN file must not be a symlink.",
         )
-    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        return DatabaseUrlConfig(
-            url=None,
-            source=source,
-            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
-            error_message="Node-27 writer DSN file must be owner-only readable/writable.",
-        )
-    if not (info.st_mode & stat.S_IRUSR):
-        return DatabaseUrlConfig(
-            url=None,
-            source=source,
-            error_code=DATABASE_URL_FILE_UNSAFE_REASON,
-            error_message="Node-27 writer DSN file must be readable by its owner.",
-        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+                error_message="Node-27 writer DSN file must be a regular file.",
+            )
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+                error_message="Node-27 writer DSN file must be owner-only readable/writable.",
+            )
+        if not (info.st_mode & stat.S_IRUSR):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE_REASON,
+                error_message="Node-27 writer DSN file must be readable by its owner.",
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            contents = handle.read()
     except OSError as exc:
         return DatabaseUrlConfig(
             url=None,
             source=source,
             error_code=DATABASE_URL_FILE_INVALID_REASON,
-            error_message=f"Node-27 writer DSN file cannot be read: {exc.strerror or type(exc).__name__}.",
+            error_message=(
+                "Node-27 writer DSN file cannot be opened/read safely: "
+                f"{exc.strerror or type(exc).__name__}."
+            ),
         )
+    finally:
+        if fd is not None:
+            os.close(fd)
+    lines = [line.strip() for line in contents.splitlines() if line.strip()]
     if len(lines) != 1:
         return DatabaseUrlConfig(
             url=None,
@@ -739,6 +764,30 @@ def _database_url_argv_forbidden_report(run_id: str) -> dict[str, Any]:
     )
 
 
+def _node22_url_argv_forbidden_report(run_id: str) -> dict[str, Any]:
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "failed": True,
+            "reason": NODE22_DSN_ARGV_FORBIDDEN_REASON,
+            "detail": (
+                "Pass the archived node-22 rollback DSN through env N22_DSN or "
+                "the parent owner-only --node22-dsn-file; raw node-22 DSNs are "
+                "forbidden in argv."
+            ),
+            "source": {"configured": False, "source": "argv:--node22-url"},
+            "blockers": [
+                {
+                    "code": NODE22_DSN_ARGV_FORBIDDEN_REASON,
+                    "env_var": "N22_DSN",
+                    "message": "Raw archived node-22 rollback DSNs must not be passed through argv.",
+                }
+            ],
+        },
+        dsn_source="argv:--node22-url",
+    )
+
+
 def _failed_node22_mirror_report(run_id: str, error: Exception, *, dsn_source: str) -> dict[str, Any]:
     return _with_mirror_boundary(
         {
@@ -1057,6 +1106,9 @@ def mirror_forcing(
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if _raw_node22_url_arg_present(raw_argv):
+        _dump_json(_node22_url_argv_forbidden_report(_argv_option_value(raw_argv, "--run-id") or "unknown"))
+        return 2
     if _raw_database_url_arg_present(raw_argv):
         _dump_json(_database_url_argv_forbidden_report(_argv_option_value(raw_argv, "--run-id") or "unknown"))
         return 2
