@@ -145,6 +145,7 @@ def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
     placeholder = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
     placeholder["source_id"] = "gfs"
     placeholder["end_time"] = "2026-06-20T16:00:00Z"
+    placeholder["forcing_package_uri"] = f"{placeholder['forcing_package_uri']}/"
     placeholder["station_count"] = 0
     placeholder["checksum"] = None
     placeholder["lineage_json"] = {"seed": "node27_ingest_run"}
@@ -161,6 +162,9 @@ def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
     assert connection.tables["met.forcing_version"][0]["end_time"] == envelope["parsed"]["met.forcing_version"][0][
         "end_time"
     ]
+    assert connection.tables["met.forcing_version"][0]["forcing_package_uri"] == envelope["parsed"][
+        "met.forcing_version"
+    ][0]["forcing_package_uri"]
     assert connection.tables["met.forcing_version"][0]["station_count"] == 2
     assert connection.tables["met.forcing_version"][0]["checksum"] == (
         "7d4251776311e114cb3fe1a3a832abf88200297c2af4f8d571fa0a90877ab7f5"
@@ -643,9 +647,11 @@ class _FakeCursor:
                 "model_id",
                 "source_id",
                 "cycle_time",
-                "forcing_package_uri",
             )
         )
+        existing_uri = str(existing.get("forcing_package_uri") or "").rstrip("/")
+        record_uri = str(record.get("forcing_package_uri") or "").rstrip("/")
+        identity_compatible = identity_compatible and existing_uri == record_uri
         placeholder_compatible = existing.get("checksum") is None
         finalized_compatible = (
             existing.get("checksum") == record["checksum"]
@@ -659,6 +665,7 @@ class _FakeCursor:
         existing["start_time"] = record["start_time"]
         existing["end_time"] = record["end_time"]
         existing["station_count"] = record["station_count"]
+        existing["forcing_package_uri"] = record["forcing_package_uri"]
         existing["checksum"] = record["checksum"]
         existing["lineage_json"] = record["lineage_json"]
         self._fetchone = {"forcing_version_id": record["forcing_version_id"]}
