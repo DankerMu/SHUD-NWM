@@ -1201,6 +1201,9 @@ class CanonicalConverter:
         config = CanonicalConverterConfig()
         return cls(config=config, repository=_repository_from_env())
 
+    def _unit_for_standard_variable(self, standard_variable: str) -> str:
+        return unit_for_standard_variable(standard_variable)
+
     def load_manifest(self, manifest_uri: str) -> dict[str, Any]:
         try:
             return json.loads(self.object_store.read_bytes(manifest_uri).decode("utf-8"))
