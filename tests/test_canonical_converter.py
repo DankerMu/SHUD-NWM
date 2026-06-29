@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -714,6 +715,18 @@ def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> No
     assert set(lineage) >= {"source_files", "source_cycle_id", "conversion_params", "converter_version"}
     assert len(lineage["source_files"]) == 2
     assert lineage["conversion_params"]["operation"] == "cumulative_to_mm_day"
+    catalog = json.loads(
+        converter.object_store.read_bytes("canonical/gfs/2026050700/_catalog/catalog.json").decode("utf-8")
+    )
+    assert catalog["schema_version"] == "nhms.canonical.product_catalog.v1"
+    assert len(catalog["products"]) == 14
+    catalog_prcp = {
+        product["canonical_product_id"]: product
+        for product in catalog["products"]
+    }["gfs_2026050700_prcp_rate_or_amount_f003"]
+    assert catalog_prcp["unit"] == "mm/day"
+    assert catalog_prcp["grid_definition_uri"] == "canonical/gfs/grid/gfs_0p25/grid.json"
+    assert catalog_prcp["lineage_json"]["conversion_params"]["operation"] == "cumulative_to_mm_day"
 
 
 def test_conversion_writes_rectilinear_grid_definition(tmp_path: Path) -> None:

@@ -364,6 +364,10 @@ def format_cycle_time(value: str | datetime) -> str:
     return parse_cycle_time(value).strftime("%Y%m%d%H")
 
 
+def _json_time(value: datetime) -> str:
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")
+
+
 def map_variable(native_variable: str, mapping: Mapping[str, str] | None = None) -> str | None:
     return dict(mapping or VARIABLE_MAPPING).get(native_variable)
 
@@ -1369,6 +1373,11 @@ class CanonicalConverter:
         )
         error_code = "" if readiness.ready else "CANONICAL_INCOMPLETE"
         error_message = "" if readiness.ready else _canonical_readiness_error_message(readiness.evidence)
+        self._write_product_catalog(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            products=products,
+        )
         self._update_cycle_status(
             cycle_time,
             status=readiness.status,
@@ -1376,6 +1385,50 @@ class CanonicalConverter:
             error_message=error_message,
         )
         return ConversionResult(status=readiness.status, products=tuple(products))
+
+    def _write_product_catalog(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        products: Sequence[CanonicalProductResult],
+    ) -> None:
+        compact_cycle = format_cycle_time(cycle_time)
+        key = f"canonical/{source_id}/{compact_cycle}/_catalog/catalog.json"
+        rows = [
+            {
+                "canonical_product_id": product.canonical_product_id,
+                "source_id": source_id,
+                "source_version": compact_cycle,
+                "cycle_time": _json_time(cycle_time),
+                "valid_time": _json_time(product.valid_time),
+                "lead_time_hours": product.lead_time_hours,
+                "variable": product.variable,
+                "unit": unit_for_standard_variable(product.variable),
+                "grid_id": self.config.grid_id,
+                "grid_definition_uri": self.config.grid_definition_uri,
+                "native_time_resolution": self.config.native_time_resolution,
+                "native_spatial_resolution": self.config.native_spatial_resolution,
+                "object_uri": product.object_uri,
+                "checksum": product.checksum,
+                "quality_flag": product.quality_flag,
+                "lineage_json": dict(product.lineage_json),
+            }
+            for product in products
+        ]
+        payload = {
+            "schema_version": "nhms.canonical.product_catalog.v1",
+            "source_id": source_id,
+            "cycle_time": _json_time(cycle_time),
+            "products": rows,
+        }
+        try:
+            self.object_store.write_bytes_atomic(
+                key,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise CanonicalConversionError(f"Failed to write canonical product catalog {key}: {error}") from error
 
     def _read_records(self, entries: list[dict[str, Any]]) -> list[RawRecord]:
         records: list[RawRecord] = []

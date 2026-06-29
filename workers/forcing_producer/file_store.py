@@ -107,6 +107,12 @@ class FileForcingRepository:
     def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]:
         normalized_source = normalize_source_id(source_id)
         compact_cycle = format_cycle_time(cycle_time)
+        catalog_products = self._canonical_products_from_catalog(
+            source_id=normalized_source,
+            cycle_time=parse_cycle_time(compact_cycle),
+        )
+        if catalog_products is not None:
+            return catalog_products
         cycle_dir = Path(self.object_store.root) / "canonical" / normalized_source / compact_cycle
         if not cycle_dir.exists():
             return ()
@@ -429,6 +435,59 @@ class FileForcingRepository:
             checksum=checksum,
             quality_flag=str(attrs.get("quality_flag") or "ok"),
             lineage_json=lineage_json,
+        )
+
+    def _canonical_products_from_catalog(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> tuple[CanonicalProduct, ...] | None:
+        catalog_key = f"canonical/{source_id}/{format_cycle_time(cycle_time)}/_catalog/catalog.json"
+        if not self.object_store.exists(catalog_key):
+            return None
+        try:
+            payload = json.loads(self.object_store.read_bytes(catalog_key).decode("utf-8"))
+        except (OSError, ObjectStoreError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise MetStoreError(f"Failed to read canonical product catalog {catalog_key}: {error}") from error
+        if not isinstance(payload, Mapping):
+            raise MetStoreError(f"Canonical product catalog {catalog_key} must contain a JSON object.")
+        rows = payload.get("products")
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise MetStoreError(f"Canonical product catalog {catalog_key} must contain a products array.")
+        products = [
+            self._canonical_product_from_catalog_row(row, source_id=source_id, cycle_time=cycle_time)
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
+        return tuple(sorted(products, key=lambda item: (item.variable, item.valid_time, item.canonical_product_id)))
+
+    def _canonical_product_from_catalog_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> CanonicalProduct:
+        variable = str(row["variable"])
+        return CanonicalProduct(
+            canonical_product_id=str(row["canonical_product_id"]),
+            source_id=str(row.get("source_id") or source_id),
+            cycle_time=parse_cycle_time(row.get("cycle_time", cycle_time)),
+            valid_time=parse_cycle_time(row["valid_time"]),
+            lead_time_hours=_int_or_none(row.get("lead_time_hours")),
+            variable=variable,
+            unit=str(row.get("unit") or unit_for_standard_variable(variable)),
+            grid_id=str(row.get("grid_id") or _grid_id_for_source(source_id)),
+            grid_definition_uri=str(row.get("grid_definition_uri") or _grid_definition_uri_for_source(source_id)),
+            native_time_resolution=str(
+                row.get("native_time_resolution") or _native_time_resolution_for_source(source_id)
+            ),
+            native_spatial_resolution=str(row.get("native_spatial_resolution") or "0.25deg"),
+            object_uri=str(row["object_uri"]),
+            checksum=str(row.get("checksum") or ""),
+            quality_flag=str(row.get("quality_flag") or "ok"),
+            lineage_json=_json_object(row.get("lineage_json")),
         )
 
     def _read_netcdf_attrs(self, product_path: Path) -> Mapping[str, Any]:

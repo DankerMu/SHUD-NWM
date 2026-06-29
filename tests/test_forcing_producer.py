@@ -559,6 +559,52 @@ def test_file_forcing_repository_reads_model_registry_stations_and_canonical_att
     assert product.lineage_json["policy_identity"] == {"source": "gfs"}
 
 
+def test_file_forcing_repository_prefers_canonical_product_catalog(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
+    store.write_bytes_atomic(
+        "canonical/gfs/2026062118/_catalog/catalog.json",
+        json.dumps(
+            {
+                "schema_version": "nhms.canonical.product_catalog.v1",
+                "source_id": "gfs",
+                "cycle_time": "2026-06-21T18:00:00Z",
+                "products": [
+                    {
+                        "canonical_product_id": "gfs_2026062118_air_temperature_2m_f003",
+                        "source_id": "gfs",
+                        "cycle_time": "2026-06-21T18:00:00Z",
+                        "valid_time": "2026-06-21T21:00:00Z",
+                        "lead_time_hours": 3,
+                        "variable": "air_temperature_2m",
+                        "unit": "degC",
+                        "grid_id": "gfs_0p25",
+                        "grid_definition_uri": "canonical/gfs/grid/gfs_0p25/grid.json",
+                        "native_time_resolution": "3h",
+                        "native_spatial_resolution": "0.25deg",
+                        "object_uri": (
+                            "s3://nhms/canonical/gfs/2026062118/air_temperature_2m/"
+                            "gfs_2026062118_air_temperature_2m_f003.nc"
+                        ),
+                        "checksum": "abc123",
+                        "quality_flag": "ok",
+                        "lineage_json": {"policy_identity": {"source": "gfs"}},
+                    }
+                ],
+            }
+        ).encode("utf-8"),
+    )
+    repository = FileForcingRepository(object_store=store, registry_manifest=tmp_path / "unused-registry.json")
+
+    products = repository.list_canonical_products(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 21, 18, tzinfo=UTC),
+    )
+
+    assert len(products) == 1
+    assert products[0].checksum == "abc123"
+    assert products[0].lineage_json["policy_identity"] == {"source": "gfs"}
+
+
 def test_idw_weights_are_normalized_for_station() -> None:
     station = MetStation("station_1", "basin_v1", 0.5, 0.0, 10.0, "forcing_proxy")
     grid_points = (
