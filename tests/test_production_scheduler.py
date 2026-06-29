@@ -2163,6 +2163,106 @@ def test_nfs_raw_ready_candidate_stages_raw_before_convert_submit(
     assert "s3://nhms/raw" not in json.dumps(staging, sort_keys=True)
 
 
+def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    nfs_root = tmp_path / "nfs"
+    raw_key = "raw/gfs/2026052106/gfs.t06z.pgrb2.0p25.f000.bundle.grib2"
+    raw_file = nfs_root / raw_key
+    raw_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_file.write_bytes(b"node27-raw")
+    persisted_source_object = {
+        "source": "gfs",
+        "manifest_object_key": "raw/gfs/2026052106/manifest.json",
+        "manifest_digest": "persisted-nfs-manifest-digest",
+        "raw_entry_digest": "persisted-raw-entry-digest",
+    }
+    manifest = {
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T06:00:00+00:00",
+        "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+        "metadata": {
+            "physical_file_count": 1,
+            "source_object_identity": persisted_source_object,
+        },
+        "entries": [
+            {
+                "remote_url": "https://example.invalid/gfs",
+                "local_key": raw_key,
+                "variable": "prcp_rate_or_amount",
+                "forecast_hour": 0,
+            }
+        ],
+    }
+    (nfs_root / "raw/gfs/2026052106/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    nfs_readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        object_store_root=nfs_root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(nfs_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
+
+    class CapturingReadinessProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def canonical_readiness(self, **kwargs: Any) -> Mapping[str, Any]:
+            self.calls.append(dict(kwargs))
+            return {
+                "status": "canonical_ready",
+                "ready": True,
+                "reason": None,
+                "source_id": kwargs["source_id"],
+                "cycle_time": kwargs["cycle_time"],
+                "forecast_hours": list(kwargs["forecast_hours"]),
+                "policy_identity": dict(kwargs["policy_identity"]),
+                "source_object_identity": dict(kwargs["source_object_identity"]),
+                "canonical_product_id": kwargs["canonical_product_id"],
+                "model_id": kwargs["model_id"],
+                "basin_id": kwargs["basin_id"],
+            }
+
+    provider = CapturingReadinessProvider()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                source_object_identity={"source": "gfs", "manifest_digest": "adapter-digest"},
+            )
+        },
+        active_repository=FakeCandidateStateRepository(
+            {
+                "forecast_cycle": {
+                    "cycle_id": "gfs_2026052106",
+                    "source_id": "gfs",
+                    "cycle_time": "2026-05-21T06:00:00Z",
+                    "status": "raw_complete",
+                    "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+                },
+                "nfs_raw_manifest": nfs_readiness,
+            }
+        ),
+        canonical_readiness_provider=provider,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "planned"
+    assert provider.calls
+    assert provider.calls[0]["source_object_identity"] == persisted_source_object
+    canonical = result.evidence["candidates"][0]["state_evidence"]["canonical_readiness"]
+    assert canonical["source_object_identity"]["manifest_digest"] == "persisted-nfs-manifest-digest"
+
+
 def test_required_nfs_raw_manifest_missing_blocks_fresh_download_fallback(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}

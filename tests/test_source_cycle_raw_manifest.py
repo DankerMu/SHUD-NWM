@@ -22,6 +22,7 @@ def _write_manifest(
     cycle: str = "2026062612",
     entries: list[dict[str, Any]] | None = None,
     manifest_uri: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     entries = entries or [
         {
@@ -43,7 +44,7 @@ def _write_manifest(
                 "source_id": source_id,
                 "cycle_time": "2026-06-26T12:00:00+00:00",
                 "manifest_uri": manifest_uri or f"s3://nhms/raw/{source_id}/{cycle}/manifest.json",
-                "metadata": {"physical_file_count": len({entry["local_key"] for entry in entries})},
+                "metadata": metadata or {"physical_file_count": len({entry["local_key"] for entry in entries})},
                 "entries": entries,
             }
         ),
@@ -77,6 +78,33 @@ def test_nfs_raw_manifest_readiness_accepts_complete_gfs_manifest(tmp_path: Path
     assert forecast_cycle["status"] == "raw_complete"
     assert forecast_cycle["manifest_uri"] == readiness["manifest_uri"]
     assert forecast_cycle["source_cycle_truth"] == "node27_nfs_raw_manifest"
+
+
+def test_source_object_identity_from_raw_manifest_readiness_uses_manifest_metadata(tmp_path: Path) -> None:
+    source_object_identity = {
+        "source": "gfs",
+        "manifest_object_key": "raw/gfs/2026062612/manifest.json",
+        "manifest_digest": "persisted-digest",
+        "raw_entry_digest": "raw-entry-digest",
+    }
+    _write_manifest(
+        tmp_path,
+        metadata={
+            "physical_file_count": 1,
+            "source_object_identity": source_object_identity,
+        },
+    )
+    readiness = nfs_raw_manifest_readiness(
+        source_id="gfs",
+        cycle_time=datetime(2026, 6, 26, 12, tzinfo=UTC),
+        object_store_root=tmp_path,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+
+    from services.orchestrator.source_cycle_raw_manifest import source_object_identity_from_raw_manifest_readiness
+
+    assert source_object_identity_from_raw_manifest_readiness(readiness) == source_object_identity
 
 
 def test_nfs_raw_manifest_readiness_accepts_ifs_uppercase_storage(tmp_path: Path) -> None:

@@ -584,10 +584,17 @@ class ProductionScheduler:
         return max(1, int(round(elapsed_seconds / 3600.0)))
 
     def _source_readiness_context(self, cycle: _scheduler.SchedulerSourceCycle) -> dict[str, _scheduler.Any]:
+        from services.orchestrator import source_cycle_raw_manifest
+
+        nfs_source_object_identity = source_cycle_raw_manifest.nfs_raw_manifest_source_object_identity_from_env(
+            cycle.discovery.source_id,
+            cycle.discovery.cycle_time,
+        )
         cache_key = (
             cycle.discovery.source_id,
             _scheduler._ensure_utc(cycle.discovery.cycle_time).isoformat(),
             _scheduler.json.dumps(_scheduler._evidence_safe(cycle.horizon), sort_keys=True, default=str),
+            _scheduler.json.dumps(nfs_source_object_identity or {}, sort_keys=True, default=str),
         )
         cached = self._source_readiness_context_cache.get(cache_key)
         if cached is not None:
@@ -597,7 +604,8 @@ class ProductionScheduler:
         context = {
             "forecast_hours": forecast_hours,
             "policy_identity": _scheduler._source_policy_identity(cycle.discovery, adapter, forecast_hours),
-            "source_object_identity": _scheduler._source_object_identity(cycle.discovery, adapter, forecast_hours),
+            "source_object_identity": nfs_source_object_identity
+            or _scheduler._source_object_identity(cycle.discovery, adapter, forecast_hours),
         }
         self._source_readiness_context_cache[cache_key] = context
         return context

@@ -494,6 +494,8 @@ def build_candidates(
                     )
                 )
                 continue
+            if nfs_raw_manifest_gate is not None and nfs_raw_manifest_gate.get("status") == "ready":
+                candidate = _candidate_with_state_evidence(candidate, {"nfs_raw_manifest": nfs_raw_manifest_gate})
             raw_manifest_restart = _source_raw_manifest_restart_evidence(candidate, raw_candidate_state)
             raw_manifest_restart_applied = False
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)

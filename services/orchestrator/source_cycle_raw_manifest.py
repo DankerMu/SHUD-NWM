@@ -46,6 +46,8 @@ __all__ = (
     "forecast_cycle_from_raw_manifest_readiness",
     "nfs_raw_manifest_readiness",
     "nfs_raw_manifest_readiness_from_env",
+    "nfs_raw_manifest_source_object_identity_from_env",
+    "source_object_identity_from_raw_manifest_readiness",
     "stage_nfs_raw_manifest_from_env",
     "stage_nfs_raw_manifest_to_object_store",
 )
@@ -236,6 +238,40 @@ def forecast_cycle_from_raw_manifest_readiness(
         "created_at": None,
         "source_cycle_truth": NFS_RAW_MANIFEST_READY_SOURCE,
     }
+
+
+def nfs_raw_manifest_source_object_identity_from_env(source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
+    readiness = nfs_raw_manifest_readiness_from_env(source_id, cycle_time)
+    if not isinstance(readiness, Mapping):
+        return None
+    return source_object_identity_from_raw_manifest_readiness(readiness)
+
+
+def source_object_identity_from_raw_manifest_readiness(readiness: Mapping[str, Any]) -> dict[str, Any] | None:
+    if readiness.get("status") != "ready":
+        return None
+    manifest_path = readiness.get("manifest_path")
+    object_store_root = readiness.get("object_store_root")
+    if manifest_path in (None, "") or object_store_root in (None, ""):
+        return None
+    try:
+        root = verify_directory_no_follow(_absolute_path(object_store_root))
+        payload, payload_error = _read_manifest_payload(
+            _absolute_path(str(manifest_path)),
+            root=root,
+            max_manifest_bytes=NFS_RAW_MANIFEST_MAX_BYTES,
+        )
+    except (OSError, SafeFilesystemError):
+        return None
+    if payload_error is not None:
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    source_object_identity = metadata.get("source_object_identity")
+    if not isinstance(source_object_identity, Mapping) or not source_object_identity:
+        return None
+    return dict(source_object_identity)
 
 
 def stage_nfs_raw_manifest_from_env(state_evidence: Mapping[str, Any]) -> dict[str, Any] | None:
