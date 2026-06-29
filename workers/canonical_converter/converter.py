@@ -29,6 +29,32 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    LOGGER.warning("Invalid %s=%r; using default %s", name, raw_value, default)
+    return default
+
+
+def _db_free_repository_enabled() -> bool:
+    repository_backend = os.getenv("NHMS_CANONICAL_REPOSITORY_BACKEND", "").strip().lower()
+    if repository_backend in {"file", "none", "object-store", "object_store", "db-free", "db_free"}:
+        return True
+    return _env_flag("NHMS_CANONICAL_DB_FREE") or _env_flag("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+
+
+def _repository_from_env() -> CanonicalRepository | None:
+    if _db_free_repository_enabled():
+        return None
+    return PsycopgMetStore.from_env()
+
+
 # IFS 累积净太阳辐射夜间持平,GRIB 位打包让持平段抖动几百 J/m²(≈0.1 W/m²),
 # 去累积后产生伪负 delta。SHUD 模型自身(NetcdfForcingProvider.cpp)对净辐射 Rn 即
 # "rn<0 → 0" 再 nearbyint 取整到整数 W/m²,故亚 W/m² 的负值经模型读入后与 0 逐位等价,
@@ -1169,7 +1195,7 @@ class CanonicalConverter:
     @classmethod
     def from_env(cls) -> CanonicalConverter:
         config = CanonicalConverterConfig()
-        return cls(config=config, repository=PsycopgMetStore.from_env())
+        return cls(config=config, repository=_repository_from_env())
 
     def load_manifest(self, manifest_uri: str) -> dict[str, Any]:
         try:
@@ -1900,7 +1926,7 @@ class ERA5CanonicalConverter(CanonicalConverter):
     @classmethod
     def from_env(cls) -> ERA5CanonicalConverter:
         config = ERA5CanonicalConverterConfig()
-        return cls(config=config, repository=PsycopgMetStore.from_env())
+        return cls(config=config, repository=_repository_from_env())
 
     def convert_manifest(self, manifest: Any) -> ConversionResult:
         cycle_time = parse_cycle_time(_manifest_value(manifest, "cycle_time"))
@@ -2318,7 +2344,7 @@ class IFSCanonicalConverter(CanonicalConverter):
     @classmethod
     def from_env(cls) -> IFSCanonicalConverter:
         config = IFSCanonicalConverterConfig()
-        return cls(config=config, repository=PsycopgMetStore.from_env())
+        return cls(config=config, repository=_repository_from_env())
 
     def convert_manifest(self, manifest: Any) -> ConversionResult:
         cycle_time = parse_cycle_time(_manifest_value(manifest, "cycle_time"))

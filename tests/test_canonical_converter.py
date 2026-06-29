@@ -113,6 +113,59 @@ def build_converter(tmp_path: Path, repository: FakeCanonicalRepository | None =
     )
 
 
+def test_from_env_uses_no_repository_when_scheduler_db_free_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    def fail_db_factory() -> None:
+        pytest.fail("DB-free canonical converter must not construct PsycopgMetStore")
+
+    monkeypatch.setattr(converter_module.PsycopgMetStore, "from_env", staticmethod(fail_db_factory))
+
+    converter = CanonicalConverter.from_env()
+
+    assert converter.repository is None
+
+
+def test_source_specific_from_env_uses_no_repository_when_canonical_db_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_CANONICAL_DB_FREE", "true")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    def fail_db_factory() -> None:
+        pytest.fail("DB-free canonical converter must not construct PsycopgMetStore")
+
+    monkeypatch.setattr(converter_module.PsycopgMetStore, "from_env", staticmethod(fail_db_factory))
+
+    era5_converter = converter_module.ERA5CanonicalConverter.from_env()
+    ifs_converter = converter_module.IFSCanonicalConverter.from_env()
+
+    assert era5_converter.repository is None
+    assert ifs_converter.repository is None
+
+
+def test_from_env_keeps_db_repository_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("NHMS_CANONICAL_DB_FREE", raising=False)
+    monkeypatch.delenv("NHMS_CANONICAL_REPOSITORY_BACKEND", raising=False)
+
+    repository = FakeCanonicalRepository()
+    monkeypatch.setattr(converter_module.PsycopgMetStore, "from_env", staticmethod(lambda: repository))
+
+    converter = CanonicalConverter.from_env()
+
+    assert converter.repository is repository
+
+
 def canonical_rows(
     *,
     source_id: str,
