@@ -2554,8 +2554,7 @@ class FileJournalRetryService:
         )
 
     def _resolve_file_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> SimpleNamespace | None:
-        if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
-            return None
+        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE
         candidate_batch = self._file_retry_runtime_root_candidates(retry_job)
         rejected: list[dict[str, str]] = []
         rejected_total_count = 0
@@ -2586,6 +2585,8 @@ class FileJournalRetryService:
             )
             manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
             return SimpleNamespace(manifest_fields=manifest_fields, evidence=evidence)
+        if not runtime_roots_required:
+            return None
         evidence = _runtime_root_resolution_evidence(
             retry_job,
             resolved=best_resolved,
@@ -2608,7 +2609,7 @@ class FileJournalRetryService:
             )
         raise _RetryRuntimeRootResolutionError(
             RETRY_RUNTIME_ROOTS_UNRESOLVED,
-            "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+            "Manual retry cannot resolve required object-store runtime roots.",
             evidence,
         )
 

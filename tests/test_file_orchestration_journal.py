@@ -1341,6 +1341,8 @@ def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_p
 
 def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     record = _pipeline_reservation_record(cycle_time, job_id="job_cycle_ifs_2026062800_convert_convert")
     record.update(
@@ -1354,6 +1356,20 @@ def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert
         }
     )
     repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": str(workspace_root),
+                "object_store_root": str(object_store_root),
+                "object_store_prefix": "s3://nhms-prod",
+            }
+        },
+    )
     repository.update_pipeline_job_status(
         record["job_id"],
         "permanently_failed",
@@ -1382,6 +1398,9 @@ def test_file_journal_manual_retry_manifest_uses_source_cycle_fields_for_convert
     assert gateway.requests[0].manifest["cycle_id"] == "ifs_2026062800"
     assert gateway.requests[0].manifest["source_id"] == "IFS"
     assert gateway.requests[0].manifest["cycle_time"] == "2026062800"
+    assert gateway.requests[0].manifest["workspace_dir"] == str(workspace_root)
+    assert gateway.requests[0].manifest["object_store_root"] == str(object_store_root)
+    assert gateway.requests[0].manifest["object_store_prefix"] == "s3://nhms-prod"
 
 
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
