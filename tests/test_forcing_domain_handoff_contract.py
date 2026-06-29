@@ -771,6 +771,22 @@ def test_parser_payload_checksum_mismatch_is_unavailable_without_rows(tmp_path: 
     _assert_parser_handoff_evidence(result, case_root)
 
 
+def test_parser_accepts_realistic_large_forcing_package_manifest(tmp_path: Path) -> None:
+    case_root = _copy_complete_case(tmp_path)
+    manifest_path = _forcing_package_manifest_path(case_root)
+    manifest = _read_json(manifest_path)
+    manifest["station_order_padding"] = "x" * (1024 * 1024)
+    _write_json(manifest_path, manifest)
+    _sync_forcing_package_manifest_checksum(case_root)
+    assert manifest_path.stat().st_size > 1024 * 1024
+
+    result = _parse_case_root(case_root)
+
+    assert result["available"] is True
+    assert result["unavailable_reasons"] == []
+    assert result["parsed"]["met.forcing_version"]
+
+
 def test_parser_oversized_handoff_manifest_is_unavailable_without_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

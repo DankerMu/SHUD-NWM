@@ -16,7 +16,7 @@ from packages.common.storage import validate_object_path
 CONTRACT_ID = "nhms.forcing_domain_handoff.v1"
 PACKAGE_CONTRACT_ID = "nhms.forcing_domain_handoff.package.v1"
 SCHEMA_VERSION = "1.0"
-MAX_HANDOFF_MANIFEST_BYTES = 1024 * 1024
+MAX_HANDOFF_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_HANDOFF_PAYLOAD_BYTES = 64 * 1024 * 1024
 
 FORCING_DOMAIN_PACKAGE_MANIFEST_URI_FIELD = "forcing_domain_package_manifest_uri"
