@@ -56,12 +56,20 @@ from packages.common.redaction import redact_payload
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
 NODE22_DSN_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_MISSING"
+NODE22_DSN_INVALID_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_INVALID"
+NODE22_DSN_QUERY_OVERRIDE_FORBIDDEN_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_QUERY_OVERRIDE_FORBIDDEN"
+NODE22_DSN_ENDPOINT_NOT_ARCHIVED_NODE22_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_ENDPOINT_NOT_ARCHIVED_NODE22"
+NODE22_DSN_USERNAME_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_USERNAME_MISSING"
+NODE22_DSN_PASSWORD_MISSING_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_PASSWORD_MISSING"
 NODE22_ROLLBACK_MIRROR_NOT_ALLOWED_REASON = "ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_NOT_ALLOWED"
 NODE22_MIRROR_FAILED_REASON = "NODE22_TRANSITIONAL_MIRROR_FAILED"
 DATABASE_URL_NODE22_HISTORICAL_ENDPOINT_REASON = "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT"
 DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
 DATABASE_URL_ENDPOINT_NOT_NODE27_REASON = "DATABASE_URL_ENDPOINT_NOT_NODE27"
 DATABASE_URL_INVALID_REASON = "DATABASE_URL_INVALID"
+DATABASE_URL_USERNAME_MISSING_REASON = "DATABASE_URL_USERNAME_MISSING"
+DATABASE_URL_READONLY_IDENTITY_REASON = "DATABASE_URL_READONLY_IDENTITY"
+DATABASE_URL_PASSWORD_MISSING_REASON = "DATABASE_URL_PASSWORD_MISSING"
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
@@ -169,19 +177,52 @@ def _database_port(value: str | None) -> int | None:
         return None
 
 
-def _database_query_blockers(query: str) -> list[dict[str, str]]:
+def _database_username_class(username: str | None) -> str:
+    normalized = (username or "").strip().lower()
+    if not normalized:
+        return "missing"
+    if "display" in normalized or "readonly" in normalized or normalized.endswith("_ro") or normalized.endswith("ro"):
+        return "display_readonly_like"
+    return "writer_candidate"
+
+
+def _dsn_query_blockers(
+    query: str,
+    *,
+    env_var: str,
+    code: str,
+    message: str,
+) -> list[dict[str, str]]:
     if not query:
         return []
     query_keys = {key.strip().lower() for key, _value in parse_qsl(query, keep_blank_values=True)}
     if query_keys and any(key not in DATABASE_URL_ALLOWED_QUERY_KEYS for key in query_keys):
         return [
             {
-                "code": DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON,
-                "env_var": "DATABASE_URL",
-                "message": "DATABASE_URL query parameters must not override mirror destination or credential source.",
+                "code": code,
+                "env_var": env_var,
+                "message": message,
             }
         ]
     return []
+
+
+def _database_query_blockers(query: str) -> list[dict[str, str]]:
+    return _dsn_query_blockers(
+        query,
+        env_var="DATABASE_URL",
+        code=DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN_REASON,
+        message="DATABASE_URL query parameters must not override mirror destination or credential source.",
+    )
+
+
+def _node22_source_query_blockers(query: str) -> list[dict[str, str]]:
+    return _dsn_query_blockers(
+        query,
+        env_var="N22_DSN",
+        code=NODE22_DSN_QUERY_OVERRIDE_FORBIDDEN_REASON,
+        message="N22_DSN query parameters must not override mirror source endpoint or credential source.",
+    )
 
 
 def _parse_allowed_database_endpoints(value: str | None) -> set[tuple[str, int]]:
@@ -197,6 +238,97 @@ def _parse_allowed_database_endpoints(value: str | None) -> set[tuple[str, int]]
         except ValueError:
             continue
     return endpoints
+
+
+def _source_preflight(node22_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    raw = (node22_url or "").strip()
+    if not raw:
+        return {"configured": False}, [
+            {
+                "code": NODE22_DSN_MISSING_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN is required for the archived node-22 rollback mirror source.",
+            }
+        ]
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return {"configured": True}, [
+            {
+                "code": NODE22_DSN_INVALID_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must be a valid PostgreSQL URL.",
+            }
+        ]
+    query_blockers = _node22_source_query_blockers(parsed.query)
+    try:
+        dsn_parameters = psycopg2.extensions.parse_dsn(raw)
+    except psycopg2.Error:
+        if query_blockers:
+            return {"configured": True, "scheme": parsed.scheme or None}, query_blockers
+        return {"configured": True, "scheme": parsed.scheme or None}, [
+            {
+                "code": NODE22_DSN_INVALID_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must be a valid PostgreSQL URL.",
+            }
+        ]
+
+    host = dsn_parameters.get("host")
+    port = _database_port(dsn_parameters.get("port"))
+    database = dsn_parameters.get("dbname")
+    username = dsn_parameters.get("user")
+    password_present = bool(dsn_parameters.get("password"))
+    normalized_host = str(host or "").strip().lower()
+    identity: dict[str, Any] = {
+        "configured": True,
+        "scheme": parsed.scheme,
+        "host": host,
+        "port": port,
+        "database": database,
+        "username_present": bool((username or "").strip()),
+        "password_present": password_present,
+    }
+    blockers = list(query_blockers)
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not host
+        or not database
+        or (dsn_parameters.get("port") and port is None)
+    ):
+        blockers.append(
+            {
+                "code": NODE22_DSN_INVALID_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must include PostgreSQL scheme, host, port, and database name.",
+            }
+        )
+        return identity, blockers
+    if database != "nhms" or port != NODE22_HISTORICAL_DB_PORT or normalized_host not in NODE22_HISTORICAL_DB_HOSTS:
+        blockers.append(
+            {
+                "code": NODE22_DSN_ENDPOINT_NOT_ARCHIVED_NODE22_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must target the archived node-22 rollback PostgreSQL endpoint.",
+            }
+        )
+    if not identity["username_present"]:
+        blockers.append(
+            {
+                "code": NODE22_DSN_USERNAME_MISSING_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must include an explicit read-only source username.",
+            }
+        )
+    if not password_present:
+        blockers.append(
+            {
+                "code": NODE22_DSN_PASSWORD_MISSING_REASON,
+                "env_var": "N22_DSN",
+                "message": "N22_DSN must include explicit password material for the read-only source username.",
+            }
+        )
+    return identity, blockers
 
 
 def _destination_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -236,12 +368,18 @@ def _destination_preflight(database_url: str | None) -> tuple[dict[str, Any], li
     host = dsn_parameters.get("host")
     port = _database_port(dsn_parameters.get("port"))
     database = dsn_parameters.get("dbname")
+    username = dsn_parameters.get("user")
+    username_class = _database_username_class(username)
+    password_present = bool(dsn_parameters.get("password"))
     identity: dict[str, Any] = {
         "configured": True,
         "scheme": parsed.scheme,
         "host": host,
         "port": port,
         "database": database,
+        "username_present": username_class != "missing",
+        "username_class": username_class,
+        "password_present": password_present,
     }
     blockers = list(query_blockers)
     if (
@@ -274,6 +412,31 @@ def _destination_preflight(database_url: str | None) -> tuple[dict[str, Any], li
                 "code": DATABASE_URL_ENDPOINT_NOT_NODE27_REASON,
                 "env_var": "DATABASE_URL",
                 "message": "DATABASE_URL must target an allowed node-27 PostgreSQL endpoint.",
+            }
+        )
+    if identity["username_class"] == "missing":
+        blockers.append(
+            {
+                "code": DATABASE_URL_USERNAME_MISSING_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must include an explicit node-27 ingest writer username.",
+            }
+        )
+        return identity, blockers
+    if identity["username_class"] == "display_readonly_like":
+        blockers.append(
+            {
+                "code": DATABASE_URL_READONLY_IDENTITY_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL appears to use a display/readonly identity, not a node-27 ingest writer.",
+            }
+        )
+    if not password_present:
+        blockers.append(
+            {
+                "code": DATABASE_URL_PASSWORD_MISSING_REASON,
+                "env_var": "DATABASE_URL",
+                "message": "DATABASE_URL must include explicit password material for the node-27 ingest writer.",
             }
         )
     return identity, blockers
@@ -397,6 +560,27 @@ def _failed_node22_mirror_report(run_id: str, error: Exception, *, dsn_source: s
             "reason": NODE22_MIRROR_FAILED_REASON,
             "detail": str(error),
             "error_type": type(error).__name__,
+        },
+        dsn_source=dsn_source,
+    )
+
+
+def _source_forbidden_report(
+    run_id: str,
+    *,
+    dsn_source: str,
+    source: dict[str, Any],
+    blockers: list[dict[str, str]],
+) -> dict[str, Any]:
+    reason = blockers[0]["code"] if blockers else NODE22_DSN_ENDPOINT_NOT_ARCHIVED_NODE22_REASON
+    return _with_mirror_boundary(
+        {
+            "run_id": run_id,
+            "failed": True,
+            "reason": reason,
+            "detail": "N22_DSN failed archived node-22 rollback mirror source preflight.",
+            "source": source,
+            "blockers": blockers,
         },
         dsn_source=dsn_source,
     )
@@ -693,6 +877,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not _archived_rollback_mirror_allowed(args.allow_archived_node22_db_rollback_mirror):
         _dump_json(_rollback_mirror_not_allowed_report(args.run_id, dsn_source=node22_source.source))
+        return 2
+
+    source, source_blockers = _source_preflight(node22_source.url)
+    if source_blockers:
+        _dump_json(
+            _source_forbidden_report(
+                args.run_id,
+                dsn_source=node22_source.source,
+                source=source,
+                blockers=source_blockers,
+            )
+        )
         return 2
 
     if not args.object_store_root:

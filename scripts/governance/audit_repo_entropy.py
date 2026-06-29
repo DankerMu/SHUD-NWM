@@ -1985,6 +1985,8 @@ def _topology_local_postgres_context_is_allowed(
     line_context = _topology_normalized(f"{line}\n{context}")
     if _topology_context_has_stale_pending_retirement_state(line_context):
         return False
+    if _topology_context_is_pre_cutover_historical_evidence(line_context):
+        return True
     if _topology_line_mentions_mirror(line_only_context):
         if _topology_context_is_guardrail_or_test_meta(line_context):
             return True
@@ -1996,8 +1998,6 @@ def _topology_local_postgres_context_is_allowed(
             return True
         return False
     if _topology_context_is_retirement_or_rejection_boundary(line_only_context):
-        return True
-    if _topology_context_has_negative_node22_writer_boundary(local_claim_context):
         return True
     if _topology_context_has_current_node22_local_postgres_use(line_only_context) or (
         _topology_context_has_node22_local_postgres_use_action(line_only_context)
@@ -2056,6 +2056,9 @@ def _topology_context_is_non_current(context: str) -> bool:
             "retire",
             "retirement",
             "retired",
+            "rollback archive",
+            "rollback-only",
+            "rollback only",
             "superseded",
             "deprecated",
             "历史",
@@ -2074,12 +2077,16 @@ def _topology_context_is_non_current(context: str) -> bool:
             "do not use",
             "not current",
             "non-current",
+            "no active db",
+            "no active database",
             "not current topology",
             "out of current",
             "outside current",
             "not scheduler runtime env",
             "not scheduler-owned",
             "不要连",
+            "不连任何活 db",
+            "不连任何活 database",
             "不应连接",
             "不作为当前",
             "不用于当前",
@@ -2182,8 +2189,6 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
         return False
     if _topology_context_has_complete_node22_local_pg_boundary(normalized):
         return True
-    if _topology_context_has_negative_node22_writer_boundary(normalized):
-        return True
     return any(
         token in normalized
         for token in (
@@ -2196,8 +2201,8 @@ def _topology_context_is_retirement_or_rejection_boundary(context: str) -> bool:
             "fails unless",
             "grep 55433",
             "guardrail",
-            "must not use",
-            "never point",
+            "shall not instruct",
+            "shall not present",
             "no database_url",
             "no scheduler postgresql",
             "not scheduler runtime env",
@@ -2258,24 +2263,8 @@ def _topology_context_is_compatibility_mirror_contract(context: str) -> bool:
             "显式允许",
         )
     )
-    has_archived = any(
-        token in combined
-        for token in (
-            "archived",
-            "archive",
-            "rollback-only",
-            "rollback only",
-        )
-    )
-    has_stopped = any(
-        token in combined
-        for token in (
-            "stopped",
-            "stop",
-            "rollback-only",
-            "rollback only",
-        )
-    )
+    has_archived = _topology_context_has_unnegated_archived_state(combined)
+    has_stopped = _topology_context_has_unnegated_stopped_state(combined)
     return (
         has_mirror
         and has_compatibility
@@ -2351,6 +2340,8 @@ def _topology_context_is_structured_node22_local_pg_boundary(context: str) -> bo
 
 def _topology_context_has_complete_node22_local_pg_boundary(context: str) -> bool:
     normalized = _topology_normalized(context)
+    if _topology_context_has_negated_archive_or_stop_state(normalized):
+        return False
     has_node22_local_pg = (
         ":55433" in normalized
         or " 55433" in normalized
@@ -2368,6 +2359,9 @@ def _topology_context_has_complete_node22_local_pg_boundary(context: str) -> boo
             "outside current",
             "out of current",
             "retired",
+            "rollback archive",
+            "rollback-only",
+            "rollback only",
             "历史",
         )
     )
@@ -2379,26 +2373,106 @@ def _topology_context_has_complete_node22_local_pg_boundary(context: str) -> boo
             "do not connect",
             "do not use",
             "must not use",
+            "must not be used",
             "not current",
             "non-current",
+            "out of current",
+            "outside current",
             "不要连",
+            "不连任何活 db",
+            "不连任何活 database",
             "不应连接",
             "不用于当前",
         )
     )
-    has_archived = any(token in normalized for token in ("archived", "archive", "归档"))
-    has_stopped = any(
+    has_archived = _topology_context_has_unnegated_archived_state(normalized)
+    has_stopped = _topology_context_has_unnegated_stopped_state(normalized)
+    return has_node22_local_pg and has_historical and has_do_not_connect and has_archived and has_stopped
+
+
+def _topology_context_is_pre_cutover_historical_evidence(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    has_pre_cutover_marker = any(
+        token in normalized
+        for token in (
+            "before #836/#837",
+            "before #836 and #837",
+            "before #837",
+            "pre-cutover",
+            "pre cutover",
+            "initial context",
+            "historical pre-cutover",
+            "historical pre-cutover evidence only",
+        )
+    )
+    has_not_yet_retired_state = any(
+        token in normalized
+        for token in (
+            "not yet archived/stopped",
+            "not yet archived",
+            "not archived/stopped yet",
+            "still listening but unused",
+            "stayed online during #836",
+            "historical pre-cutover evidence only",
+        )
+    )
+    has_current_action = any(
+        token in normalized
+        for token in (
+            "current production db checks should use",
+            "current production state checks",
+            "current checks should use",
+            "use node-22 local postgresql",
+            "connect to node-22 local postgresql",
+        )
+    )
+    return has_pre_cutover_marker and has_not_yet_retired_state and not has_current_action
+
+
+def _topology_context_has_unnegated_archived_state(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if _topology_context_has_negated_archive_or_stop_state(normalized):
+        return False
+    return any(token in normalized for token in ("archived", "archive", "rollback-only", "rollback only", "归档"))
+
+
+def _topology_context_has_unnegated_stopped_state(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    if _topology_context_has_negated_archive_or_stop_state(normalized):
+        return False
+    return any(
         token in normalized
         for token in (
             "stopped",
             "stop",
+            "rollback-only",
+            "rollback only",
             "exited",
             "not listening",
             "no listener",
             "停止",
         )
     )
-    return has_node22_local_pg and has_historical and has_do_not_connect and has_archived and has_stopped
+
+
+def _topology_context_has_negated_archive_or_stop_state(context: str) -> bool:
+    normalized = _topology_normalized(context)
+    return bool(
+        re.search(
+            r"\b(?:not|never|no|without|lacks?|missing)\s+"
+            r"(?:yet\s+)?(?:an?\s+)?(?:archive|archived|stop|stopped)"
+            r"(?:\s+or\s+(?:archive|archived|stop|stopped))?(?:\s+yet)?\b",
+            normalized,
+        )
+        or re.search(
+            r"\bnot\s+(?:archive|archived)\s+or\s+(?:stop|stopped)(?:\s+yet)?\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:archive|archived|stop|stopped)\s+is\s+not\b",
+            normalized,
+        )
+    )
 
 
 def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
@@ -2457,11 +2531,21 @@ def _topology_context_is_guardrail_or_test_meta(context: str) -> bool:
             "node22_historical_db_port",
             "node22_dsn_file_invalid_reason",
             "node22_dsn_file_unsafe_reason",
+            "node22_dsn_query_override_forbidden_reason",
+            "node22_dsn_endpoint_not_archived_node22_reason",
+            "node22_dsn_invalid_reason",
+            "node22_dsn_username_missing_reason",
+            "node22_dsn_password_missing_reason",
             "node22_mirror_failed_reason",
             "node22_rollback_mirror_not_allowed_reason",
+            "database_url_username_missing_reason",
+            "database_url_readonly_identity_reason",
+            "database_url_password_missing_reason",
             "default_allowed_db_endpoints",
             "historical_node22_pg_status",
             "transitional_mirror_sunset",
+            "_source_preflight",
+            "_source_forbidden_report",
             "focused tests cover",
             "regression rows",
             "drift in current operational surfaces",

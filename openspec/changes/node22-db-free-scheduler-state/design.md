@@ -862,8 +862,8 @@ Must preserve:
 - Non-DB runtime roots, manifest paths, secret handling, template roots,
   workspace/object-store/temp/evidence roots, and allowed-root checks stay
   strict.
-- The historical do-not-connect `:55433` rollback listener is not stopped or
-  disabled by #836; archive/stop is #837.
+- During #836, the historical do-not-connect `:55433` rollback listener stayed
+  online as rollback state; archive/stop is #837.
 - Existing display/node-27 readonly and ingest responsibilities do not move to
   node-22.
 - Scheduler evidence remains bounded and must not reveal raw DB URLs, tokens,

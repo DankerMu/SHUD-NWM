@@ -4399,6 +4399,7 @@ def test_entropy_audit_topology_guardrails_do_not_allow_active_claim_after_neigh
         ("docs/runbooks/current-production-ops.md", 2)
     ]
     assert [(finding["evidence_path"], finding["line"]) for finding in local_pg_findings] == [
+        ("docs/runbooks/current-production-ops.md", 3),
         ("docs/runbooks/current-production-ops.md", 4)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(writer_findings[0])
@@ -4792,6 +4793,42 @@ def test_entropy_audit_topology_guardrails_reject_incomplete_local_pg_boundary(
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
+def test_entropy_audit_topology_guardrails_reject_do_not_connect_without_archive_stop(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        node-22 local PostgreSQL :55433 is historical and do not connect for current NHMS production.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
+def test_entropy_audit_topology_guardrails_reject_negated_archived_stopped_boundary(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        node-22 local PostgreSQL :55433 is historical and do-not-connect, but not archived or stopped yet.
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+
+
 def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical_banner(
     tmp_path: Path,
 ) -> None:
@@ -4801,7 +4838,8 @@ def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical
         # display_readonly Live PostGIS MVT Runbook
 
         > Current topology warning: this runbook preserves historical receipt context;
-        > do not treat node-22 `210.77.77.22:55433` as current display DB config.
+        > do not treat node-22 `210.77.77.22:55433` as current display DB config;
+        > it is historical do-not-connect archived/stopped rollback-only state.
         > Current active primary PostgreSQL is node-27 local `:55432`.
 
         ## Current operator steps
@@ -4820,7 +4858,7 @@ def test_entropy_audit_topology_guardrails_scan_current_runbook_after_historical
         (
             "production-topology-node22-db-writer",
             "docs/runbooks/display-readonly-live-mvt.md",
-            9,
+            10,
         )
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(topology_findings[0])
