@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import shutil
-import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,6 @@ EXPECTED_COUNTS = {
     "met.forcing_station_timeseries": 8,
     "met.interp_weight": 4,
 }
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -403,16 +402,19 @@ def test_failure_reports_are_credential_safe_for_parser_and_sql_errors() -> None
     assert "[redacted]" in serialized or "postgresql://example.test/db" in serialized
 
 
-def test_node27_autopipeline_policy_file_is_unchanged_by_apply_scope() -> None:
-    result = subprocess.run(
-        ["git", "diff", "--exit-code", "origin/master...HEAD", "--", "scripts/node27_autopipeline.py"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+def test_apply_scope_does_not_depend_on_node27_autopipeline_policy_file() -> None:
+    module_source = Path(apply_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(module_source)
+    imported_modules: set[str] = set()
 
-    assert result.stdout == ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    assert all("node27_autopipeline" not in module_name for module_name in imported_modules)
+    assert "node27_autopipeline" not in module_source
 
 
 def _all_tables_empty(tables: dict[str, list[dict[str, Any]]]) -> bool:

@@ -16,9 +16,10 @@ NHMS_AUTH_MODE=production
 NHMS_REQUIRE_FORECAST_WARM_START=true
 UV_CACHE_DIR=/tmp/nhms-uv-cache
 
-# Compute API / rollback DB. The scheduler-once compose service does not inherit
-# DATABASE_URL in DB-free mode; keep this only for compute-api and historical
-# rollback until node-22 :55433 is archived.
+# Compute API / archived rollback DB placeholder. The scheduler-once compose
+# service does not inherit DATABASE_URL in DB-free mode; keep this only for
+# compute-api or an explicit archived rollback drill. Node-22 :55433 is stopped
+# and is not an active business DB.
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms
 
 WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace

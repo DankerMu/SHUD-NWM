@@ -17,6 +17,14 @@ WRAPPER = REPO_ROOT / "scripts" / "node27_autopipe_cron.sh"
 RUN_QHH = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_QHH_NEXT = "fcst_gfs_2026062112_basins_qhh_shud"
 RUN_HEIHE = "fcst_gfs_2026062112_basins_heihe_shud"
+NODE27_DATABASE_URL = "postgresql://node27_writer:writer-secret@127.0.0.1:55432/nhms"
+NODE22_ROLLBACK_DSN = "postgresql://n22_user:n22-secret@210.77.77.22:55433/nhms"
+
+
+@pytest.fixture(autouse=True)
+def _clear_libpq_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in autopipe.LIBPQ_CONNECTION_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 def _prepare_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -65,7 +73,10 @@ def _args(object_store_root: Path, basins_root: Path, database_url: str | None =
         str(basins_root),
     ]
     if database_url is not None:
-        args.extend(["--database-url", database_url])
+        database_url_file = object_store_root.parent / "node27-writer-dsn.txt"
+        database_url_file.write_text(database_url + "\n", encoding="utf-8")
+        database_url_file.chmod(0o600)
+        args.extend(["--database-url-file", str(database_url_file)])
     return args
 
 
@@ -108,6 +119,85 @@ def test_missing_database_url_blocks_before_seed_run_publish_and_redacts(
     assert "preflight-secret-token" not in rendered
 
 
+@pytest.mark.parametrize(
+    "database_url_args",
+    [
+        ["--database-url", NODE27_DATABASE_URL],
+        [f"--database-url={NODE27_DATABASE_URL}"],
+    ],
+)
+def test_raw_database_url_argv_blocks_before_argparse_echo_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    database_url_args: list[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc = autopipe.main(
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            *database_url_args,
+        ]
+    )
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert captured.err == ""
+    assert summary["status"] == "preflight_blocked"
+    assert autopipe.DATABASE_URL_ARGV_FORBIDDEN in _blocker_codes(summary)
+    assert summary["ingest"]["preflight"]["database"] == {
+        "configured": True,
+        "source": "argv:--database-url",
+    }
+    assert "postgresql://" not in captured.out
+    assert "writer-secret" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "node22_url_args",
+    [
+        ["--node22-url", NODE22_ROLLBACK_DSN],
+        [f"--node22-url={NODE22_ROLLBACK_DSN}"],
+    ],
+)
+def test_legacy_node22_url_argv_blocks_before_argparse_echo_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    node22_url_args: list[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("DATABASE_URL", NODE27_DATABASE_URL)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc = autopipe.main(
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            *node22_url_args,
+        ]
+    )
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert captured.err == ""
+    assert summary["status"] == "preflight_blocked"
+    assert _blocker_codes(summary) == {autopipe.NODE22_DSN_ARGV_FORBIDDEN}
+    assert "postgresql://" not in captured.out
+    assert "n22-secret" not in captured.out
+
+
 def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -121,7 +211,7 @@ def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
@@ -144,6 +234,7 @@ def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "display_readonly")
     monkeypatch.setenv("AUTOPIPE_WORK_ROOT", "relative-work")
     monkeypatch.setenv("AUTOPIPE_LOG_ROOT", "relative-log")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms_display_ro:readonly-secret@127.0.0.1:55432/nhms")
 
     rc, summary, rendered = _run_main(
         capsys,
@@ -152,8 +243,6 @@ def test_preflight_reports_stable_blocker_codes_for_unsafe_ingest_identity(
             "",
             "--basins-root",
             "",
-            "--database-url",
-            "postgresql://nhms_display_ro:readonly-secret@db.example/nhms",
         ],
     )
 
@@ -182,6 +271,85 @@ def test_preflight_reports_malformed_database_url_with_stable_code(
     assert _blocker_codes(summary) == {"DATABASE_URL_INVALID"}
 
 
+def test_database_url_file_must_be_owner_only_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    database_url_file = tmp_path / "node27-writer-dsn.txt"
+    database_url_file.write_text(NODE27_DATABASE_URL + "\n", encoding="utf-8")
+    database_url_file.chmod(0o644)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            "--database-url-file",
+            str(database_url_file),
+        ],
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {autopipe.DATABASE_URL_FILE_UNSAFE}
+    assert "writer-secret" not in rendered
+
+
+def test_database_url_file_symlink_blocks_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    target = tmp_path / "node27-writer-target.txt"
+    target.write_text(NODE27_DATABASE_URL + "\n", encoding="utf-8")
+    target.chmod(0o600)
+    database_url_file = tmp_path / "node27-writer-link.txt"
+    database_url_file.symlink_to(target)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(basins_root),
+            "--database-url-file",
+            str(database_url_file),
+        ],
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {autopipe.DATABASE_URL_FILE_UNSAFE}
+    assert "writer-secret" not in rendered
+
+
+def test_preflight_rejects_ambient_libpq_env_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=1")
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root, NODE27_DATABASE_URL))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert _blocker_codes(summary) == {autopipe.LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON}
+    assert {blocker["env_var"] for blocker in summary["ingest"]["preflight"]["blockers"]} == {"PGOPTIONS"}
+    assert "statement_timeout" not in rendered
+    assert "writer-secret" not in rendered
+
+
 def test_preflight_rejects_database_url_without_username_before_libpq_ambient_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -197,7 +365,10 @@ def test_preflight_rejects_database_url_without_username_before_libpq_ambient_id
     rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root))
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
-    assert _blocker_codes(summary) == {"DATABASE_URL_USERNAME_MISSING"}
+    assert _blocker_codes(summary) == {
+        "DATABASE_URL_USERNAME_MISSING",
+        autopipe.LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+    }
     assert summary["ingest"]["preflight"]["database"]["username_present"] is False
     assert summary["ingest"]["preflight"]["database"]["username_class"] == "missing"
     assert "readonly-secret" not in rendered
@@ -220,7 +391,10 @@ def test_preflight_rejects_database_url_without_password_before_libpq_ambient_cr
     rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root))
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
-    assert _blocker_codes(summary) == {"DATABASE_URL_PASSWORD_MISSING"}
+    assert _blocker_codes(summary) == {
+        "DATABASE_URL_PASSWORD_MISSING",
+        autopipe.LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+    }
     assert summary["ingest"]["preflight"]["database"]["username_present"] is True
     assert summary["ingest"]["preflight"]["database"]["username_class"] == "writer_candidate"
     assert summary["ingest"]["preflight"]["database"]["password_present"] is False
@@ -315,6 +489,57 @@ def test_preflight_rejects_database_url_query_overrides_before_work_and_redacts(
         assert forbidden not in rendered
 
 
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://node27_writer:writer-secret@210.77.77.22:55432/nhms",
+        "postgresql://node27_writer:writer-secret@db.example:55433/nhms",
+    ],
+)
+def test_preflight_rejects_node22_historical_database_url_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    database_url: str,
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root, database_url))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert autopipe.DATABASE_URL_NODE22_HISTORICAL_ENDPOINT in _blocker_codes(summary)
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "writer-secret" not in rendered
+
+
+def test_preflight_rejects_non_node27_writer_endpoint_before_work_and_redacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        _args(
+            object_store_root,
+            basins_root,
+            "postgresql://node27_writer:writer-secret@db.example:55432/nhms",
+        ),
+    )
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert autopipe.DATABASE_URL_ENDPOINT_NOT_NODE27 in _blocker_codes(summary)
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "writer-secret" not in rendered
+
+
 def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -322,14 +547,13 @@ def test_direct_entry_without_basins_root_blocks_even_when_default_path_exists(
 ) -> None:
     object_store_root, _basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
     monkeypatch.delenv("BASINS_ROOT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", NODE27_DATABASE_URL)
 
     rc, summary, _rendered = _run_main(
         capsys,
         [
             "--object-store-root",
             str(object_store_root),
-            "--database-url",
-            "postgresql://node27_writer:writer-secret@db.example/nhms",
         ],
     )
 
@@ -350,7 +574,7 @@ def test_canonical_root_resolution_blocks_work_and_log_roots_resolving_to_root(
 
     rc, summary, _rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == autopipe.PREFLIGHT_BLOCKED_RC
@@ -377,7 +601,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example:55432/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 0
@@ -390,9 +614,10 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["ingest"]["preflight"]["database"] == {
         "configured": True,
         "database": "nhms",
-        "host": "db.example",
+        "host": "127.0.0.1",
         "port": 55432,
         "scheme": "postgresql",
+        "source": f"file:{object_store_root.parent / 'node27-writer-dsn.txt'}",
         "password_present": True,
         "username_class": "writer_candidate",
         "username_present": True,
@@ -401,7 +626,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["runs"]["already_ingested"] == 1
     assert summary["runs"]["processed"] == 0
     assert summary["runs"]["published"] == 5
-    assert published_calls == ["postgresql://node27_writer:writer-secret@db.example:55432/nhms"]
+    assert published_calls == [NODE27_DATABASE_URL]
     assert "writer-secret" not in rendered
 
 
@@ -427,7 +652,7 @@ def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
         raise AssertionError(f"unexpected seed command: {argv}")
 
     monkeypatch.setattr(autopipe, "_run", fake_run)
-    database_url = "postgresql://node27_writer:writer-secret@db.example/nhms"
+    database_url = NODE27_DATABASE_URL
 
     rc, summary, rendered = _run_main(
         capsys,
@@ -473,7 +698,7 @@ def test_basin_seed_failure_isolated_after_valid_preflight(
 
     rc, summary, rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 1
@@ -507,7 +732,7 @@ def test_one_run_failure_isolated_after_valid_preflight(
 
     rc, summary, _rendered = _run_main(
         capsys,
-        _args(object_store_root, basins_root, "postgresql://node27_writer:writer-secret@db.example/nhms"),
+        _args(object_store_root, basins_root, NODE27_DATABASE_URL),
     )
 
     assert rc == 1
@@ -533,12 +758,11 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "AUTOPIPE_WORK_ROOT",
         "AUTOPIPE_LOG_ROOT",
         "N22_DSN",
-        "PGUSER",
-        "PGPASSWORD",
-        "PGPASSFILE",
-        "PGSERVICE",
-        "PGSERVICEFILE",
+        "NHMS_NODE22_DSN_SOURCE",
+        "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
     ):
+        assert f"unset {required_key}" in script
+    for required_key in autopipe.LIBPQ_CONNECTION_ENV_KEYS:
         assert f"unset {required_key}" in script
     assert "--database-url" not in script
 
@@ -632,6 +856,60 @@ def test_wrapper_env_file_missing_database_url_ignores_ambient_without_override(
     assert "DATABASE_URL_MISSING" in bootstrap_log.read_text(encoding="utf-8")
     assert not invocations.exists()
     assert not (log_root / "autopipe.log").exists()
+
+
+def test_wrapper_env_file_libpq_env_blocks_after_source_without_leaking_value(tmp_path: Path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (scripts / "node27_autopipeline.py").write_text("# fake autopipeline\n", encoding="utf-8")
+    (scripts / "node27_refresh_coverage.py").write_text("# fake coverage\n", encoding="utf-8")
+    invocations = tmp_path / "invocations.txt"
+    python_bin.write_text(f"#!/bin/sh\necho \"$@\" >> {invocations}\nexit 99\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://node27_writer:writer-secret@db.example/nhms",
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                "OBJECT_STORE_PREFIX=s3://nhms",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+                "PGOPTIONS=-c statement_timeout=1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    bootstrap_log = tmp_path / "bootstrap.log"
+    env = {
+        **os.environ,
+        "NODE27_AUTOPIPE_REPO": str(fake_repo),
+        "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+        "NODE27_AUTOPIPE_BOOTSTRAP_LOG": str(bootstrap_log),
+    }
+    env.pop("NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV", None)
+
+    proc = subprocess.run(["bash", str(WRAPPER)], env=env, capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 2
+    assert "LIBPQ_AMBIENT_ENV_FORBIDDEN_PGOPTIONS" in proc.stderr
+    assert "LIBPQ_AMBIENT_ENV_FORBIDDEN_PGOPTIONS" in bootstrap_log.read_text(encoding="utf-8")
+    assert not invocations.exists()
+    assert "statement_timeout" not in proc.stderr
+    assert "writer-secret" not in proc.stderr
 
 
 def test_wrapper_env_file_passwordless_database_url_does_not_inherit_libpq_credentials(tmp_path: Path) -> None:

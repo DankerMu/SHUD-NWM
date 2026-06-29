@@ -56,10 +56,10 @@ present and valid.
    `convert` and disables fresh download for that cycle. Missing required NFS
    raw evidence blocks the candidate instead of submitting node-22 download.
 
-5. **DB retirement remains a later cleanup.** Node-22 local PostgreSQL `:55433`
-   is historical and sunset-bound, but stopping it is not part of this slice.
-   That retirement needs its own replacement for scheduler locks/job state,
-   archive evidence, and live observation window.
+5. **DB retirement is closed by #837.** Node-22 local PostgreSQL `:55433` is
+   historical, archived, stopped, and outside current topology. Scheduler
+   locks/job state no longer require scheduler DB access, and the retirement
+   evidence lives in `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`.
 
 6. **Rollback keeps topology truth intact.** A temporary rollback may disable
    the node-22 NFS gate while the new path is fixed, but docs and guardrails
@@ -75,8 +75,9 @@ present and valid.
 5. Promote node-27 download to production source-cycle ownership.
 6. Observe live GFS/IFS cycles that use node-27 raw and node-22 downstream
    compute from the NFS handoff plus local staging.
-7. Plan any node-22 DB retirement or scheduler-state reduction as a separate
-   governed change after the handoff is stable.
+7. Treat node-22 DB retirement and scheduler-state reduction as completed by
+   `node22-db-free-scheduler-state` / #837; keep this change's remaining scope
+   limited to node-27 download ownership and NFS raw handoff behavior.
 
 ## Risks
 
@@ -95,5 +96,7 @@ Rollback is phase-bounded. Before production gate enablement, disable the
 node-27 download cron/wrapper and keep the previous node-22 download path. After
 the required NFS gate is enabled, rollback must explicitly turn off
 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` and record why node-27 download did
-not hold. Node-22 PostgreSQL remains available until a later retirement change
-replaces its scheduler-state responsibilities.
+not hold. Node-22 PostgreSQL is no longer an active rollback dependency; the
+`:55433` listener is historical do-not-connect archived/stopped rollback-only
+state. Any archive restore is a separate operator recovery path governed by the
+issue #837 retirement receipt and must not reconnect scheduler runtime to `:55433`.

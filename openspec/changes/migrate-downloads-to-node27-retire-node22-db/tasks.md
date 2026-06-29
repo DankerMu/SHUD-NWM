@@ -141,26 +141,39 @@
 
 ## 6. Later Node-22 Scheduler-State Reduction
 
-- [ ] 6.1 Design the replacement for node-22 scheduler DB responsibilities.
+- [x] 6.1 Design the replacement for node-22 scheduler DB responsibilities.
   Evidence floor: separate change documents lock state, candidate state, job
   state, retry semantics, rollback, and live verification before removing
   node-22 scheduler DB dependencies.
-  Latest status: 2026-06-27 live evidence shows node-22 scheduler still reads
-  `DATABASE_URL` pointing at `:55433`, uses `NHMS_SCHEDULER_LOCK_BACKEND=postgres`,
-  and opens live PostgreSQL sessions during scheduler passes.
+  Latest status: #837 completed this in `node22-db-free-scheduler-state`.
+  Post-stop evidence shows node-22 scheduler runtime has no `DATABASE_URL`,
+  file-backed locks/selectors are active, and `:55433` is stopped.
   Retirement gate: `docs/runbooks/node22-db-retirement-runbook.md`.
 
 ## 7. Retire Node-22 Historical PostgreSQL
 
-- [ ] 7.1 Archive/dump node-22 `:55433` and record checksum/path without secrets.
+- [x] 7.1 Archive/dump node-22 `:55433` and record checksum/path without secrets.
   Evidence floor: archive receipt is stored outside gitignored volatile paths
   or referenced by stable operator evidence.
-- [ ] 7.2 Stop node-22 historical PostgreSQL only after scheduler-state
+- [x] 7.2 Stop node-22 historical PostgreSQL only after scheduler-state
   responsibilities are replaced.
   Evidence floor: `ss -ltnp` shows no `:55433`, compute services remain healthy,
-  and post-retirement cycles complete through node-27 download, node-22
-  NFS-gated scheduling, downstream compute, node-27 ingest, and public display.
-- [ ] 7.3 Add/update topology guardrails and docs.
+  scheduler runtime remains DB-free, and active docs/env examples do not route
+  current validation back to node-22 `:55433`.
+  Evidence: #837 receipt
+  `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md` records
+  archive/stop state, empty post-stop listener check, compute health, and
+  DB-free scheduler evidence. Full post-retirement GFS/IFS E2E remains tracked
+  by task 7.4 / 4.6 rather than claimed by the stop gate.
+- [x] 7.3 Add/update topology guardrails and docs.
   Evidence floor: static guard fails on active node-22 `:55433`/business
   `DATABASE_URL` writer assumptions, while allowing historical archived context;
   OpenSpec, ruff, focused tests, docs lint, and live receipts pass.
+  Evidence: #837 receipt
+  `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`.
+- [ ] 7.4 Record full post-retirement GFS/IFS end-to-end receipts.
+  Evidence floor: post-retirement cycles complete through node-27 download,
+  node-22 NFS-gated scheduling, downstream compute, node-27 ingest, and public
+  display for both GFS and IFS.
+  Latest status: pending with task 4.6; #837 stop evidence is necessary but not
+  sufficient for this full E2E floor.

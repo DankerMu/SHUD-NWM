@@ -42,21 +42,30 @@ the source acquisition handoff between the two nodes.
 
 ### Requirement: Historical node-22 PostgreSQL retirement remains separately gated
 
-The system SHALL treat node-22 local PostgreSQL `:55433` as historical and
-sunset-bound, but SHALL NOT stop it as part of the node-27 download / NFS
-handoff change until scheduler-state responsibilities are replaced by a later
-governed change.
+The system SHALL treat node-22 local PostgreSQL `:55433` as historical,
+do-not-connect, archived/stopped rollback-only state after #837; this node-27
+download / NFS handoff change SHALL NOT reintroduce it as an active DB
+dependency.
 
-#### Scenario: Retirement is gated by live evidence
+#### Scenario: Retirement stop gate is bounded by archive and DB-free proof
 
 - **WHEN** an operator stops node-22 historical PostgreSQL
 - **THEN** an archive/dump path and checksum have been recorded
 - **AND** a replacement for scheduler locks, candidate state, job state, and
   required operational receipts has been implemented
-- **AND** live production cycles covering GFS and IFS have advanced through
+- **AND** post-stop evidence shows no node-22 `:55433` listener
+- **AND** scheduler runtime evidence remains DB-free with compute API and Slurm
+  gateway health still passing
+- **AND** a rollback note identifies the emergency restore path.
+
+#### Scenario: Full post-retirement E2E remains separately tracked
+
+- **WHEN** operators claim full post-retirement production handoff closure
+- **THEN** live production cycles covering GFS and IFS have advanced through
   node-27 download, node-22 NFS-gated scheduling, downstream compute,
   node-27 ingest, and public display readiness
-- **AND** a rollback note identifies the emergency restore path.
+- **AND** the evidence is recorded under the pending full E2E task rather than
+  the historical PostgreSQL stop/archive gate.
 
 #### Scenario: Guardrails block node-22 DB drift
 

@@ -251,20 +251,42 @@ Scenario evidence rows for section 5:
 
 ## 7. Archive And Stop Node-22 Historical PostgreSQL
 
-- [ ] 7.1 Capture pre-stop listener and session attribution.
+- [x] 7.1 Capture pre-stop listener and session attribution.
   Evidence floor: receipt records `ss -ltnp`, PID, process owner, unit/service
   metadata where available, command line, active client/session snapshot, and
   proof `:55433` is historical rollback state rather than scheduler-owned.
-- [ ] 7.2 Archive node-22 `:55433`.
+  Evidence: `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`
+  records `pre-stop-metadata.json`, Docker owner attribution, active sessions,
+  scheduler timer/service status, and the `sudo -n` limitation for root-owned
+  socket PID metadata. It also links the 2026-06-28 #836 GFS/IFS live proof
+  receipt that satisfied the pre-stop DB-free scheduler gate.
+- [x] 7.2 Archive node-22 `:55433`.
   Evidence floor: receipt records dump/archive path, checksum, service/unit
   metadata, env backup, process owner, listener snapshot, and rollback commands
   without secrets.
-- [ ] 7.3 Stop and disable node-22 historical PostgreSQL.
+  Evidence: archive root
+  `/ghdc/data/nwm/operator-archives/node22-postgres-55433/20260629T025421Z`,
+  `SHA256SUMS`, `sha256sum-check.txt`, `pg-restore-list.txt`, redacted env
+  backups, `archive-permissions.txt`, owner-only archive/evidence permission
+  checks, and secret-free rollback/cleanup commands are listed in the
+  2026-06-29 receipt.
+- [x] 7.3 Stop and disable node-22 historical PostgreSQL.
   Evidence floor: stop action is performed by the owning account or an
   administrator; `ss -ltnp | grep 55433` is empty.
-- [ ] 7.4 Run post-stop scheduler and service health verification.
+  Evidence: `docker stop nhms-22-e2e-db` completed on 2026-06-29; post-stop
+  Docker state is `exited` with restart policy `no`, `docker ps` has no running
+  matching container, and `ss_55433_after` is empty in
+  `post-stop-health.txt`.
+- [x] 7.4 Run post-stop scheduler and service health verification.
   Evidence floor: bounded no-DB scheduler pass succeeds, compute API and Slurm
   gateway are healthy, and latest evidence still shows `lock_type=file`.
-- [ ] 7.5 Update topology guardrails and receipts.
+  Evidence: bounded GFS post-stop dry-run records `status=planned`,
+  `database_url_configured=false`, `scheduler_db_free_required=true`,
+  all scheduler backends as `file`, `lock_type=file`, root preflight ready, and
+  no mutation; compute API and `/api/v1/slurm/health` both pass.
+- [x] 7.5 Update topology guardrails and receipts.
   Evidence floor: active docs/env examples no longer present node-22 `:55433`
   as business DB; historical references are explicitly marked archive/rollback.
+  Evidence: this task update, the 2026-06-29 receipt,
+  `docs/runbooks/node22-db-retirement-runbook.md`, active topology docs, and
+  env examples now describe `:55433` as archived/stopped rollback state only.

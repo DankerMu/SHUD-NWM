@@ -50,8 +50,9 @@
 | node-27 | active DB + ingest + display | 本机 PostgreSQL `:55432`、node-27 ingest writer、display API、前端；display runtime 为 `display_readonly` |
 
 shared NFS 路径：node-22 视图为 `/ghdc/data/nwm/...`，node-27 视图为
-`/home/ghdc/nwm/...`。node-22 本地 PG `:55433` 是 historical/do-not-connect/
-pending removal；当前 active DB 和 display/frontend oracle 都在 node-27。
+`/home/ghdc/nwm/...`。node-22 本地 PG `:55433` 是 historical
+do-not-connect、archived/stopped rollback-only archive；当前 active DB 和
+display/frontend oracle 都在 node-27。
 
 ---
 

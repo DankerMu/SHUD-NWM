@@ -109,8 +109,9 @@ by `PsycopgOrchestratorRepository`.
 
 #### Scenario: Historical scheduler state migrates into append-only journal
 
-- **WHEN** operators export scheduler-relevant rows from historical node-22
-  PostgreSQL `:55433`
+- **WHEN** operators export scheduler-relevant rows from historical
+  do-not-connect node-22 PostgreSQL `:55433` for the archived/stopped rollback
+  state
 - **THEN** the importer writes active/completed/candidate/job/event/retry and
   permanent-failure rows into the file journal
 - **AND** migrated pipeline events preserve historical `event_id` and

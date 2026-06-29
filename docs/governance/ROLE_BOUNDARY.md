@@ -15,9 +15,10 @@ full API and is not a production deployment category.
 
 **Current physical deployment (2026-06-21):**
 
-- node-22 runs the Slurm/SHUD compute wrapper. It does **NOT** connect to any active
-  database. The local PG `:55433` instance on node-22 is historical and pending
-  removal — do not connect to it.
+- node-22 runs the Slurm/SHUD compute wrapper. It does **NOT** connect to any
+  active database. The local PG `:55433` instance on node-22 is historical,
+  archived, and stopped as of the 2026-06-29 retirement receipt — do not
+  connect to it.
 - node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers, the
   display API (`:8080`), and the frontend on a single machine. node-27 reads
   node-22's compute artifacts via NFS (`/home/ghdc/nwm/` ↔ node-22

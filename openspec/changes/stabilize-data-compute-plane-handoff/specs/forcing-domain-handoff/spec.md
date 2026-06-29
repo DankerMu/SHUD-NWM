@@ -93,24 +93,27 @@ evidence.
 - **AND** the receipt proves readiness did not depend on implicit node-22 DB
   access or `infra/env/display.env` mirror fallback
 
-### Requirement: Transitional node-22 compatibility-only mirror is explicit-DSN and sunset-bound
+### Requirement: Archived/stopped compatibility-only node-22 rollback mirror is explicit-DSN, allow-flagged, and sunset/removal-bound
 
-The system SHALL keep any transitional node-22 forcing mirror path explicit-DSN,
-audited, sunset-bound, and limited to operator-controlled compatibility runs.
+The system SHALL keep any archived node-22 rollback forcing mirror path
+explicit-DSN through `N22_DSN` or owner-only file indirection, archived-rollback
+allow-flagged, audited, compatibility-only, archived/stopped, sunset-bound, and
+limited to operator-controlled compatibility runs until removal.
 
 #### Scenario: Mirror does not read display runtime configuration
 
-- **WHEN** node-27 forcing mirror runs without `--node22-url` and without
-  `N22_DSN`
+- **WHEN** node-27 forcing mirror runs without `N22_DSN` or owner-only file
+  indirection
 - **THEN** it MUST NOT read `infra/env/display.env` or any display runtime
   `DATABASE_URL` as a mirror source
 - **AND** it exits or reports a stable skip reason indicating that no explicit
-  transitional mirror DSN was configured
+  archived rollback mirror DSN was configured
 
 #### Scenario: Explicit mirror records transition evidence
 
-- **WHEN** node-27 forcing mirror runs with an explicit transitional mirror DSN
-- **THEN** the report identifies the source as transitional mirror mode
+- **WHEN** node-27 forcing mirror runs with an explicit archived rollback mirror
+  DSN and archived-rollback allow flag
+- **THEN** the report identifies the source as archived rollback mirror mode
 - **AND** the report records the run id, forcing version id, mirrored table row
   counts, and read-only/mutation boundary without printing the DSN value
 - **AND** local writes are limited to node-27 data-plane tables required for

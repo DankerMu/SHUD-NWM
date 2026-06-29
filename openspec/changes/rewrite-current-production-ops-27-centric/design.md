@@ -24,8 +24,9 @@ Live verification on 2026-06-22 found:
   and is not the NHMS repo orchestrator/ingest path for this runbook.
 - node-22 repo `/scratch/frd_muziyao/NWM` at `1be0f05`, tracked worktree clean.
 - node-22 runs `services.slurm_gateway` and a diagnostic `apps.api.main` on
-  `:8001`; it also exposes historical PostgreSQL `:55433`, but that DB remains
-  out of current NHMS production topology.
+  `:8001`. Its historical PostgreSQL `:55433` has since been archived and
+  stopped by #837; it remains out of current NHMS production topology and must
+  not be used by current DB query examples.
 - node-22 sees NFS roots at `/ghdc/data/nwm/object-store` and
   `/ghdc/data/nwm/published`; node-27 sees the same data under
   `/home/ghdc/nwm/object-store` and `/home/ghdc/nwm/published`.
@@ -60,7 +61,8 @@ Live verification on 2026-06-22 found:
   `scripts/ops/start-display-api.sh`, nginx proxy config, and corrected live
   deployment all converge on `127.0.0.1:8080`.
 - Keep node-22 PostgreSQL `:55433` visible only as a historical do-not-connect
-  note. Any current DB query examples must run on node-27 against `:55432`.
+  archived/stopped rollback-only note. Any current DB query examples must run on
+  node-27 against `:55432`.
 
 ## Risks / Trade-offs
 

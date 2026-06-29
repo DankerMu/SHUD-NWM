@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Basin-agnostic autopipeline: discover object-store runs, seed missing basin
 registries, then register -> object-store forcing handoff (or explicit
-compatibility-only transitional mirror while pre-contract packages sunset) ->
+archived-rollback mirror when an operator deliberately enables it) ->
 parse -> refresh-coverage every run.
 
 Generalises the earlier qhh-hardcoded ingest into a basin-agnostic pipeline so
@@ -19,9 +19,8 @@ node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/ru
      run's failure never aborts the batch):
        register -> scripts/node27_ingest_run.py
        forcing  -> object-store forcing-domain handoff DB apply
-                  or scripts/node27_mirror_forcing.py when explicitly configured
-                  for compatibility runs with no declared handoff; remove after
-                  object-store handoff packages cover live display readiness
+                  or scripts/node27_mirror_forcing.py only when explicitly
+                  enabled for an archived node-22 DB rollback drill
        parse    -> workers.output_parser.cli parse
        refresh  -> scripts/node27_refresh_coverage.py  (Mission-4; skipped if absent)
 
@@ -45,9 +44,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -66,6 +67,8 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.redaction import redact_payload, redact_text
 from scripts.node27_mirror_forcing import (
+    LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+    LIBPQ_CONNECTION_ENV_KEYS,
     NODE22_MIRROR_FAILED_REASON,
     TRANSITIONAL_MIRROR_MODE,
 )
@@ -98,6 +101,13 @@ INGEST_STAGE_SHAPE = (
 )
 DISPLAY_HEALTH_SEPARATION = "display_api_health_is_readonly_consumer_health_not_ingest_writer_readiness"
 DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN = "DATABASE_URL_QUERY_OVERRIDE_FORBIDDEN"
+DATABASE_URL_NODE22_HISTORICAL_ENDPOINT = "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT"
+DATABASE_URL_ENDPOINT_NOT_NODE27 = "DATABASE_URL_ENDPOINT_NOT_NODE27"
+DATABASE_URL_ARGV_FORBIDDEN = "DATABASE_URL_ARGV_FORBIDDEN"
+DATABASE_URL_FILE_INVALID = "DATABASE_URL_FILE_INVALID"
+DATABASE_URL_FILE_UNSAFE = "DATABASE_URL_FILE_UNSAFE"
+NODE22_DSN_ARGV_FORBIDDEN = "NODE22_DSN_ARGV_FORBIDDEN"
+DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -106,11 +116,26 @@ DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
         "sslmode",
     }
 )
+NODE22_HISTORICAL_DB_HOSTS = frozenset(
+    {
+        "210.77.77.22",
+        "10.0.2.100",
+        "node-22",
+        "node22",
+        "compute-control",
+        "compute_control",
+    }
+)
+NODE22_HISTORICAL_DB_PORT = 55433
 
 NO_FORCING_HANDOFF_MODE = "object_store_forcing_domain_handoff_missing"
+ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV = "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR"
 NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON = "OBJECT_STORE_HANDOFF_NOT_DECLARED_AND_NODE22_MIRROR_DSN_MISSING"
+NODE22_MIRROR_ROLLBACK_NOT_ALLOWED_REASON = "ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_NOT_ALLOWED"
 FORCING_HANDOFF_UNAVAILABLE_REASON = "OBJECT_STORE_FORCING_HANDOFF_UNAVAILABLE"
 FORCING_HANDOFF_FAILED_REASON = "OBJECT_STORE_FORCING_HANDOFF_FAILED"
+NODE22_DSN_FILE_INVALID_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_FILE_INVALID"
+NODE22_DSN_FILE_UNSAFE_REASON = "NODE22_TRANSITIONAL_MIRROR_DSN_FILE_UNSAFE"
 FORCING_STAGE = "forcing_handoff"
 FORCING_TABLE_KEYS = (
     "met.forcing_version",
@@ -118,6 +143,22 @@ FORCING_TABLE_KEYS = (
     "met.forcing_station_timeseries",
     "met.interp_weight",
 )
+
+
+@dataclass(frozen=True)
+class MirrorDsnConfig:
+    url: str | None
+    source: str | None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class DatabaseUrlConfig:
+    url: str | None
+    source: str | None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -198,7 +239,42 @@ def _database_port(value: str | None) -> int | None:
         return None
 
 
-def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def _database_url_points_to_historical_node22(host: str | None, port: int | None) -> bool:
+    normalized_host = (host or "").strip().lower()
+    return normalized_host in NODE22_HISTORICAL_DB_HOSTS or port == NODE22_HISTORICAL_DB_PORT
+
+
+def _parse_allowed_database_endpoints(value: str | None) -> set[tuple[str, int]]:
+    raw = (value or DEFAULT_ALLOWED_DB_ENDPOINTS).strip()
+    endpoints: set[tuple[str, int]] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        host, port = item.rsplit(":", 1)
+        try:
+            endpoints.add((host.strip().lower(), int(port)))
+        except ValueError:
+            continue
+    return endpoints
+
+
+def _database_url_points_to_allowed_node27(
+    *,
+    host: str | None,
+    port: int | None,
+    database: str | None,
+    env: dict[str, str],
+) -> bool:
+    normalized_host = (host or "").strip().lower()
+    normalized_database = (database or "").strip()
+    if normalized_database != "nhms" or port is None:
+        return False
+    allowed = _parse_allowed_database_endpoints(env.get("NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS"))
+    return (normalized_host, port) in allowed
+
+
+def _database_preflight(database_url: str | None, env: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
     raw = (database_url or "").strip()
     if not raw:
         return {"configured": False}, [
@@ -262,6 +338,22 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
                 "DATABASE_URL must include PostgreSQL scheme, host, and database name.",
             )
         ]
+    if _database_url_points_to_historical_node22(host, port):
+        blockers.append(
+            _preflight_blocker(
+                DATABASE_URL_NODE22_HISTORICAL_ENDPOINT,
+                "DATABASE_URL",
+                "DATABASE_URL must target the node-27 ingest writer, not node-22 historical PostgreSQL.",
+            )
+        )
+    if not _database_url_points_to_allowed_node27(host=host, port=port, database=database, env=env):
+        blockers.append(
+            _preflight_blocker(
+                DATABASE_URL_ENDPOINT_NOT_NODE27,
+                "DATABASE_URL",
+                "DATABASE_URL must target an allowed node-27 PostgreSQL endpoint.",
+            )
+        )
     if identity["username_class"] == "missing":
         blockers.append(
             _preflight_blocker(
@@ -290,6 +382,130 @@ def _database_preflight(database_url: str | None) -> tuple[dict[str, Any], list[
     if blockers:
         return identity, blockers
     return identity, []
+
+
+def _raw_database_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--database-url" or arg.startswith("--database-url=") for arg in argv)
+
+
+def _raw_node22_url_arg_present(argv: list[str]) -> bool:
+    return any(arg == "--node22-url" or arg.startswith("--node22-url=") for arg in argv)
+
+
+def _argv_option_value(argv: list[str], option: str) -> str | None:
+    prefix = f"{option}="
+    for index, arg in enumerate(argv):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == option and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _ambient_libpq_env_blockers(env: dict[str, str]) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for key in sorted(LIBPQ_CONNECTION_ENV_KEYS):
+        if (env.get(key) or "").strip():
+            blockers.append(
+                _preflight_blocker(
+                    LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON,
+                    key,
+                    f"{key} must be unset so explicit node-27 ingest DSNs cannot be overridden by libpq state.",
+                )
+            )
+    return blockers
+
+
+def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
+    raw = _non_empty(path_value)
+    if raw is None:
+        return DatabaseUrlConfig(url=None, source=None)
+    path = Path(raw)
+    source = f"file:{path}"
+    if not path.is_absolute():
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file path must be absolute.",
+        )
+    try:
+        link_info = path.lstat()
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message=f"Node-27 writer DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
+        )
+    if stat.S_ISLNK(link_info.st_mode):
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_UNSAFE,
+            error_message="Node-27 writer DSN file must not be a symlink.",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be a regular file.",
+            )
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be owner-only readable/writable.",
+            )
+        if not (info.st_mode & stat.S_IRUSR):
+            return DatabaseUrlConfig(
+                url=None,
+                source=source,
+                error_code=DATABASE_URL_FILE_UNSAFE,
+                error_message="Node-27 writer DSN file must be readable by its owner.",
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            contents = handle.read()
+    except OSError as exc:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message=(
+                "Node-27 writer DSN file cannot be opened/read safely: "
+                f"{exc.strerror or type(exc).__name__}."
+            ),
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+    lines = [line.strip() for line in contents.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return DatabaseUrlConfig(
+            url=None,
+            source=source,
+            error_code=DATABASE_URL_FILE_INVALID,
+            error_message="Node-27 writer DSN file must contain exactly one non-empty line.",
+        )
+    return DatabaseUrlConfig(url=lines[0], source=source)
+
+
+def _database_url_config(database_url_file: str | None, env: dict[str, str]) -> DatabaseUrlConfig:
+    file_config = _database_url_file_config(database_url_file)
+    if file_config.url or file_config.error_code:
+        return file_config
+    env_url = _non_empty(env.get("DATABASE_URL"))
+    if env_url:
+        return DatabaseUrlConfig(url=env_url, source="env:DATABASE_URL")
+    return DatabaseUrlConfig(url=None, source=None)
 
 
 def _role_preflight(env: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -339,6 +555,9 @@ def _ingest_config_source(env: dict[str, str]) -> str:
 def _preflight_ingest_config(
     *,
     database_url: str | None,
+    database_url_source: str | None = None,
+    database_url_error_code: str | None = None,
+    database_url_error_message: str | None = None,
     object_store_root: str | None,
     basins_root: str | None,
     env: dict[str, str],
@@ -346,9 +565,22 @@ def _preflight_ingest_config(
     blockers: list[dict[str, str]] = []
     role, role_blockers = _role_preflight(env)
     blockers.extend(role_blockers)
+    blockers.extend(_ambient_libpq_env_blockers(env))
 
-    database, database_blockers = _database_preflight(database_url)
-    blockers.extend(database_blockers)
+    if database_url_error_code:
+        database = {"configured": True, "source": database_url_source}
+        blockers.append(
+            _preflight_blocker(
+                database_url_error_code,
+                "DATABASE_URL",
+                database_url_error_message or database_url_error_code,
+            )
+        )
+    else:
+        database, database_blockers = _database_preflight(database_url, env)
+        if database_url_source:
+            database["source"] = database_url_source
+        blockers.extend(database_blockers)
 
     object_store, object_store_blockers = _path_preflight("OBJECT_STORE_ROOT", object_store_root)
     blockers.extend(object_store_blockers)
@@ -629,8 +861,119 @@ def _handoff_manifest_path(object_store_root: Path, run_id: str) -> Path:
     return object_store_root / "runs" / run_id / "input" / "forcing_domain_handoff.json"
 
 
-def _explicit_mirror_configured(node22_url: str | None, env: dict[str, str]) -> bool:
-    return bool((node22_url or "").strip() or (env.get("N22_DSN") or "").strip())
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _non_empty(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _mirror_dsn_file_config(path_value: str | None) -> MirrorDsnConfig:
+    raw = _non_empty(path_value)
+    if raw is None:
+        return MirrorDsnConfig(url=None, source=None)
+    path = Path(raw)
+    source = f"file:{path}"
+    if not path.is_absolute():
+        return MirrorDsnConfig(
+            url=None,
+            source=source,
+            error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+            error_message="Node-22 mirror DSN file path must be absolute.",
+        )
+    try:
+        link_info = path.lstat()
+    except OSError as exc:
+        return MirrorDsnConfig(
+            url=None,
+            source=source,
+            error_code=NODE22_DSN_FILE_INVALID_REASON,
+            error_message=f"Node-22 mirror DSN file cannot be inspected: {exc.strerror or type(exc).__name__}.",
+        )
+    if stat.S_ISLNK(link_info.st_mode):
+        return MirrorDsnConfig(
+            url=None,
+            source=source,
+            error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+            error_message="Node-22 mirror DSN file must not be a symlink.",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be a regular file.",
+            )
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be owner-only readable/writable.",
+            )
+        if not (info.st_mode & stat.S_IRUSR):
+            return MirrorDsnConfig(
+                url=None,
+                source=source,
+                error_code=NODE22_DSN_FILE_UNSAFE_REASON,
+                error_message="Node-22 mirror DSN file must be readable by its owner.",
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            contents = handle.read()
+    except OSError as exc:
+        return MirrorDsnConfig(
+            url=None,
+            source=source,
+            error_code=NODE22_DSN_FILE_INVALID_REASON,
+            error_message=(
+                "Node-22 mirror DSN file cannot be opened/read safely: "
+                f"{exc.strerror or type(exc).__name__}."
+            ),
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+    lines = [line.strip() for line in contents.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return MirrorDsnConfig(
+            url=None,
+            source=source,
+            error_code=NODE22_DSN_FILE_INVALID_REASON,
+            error_message="Node-22 mirror DSN file must contain exactly one non-empty line.",
+        )
+    return MirrorDsnConfig(url=lines[0], source=source)
+
+
+def _mirror_dsn_config(node22_dsn_file: str | None, env: dict[str, str]) -> MirrorDsnConfig:
+    file_config = _mirror_dsn_file_config(node22_dsn_file)
+    if file_config.url or file_config.error_code:
+        return file_config
+    env_dsn = _non_empty(env.get("N22_DSN"))
+    if env_dsn:
+        return MirrorDsnConfig(url=env_dsn, source="env:N22_DSN")
+    return MirrorDsnConfig(url=None, source=None)
+
+
+def _mirror_dsn_configured(mirror_dsn: MirrorDsnConfig) -> bool:
+    return bool(mirror_dsn.url)
+
+
+def _explicit_mirror_configured(
+    mirror_dsn: MirrorDsnConfig,
+    *,
+    allow_archived_node22_db_rollback_mirror: bool,
+) -> bool:
+    return _mirror_dsn_configured(mirror_dsn) and allow_archived_node22_db_rollback_mirror
 
 
 def _extract_local_rows(value: Any) -> int | None:
@@ -689,13 +1032,13 @@ def _forcing_stage_from_mirror(report: dict[str, Any], *, status: str = "mirrore
     )
 
 
-def _forcing_stage_missing_mirror() -> dict[str, Any]:
+def _forcing_stage_missing_mirror(reason: str = NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON) -> dict[str, Any]:
     return {
         "mode": NO_FORCING_HANDOFF_MODE,
         "status": "skipped",
         "ready": False,
         "row_counts": {},
-        "reason_codes": [NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON],
+        "reason_codes": [reason],
     }
 
 
@@ -724,8 +1067,9 @@ def _process_forcing_stage(
     object_store_root: Path,
     database_url: str,
     object_store_prefix: str,
-    node22_url: str | None,
+    mirror_dsn: MirrorDsnConfig,
     env: dict[str, str],
+    allow_archived_node22_db_rollback_mirror: bool,
 ) -> dict[str, Any]:
     handoff_manifest = _handoff_manifest_path(object_store_root, run_id)
     if handoff_manifest.is_file():
@@ -766,21 +1110,54 @@ def _process_forcing_stage(
             "error": ",".join(forcing_stage["reason_codes"]),
         }
 
-    if not _explicit_mirror_configured(node22_url, env):
+    if mirror_dsn.error_code:
+        return {
+            "outcome": "failed",
+            "stage": FORCING_STAGE,
+            "forcing_stage": _forcing_stage_missing_mirror(reason=mirror_dsn.error_code),
+            "error": mirror_dsn.error_message or mirror_dsn.error_code,
+        }
+
+    if not _explicit_mirror_configured(
+        mirror_dsn,
+        allow_archived_node22_db_rollback_mirror=allow_archived_node22_db_rollback_mirror,
+    ):
+        reason = (
+            NODE22_MIRROR_ROLLBACK_NOT_ALLOWED_REASON
+            if _mirror_dsn_configured(mirror_dsn)
+            else NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON
+        )
         return {
             "outcome": "skipped",
             "stage": FORCING_STAGE,
-            "forcing_stage": _forcing_stage_missing_mirror(),
-            "reason": NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON,
+            "forcing_stage": _forcing_stage_missing_mirror(reason=reason),
+            "reason": reason,
         }
 
+    # Archived rollback mirror contract: compatibility-only, explicit DSN via
+    # child environment, allow-flagged, and sunset-bound after object-store
+    # forcing-domain handoff covers old pre-contract runs. Never pass raw DSN argv.
+    mirror_env = dict(env)
+    for key in LIBPQ_CONNECTION_ENV_KEYS:
+        mirror_env.pop(key, None)
+    mirror_env["N22_DSN"] = mirror_dsn.url or ""
+    mirror_env["NHMS_NODE22_DSN_SOURCE"] = mirror_dsn.source or "env:N22_DSN"
     mirror = [PY, str(REPO_ROOT / "scripts" / "node27_mirror_forcing.py"), "--run-id", run_id]
-    if node22_url:
-        mirror.extend(["--node22-url", node22_url])
-    rc, out, err = _run(mirror, env)
+    mirror.append("--allow-archived-node22-db-rollback-mirror")
+    rc, out, err = _run(mirror, mirror_env)
     payload = _last_json(out) or {}
     if rc == 2:
         reason = payload.get("reason", "FORCING_NOT_ON_NODE22")
+        if payload.get("failed") is True or payload.get("blockers"):
+            return {
+                "outcome": "failed",
+                "stage": FORCING_STAGE,
+                "forcing_stage": _forcing_stage_from_mirror(
+                    {**payload, "reason": reason},
+                    status="failed",
+                ),
+                "error": reason,
+            }
         return {
             "outcome": "skipped",
             "stage": FORCING_STAGE,
@@ -926,7 +1303,8 @@ def _process_run(
     object_store_root: Path,
     database_url: str,
     object_store_prefix: str,
-    node22_url: str | None = None,
+    mirror_dsn: MirrorDsnConfig | None = None,
+    allow_archived_node22_db_rollback_mirror: bool = False,
 ) -> dict[str, Any]:
     register = [PY, str(REPO_ROOT / "scripts" / "node27_ingest_run.py"), "--run-id", run_id]
     rc, out, err = _run(register, env)
@@ -944,24 +1322,19 @@ def _process_run(
         object_store_root=object_store_root,
         database_url=database_url,
         object_store_prefix=object_store_prefix,
-        node22_url=node22_url,
+        mirror_dsn=mirror_dsn or MirrorDsnConfig(url=None, source=None),
         env=env,
+        allow_archived_node22_db_rollback_mirror=allow_archived_node22_db_rollback_mirror,
     )
     forcing_stage = forcing.get("forcing_stage")
     if forcing["outcome"] == "skipped":
-        # Live station-series reads the SHUD CSVs directly from object-store.
-        # Missing DB forcing handoff should not block parsing already-completed
-        # SHUD hydro outputs; declared handoff failures and mirror failures
-        # still stop this run below because they indicate an explicit contract
-        # was present but unhealthy.
-        if forcing.get("reason") != NO_FORCING_HANDOFF_AND_MIRROR_DSN_REASON:
-            return {
-                "run_id": run_id,
-                "outcome": "skipped",
-                "stage": forcing.get("stage", FORCING_STAGE),
-                "reason": forcing.get("reason"),
-                "forcing_stage": forcing_stage,
-            }
+        return {
+            "run_id": run_id,
+            "outcome": "skipped",
+            "stage": forcing.get("stage", FORCING_STAGE),
+            "reason": forcing.get("reason"),
+            "forcing_stage": forcing_stage,
+        }
     if forcing["outcome"] == "failed":
         return {
             "run_id": run_id,
@@ -1016,10 +1389,79 @@ def _process_run(
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     global WORK_ROOT
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    env = dict(os.environ)
+
+    if _raw_node22_url_arg_present(raw_argv):
+        preflight = _preflight_ingest_config(
+            database_url=env.get("DATABASE_URL"),
+            database_url_source="env:DATABASE_URL" if env.get("DATABASE_URL") else None,
+            object_store_root=_argv_option_value(raw_argv, "--object-store-root") or env.get("OBJECT_STORE_ROOT"),
+            basins_root=_argv_option_value(raw_argv, "--basins-root") or env.get("BASINS_ROOT"),
+            env=env,
+        )
+        preflight["status"] = "blocked"
+        preflight.setdefault("blockers", []).append(
+            _preflight_blocker(
+                NODE22_DSN_ARGV_FORBIDDEN,
+                "N22_DSN",
+                "Raw archived node-22 rollback DSNs must not be passed through argv.",
+            )
+        )
+        _emit_json_summary(
+            {
+                "schema": INGEST_SUMMARY_SCHEMA,
+                "status": "preflight_blocked",
+                "return_code": PREFLIGHT_BLOCKED_RC,
+                "ingest": _ingest_evidence(preflight),
+                "object_store_root": _argv_option_value(raw_argv, "--object-store-root"),
+                "basins_root": _argv_option_value(raw_argv, "--basins-root"),
+                "sources": [],
+                "discovered_runs": 0,
+                "basins": [],
+                "seed": _empty_seed_summary(),
+                "runs": _empty_runs_summary(),
+            }
+        )
+        return PREFLIGHT_BLOCKED_RC
+
+    if _raw_database_url_arg_present(raw_argv):
+        preflight = _preflight_ingest_config(
+            database_url=None,
+            database_url_source="argv:--database-url",
+            database_url_error_code=DATABASE_URL_ARGV_FORBIDDEN,
+            database_url_error_message=(
+                "Pass the node-27 writer DSN through env DATABASE_URL or owner-only "
+                "--database-url-file; raw writer DSNs are forbidden in argv."
+            ),
+            object_store_root=_argv_option_value(raw_argv, "--object-store-root") or env.get("OBJECT_STORE_ROOT"),
+            basins_root=_argv_option_value(raw_argv, "--basins-root") or env.get("BASINS_ROOT"),
+            env=env,
+        )
+        _emit_json_summary(
+            {
+                "schema": INGEST_SUMMARY_SCHEMA,
+                "status": "preflight_blocked",
+                "return_code": PREFLIGHT_BLOCKED_RC,
+                "ingest": _ingest_evidence(preflight),
+                "object_store_root": _argv_option_value(raw_argv, "--object-store-root"),
+                "basins_root": _argv_option_value(raw_argv, "--basins-root"),
+                "sources": [],
+                "discovered_runs": 0,
+                "basins": [],
+                "seed": _empty_seed_summary(),
+                "runs": _empty_runs_summary(),
+            }
+        )
+        return PREFLIGHT_BLOCKED_RC
 
     parser = argparse.ArgumentParser(description="Basin-agnostic node-27 autopipeline.")
     parser.add_argument("--object-store-root", default=os.environ.get("OBJECT_STORE_ROOT"))
-    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    parser.add_argument(
+        "--database-url-file",
+        default=None,
+        help="Owner-only file containing the node-27 writer DSN. Defaults to env DATABASE_URL.",
+    )
     parser.add_argument("--basins-root", default=os.environ.get("BASINS_ROOT"))
     parser.add_argument("--sources", default="gfs,ifs", help="Comma list of sources (default gfs,ifs).")
     parser.add_argument("--only-basin", default=None, help="Restrict to a single basin slug (e.g. heihe).")
@@ -1028,20 +1470,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="Re-ingest even already-parsed runs.")
     parser.add_argument("--progress", action="store_true", help="Per-step progress to stderr.")
     parser.add_argument(
-        "--node22-url",
+        "--node22-dsn-file",
         default=None,
         help=(
-            "Explicit node-22 read-only DSN for compatibility-only transitional forcing mirror fallback; "
-            "sunset after object-store handoff packages cover live readiness."
+            "Owner-only file containing the explicit node-22 read-only DSN for archived "
+            "rollback forcing mirror fallback. The DSN is never accepted in argv and is "
+            "ignored unless --allow-archived-node22-db-rollback-mirror or "
+            f"{ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV}=true is set."
         ),
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--allow-archived-node22-db-rollback-mirror",
+        action="store_true",
+        help=(
+            "Deliberately allow the explicit-DSN, allow-flagged, compatibility-only, "
+            "sunset-bound archived node-22 DB rollback mirror. "
+            "This is not normal node-27 ingest operation."
+        ),
+    )
+    args = parser.parse_args(raw_argv)
 
     sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
 
-    env = dict(os.environ)
+    allow_archived_node22_db_rollback_mirror = bool(
+        args.allow_archived_node22_db_rollback_mirror
+        or _truthy_env(env.get(ARCHIVED_NODE22_DB_ROLLBACK_MIRROR_ENV))
+    )
+    database_config = _database_url_config(args.database_url_file, env)
     preflight = _preflight_ingest_config(
-        database_url=args.database_url,
+        database_url=database_config.url,
+        database_url_source=database_config.source,
+        database_url_error_code=database_config.error_code,
+        database_url_error_message=database_config.error_message,
         object_store_root=args.object_store_root,
         basins_root=args.basins_root,
         env=env,
@@ -1066,8 +1526,9 @@ def main(argv: list[str] | None = None) -> int:
 
     object_store_root = Path(args.object_store_root)
     basins_root = Path(args.basins_root)
-    database_url = args.database_url
+    database_url = database_config.url or ""
     WORK_ROOT = str(Path(env["AUTOPIPE_WORK_ROOT"]))
+    mirror_dsn = _mirror_dsn_config(args.node22_dsn_file, env)
 
     env["OBJECT_STORE_ROOT"] = str(object_store_root)
     env.setdefault("OBJECT_STORE_PREFIX", os.environ.get("OBJECT_STORE_PREFIX", ""))
@@ -1125,7 +1586,8 @@ def main(argv: list[str] | None = None) -> int:
                 object_store_root=object_store_root,
                 database_url=database_url,
                 object_store_prefix=object_store_prefix,
-                node22_url=args.node22_url,
+                mirror_dsn=mirror_dsn,
+                allow_archived_node22_db_rollback_mirror=allow_archived_node22_db_rollback_mirror,
             )
             run_results.append(result)
             if args.progress:
@@ -1137,7 +1599,8 @@ def main(argv: list[str] | None = None) -> int:
     # catalog (discharge / q_down overlay) actually surfaces them. Idempotent;
     # also back-fills runs parsed by earlier ticks before this step existed.
     published_count = 0
-    if not args.seed_only:
+    publish_eligible = already_count > 0 or any(result.get("outcome") == "ingested" for result in run_results)
+    if not args.seed_only and publish_eligible:
         published_count = _publish_display_runs(database_url)
         if args.progress:
             print(f"[publish] advanced {published_count} run(s) parsed -> published",

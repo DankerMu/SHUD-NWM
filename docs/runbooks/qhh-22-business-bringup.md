@@ -21,6 +21,12 @@
 > #292 daemon live receipt：`artifacts/m24/m24-daemon-5880d09/`
 > （`lease_nfs.json` 两进程心跳锁、`grib_preflight.json` GRIB 预检、`daemon_pass.json` 守护进程通过证据）；
 > worklog `openspec/changes/m24-multibasin-continuous-daemon-live/issue-292-worklog.md`。
+>
+> ⚠️ **Post-#837 status (2026-06-29)**：本文中所有 node-22
+> `10.0.2.100:55433` / `nhms-22-e2e-db` / `DATABASE_URL` 配置都是
+> pre-#837 historical diagnostic evidence。node-22 `:55433` 现已
+> archived/stopped，仅可在显式 rollback drill 中临时重启；当前生产与值守入口
+> 见 `docs/runbooks/current-production-ops.md` 和 DB-free scheduler env。
 
 ---
 
@@ -32,7 +38,9 @@
 2. **所有运行根必须在 `/scratch`** —— 计算节点（cn01-24）只挂 `/scratch`（NFS 10.0.2.99）、`/volume/data/nwm/Basins`、
    `/users/frd_muziyao/sundials`，**看不到 `/ghdc`**（那是 node-27 的 NFS）。把 workspace/object-store/run-root 放
    `/ghdc` 会导致作业 1 秒即死（连 sbatch 日志都写不出）。
-3. **DB 要用集群 IP**，不能用容器名或 127.0.0.1 —— 计算节点解析不了 docker 容器名 `nhms-22-e2e-db`，也连不上登录节点的 `127.0.0.1`。用 `10.0.2.100:55433`（DB 容器在宿主机发布的端口 + 集群网 IP），登录节点与计算节点都可达。
+3. **Pre-#837 historical DB note，不用于当前生产**：当时诊断 DB 必须用集群 IP，不能用容器名或
+   `127.0.0.1`。历史值是 `10.0.2.100:55433`（`nhms-22-e2e-db` 容器发布端口），但该
+   listener 现已 archived/stopped；当前流程不得把它当业务 DB。
 4. **`OBJECT_STORE_ROOT` 必须等于 `QHH_RUN_ROOT`** —— QHH 包经 s3 前缀发布到 object-store，seed 步骤在 run-root 找；二者不一致会"package path unsafe / 找不到"。
 5. **生产/业务运行器是 `nhms-pipeline plan-production --continuous --submit`**；它通过通用 orchestrator + standalone Slurm gateway 提交所有 active runnable 注册模型。`scripts/run_qhh_continuous.py --executor slurm` 只保留为 QHH 诊断/bring-up fallback；`--once` 仅做一次诊断扫描，去掉 `--once` 也不是生产 daemon。
 6. **对象存储用生产前缀 `s3://nhms`**（`OBJECT_STORE_PREFIX`，文件系统对象存储的 URI 标签）——e2e 标签 `s3://nhms-22-e2e` 已废弃；`object_store.py` 会校验 URI 桶名==前缀,切前缀必须先清干净旧标签数据(否则旧 URI 解析报错)。
@@ -47,7 +55,7 @@
 |------|------|------|------|
 | 控制/调度面 | node-22 登录节点 `xnode`（10.0.2.100 / 10.0.1.100 / 210.77.77.22） | 生产：跑 `nhms-pipeline plan-production --continuous --submit` 并通过 standalone Slurm gateway 提交；诊断 fallback：手动跑 `run_qhh_continuous.py --executor slurm` | `/scratch`、`/ghdc`、`/volume`、`/users`、容器 |
 | 计算执行面 | 计算节点 cn01-24（CPU 分区） | sbatch 内跑全链路（下载→canonical→forcing→SHUD→parse→publish） | `/scratch`、`/volume/data/nwm/Basins`、`/users/frd_muziyao/sundials` ❌ **无 `/ghdc`** |
-| 数据库 | 容器 `nhms-22-e2e-db`（timescaledb-ha pg15） | hydro/met/ops/flood schema（26 迁移） | 宿主端口 55433；集群可达 10.0.2.100:55433 |
+| 历史诊断数据库（pre-#837，不用于当前生产） | 容器 `nhms-22-e2e-db`（timescaledb-ha pg15） | historical hydro/met/ops/flood schema（26 迁移） | archived/stopped rollback-only；历史端口为 55433 / 10.0.2.100:55433 |
 
 > ⚠️ 首跑使用的是现有 **e2e DB 容器**（`nhms-22-e2e-db`）作为生产库的临时承载；正式业务化前需评估是否切换为独立生产 PostgreSQL。
 
@@ -131,7 +139,7 @@ uv run python -m packages.common.migrate        # 全量迁移；已应用则全
 
 | 键 | 值 | 说明 |
 |----|----|------|
-| `DATABASE_URL` | `postgresql://nhms:***@10.0.2.100:55433/nhms` | 集群 IP，计算节点可达 |
+| `DATABASE_URL` | pre-#837 historical value: `postgresql://nhms:***@10.0.2.100:55433/nhms` | archived/stopped rollback-only；当前生产不得使用 |
 | `SHUD_EXECUTABLE` | `/scratch/frd_muziyao/NWM/SHUD/shud` | 真二进制 |
 | `WORKSPACE_ROOT` | `/scratch/frd_muziyao/nhms-prod/workspace` | /scratch |
 | `OBJECT_STORE_ROOT` | `/scratch/frd_muziyao/nhms-prod/object-store`（运行时被覆盖为 = RUN_ROOT，见 3.2） | /scratch |
@@ -227,7 +235,7 @@ uv run nhms-monitor                               # 打印 JSON 到 stdout，并
 | 1 | `SHUD_EXECUTABLE=/bin/true` | e2e 桩 / 旧 macOS 档 | 计算节点重编真实 Linux 二进制 | ✅ |
 | 2 | 容器 `sbatch`/`sinfo` not found | 容器非 Slurm 提交点 | 执行面改到宿主机 | ✅ |
 | 3 | 作业 1 秒 FAILED、无日志 | 计算节点看不到 `/ghdc` | 运行根全迁 `/scratch/nhms-prod` | ✅ |
-| 4 | slurm 要求 DB 可达校验失败 | DB 用 127.0.0.1 / 容器名 | `DATABASE_URL` 改集群 IP 10.0.2.100:55433 | ✅ |
+| 4 | slurm 要求 DB 可达校验失败 | pre-#837 诊断 DB 用 127.0.0.1 / 容器名 | historical fix was `DATABASE_URL` to 10.0.2.100:55433; post-#837 this DB is archived/stopped rollback-only | ✅ |
 | 5 | `QHH_BOOTSTRAP_PACKAGE_PATH_UNSAFE`（找不到 package） | `OBJECT_STORE_ROOT ≠ QHH_RUN_ROOT` | 令二者相等 | ✅ |
 | 6 | canonical 需 cdo/eccodes | sbatch 用自有 runtime 约定 | `QHH_ECCODES_RUNTIME=nhms-grib` + cdo 入 PATH | ✅ |
 | 7 | `QHH_BOOTSTRAP_SP_RIV_MALFORMED` | `qhh.sp.riv` 多块 SHUD 格式解析器不支持 | 多块感知解析(跳列名行/只读首块 count 行)，17f5229 | ✅ |

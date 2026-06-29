@@ -1,19 +1,27 @@
 ## Context
 
 Node-22 has already stopped owning production downloads, but it still owns the
-production scheduler and Slurm/SHUD control surface. The historical node-22
-PostgreSQL `:55433` listener remains online only because the scheduler still
-uses it for lock/state/model reads. Latest live evidence shows:
+production scheduler and Slurm/SHUD control surface.
+
+Initial context before #836/#837: the historical do-not-connect node-22
+PostgreSQL `:55433` rollback listener was not yet archived/stopped only because
+the scheduler still used it for lock/state/model reads. Pre-cutover live
+evidence showed:
 
 ```text
+# Historical pre-cutover evidence only; do not connect or reuse.
 DATABASE_URL=postgresql://REDACTED@10.0.2.100:55433/nhms
 NHMS_SCHEDULER_LOCK_BACKEND=postgres
-latest scheduler evidence lock_type=postgres_advisory
+pre-cutover scheduler evidence lock_type=postgres_advisory
 ```
 
 The stopping gate is documented in
 `docs/runbooks/node22-db-retirement-runbook.md`. This change implements the
 software work needed to satisfy that gate.
+
+Current status after #837: node-22 `:55433` is historical do-not-connect,
+archived/stopped rollback-only state. The authoritative stop receipt is
+`docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`.
 
 ## Goals
 
@@ -67,9 +75,10 @@ software work needed to satisfy that gate.
    reservation binding, job status updates, pipeline events, retry repair, and
    permanent-failure decisions.
 
-6. **Cutover keeps DB online until proven.** The first live deployment runs with
-   `:55433` still listening but unused. Only after no-DB scheduler evidence and
-   GFS/IFS live receipts pass do operators archive and stop the listener.
+6. **Cutover kept historical DB online until proven, then stopped it.** The
+   first live deployment ran with the historical do-not-connect `:55433`
+   rollback listener still listening but unused. After no-DB scheduler evidence
+   and GFS/IFS live receipts passed, #837 archived and stopped the listener.
 
 7. **Runtime names are fixed by this change.** Implementations must not invent
    backend env keys per issue. The canonical matrix below is the contract used
@@ -853,7 +862,8 @@ Must preserve:
 - Non-DB runtime roots, manifest paths, secret handling, template roots,
   workspace/object-store/temp/evidence roots, and allowed-root checks stay
   strict.
-- `:55433` is not stopped or disabled by #836; archive/stop is #837.
+- During #836, the historical do-not-connect `:55433` rollback listener stayed
+  online as rollback state; archive/stop is #837.
 - Existing display/node-27 readonly and ingest responsibilities do not move to
   node-22.
 - Scheduler evidence remains bounded and must not reveal raw DB URLs, tokens,
@@ -888,8 +898,9 @@ Risk packs considered for #836:
   avoid concurrent migration/live scheduler mutation.
 - Resource limits / discovery: selected - static and runtime evidence remain
   bounded; local no-DB tests cover discovery providers.
-- Legacy compatibility / rollback: selected - node-22 `:55433` stays online
-  during #836 as rollback.
+- Legacy compatibility / rollback: selected - the historical do-not-connect
+  node-22 `:55433` rollback listener stayed online during #836 and was
+  archived/stopped by #837.
 - Error handling / partial outputs: selected - failed preflight/live evidence
   blocks merge rather than claiming readiness.
 - Slurm production lifecycle / mock-vs-real parity: selected - live receipts
@@ -947,6 +958,93 @@ Invariant Matrix:
     file-backed scheduler state, no scheduler PostgreSQL, and no
     `download_source_cycle` submission.
 
+## Issue #837 Fixture
+
+Fixture level: expanded/live-deployment
+Repair intensity: high
+
+Mandatory expanded triggers:
+
+- The change stops a production rollback database listener and must preserve a
+  restorable archive with checksums.
+- Operator-facing docs and env examples decide whether node-22 `:55433` is
+  treated as active business DB, archive, or rollback state.
+- Post-stop scheduler evidence must prove the DB-free runtime still plans with
+  file backends and no scheduler `DATABASE_URL`.
+
+Must preserve:
+
+- Active NHMS business DB ownership remains node-27 `:55432`.
+- Node-22 scheduler runtime remains DB-free; old `compute.env` credentials are
+  not reintroduced into scheduler env.
+- The archive and rollback commands contain no secrets.
+- Historical receipts and governance inventories may keep old `:55433`
+  references when clearly marked historical, archived, rollback, or
+  compatibility context.
+
+Must add/change:
+
+- A dated retirement receipt records pre-stop listener/session attribution,
+  archive path, checksums, redacted env backups, stop evidence, rollback
+  commands, and post-stop health checks.
+- Active topology/runbook/env guidance states node-22 `:55433` is historical
+  do-not-connect archived/stopped rollback-only state.
+- OpenSpec tasks 7.1-7.5 are closed with exact evidence paths.
+
+Risk packs considered for #837:
+
+- Public API / CLI / script entry: selected - operator commands stop Docker,
+  run scheduler dry-run, and probe service health.
+- Config / project setup: selected - env examples and systemd/runtime state
+  must not point scheduler back at the historical do-not-connect archived/stopped
+  `:55433` rollback listener.
+- File IO / path safety / overwrite: selected - archive, checksum, and evidence
+  paths live on shared NFS and node-22 workspace roots.
+- Auth / permissions / secrets: selected - env backups are redacted and
+  rollback commands omit credentials.
+- Resource limits / discovery: selected - archive verification uses checksums
+  and `pg_restore -l` instead of unbounded manual inspection.
+- Legacy compatibility / rollback: selected - `nhms-22-e2e-db` remains a stopped
+  rollback container with restart policy `no`.
+- Error handling / rollback / partial outputs: selected - failed archive,
+  checksum, stop, empty-listener, or health checks block completion.
+- Documentation / migration notes: selected - active docs/env examples must
+  describe `:55433` as historical do-not-connect archived/stopped rollback-only
+  state.
+
+Invariant Matrix:
+
+- Governing invariant: after #837, node-22 `:55433` is not an active scheduler
+  or business database dependency; it is historical do-not-connect
+  archived/stopped rollback-only state, either absent from listeners or
+  deliberately restarted only as an archived rollback target.
+- Source-of-truth contract: the 2026-06-29 retirement receipt, archive
+  `SHA256SUMS`, post-stop `ss_55433_after`, DB-free scheduler evidence
+  `database_url_configured=false` and `lock_type=file`, and active topology docs.
+- Producers: Docker stop command, pg_dump archive, checksum verification,
+  scheduler dry-run evidence writer, health probes, and documentation updates.
+- Validators/preflight: pre-stop listener/session attribution, `sha256sum -c`,
+  `pg_restore -l`, post-stop `ss`, compute API health, Slurm gateway health,
+  OpenSpec validation, and topology guard tests.
+- Failure paths/rollback/stale state: missing archive/checksum/env backup,
+  listener still present, scheduler evidence showing DB dependency, failed
+  health probes, or active docs presenting `:55433` as business DB all block
+  completion.
+- Evidence/audit/readiness: dated receipt, remote evidence root, archive root,
+  local OpenSpec strict validation, markdown lint, and static topology guard.
+- Regression rows:
+  - Pre-stop listener and sessions identify `nhms-22-e2e-db` as historical
+    rollback DB, not scheduler runtime.
+  - Archive root contains dump directory, globals without role passwords,
+    `SHA256SUMS`, and `sha256sum -c` passes.
+  - Post-stop `ss -ltnp | grep 55433` is empty and Docker state is exited with
+    restart policy `no`.
+  - Post-stop scheduler dry-run has no `DATABASE_URL`, all scheduler backends
+    `file`, `lock_type=file`, root preflight ready, and no mutation.
+  - Compute API and `/api/v1/slurm/health` pass after stop.
+  - Active docs/env examples mark `:55433` only as archived/stopped rollback
+    context.
+
 ## Migration Plan
 
 1. Add DB-free runtime preflight and file-lock live proof while state remains
@@ -976,8 +1074,11 @@ Invariant Matrix:
 
 ## Rollback
 
-Before stopping `:55433`, rollback is switching scheduler env back to
-PostgreSQL-backed mode and re-enabling the old `DATABASE_URL`. After stopping
-the DB, rollback requires restarting the archived PostgreSQL service first,
-then restoring the previous scheduler env and timer. Every live cutover receipt
-must include the exact env backup and archive path used for rollback.
+Before #837 stopped the historical do-not-connect `:55433` rollback listener,
+rollback meant switching scheduler env back to PostgreSQL-backed mode and
+re-enabling the old `DATABASE_URL`. After #837, rollback is an explicit
+archived-DB recovery path only: restart the archived/stopped PostgreSQL
+container deliberately, verify the listener, record the decision, and stop it
+again after the rollback drill unless an operator has explicitly accepted a
+temporary rollback window. Every live cutover receipt must include
+the exact env backup and archive path used for rollback.

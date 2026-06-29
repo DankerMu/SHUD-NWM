@@ -17,12 +17,14 @@ active runbooks, role-boundary docs, scripts, and verification instructions.
 #### Scenario: Node-22 local PostgreSQL is marked do-not-connect
 
 - **WHEN** active docs, scripts, env templates, or verification instructions
-  mention node-22 local PostgreSQL, port `:55433`, or a transitional node-22 DB
-  mirror
+  mention node-22 local PostgreSQL, port `:55433`, or an archived node-22
+  rollback DB mirror
 - **THEN** node-22 local PostgreSQL MUST be marked historical, do-not-connect
-  for current NHMS production state, and pending removal or sunset
-- **AND** any transitional mirror reference MUST state explicit DSN only,
-  compatibility-only purpose, and removal/sunset condition
+  for current NHMS production state, archived/stopped rollback-only, and
+  sunset-bound
+- **AND** any archived rollback mirror reference MUST state explicit DSN only,
+  archived-rollback allow flag, compatibility-only purpose, and removal/sunset
+  condition
 
 #### Scenario: Verification routes to the correct oracle
 
@@ -48,8 +50,8 @@ node-22-writer and display-env-writer drift in current operational surfaces.
 
 #### Scenario: Display env is not reused for data-plane writer jobs
 
-- **WHEN** active scripts or runbooks configure data-plane writer or transitional
-  mirror jobs
+- **WHEN** active scripts or runbooks configure data-plane writer or archived
+  rollback mirror jobs
 - **THEN** the guard reports a finding if they source `infra/env/display.env` as
   the writer/mirror authority
 - **AND** display API restart and readonly object-store reads may still use
