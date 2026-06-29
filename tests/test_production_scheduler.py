@@ -17066,6 +17066,52 @@ def test_file_canonical_readiness_provider_uses_product_catalog_when_index_produ
     assert evidence["readiness_index"]["canonical_product_catalog"]["product_row_count"] == len(products)
 
 
+def test_file_canonical_readiness_provider_missing_identity_is_fresh_zero_row(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    forecast_hours = (0, 3)
+    policy_identity = {"source": "gfs", "forecast_hours": list(forecast_hours)}
+    source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    generated_at = _dt("2026-06-27T00:00:00Z")
+    scheduler_module.publish_canonical_readiness_index(
+        [],
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+    )
+    provider = scheduler_module.FileCanonicalReadinessProvider(
+        paths["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        now=generated_at,
+    )
+
+    evidence = provider.canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=forecast_hours,
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+        canonical_product_id=f"canon_gfs_{format_cycle_time(cycle_time)}",
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+
+    assert evidence["ready"] is False
+    assert evidence["status"] == "canonical_incomplete"
+    assert evidence["candidate_row_count"] == 0
+    assert evidence["expected_leads"] == [0, 3]
+    assert evidence["readiness_index"]["status"] == "ready"
+    assert evidence["readiness_index"]["entry_status"] == "missing"
+    assert evidence["readiness_index"]["entry_product_row_count"] == 0
+    assert evidence["readiness_index"]["entry_product_source"] == "missing_identity_zero_rows"
+    assert scheduler_module._canonical_evidence_is_fresh_zero_row(evidence) is True
+
+
 def test_file_canonical_readiness_evidence_redacts_identity_paths(
     monkeypatch: Any,
     tmp_path: Path,
