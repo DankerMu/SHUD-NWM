@@ -93,7 +93,7 @@ evidence.
 - **AND** the receipt proves readiness did not depend on implicit node-22 DB
   access or `infra/env/display.env` mirror fallback
 
-### Requirement: Transitional node-22 mirror is explicit and audited
+### Requirement: Transitional node-22 compatibility-only mirror is explicit-DSN and sunset-bound
 
 The system SHALL keep any transitional node-22 forcing mirror path explicit-DSN,
 audited, sunset-bound, and limited to operator-controlled compatibility runs.

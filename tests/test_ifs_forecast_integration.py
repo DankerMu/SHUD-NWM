@@ -193,7 +193,7 @@ def test_explicit_scenario_id_override_is_preserved_for_ifs_context(tmp_path: Pa
     assert orchestrator._build_run_manifest(context)["scenario_id"] == "custom_forecast_scenario"
 
 
-def test_ifs_canonical_ready_auto_trigger_starts_at_forcing_stage(tmp_path: Path) -> None:
+def test_ifs_canonical_ready_auto_trigger_starts_at_forecast_stage(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-07T06:00:00Z")
     object_root = tmp_path / "object-store"
     repository = FakeReadyRepository(
@@ -211,7 +211,6 @@ def test_ifs_canonical_ready_auto_trigger_starts_at_forcing_stage(tmp_path: Path
     assert len(results) == 1
     assert results[0].run_id == "fcst_ifs_2026050706_demo_model"
     assert [payload["manifest"]["stage"] for payload in slurm_client.submissions] == [
-        "produce_forcing",
         "run_shud_forecast",
         "parse_output",
     ]

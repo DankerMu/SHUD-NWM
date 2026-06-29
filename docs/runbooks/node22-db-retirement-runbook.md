@@ -11,6 +11,7 @@ Do not stop `:55433` while node-22 `nhms-compute-scheduler.timer` can still run
 the production scheduler with:
 
 ```text
+# Historical blocker evidence only; do-not-connect rollback state.
 DATABASE_URL=...:55433/nhms
 NHMS_SCHEDULER_LOCK_BACKEND=postgres
 ```

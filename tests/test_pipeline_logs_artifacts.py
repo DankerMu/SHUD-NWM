@@ -499,7 +499,7 @@ def test_compute_pipeline_keeps_legacy_object_store_uri_without_publish_root(
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
-    assert result.stages[0].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    assert result.stages[0].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/convert.log"
 
 
 class _client:
