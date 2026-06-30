@@ -8,7 +8,7 @@ from pathlib import Path
 
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
-from services.orchestrator.chain_stages import STAGES
+from services.orchestrator.chain_stages import STAGES, terminal_stage_names
 from services.orchestrator.chain_types import OrchestratorError
 from workers.data_adapters.base import format_cycle_time
 
@@ -133,8 +133,8 @@ def _normalize_terminal_stage(value: str | None) -> str | None:
     terminal_stage = value.strip()
     if not terminal_stage:
         return None
-    known_stages = {stage.stage for stage in STAGES}
+    known_stages = set(terminal_stage_names(STAGES))
     if terminal_stage not in known_stages:
-        known = ", ".join(stage.stage for stage in STAGES)
+        known = ", ".join(terminal_stage_names(STAGES))
         raise ValueError(f"NHMS_ORCHESTRATOR_TERMINAL_STAGE must be one of: {known}.")
     return terminal_stage

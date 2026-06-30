@@ -1833,6 +1833,26 @@ def test_terminal_stage_forecast_stops_before_parse_state_and_publish(tmp_path: 
     assert "publish" not in {job["stage"] for job in repository.jobs.values()}
 
 
+def test_terminal_stage_forecast_state_save_qc_skips_parse_and_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    assert result.status == "succeeded"
+    assert [stage.stage for stage in orchestrator.stages] == ["convert", "forcing", "forecast", "state_save_qc"]
+    assert [submission["stage"] for submission in client.submissions] == [
+        "convert",
+        "forcing",
+        "forecast",
+        "state_save_qc",
+    ]
+    assert [stage.status for stage in result.stages] == ["succeeded", "succeeded", "succeeded", "succeeded"]
+    assert "parse" not in {job["stage"] for job in repository.jobs.values()}
+    assert "publish" not in {job["stage"] for job in repository.jobs.values()}
+
+
 def test_orchestrator_config_from_env_reads_terminal_stage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1843,6 +1863,18 @@ def test_orchestrator_config_from_env_reads_terminal_stage(
     config = OrchestratorConfig.from_env()
 
     assert config.terminal_stage == "forecast"
+
+
+def test_orchestrator_config_from_env_reads_compute_state_terminal_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+
+    config = OrchestratorConfig.from_env()
+
+    assert config.terminal_stage == "forecast_state_save_qc"
 
 
 def test_orchestrator_config_rejects_unknown_terminal_stage(tmp_path: Path) -> None:

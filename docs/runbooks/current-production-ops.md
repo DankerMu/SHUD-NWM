@@ -129,6 +129,14 @@ misconfiguration. Slurm submission is through the node-22 Slurm Gateway and
 `sbatch`; Slurm then runs compute work on allocated compute nodes such as
 `cnXX`.
 
+node-22 compute-only chain must stop at
+`NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` with
+`NHMS_REQUIRE_FORECAST_WARM_START=true`: this runs SHUD forecast and DB-free
+`state_save_qc`, then skips parse/publish. Do not use `forecast` as the
+production terminal stage, because it writes forecast outputs but stops before
+publishing canonical warm-start checkpoints into the file state index. Node-27
+remains the owner of parse/QC/ingest/display.
+
 node-22 scheduler 的模型清单来自 DB-free file registry。生产上不要手工只写
 qhh；新增或移动 Basins 后，从 `NHMS_BASINS_ROOT` 重新发布全流域 registry。
 2026-06-30 现场 22 节点的 Basins 根为 `/volume/nwm/Basins`（Linux 路径区分大小写；

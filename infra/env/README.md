@@ -52,10 +52,12 @@ Compute role, node 22:
   the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
   `compute.env` only for `compute-api` or an explicit archived rollback drill;
   node-22 `:55433` is stopped/archived and is not scheduler runtime env.
-- Node-22 compute-control must set `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast`.
-  That makes the scheduler stop after SHUD forecast output is written to the
-  shared object-store. Node-27 data-plane ingest owns parse, QC, DB writes, and
-  display publication from those forecast outputs.
+- Node-22 compute-control must set
+  `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` and
+  `NHMS_REQUIRE_FORECAST_WARM_START=true`. That makes the scheduler run SHUD and
+  DB-free `state_save_qc` so forecast warm-start state continues to advance, then
+  stop before parse/publish. Node-27 data-plane ingest owns parse, QC, DB writes,
+  and display publication from those forecast outputs.
 - Production scheduler model selection is registry-driven. Keep
   `NHMS_SCHEDULER_MODEL_IDS` and `NHMS_SCHEDULER_BASIN_IDS` empty for normal
   operations; publish the full Basins file registry with
