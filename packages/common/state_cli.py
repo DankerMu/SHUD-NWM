@@ -7,7 +7,7 @@ import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -142,7 +142,10 @@ def save_state_for_run(
     else:
         run_repository = repository or _state_run_repository_from_env_for_save()
         run = run_repository.load_run_context(run_id)
-    checkpoints = _find_state_checkpoints(run, workspace, state_manager.object_store)
+    checkpoints = [
+        _checkpoint_with_header_time(checkpoint, run)
+        for checkpoint in _find_state_checkpoints(run, workspace, state_manager.object_store)
+    ]
     if not checkpoints:
         ic_file = _find_ic_file(run, workspace, state_manager.object_store)
         checkpoints = [
@@ -229,6 +232,64 @@ def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
     lines[0] = "\t".join(header)
     atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
     return normalized
+
+
+def _checkpoint_with_header_time(checkpoint: StateCheckpoint, run: StateRunContext) -> StateCheckpoint:
+    """Trust the checkpoint IC header when it proves a different model time."""
+
+    observed_minute = _checkpoint_header_minute(checkpoint.ic_file)
+    if observed_minute is None or run.cycle_time is None:
+        return checkpoint
+    inferred_valid_time = _valid_time_from_header_minute(observed_minute, run)
+    if inferred_valid_time is None:
+        return checkpoint
+    lead_hours = _lead_hours_from_run_valid_time(run, inferred_valid_time)
+    if lead_hours is None:
+        return checkpoint
+    if _ensure_utc(checkpoint.valid_time) == inferred_valid_time and checkpoint.lead_hours == lead_hours:
+        return checkpoint
+    return StateCheckpoint(
+        valid_time=inferred_valid_time,
+        ic_file=checkpoint.ic_file,
+        original_shud_filename=checkpoint.original_shud_filename,
+        lead_hours=lead_hours,
+    )
+
+
+def _checkpoint_header_minute(path: Path) -> float | None:
+    content = _read_limited_text_no_follow(
+        path,
+        max_bytes=MAX_STATE_IC_BYTES,
+        label="state checkpoint IC file",
+    )
+    lines = content.splitlines()
+    if not lines:
+        return None
+    header = lines[0].split()
+    minute_index = cfg_ic_header_minute_index(header)
+    if minute_index is None:
+        return None
+    try:
+        return float(header[minute_index])
+    except ValueError:
+        return None
+
+
+def _valid_time_from_header_minute(observed_minute: float, run: StateRunContext) -> datetime | None:
+    if run.cycle_time is None:
+        return None
+    cycle_time = _ensure_utc(run.cycle_time)
+    end_time = _ensure_utc(run.end_time)
+    rounded_minute = round(observed_minute)
+    if 0 <= rounded_minute <= round((end_time - cycle_time).total_seconds() / 60):
+        return cycle_time + timedelta(minutes=rounded_minute)
+    try:
+        inferred = datetime.fromtimestamp(observed_minute * 60, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if cycle_time <= inferred <= end_time:
+        return inferred
+    return None
 
 
 def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:

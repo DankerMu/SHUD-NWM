@@ -429,6 +429,100 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
     assert round(_read_cfg_ic_header_minute(saved_t12)) == round(_minute_time("2026-05-01T12:00:00Z"))
 
 
+def test_state_save_rekeys_checkpoint_when_manifest_lagged_header_minute(tmp_path: Path) -> None:
+    from packages.common.state_cli import StateRunContext, save_state_for_run
+    from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager
+
+    object_root = tmp_path / "object-store"
+    workspace = tmp_path / "workspace"
+    run_id = "fcst_gfs_2026050100_demo_model"
+    output_dir = workspace / "runs" / run_id / "output" / "state_checkpoints"
+    output_dir.mkdir(parents=True)
+    f006 = output_dir / "demo.f006.cfg.ic.update"
+    f006.write_text("2 1 720.000000\n1 0.3\n2 0.4\n1 0.0\n", encoding="utf-8")
+    (output_dir / "state_checkpoints.json").write_text(
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "lead_hours": 6,
+                        "valid_time": "2026-05-01T06:00:00Z",
+                        "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
+                        "checkpoint_filename": "demo.f006.cfg.ic.update",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {"snapshots": []}
+
+    class _Repo(PsycopgStateSnapshotRepository):
+        def __init__(self) -> None:
+            pass
+
+        def get_state_snapshot_by_model_time(
+            self,
+            *,
+            model_id: str,
+            valid_time: datetime,
+            source_id: str | None = None,
+            cycle_id: str | None = None,
+            lead_hours: int | None = None,
+        ) -> StateSnapshot | None:
+            del model_id, valid_time, source_id, cycle_id, lead_hours
+            return None
+
+        def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
+            captured["snapshots"].append(snapshot)
+            return snapshot
+
+        def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
+            return next((item for item in captured["snapshots"] if item.state_id == state_id), None)
+
+        def insert_qc_result(self, record: Any) -> dict[str, Any]:
+            captured.setdefault("qc_records", []).append(record)
+            return {}
+
+        def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
+            del usable_flag
+            return self.get_state_snapshot(state_id)
+
+    class _RunRepo:
+        def load_run_context(self, _run_id: str) -> StateRunContext:
+            return StateRunContext(
+                run_id=run_id,
+                model_id="demo_model",
+                end_time=_dt("2026-05-08T00:00:00Z"),
+                output_uri=None,
+                source_id="GFS",
+                cycle_time=_dt("2026-05-01T00:00:00Z"),
+                model_package_version="s3://nhms/models/demo_model/package/",
+                model_package_checksum="package-sha-1",
+            )
+
+    manager = StateManager(repository=_Repo(), object_store=LocalObjectStore(object_root, ""))
+
+    result = save_state_for_run(run_id, manager=manager, repository=_RunRepo(), workspace_root=workspace)
+
+    snapshots = captured["snapshots"]
+    assert [snapshot.valid_time for snapshot in snapshots] == [_dt("2026-05-01T12:00:00Z")]
+    assert [snapshot.lead_hours for snapshot in snapshots] == [12]
+    assert [item["valid_time"] for item in result["checkpoints"]] == ["2026-05-01T12:00:00Z"]
+    assert [item["lead_hours"] for item in result["checkpoints"]] == [12]
+    saved_t12 = (
+        object_root
+        / "states"
+        / "GFS"
+        / "demo_model"
+        / "2026050112"
+        / "gfs_2026050100"
+        / "f012"
+        / "state.cfg.ic"
+    )
+    assert round(_read_cfg_ic_header_minute(saved_t12)) == round(_minute_time("2026-05-01T12:00:00Z"))
+
+
 # ---------------------------------------------------------------------------
 # IC materialization on the consume side: state.cfg.ic -> <project>.cfg.ic
 # ---------------------------------------------------------------------------
