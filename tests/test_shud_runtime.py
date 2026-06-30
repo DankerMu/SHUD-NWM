@@ -18,6 +18,7 @@ from workers.shud_runtime.runtime import (
     SHUDRuntime,
     SHUDRuntimeConfig,
     SHUDRuntimeError,
+    _state_checkpoint_poll_seconds,
     _StateCheckpointTracker,
     _validate_direct_grid_station_filename_target,
 )
@@ -2657,6 +2658,27 @@ def test_run_shud_allows_valid_python_runtime_script(tmp_path: Path, monkeypatch
 
     assert (output_dir / "demo.rivqdown").exists()
     assert (log_dir / "shud_stdout.log").read_text(encoding="utf-8")
+
+
+def test_run_shud_fails_when_requested_state_checkpoints_are_missing(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)  # tests/mock_shud_omp.py writes no cfg.ic.update checkpoints.
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f006" in exc_info.value.message
+    assert "f012" in exc_info.value.message
+
+
+def test_state_checkpoint_poll_seconds_defaults_to_fast_checkpoint_capture() -> None:
+    manifest = _manifest()
+
+    assert _state_checkpoint_poll_seconds(manifest) == pytest.approx(0.01)
 
 
 def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None:

@@ -521,6 +521,13 @@ class SHUDRuntime:
             )
         checkpoint_tracker.capture_final()
         checkpoint_tracker.write_manifest()
+        missing_checkpoints = checkpoint_tracker.missing_hours()
+        if missing_checkpoints:
+            missing = ", ".join(f"f{hour:03d}" for hour in missing_checkpoints)
+            raise SHUDRuntimeError(
+                "STATE_CHECKPOINTS_MISSING",
+                f"SHUD did not emit requested restart checkpoints: {missing}",
+            )
         _ensure_directory(output_dir)
 
     def _wait_for_shud_process(
@@ -2480,6 +2487,9 @@ class _StateCheckpointTracker:
             "checksum": sha256_bytes(_read_staged_bytes(target, root=self.output_dir)),
         }
 
+    def missing_hours(self) -> list[int]:
+        return [hour for hour in sorted(self.targets) if hour not in self.captured]
+
 
 def _state_checkpoint_hours(manifest: dict[str, Any]) -> list[int]:
     runtime = manifest.get("runtime") or {}
@@ -2514,11 +2524,11 @@ def _state_checkpoint_poll_seconds(manifest: dict[str, Any]) -> float:
     runtime = manifest.get("runtime") or {}
     value = runtime.get("state_checkpoint_poll_seconds")
     if value in (None, ""):
-        return 0.1
+        return 0.01
     try:
-        return max(float(value), 0.1)
+        return max(float(value), 0.01)
     except (TypeError, ValueError):
-        return 0.1
+        return 0.01
 
 
 def _header_minute_matches_checkpoint(
