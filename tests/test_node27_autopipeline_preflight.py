@@ -198,6 +198,37 @@ def test_legacy_node22_url_argv_blocks_before_argparse_echo_and_redacts(
     assert "n22-secret" not in captured.out
 
 
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        ("N22_DSN", NODE22_ROLLBACK_DSN),
+        ("NHMS_NODE22_DSN_SOURCE", "env:N22_DSN"),
+        ("NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR", "true"),
+    ],
+)
+def test_legacy_node22_db_runtime_env_blocks_before_seed_run_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    env_key: str,
+    env_value: str,
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("DATABASE_URL", NODE27_DATABASE_URL)
+    monkeypatch.setenv(env_key, env_value)
+    for name in ("_basin_seeded", "_already_ingested_runs", "_seed_basin", "_process_run", "_publish_display_runs"):
+        monkeypatch.setattr(autopipe, name, _fail_if_called(name))
+
+    rc, summary, rendered = _run_main(capsys, _args(object_store_root, basins_root))
+
+    assert rc == autopipe.PREFLIGHT_BLOCKED_RC
+    assert summary["status"] == "preflight_blocked"
+    assert _blocker_codes(summary) == {autopipe.NODE22_DB_RUNTIME_ENV_FORBIDDEN}
+    assert summary["seed"] == autopipe._empty_seed_summary()
+    assert summary["runs"] == autopipe._empty_runs_summary()
+    assert "n22-secret" not in rendered
+
+
 def test_missing_direct_ingest_role_blocks_before_seed_run_publish_and_redacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -749,6 +780,7 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
     assert "postgresql://nhms:nhms_dev" not in script
     assert '. "$REPO/infra/env/display.env"' not in script
     assert "INGEST_ENV_DISPLAY_RUNTIME_FORBIDDEN" in script
+    assert "NODE22_DB_RUNTIME_ENV_FORBIDDEN" in script
     for required_key in (
         "DATABASE_URL",
         "NHMS_NODE27_INGEST_ROLE",
@@ -757,11 +789,14 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
         "BASINS_ROOT",
         "AUTOPIPE_WORK_ROOT",
         "AUTOPIPE_LOG_ROOT",
+    ):
+        assert f"unset {required_key}" in script
+    for forbidden_unset in (
         "N22_DSN",
         "NHMS_NODE22_DSN_SOURCE",
         "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
     ):
-        assert f"unset {required_key}" in script
+        assert f"unset {forbidden_unset}" not in script
     for required_key in autopipe.LIBPQ_CONNECTION_ENV_KEYS:
         assert f"unset {required_key}" in script
     assert "--database-url" not in script

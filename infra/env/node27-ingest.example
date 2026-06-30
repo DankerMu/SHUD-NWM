@@ -22,16 +22,3 @@ AUTOPIPE_WORK_ROOT=/home/nwm/autopipe-work
 AUTOPIPE_LOG_ROOT=/home/nwm/autopipe-logs
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
-
-# Optional archived rollback mirror for pre-contract runs.
-# Compatibility-only and rollback-only: leave unset unless an operator has
-# deliberately restarted the archived node-22 DB container for a rollback drill
-# and also sets NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=true. The
-# historical node-22 local PostgreSQL :55433 instance is do-not-connect for
-# current NHMS production state and is archived/stopped.
-# For one-off drills, prefer an owner-only DSN file passed to
-# scripts/node27_autopipeline.py --node22-dsn-file /path/to/0600-file. Do not
-# pass a raw DSN in argv, and do not set NHMS_NODE22_DSN_SOURCE here; the parent
-# script sets the non-secret source label when it invokes the mirror.
-# NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR=false
-# N22_DSN=postgresql://readonly-user:change-me@210.77.77.22:55433/nhms

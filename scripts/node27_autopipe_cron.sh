@@ -3,7 +3,7 @@
 #
 # Periodically scans the object-store for new basins/runs and ingests them via
 # scripts/node27_autopipeline.py (seed registry -> register -> object-store
-# forcing handoff or explicit mirror -> parse -> refresh-coverage). Idempotent:
+# forcing handoff -> parse -> refresh-coverage). Idempotent:
 # already-seeded basins and already-parsed runs are detected and skipped, so
 # re-running every N minutes is safe and only does outstanding work.
 #
@@ -60,9 +60,6 @@ if [ -f "$INGEST_ENV" ]; then
     unset BASINS_ROOT
     unset AUTOPIPE_WORK_ROOT
     unset AUTOPIPE_LOG_ROOT
-    unset N22_DSN
-    unset NHMS_NODE22_DSN_SOURCE
-    unset NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR
     unset PGAPPNAME
     unset PGCHANNELBINDING
     unset PGCLIENTENCODING
@@ -140,6 +137,12 @@ elif [ "$ALLOW_AMBIENT_ENV" = "1" ]; then
   export NHMS_NODE27_INGEST_CONFIG_SOURCE="${NHMS_NODE27_INGEST_CONFIG_SOURCE:-ambient:NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV}"
 else
   bootstrap_blocked "INGEST_ENV_MISSING"
+fi
+
+if [ -n "${N22_DSN:-}" ] ||
+  [ -n "${NHMS_NODE22_DSN_SOURCE:-}" ] ||
+  [ -n "${NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR:-}" ]; then
+  bootstrap_blocked "NODE22_DB_RUNTIME_ENV_FORBIDDEN"
 fi
 
 if [ "${NHMS_NODE27_INGEST_ROLE:-}" != "node27_data_plane_ingest" ]; then

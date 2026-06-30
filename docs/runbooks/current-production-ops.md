@@ -15,7 +15,7 @@
 ## 1. 当前结论
 
 - node-27 是当前 active production service host：本机 PostgreSQL `:55432`、
-  source download、ingest、display API 和前端公网入口都在 27。
+  source download、cron-driven ingest、display API 和前端公网入口都在 27。
 - node-27 source download 由用户级 systemd timer
   `nhms-node27-download.timer` 驱动，调用
   `scripts/node27_download_once.sh`，自动选择 00/12 UTC 业务 cycle 并把 raw
@@ -85,6 +85,12 @@ crontab -l | grep -F 'scripts/node27_autopipe_cron.sh'
 ```text
 */10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh >> /home/nwm/autopipe.log 2>&1
 ```
+
+`N22_DSN`、`NHMS_NODE22_DSN_SOURCE` 和
+`NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` 不属于当前生产 ingest
+配置。wrapper 和 `scripts/node27_autopipeline.py` 都会把这些旧 node-22 DB
+变量作为 `NODE22_DB_RUNTIME_ENV_FORBIDDEN` 显式阻断；forcing 元数据只通过
+object-store forcing-domain handoff 进入 node-27 DB。
 
 查看 wrapper 和最近运行结果：
 

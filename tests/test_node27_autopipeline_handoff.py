@@ -98,8 +98,6 @@ def _prepare_autopipe(
             return 0, json.dumps({"status": "parsed", "rows_written": len(run_id)}) + "\n", ""
         if "node27_refresh_coverage.py" in command:
             return 0, json.dumps({"refreshed": True}) + "\n", ""
-        if "node27_mirror_forcing.py" in command:
-            raise AssertionError("node-27 autopipeline must not invoke archived node-22 DB mirror")
         raise AssertionError(f"unexpected command: {argv}")
 
     monkeypatch.setattr(autopipe, "_run", fake_run)
@@ -166,8 +164,6 @@ def _command_kinds(calls: list[list[str]]) -> list[str]:
         command = " ".join(argv)
         if "node27_ingest_run.py" in command:
             kinds.append("register")
-        elif "node27_mirror_forcing.py" in command:
-            kinds.append("mirror")
         elif "workers.output_parser.cli" in command:
             kinds.append("parse")
         elif "node27_refresh_coverage.py" in command:
@@ -207,13 +203,11 @@ def test_declared_handoff_success_records_run_details_without_mirror(
     assert summary["runs"]["published"] == 7
 
 
-def test_missing_handoff_requires_object_store_handoff_even_when_node22_dsn_is_set(
+def test_missing_handoff_requires_object_store_handoff_without_node22_db_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
-    monkeypatch.setenv("NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR", "true")
     object_store_root, calls, published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: False})
 
     rc, summary = _run_main(capsys, object_store_root)
@@ -242,8 +236,6 @@ def test_declared_handoff_unavailable_does_not_fallback_to_node22_db(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
-    monkeypatch.setenv("NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR", "true")
     object_store_root, calls, published_calls = _prepare_autopipe(
         monkeypatch,
         tmp_path,
@@ -268,8 +260,6 @@ def test_declared_handoff_apply_exception_isolated_without_node22_db_fallback(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("N22_DSN", "postgresql://n22_user:n22-secret@node22.example/nhms")
-    monkeypatch.setenv("NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR", "true")
     object_store_root, calls, _published_calls = _prepare_autopipe(
         monkeypatch,
         tmp_path,

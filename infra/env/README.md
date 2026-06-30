@@ -156,11 +156,12 @@ Node-27 ingest role:
 - `NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS` defaults to
   `127.0.0.1:55432,localhost:55432`; set it only when node-27 ingest must use a
   different local node-27 PostgreSQL endpoint.
-- Current node-27 autopipeline does not call the archived node-22 DB rollback
-  mirror. Every run must provide an object-store
+- Current node-27 autopipeline does not call a node-22 DB rollback mirror and
+  treats `N22_DSN`, `NHMS_NODE22_DSN_SOURCE`, and
+  `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` as forbidden runtime env.
+  Every run must provide an object-store
   `runs/<run_id>/input/forcing_domain_handoff.json`; missing handoff is reported
-  as `OBJECT_STORE_FORCING_HANDOFF_REQUIRED`. Historical node-22 rollback tools
-  remain archive-only and are not part of normal ingest automation.
+  as `OBJECT_STORE_FORCING_HANDOFF_REQUIRED`.
 
 Node-27 download role:
 

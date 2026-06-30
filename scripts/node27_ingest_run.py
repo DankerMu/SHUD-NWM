@@ -103,10 +103,9 @@ def upsert_forcing_version(cursor: Any, manifest: dict[str, Any], source_id: str
             "forcing_package_uri",
         )
     )
-    # Manifest mislabels station_count as 0 (station_forcing_unavailable); it is
-    # only a first-insert placeholder. node27_mirror_forcing is authoritative and
-    # writes the real count from node-22, so the ON CONFLICT below intentionally
-    # does NOT update station_count (re-register must not clobber the mirrored value).
+    # Some historical manifests carried station_count=0 as a first-insert
+    # placeholder. The object-store forcing-domain handoff now owns the real
+    # station rows/counts, so re-register must not clobber that applied value.
     station_count = int(forcing.get("station_count") or 0)
     lineage = {
         "seed": "node27_ingest_run",

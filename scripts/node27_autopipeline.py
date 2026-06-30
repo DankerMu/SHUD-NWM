@@ -148,7 +148,15 @@ DATABASE_URL_ARGV_FORBIDDEN = "DATABASE_URL_ARGV_FORBIDDEN"
 DATABASE_URL_FILE_INVALID = "DATABASE_URL_FILE_INVALID"
 DATABASE_URL_FILE_UNSAFE = "DATABASE_URL_FILE_UNSAFE"
 NODE22_DSN_ARGV_FORBIDDEN = "NODE22_DSN_ARGV_FORBIDDEN"
+NODE22_DB_RUNTIME_ENV_FORBIDDEN = "NODE22_DB_RUNTIME_ENV_FORBIDDEN"
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
+NODE22_DB_RUNTIME_ENV_KEYS = frozenset(
+    {
+        "N22_DSN",
+        "NHMS_NODE22_DSN_SOURCE",
+        "NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR",
+    }
+)
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -439,6 +447,20 @@ def _ambient_libpq_env_blockers(env: dict[str, str]) -> list[dict[str, str]]:
     return blockers
 
 
+def _node22_runtime_env_blockers(env: dict[str, str]) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for key in sorted(NODE22_DB_RUNTIME_ENV_KEYS):
+        if (env.get(key) or "").strip():
+            blockers.append(
+                _preflight_blocker(
+                    NODE22_DB_RUNTIME_ENV_FORBIDDEN,
+                    key,
+                    f"{key} is forbidden in node-27 ingest runtime; use object-store forcing-domain handoff.",
+                )
+            )
+    return blockers
+
+
 def _database_url_file_config(path_value: str | None) -> DatabaseUrlConfig:
     raw = _non_empty(path_value)
     if raw is None:
@@ -589,6 +611,7 @@ def _preflight_ingest_config(
     role, role_blockers = _role_preflight(env)
     blockers.extend(role_blockers)
     blockers.extend(_ambient_libpq_env_blockers(env))
+    blockers.extend(_node22_runtime_env_blockers(env))
 
     if database_url_error_code:
         database = {"configured": True, "source": database_url_source}
@@ -742,8 +765,8 @@ def _basin_seeded(database_url: str, basin_id: str) -> bool:
 def _already_ingested_runs(database_url: str, run_ids: list[str]) -> set[str]:
     """Return the subset of run_ids already fully ingested: hydro_run at a
     parser-advanced status AND carrying river_timeseries rows. Lets the cron
-    re-scan cheaply -- finished runs are skipped instead of re-mirroring their
-    (large) per-cycle forcing every tick."""
+    re-scan cheaply -- finished runs are skipped instead of re-applying their
+    per-cycle forcing handoff every tick."""
     if not run_ids:
         return set()
     conn = psycopg2.connect(database_url)
@@ -1213,7 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
             _preflight_blocker(
                 NODE22_DSN_ARGV_FORBIDDEN,
                 "N22_DSN",
-                "Raw archived node-22 rollback DSNs must not be passed through argv.",
+                "Legacy node-22 DB DSNs are forbidden; use object-store forcing-domain handoff.",
             )
         )
         _emit_json_summary(
