@@ -152,6 +152,8 @@ set +a
 `zhaochen/` 下还有 4 个可运行子模型，因此 scheduler registry 应发布 13 个
 模型。`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，
 由 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
+若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
+里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。

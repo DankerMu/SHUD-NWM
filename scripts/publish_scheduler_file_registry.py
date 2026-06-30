@@ -15,9 +15,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,7 @@ from workers.model_registry.basins_discovery import (
     write_inventory,
 )
 from workers.model_registry.basins_package import BasinsPackageError, publish_basins_package
+from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
     ImportSources,
@@ -47,6 +50,13 @@ DEFAULT_SOURCE_POLICY = {
     "allowed_cycle_hours_utc": [0, 12],
 }
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+@dataclass(frozen=True)
+class PublishContext:
+    model: dict[str, Any]
+    inventory_path: Path
+    repair: dict[str, Any] | None = None
 
 
 class SchedulerRegistryPublishError(RuntimeError):
@@ -75,6 +85,7 @@ def publish_all_basin_scheduler_registry(
     memory_mb: int = 8192,
     walltime_minutes: int = 720,
     enable_return_periods: bool = False,
+    repair_missing_radiation: bool = True,
     dry_run: bool = False,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -103,10 +114,29 @@ def publish_all_basin_scheduler_registry(
         basin_slugs=basin_slugs,
         model_ids=model_ids,
     )
+    contexts = [PublishContext(model=model, inventory_path=inventory_path) for model in selected_models]
+    if repair_missing_radiation:
+        contexts.extend(
+            _repair_missing_radiation_contexts(
+                inventory=inventory,
+                basins_root=root,
+                workspace=workspace,
+                basin_slugs=basin_slugs,
+                model_ids=model_ids,
+                already_selected_model_ids={str(model.get("model_id")) for model in selected_models},
+            )
+        )
+    if not contexts:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
+            "No publishable Basins models were discovered.",
+            details={"discovered_model_count": int(inventory.get("model_count") or 0)},
+        )
     store = LocalObjectStore(resolved_object_root, object_store_prefix=resolved_object_prefix)
     registry_models: list[dict[str, Any]] = []
     package_results: list[dict[str, Any]] = []
-    for model in selected_models:
+    for context in contexts:
+        model = context.model
         model_id = _required_model_str(model, "model_id")
         version = package_version_for_model(model, package_version_template)
         package_manifest_path = package_manifest_dir / f"{model_id}.manifest.json"
@@ -119,7 +149,7 @@ def publish_all_basin_scheduler_registry(
             }
         else:
             package_result = publish_basins_package(
-                inventory_path=inventory_path,
+                inventory_path=context.inventory_path,
                 model_id=model_id,
                 version=version,
                 output_path=package_manifest_path,
@@ -130,7 +160,7 @@ def publish_all_basin_scheduler_registry(
         if dry_run:
             continue
         sources = prepare_basins_import_sources(
-            inventory_path=inventory_path,
+            inventory_path=context.inventory_path,
             package_manifest_path=package_manifest_path,
         )
         registry_models.append(
@@ -163,9 +193,10 @@ def publish_all_basin_scheduler_registry(
         "resolved_basins_root": str(root.resolve()),
         "inventory_path": str(inventory_path),
         "discovered_model_count": int(inventory.get("model_count") or 0),
-        "selected_model_count": len(selected_models),
-        "selected_basin_slugs": [str(model.get("basin_slug")) for model in selected_models],
-        "selected_model_ids": [_required_model_str(model, "model_id") for model in selected_models],
+        "selected_model_count": len(contexts),
+        "selected_basin_slugs": [str(context.model.get("basin_slug")) for context in contexts],
+        "selected_model_ids": [_required_model_str(context.model, "model_id") for context in contexts],
+        "repairs": [context.repair for context in contexts if context.repair is not None],
         "registry_manifest": str(registry_manifest),
         "registry": registry_receipt,
         "package_status_counts": package_status_counts,
@@ -298,6 +329,8 @@ def _select_publishable_models(
         if requested_model_ids and model_id not in requested_model_ids:
             continue
         if model.get("status") != "valid" or model.get("default_publish_eligible") is not True:
+            if _is_missing_tsd_rl_only(model):
+                continue
             if requested_slugs or requested_model_ids:
                 raise SchedulerRegistryPublishError(
                     "SCHEDULER_REGISTRY_MODEL_NOT_PUBLISHABLE",
@@ -325,16 +358,114 @@ def _select_publishable_models(
             },
         )
     selected.sort(key=lambda model: (str(model.get("root_relative_resolved_path") or ""), str(model.get("model_id"))))
-    if not selected:
-        raise SchedulerRegistryPublishError(
-            "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
-            "No publishable Basins models were discovered.",
-            details={
-                "discovered_model_count": int(inventory.get("model_count") or 0),
-                "available_basin_slugs": sorted(available_slugs),
-            },
-        )
     return selected
+
+
+def _repair_missing_radiation_contexts(
+    *,
+    inventory: Mapping[str, Any],
+    basins_root: Path,
+    workspace: Path,
+    basin_slugs: Sequence[str],
+    model_ids: Sequence[str],
+    already_selected_model_ids: set[str],
+) -> list[PublishContext]:
+    requested_slugs = {str(value) for value in basin_slugs if str(value)}
+    requested_model_ids = {str(value) for value in model_ids if str(value)}
+    contexts: list[PublishContext] = []
+    repaired_root_base = workspace / "repaired-basins"
+    repaired_inventory_dir = workspace / "repaired-inventories"
+    repaired_inventory_dir.mkdir(parents=True, exist_ok=True)
+    for model in _repairable_missing_radiation_models(inventory):
+        basin_slug = str(model.get("basin_slug") or "")
+        model_id = str(model.get("model_id") or "")
+        if model_id in already_selected_model_ids:
+            continue
+        if requested_slugs and basin_slug not in requested_slugs:
+            continue
+        if requested_model_ids and model_id not in requested_model_ids:
+            continue
+        source_path = Path(str(model.get("source_path") or ""))
+        if not source_path.is_dir():
+            continue
+        repaired_root = repaired_root_base / _slug_id(basin_slug)
+        if repaired_root.exists():
+            shutil.rmtree(repaired_root, ignore_errors=True)
+        repaired_target = repaired_root / basin_slug
+        repaired_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_path, repaired_target, symlinks=False)
+        _strip_synology_sidecars(repaired_target)
+        repair = repair_missing_tsd_rl_for_basin(
+            isolated_root=repaired_root,
+            basin_slug=basin_slug,
+            template_search_root=basins_root,
+        )
+        if not repair_performed(repair):
+            if requested_slugs or requested_model_ids:
+                raise SchedulerRegistryPublishError(
+                    "SCHEDULER_REGISTRY_MISSING_RADIATION_REPAIR_FAILED",
+                    "Requested Basins model is missing *.tsd.rl and no matching template was found.",
+                    details={"model_id": model_id, "basin_slug": basin_slug, "repair": repair},
+                )
+            continue
+        repaired_inventory = discover_basins_inventory(repaired_root)
+        repaired_model = _find_inventory_model(repaired_inventory, model_id)
+        if repaired_model.get("status") != "valid" or repaired_model.get("default_publish_eligible") is not True:
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
+                "Repaired Basins model is still not publishable.",
+                details={
+                    "model_id": model_id,
+                    "basin_slug": basin_slug,
+                    "status": repaired_model.get("status"),
+                    "missing_required_files": repaired_model.get("missing_required_files") or [],
+                    "repair": repair,
+                },
+            )
+        repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
+        write_inventory(repaired_inventory, repaired_inventory_path)
+        contexts.append(PublishContext(model=repaired_model, inventory_path=repaired_inventory_path, repair=repair))
+    return contexts
+
+
+def _repairable_missing_radiation_models(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    models = inventory.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, str | bytes | bytearray):
+        return []
+    return [
+        dict(model)
+        for model in models
+        if isinstance(model, Mapping)
+        and model.get("status") == "partial"
+        and model.get("default_publish_eligible") is not True
+        and _is_missing_tsd_rl_only(model)
+    ]
+
+
+def _is_missing_tsd_rl_only(model: Mapping[str, Any]) -> bool:
+    return set(model.get("missing_required_files") or []) == {"*.tsd.rl"}
+
+
+def _find_inventory_model(inventory: Mapping[str, Any], model_id: str) -> dict[str, Any]:
+    models = inventory.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, str | bytes | bytearray):
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_INVENTORY_INVALID",
+            "Basins inventory must contain a models array.",
+        )
+    matches = [dict(model) for model in models if isinstance(model, Mapping) and model.get("model_id") == model_id]
+    if len(matches) != 1:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_FOUND",
+            "Repaired Basins inventory did not contain exactly one requested model.",
+            details={"model_id": model_id, "match_count": len(matches)},
+        )
+    return matches[0]
+
+
+def _strip_synology_sidecars(root: Path) -> None:
+    for sidecar in root.rglob("@eaDir"):
+        shutil.rmtree(sidecar, ignore_errors=True)
 
 
 def _model_content_hash(model: Mapping[str, Any]) -> str:
@@ -434,6 +565,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Set frequency_capabilities.return_periods=true for all published models.",
     )
     parser.add_argument(
+        "--no-repair-missing-radiation",
+        action="store_true",
+        help="Do not synthesize missing *.tsd.rl files in private scratch copies.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Discover/select only; do not publish packages/registry.",
@@ -460,6 +596,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             memory_mb=args.memory_mb,
             walltime_minutes=args.walltime_minutes,
             enable_return_periods=args.enable_return_periods,
+            repair_missing_radiation=not args.no_repair_missing_radiation,
             dry_run=args.dry_run,
             output_path=args.output,
         )

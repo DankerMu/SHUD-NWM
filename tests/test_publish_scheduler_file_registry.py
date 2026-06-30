@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import scripts.publish_scheduler_file_registry as registry_script
+from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 
 
 def test_package_version_for_nested_basin_is_safe_and_content_stable() -> None:
@@ -86,6 +87,101 @@ def test_publish_all_basin_scheduler_registry_writes_all_publishable_models(
     assert rows["basins_qhh_shud"]["resource_profile"]["lineage"] == "basins_scheduler_file_registry"
     assert rows["basins_zhaochen_bst_shud"]["resource_profile"]["project_name"] == "BST"
     assert rows["basins_zhaochen_bst_shud"]["output_segment_count"] == 7
+
+
+def test_missing_radiation_repair_copies_matching_template_inside_private_root(tmp_path: Path) -> None:
+    isolated = tmp_path / "isolated"
+    target_input = isolated / "tailanhe" / "input" / "tlh"
+    target_input.mkdir(parents=True)
+    (target_input / "tlh.tsd.lai").write_text("900\t18\t19810101\t20551201\t86400\nlai\n", encoding="utf-8")
+    template = tmp_path / "Basins" / "heihe" / "input" / "heihe" / "heihe.tsd.rl"
+    template.parent.mkdir(parents=True)
+    template.write_text("900\t18\t19810101\t20551201\t86400\nradiation\n", encoding="utf-8")
+
+    report = repair_missing_tsd_rl_for_basin(
+        isolated_root=isolated,
+        basin_slug="tailanhe",
+        template_search_root=tmp_path / "Basins",
+    )
+
+    assert repair_performed(report)
+    assert (target_input / "tlh.tsd.rl").read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+    assert report["repairs"][0]["template"] == str(template)
+
+
+def test_publish_all_basin_scheduler_registry_repairs_missing_radiation_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    basins_root = tmp_path / "Basins"
+    tailanhe_input = basins_root / "tailanhe" / "input" / "tlh"
+    tailanhe_input.mkdir(parents=True)
+    (tailanhe_input / "tlh.tsd.lai").write_text("900\t18\t19810101\t20551201\t86400\nlai\n", encoding="utf-8")
+    template = basins_root / "heihe" / "input" / "heihe" / "heihe.tsd.rl"
+    template.parent.mkdir(parents=True)
+    template.write_text("900\t18\t19810101\t20551201\t86400\nradiation\n", encoding="utf-8")
+    initial_inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(basins_root),
+        "resolved_root": str(basins_root),
+        "model_count": 2,
+        "models": [
+            _inventory_model("qhh"),
+            {
+                **_inventory_model("tailanhe", shud_input_name="tlh"),
+                "source_path": str(basins_root / "tailanhe"),
+                "resolved_source_path": str(basins_root / "tailanhe"),
+                "input_dir": str(tailanhe_input),
+                "status": "partial",
+                "default_publish_eligible": False,
+                "missing_required_files": ["*.tsd.rl"],
+            },
+        ],
+        "warnings": [],
+    }
+
+    def fake_discover(root: Path) -> dict[str, Any]:
+        if Path(root) == basins_root:
+            return initial_inventory
+        repaired = _inventory_model("tailanhe", shud_input_name="tlh")
+        repaired["source_path"] = str(Path(root) / "tailanhe")
+        repaired["resolved_source_path"] = str(Path(root) / "tailanhe")
+        repaired["input_dir"] = str(Path(root) / "tailanhe" / "input" / "tlh")
+        return {
+            "schema_version": "basins.discovery.v1",
+            "root": str(root),
+            "resolved_root": str(root),
+            "model_count": 1,
+            "models": [repaired],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", fake_discover)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            _inventory_from_file(Path(inventory_path)),
+            Path(package_manifest_path),
+        ),
+    )
+
+    object_root = tmp_path / "object-store"
+    registry_manifest = object_root / "scheduler" / "registry" / "manifest-last.json"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+    )
+
+    assert summary["selected_basin_slugs"] == ["qhh", "tailanhe"]
+    assert len(summary["repairs"]) == 1
+    assert summary["repairs"][0]["basin_slug"] == "tailanhe"
+    payload = json.loads(registry_manifest.read_text(encoding="utf-8"))
+    assert {row["model_id"] for row in payload["models"]} == {"basins_qhh_shud", "basins_tailanhe_shud"}
 
 
 def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> dict[str, Any]:
@@ -168,3 +264,7 @@ def _fake_sources(inventory: dict[str, Any], package_manifest_path: Path) -> Sim
             evidence_counts={"river_count": 7, "rivseg_segment_count": 11},
         ),
     )
+
+
+def _inventory_from_file(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))

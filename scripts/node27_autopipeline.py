@@ -63,6 +63,7 @@ from packages.common.forcing_domain_handoff_apply import (
     apply_forcing_domain_handoff_path,
 )
 from packages.common.redaction import redact_payload, redact_text
+from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
 
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
@@ -1029,6 +1030,11 @@ def _isolate_basin_root(basins_root: Path, basin: str) -> Path:
     shutil.copytree(basins_root / basin, dst, symlinks=False)
     for ea in dst.rglob("@eaDir"):
         shutil.rmtree(ea, ignore_errors=True)
+    repair_missing_tsd_rl_for_basin(
+        isolated_root=only_root,
+        basin_slug=basin,
+        template_search_root=basins_root,
+    )
     return only_root
 
 
