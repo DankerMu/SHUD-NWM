@@ -611,7 +611,12 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
     store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
     repository = FileForcingRepository(object_store=store, registry_manifest=tmp_path / "unused-registry.json")
     cycle_time = parse_cycle_time("2026050700")
-    valid_times = (cycle_time, cycle_time + timedelta(hours=3))
+    valid_times = (
+        cycle_time,
+        cycle_time + timedelta(hours=3),
+        cycle_time + timedelta(hours=6),
+        cycle_time + timedelta(hours=12),
+    )
     forcing_version_id = "forc_gfs_2026050700_demo_model"
     package_key = "forcing/gfs/2026050700/basin_v1/demo_model"
     package_uri = store.uri_for_key(package_key)
@@ -622,7 +627,7 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
         "source_id": "gfs",
         "cycle_time": "2026-05-07T00:00:00Z",
         "start_time": "2026-05-07T00:00:00Z",
-        "end_time": "2026-05-07T03:00:00Z",
+        "end_time": "2026-05-07T12:00:00Z",
         "basin_id": "basin_a",
         "basin_version_id": "basin_v1",
         "river_network_version_id": "rivnet_v1",
@@ -714,10 +719,27 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
     assert {table: len(rows) for table, rows in parsed["parsed"].items()} == {
         "met.forcing_version": 1,
         "met.met_station": 1,
-        "met.forcing_station_timeseries": 2,
+        "met.forcing_station_timeseries": 4,
         "met.interp_weight": 1,
     }
     assert parsed["parsed"]["met.met_station"][0]["station_id"] == "qhh_forc_001"
+    parsed_timeseries = parsed["parsed"]["met.forcing_station_timeseries"]
+    assert [row["native_resolution"] for row in parsed_timeseries] == ["3h", "3h", "3h", "6h"]
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    assert handoff["payloads"]["station_timeseries"]["time_lattice"] == [
+        {
+            "variable": "PRCP",
+            "valid_time_start": "2026-05-07T00:00:00Z",
+            "valid_time_end": "2026-05-07T06:00:00Z",
+            "native_resolution": "3h",
+        },
+        {
+            "variable": "PRCP",
+            "valid_time_start": "2026-05-07T12:00:00Z",
+            "valid_time_end": "2026-05-07T12:00:00Z",
+            "native_resolution": "6h",
+        },
+    ]
 
 
 def test_idw_weights_are_normalized_for_station() -> None:

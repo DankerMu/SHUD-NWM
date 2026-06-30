@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,7 @@ from workers.forcing_producer.producer import (
 LOGGER = logging.getLogger(__name__)
 
 _FORECAST_PRODUCT_RE = re.compile(r"^(?P<source>.+)_(?P<cycle>\d{10})_(?P<variable>.+)_f(?P<lead>\d{3})\.nc$")
+_NATIVE_RESOLUTION_RE = re.compile(r"^(?P<value>[1-9]\d*)(?P<unit>h|min)$", re.IGNORECASE)
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
 
 
@@ -609,7 +610,14 @@ class FileForcingRepository:
             basin_version_id=basin_version_id,
             model_id=model_id,
         )
-        timeseries_rows = [_handoff_timeseries_row(row) for row in sorted(rows, key=_timeseries_sort_key)]
+        native_resolution_by_time = _time_lattice_resolution_by_variable_time(rows)
+        timeseries_rows = [
+            _handoff_timeseries_row(
+                row,
+                native_resolution=native_resolution_by_time.get((row.variable, _ensure_utc(row.valid_time))),
+            )
+            for row in sorted(rows, key=_timeseries_sort_key)
+        ]
         weight_rows = self._handoff_weight_rows(
             record=record,
             package_manifest=package_manifest,
@@ -641,7 +649,7 @@ class FileForcingRepository:
         units = {variable: _first_unit(rows, variable) for variable in variables}
         payload_refs["station_timeseries"]["variables"] = variables
         payload_refs["station_timeseries"]["units"] = units
-        payload_refs["station_timeseries"]["time_lattice"] = _time_lattice(rows)
+        payload_refs["station_timeseries"]["time_lattice"] = _time_lattice(native_resolution_by_time)
 
         table_row_counts = {
             "met.forcing_version": 1,
@@ -1038,7 +1046,7 @@ def _station_name_prefix(basin_id: str) -> str:
     return value.upper()
 
 
-def _handoff_timeseries_row(row: ForcingTimeseriesRow) -> dict[str, Any]:
+def _handoff_timeseries_row(row: ForcingTimeseriesRow, *, native_resolution: str | None = None) -> dict[str, Any]:
     return {
         "forcing_version_id": row.forcing_version_id,
         "basin_version_id": row.basin_version_id,
@@ -1048,7 +1056,7 @@ def _handoff_timeseries_row(row: ForcingTimeseriesRow) -> dict[str, Any]:
         "variable": row.variable,
         "value": row.value,
         "unit": row.unit,
-        "native_resolution": row.native_resolution,
+        "native_resolution": native_resolution or row.native_resolution,
         "quality_flag": row.quality_flag,
     }
 
@@ -1075,21 +1083,91 @@ def _first_unit(rows: Sequence[ForcingTimeseriesRow], variable: str) -> str:
     return ""
 
 
-def _time_lattice(rows: Sequence[ForcingTimeseriesRow]) -> list[dict[str, Any]]:
+def _time_lattice(
+    native_resolution_by_time: Mapping[tuple[str, datetime], str],
+) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
+    variables = sorted({variable for variable, _valid_time in native_resolution_by_time})
+    for variable in variables:
+        ordered_points = sorted(
+            (valid_time, native_resolution)
+            for (row_variable, valid_time), native_resolution in native_resolution_by_time.items()
+            if row_variable == variable
+        )
+        if not ordered_points:
+            continue
+
+        segment_start, segment_resolution = ordered_points[0]
+        segment_end = segment_start
+        segment_delta = _native_resolution_delta(segment_resolution)
+        for valid_time, native_resolution in ordered_points[1:]:
+            expected_next = segment_end + segment_delta if segment_delta is not None else None
+            if native_resolution == segment_resolution and expected_next == valid_time:
+                segment_end = valid_time
+                continue
+            segments.append(_time_lattice_segment(variable, segment_start, segment_end, segment_resolution))
+            segment_start = valid_time
+            segment_end = valid_time
+            segment_resolution = native_resolution
+            segment_delta = _native_resolution_delta(segment_resolution)
+        segments.append(_time_lattice_segment(variable, segment_start, segment_end, segment_resolution))
+    return segments
+
+
+def _time_lattice_resolution_by_variable_time(
+    rows: Sequence[ForcingTimeseriesRow],
+) -> dict[tuple[str, datetime], str]:
+    native_resolution_by_time: dict[tuple[str, datetime], str] = {}
     variables = sorted({row.variable for row in rows})
     for variable in variables:
-        variable_rows = [row for row in rows if row.variable == variable]
-        valid_times = sorted({_ensure_utc(row.valid_time) for row in variable_rows})
-        native_resolution = next((row.native_resolution for row in variable_rows if row.native_resolution), None)
-        if not valid_times or native_resolution is None:
+        rows_for_variable = [row for row in rows if row.variable == variable]
+        labels_by_time: dict[datetime, set[str]] = {}
+        for row in rows_for_variable:
+            label = str(row.native_resolution or "").strip()
+            if label:
+                labels_by_time.setdefault(_ensure_utc(row.valid_time), set()).add(label)
+        ordered_times = sorted({_ensure_utc(row.valid_time) for row in rows_for_variable})
+        if not ordered_times:
             continue
-        segments.append(
-            {
-                "variable": variable,
-                "valid_time_start": _format_time(valid_times[0]),
-                "valid_time_end": _format_time(valid_times[-1]),
-                "native_resolution": native_resolution,
-            }
-        )
-    return segments
+        for index, valid_time in enumerate(ordered_times):
+            if index > 0:
+                inferred = _duration_label(valid_time - ordered_times[index - 1])
+            elif len(ordered_times) > 1:
+                inferred = _duration_label(ordered_times[1] - valid_time)
+            else:
+                inferred = None
+            existing = sorted(labels_by_time.get(valid_time, ()))
+            native_resolution = inferred or (existing[0] if existing else None)
+            if native_resolution:
+                native_resolution_by_time[(variable, valid_time)] = native_resolution
+    return native_resolution_by_time
+
+
+def _time_lattice_segment(variable: str, start: datetime, end: datetime, native_resolution: str) -> dict[str, Any]:
+    return {
+        "variable": variable,
+        "valid_time_start": _format_time(start),
+        "valid_time_end": _format_time(end),
+        "native_resolution": native_resolution,
+    }
+
+
+def _duration_label(delta: timedelta) -> str | None:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return None
+    if total_seconds % 3600 == 0:
+        return f"{total_seconds // 3600}h"
+    if total_seconds % 60 == 0:
+        return f"{total_seconds // 60}min"
+    return None
+
+
+def _native_resolution_delta(native_resolution: str) -> timedelta | None:
+    match = _NATIVE_RESOLUTION_RE.match(native_resolution)
+    if match is None:
+        return None
+    value = int(match.group("value"))
+    if match.group("unit").lower() == "h":
+        return timedelta(hours=value)
+    return timedelta(minutes=value)
