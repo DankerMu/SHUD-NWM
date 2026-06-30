@@ -5178,6 +5178,83 @@ def test_manual_retry_overrides_stale_created_hydro_placeholder_after_permanent_
     assert decision.action == "retry"
     assert decision.reason == "manual_retry_requested"
     assert decision.evidence["manual_retry"]["new_attempt"] == 4
+    assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is True
+
+
+def test_manual_retry_candidate_bypasses_repository_active_placeholder(
+    tmp_path: Path,
+) -> None:
+    class ActivePlaceholderManualRetryRepository(FakeCandidateStateRepository):
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    failed_job_id = "job_cycle_gfs_2026052106_model_a_forecast_retry_3"
+    active_repository = ActivePlaceholderManualRetryRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": "created",
+            "pipeline_status": "permanently_failed",
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    **identity,
+                    "job_id": failed_job_id,
+                    "status": "permanently_failed",
+                    "stage": "forecast",
+                    "retry_count": 3,
+                    "error_code": "NODE_FAILURE",
+                    "updated_at": "2026-05-21T06:57:16Z",
+                }
+            ],
+            "pipeline_events": [
+                {
+                    "event_id": 101,
+                    "entity_id": failed_job_id,
+                    "event_type": "permanently_failed",
+                    "status_from": "failed",
+                    "status_to": "permanently_failed",
+                    "created_at": "2026-05-21T06:57:16Z",
+                    "details": {**identity, "final_retry_count": 3, "last_error": "NODE_FAILURE"},
+                },
+                {
+                    "event_id": 102,
+                    "entity_id": failed_job_id,
+                    "event_type": "retry",
+                    "status_from": "permanently_failed",
+                    "status_to": "manual_repair_requested",
+                    "created_at": "2026-05-21T07:06:07Z",
+                    "details": {
+                        **identity,
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 4,
+                        "previous_job_id": failed_job_id,
+                        "prior_failure_reason": "NODE_FAILURE",
+                    },
+                },
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["candidates"][0]["state_evidence"]["decision"] == "manual_retry"
+    assert orchestrator.calls[0]["basins"][0]["manual_retry_attempt"] == 4
 
 
 @pytest.mark.parametrize(

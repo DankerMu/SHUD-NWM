@@ -288,11 +288,20 @@ def _candidate_state_is_candidate_scoped_retry(decision: CandidateStateDecision 
         str(evidence.get("restart_stage") or evidence.get("restart_from_stage") or "")
     )
     task_identity = evidence.get("task_identity")
+    manual_retry = evidence.get("manual_retry")
+    manual_retry_marker = (
+        isinstance(manual_retry, Mapping)
+        and (manual_retry.get("marker") or manual_retry.get("requested") or manual_retry.get("allowed"))
+    )
     return bool(
         isinstance(identity, Mapping)
         and identity.get("candidate_id")
         and identity.get("run_id")
-        and (restart_stage is not None or (isinstance(task_identity, Mapping) and bool(task_identity)))
+        and (
+            restart_stage is not None
+            or (isinstance(task_identity, Mapping) and bool(task_identity))
+            or manual_retry_marker
+        )
     )
 
 def _call_active_slurm_jobs_provider(
