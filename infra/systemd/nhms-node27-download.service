@@ -4,7 +4,7 @@ Description=NHMS node-27 raw GFS/IFS source download
 [Service]
 Type=oneshot
 WorkingDirectory=/home/nwm/NWM
-ExecStart=/home/nwm/NWM/scripts/node27_download_once.sh
+ExecStart=/bin/bash /home/nwm/NWM/scripts/node27_download_once.sh
 StandardOutput=append:/home/nwm/node27-download-logs/systemd.log
 StandardError=append:/home/nwm/node27-download-logs/systemd.err
 TimeoutStartSec=0
