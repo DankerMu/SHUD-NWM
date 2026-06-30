@@ -906,3 +906,27 @@ def test_publish_tiles_command_exists(capsys):
     assert payload["cycle_id"] == "missing_cycle"
     assert payload["error_code"] in {"WORKSPACE_ROOT_MISSING", "OBJECT_STORE_ROOT_MISSING", "DATABASE_URL_MISSING"}
     assert payload["layers"] == []
+
+
+def test_publish_tiles_compute_control_without_database_url_defers_to_node27(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "ifs_2026062712"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["status"] == "deferred_to_node27_ingest"
+    assert payload["cycle_id"] == "ifs_2026062712"
+    assert payload["layers"] == []
+    assert payload["artifacts"] == []
+    assert payload["lineage"]["reason_code"] == "NODE22_DB_FREE_PUBLISH_DEFERRED"
+    assert payload["lineage"]["deferred_to"] == "node27_autopipeline"
