@@ -887,6 +887,44 @@ def _activate_model(database_url: str, model_id: str) -> int:
         conn.close()
 
 
+def _model_river_network_version_id(database_url: str, model_id: str) -> str | None:
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT river_network_version_id
+                FROM core.model_instance
+                WHERE model_id = %s
+                """,
+                (model_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] else None
+    finally:
+        conn.close()
+
+
+def _ensure_seeded_basin_display_ready(database_url: str, model_id: str) -> dict[str, Any]:
+    """Make an existing imported basin visible to display consumers.
+
+    ``core.basin`` being present only proves the generic registry import ran at
+    least once. Display still needs the model active and output reaches carrying
+    geometry; older seed passes can leave both incomplete.
+    """
+    rnv_id = _model_river_network_version_id(database_url, model_id)
+    if not rnv_id:
+        raise ValueError(f"model_instance missing or incomplete for {model_id}")
+    geom_rows = _backfill_output_geometry(database_url, rnv_id)
+    activated = _activate_model(database_url, model_id)
+    return {
+        "model_id": model_id,
+        "river_network_version_id": rnv_id,
+        "output_geometry_backfilled": geom_rows,
+        "model_activated_rows": activated,
+    }
+
+
 def _backfill_output_geometry(database_url: str, river_network_version_id: str) -> int:
     """Copy reach geometry onto the NULL-geom ``.sp.riv`` output reaches the
     generic import seeds. The import deliberately leaves those reaches NULL
@@ -1471,12 +1509,29 @@ def main(argv: list[str] | None = None) -> int:
         identity = seed_identities[basin]
         basin_slug = identity.get("basin_slug") or basin
         if _basin_seeded(database_url, identity["basin_id"]):
+            try:
+                display_ready = _ensure_seeded_basin_display_ready(database_url, identity["model_id"])
+            except Exception as exc:  # noqa: BLE001 - record + continue, isolate failure
+                seed_results.append(
+                    {
+                        "basin": basin,
+                        "basin_slug": basin_slug,
+                        "outcome": "seed_failed",
+                        "stage": "display_ready",
+                        "basin_id": identity["basin_id"],
+                        "model_id": identity["model_id"],
+                        "identity_source": identity.get("identity_source"),
+                        "error": redact_text(str(exc)),
+                    }
+                )
+                continue
             seed_results.append(
                 {
                     "basin": basin,
                     "basin_slug": basin_slug,
                     "outcome": "already_seeded",
                     "basin_id": identity["basin_id"],
+                    **display_ready,
                     "identity_source": identity.get("identity_source"),
                 }
             )

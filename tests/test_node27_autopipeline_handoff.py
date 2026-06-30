@@ -61,6 +61,16 @@ def _prepare_autopipe(
     published_calls: list[str] = []
 
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        autopipe,
+        "_ensure_seeded_basin_display_ready",
+        lambda _database_url, model_id: {
+            "model_id": model_id,
+            "river_network_version_id": f"{model_id}_rivnet",
+            "output_geometry_backfilled": 0,
+            "model_activated_rows": 1,
+        },
+    )
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: set())
     monkeypatch.setenv("AUTOPIPE_WORK_ROOT", str(work_root))
     monkeypatch.setenv("AUTOPIPE_LOG_ROOT", str(log_root))

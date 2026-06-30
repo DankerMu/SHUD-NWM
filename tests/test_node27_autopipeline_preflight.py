@@ -115,6 +115,15 @@ def _fail_if_called(name: str) -> Callable[..., Any]:
     return fail
 
 
+def _display_ready_stub(_database_url: str, model_id: str) -> dict[str, Any]:
+    return {
+        "model_id": model_id,
+        "river_network_version_id": f"{model_id}_rivnet",
+        "output_geometry_backfilled": 0,
+        "model_activated_rows": 1,
+    }
+
+
 def _blocker_codes(summary: dict[str, Any]) -> set[str]:
     return {blocker["code"] for blocker in summary["ingest"]["preflight"]["blockers"]}
 
@@ -642,6 +651,7 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
     _write_run(object_store_root, RUN_QHH, basin="qhh")
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", _display_ready_stub)
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_QHH})
     monkeypatch.setattr(autopipe, "_process_run", _fail_if_called("_process_run"))
     published_calls: list[str] = []
@@ -681,6 +691,54 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["runs"]["published"] == 5
     assert published_calls == [NODE27_DATABASE_URL]
     assert "writer-secret" not in rendered
+
+
+def test_already_seeded_registry_is_reactivated_for_display(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    inventory = {
+        "models": [
+            _inventory_model("qhh"),
+            _inventory_model("zhaochen/BST"),
+        ]
+    }
+    monkeypatch.setattr(autopipe, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: set())
+    monkeypatch.setattr(autopipe, "_seed_basin", _fail_if_called("_seed_basin"))
+    monkeypatch.setattr(autopipe, "_publish_display_runs", lambda _database_url: 0)
+    ready_calls: list[tuple[str, str]] = []
+
+    def fake_display_ready(database_url: str, model_id: str) -> dict[str, Any]:
+        ready_calls.append((database_url, model_id))
+        return {
+            "model_id": model_id,
+            "river_network_version_id": f"{model_id}_rivnet",
+            "output_geometry_backfilled": 2,
+            "model_activated_rows": 1,
+        }
+
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", fake_display_ready)
+
+    rc, summary, _rendered = _run_main(
+        capsys,
+        [*_args(object_store_root, basins_root, NODE27_DATABASE_URL), "--seed-only"],
+    )
+
+    assert rc == 0
+    assert summary["seed"]["already_seeded"] == ["qhh", "zhaochen_bst"]
+    assert summary["seed"]["failed"] == []
+    assert ready_calls == [
+        (NODE27_DATABASE_URL, "basins_qhh_shud"),
+        (NODE27_DATABASE_URL, "basins_zhaochen_bst_shud"),
+    ]
+    assert {
+        (detail["basin"], detail["model_activated_rows"], detail["output_geometry_backfilled"])
+        for detail in summary["seed"]["details"]
+    } == {("qhh", 1, 2), ("zhaochen_bst", 1, 2)}
 
 
 def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
@@ -781,6 +839,7 @@ def test_basin_seed_failure_isolated_after_valid_preflight(
     _write_run(object_store_root, RUN_QHH, basin="qhh")
     _write_run(object_store_root, RUN_HEIHE, basin="heihe")
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda _database_url, basin_id: basin_id == "basins_heihe")
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", _display_ready_stub)
 
     def fake_seed(**kwargs: object) -> dict[str, Any]:
         return {"basin": kwargs["basin"], "outcome": "seed_failed", "stage": "import", "error": "secret=seed-token"}
@@ -820,6 +879,7 @@ def test_one_run_failure_isolated_after_valid_preflight(
     _write_run(object_store_root, RUN_QHH, basin="qhh")
     _write_run(object_store_root, RUN_QHH_NEXT, basin="qhh")
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", _display_ready_stub)
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: set())
 
     def fake_process_run(run_id: str, *_args: object, **_kwargs: object) -> dict[str, Any]:
