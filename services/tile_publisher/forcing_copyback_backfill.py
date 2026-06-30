@@ -61,7 +61,7 @@ _DISCOVER_BACKFILL_RUNS_SQL = """
     FROM hydro.hydro_run h
     LEFT JOIN met.forcing_version fv
       ON fv.forcing_version_id = h.forcing_version_id
-    WHERE h.status IN ('parsed', 'frequency_done', 'published')
+    WHERE h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
       AND EXISTS (
           SELECT 1
           FROM hydro.river_timeseries rt

@@ -528,14 +528,14 @@ class ForecastOrchestratorCycleMixin:
     def _success_cycle_status(self, stage: _chain.StageDefinition, context: _chain.CycleOrchestrationContext) -> str:
         if not context.had_partial:
             return stage.success_cycle_status
-        if stage.stage in {"parse", "state_save_qc", "frequency", "publish"}:
+        if stage.stage in {"parse", "state_save_qc"}:
             return "parsed_partial"
         if stage.stage in {"forcing", "forecast"}:
             return "forcing_ready_partial"
         return context.last_partial_status or stage.success_cycle_status
 
     def _partial_cycle_status(self, stage: _chain.StageDefinition) -> str:
-        if stage.stage in {"parse", "state_save_qc", "frequency"}:
+        if stage.stage in {"parse", "state_save_qc"}:
             return "parsed_partial"
         return "forcing_ready_partial"
 

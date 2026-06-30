@@ -321,7 +321,7 @@ MODEL_RUN_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.MODEL_RUN_EVIDENCE_SCHEM
 SCHEDULER_EVIDENCE_CONTRACT_ID = _scheduler_evidence.SCHEDULER_EVIDENCE_CONTRACT_ID
 SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = _scheduler_evidence.SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE
 SCHEDULER_EVIDENCE_GITHUB_ISSUE = _scheduler_evidence.SCHEDULER_EVIDENCE_GITHUB_ISSUE
-SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc", "frequency"}
+SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
@@ -392,12 +392,9 @@ TERMINAL_PIPELINE_STATUSES = {
 PIPELINE_TERMINAL_SUCCESS_STAGES = {
     "parse",
     "state_save_qc",
-    "frequency",
-    "publish",
     "parse_output",
     "save_state_snapshot",
     "save_state_snapshot_array",
-    "publish_tiles",
 }
 UNKNOWN_AFTER_ATTEMPT = _scheduler_evidence.UNKNOWN_AFTER_ATTEMPT
 uuid4 = _uuid4

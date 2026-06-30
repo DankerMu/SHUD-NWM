@@ -19,7 +19,7 @@ from services.orchestrator.chain import ForecastOrchestrator
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
-SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc", "frequency"}
+SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")

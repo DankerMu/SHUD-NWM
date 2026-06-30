@@ -287,6 +287,10 @@ def _successful_control_node_publisher(calls: list[dict[str, Any]] | None = None
     return _ControlNodePublisher
 
 
+def _legacy_publish_stage() -> StageDefinition:
+    return StageDefinition("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish")
+
+
 class FakeCycleRepository:
     def __init__(self, *, active: bool = False) -> None:
         self.active = active
@@ -1746,8 +1750,6 @@ def test_chain_stage_catalog_preserves_static_snapshots_and_legacy_identity() ->
             "failed_publish",
             True,
         ),
-        ("frequency", "compute_frequency_array", "compute_frequency_array.sbatch", "complete", "failed_parse", True),
-        ("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish", False),
     ]
 
     assert {
@@ -1817,7 +1819,7 @@ def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> Non
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
 
 
-def test_m3_forecast_saves_state_before_frequency() -> None:
+def test_m3_forecast_ends_after_state_save_qc() -> None:
     stages = [stage.stage for stage in M3_STAGES]
 
     assert stages == [
@@ -1826,8 +1828,6 @@ def test_m3_forecast_saves_state_before_frequency() -> None:
         "forecast",
         "parse",
         "state_save_qc",
-        "frequency",
-        "publish",
     ]
 
 
@@ -1850,7 +1850,7 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
         for submission in client.submissions
         if submission["stage"] in {"convert", "publish"}
     }
-    assert set(non_array_submissions) == {"convert", "publish"}
+    assert set(non_array_submissions) == {"convert"}
     for submission in non_array_submissions.values():
         assert submission["slurm_job_type_templates"] == dict(DEFAULT_JOB_TYPE_TEMPLATES)
         assert submission["slurm_env"] == {
@@ -1989,7 +1989,7 @@ def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "complete"
-    for stage in ("forcing", "forecast", "parse", "state_save_qc", "frequency"):
+    for stage in ("forcing", "forecast", "parse", "state_save_qc"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100"
         assert job["model_id"] is None
@@ -2012,7 +2012,7 @@ def test_single_candidate_downstream_restart_jobs_are_candidate_scoped(tmp_path:
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
 
     assert result.status == "complete"
-    for stage in ("parse", "state_save_qc", "frequency", "publish"):
+    for stage in ("parse", "state_save_qc"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse"
         assert job["model_id"] == "model_0"
@@ -2046,10 +2046,8 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     assert [submission["stage"] for submission in client.submissions] == [
         "parse",
         "state_save_qc",
-        "frequency",
-        "publish",
     ]
-    for stage in ("parse", "state_save_qc", "frequency", "publish"):
+    for stage in ("parse", "state_save_qc"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_0_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse_model_0"
         assert job["model_id"] == "model_0"
@@ -2079,14 +2077,10 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     assert [submission["stage"] for submission in client.submissions[first_submission_count:]] == [
         "parse",
         "state_save_qc",
-        "frequency",
-        "publish",
     ]
     assert [stage.pipeline_job_id for stage in second_result.stages] == [
         "job_cycle_gfs_2026050100_parse_model_1_parse",
         "job_cycle_gfs_2026050100_parse_model_1_state_save_qc",
-        "job_cycle_gfs_2026050100_parse_model_1_frequency",
-        "job_cycle_gfs_2026050100_parse_model_1_publish",
     ]
     for stage in ("parse", "state_save_qc", "frequency", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_1_{stage}"]
@@ -3340,8 +3334,6 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
     assert [submission["stage"] for submission in client.submissions] == [
         "parse",
         "state_save_qc",
-        "frequency",
-        "publish",
     ]
     assert "job_cycle_gfs_2026050100_download" not in repository.jobs
     assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
@@ -3350,11 +3342,10 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
 @pytest.mark.parametrize(
     ("restart_stage", "expected_stages"),
     [
-        ("frequency", ["frequency", "publish"]),
-        ("publish", ["publish"]),
+        ("state_save_qc", ["state_save_qc"]),
     ],
 )
-def test_restart_stage_frequency_and_publish_skip_durable_upstream_stages(
+def test_restart_stage_state_save_qc_skips_durable_upstream_stages(
     tmp_path: Path,
     restart_stage: str,
     expected_stages: list[str],
@@ -7966,7 +7957,11 @@ def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
         active_basins=[],
     )
 
-    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-local-publish")
+    result = orchestrator._run_local_publish_stage(
+        _legacy_publish_stage(),
+        context,
+        pipeline_job_id="job-local-publish",
+    )
 
     assert result.status == "succeeded"
     assert calls[-1] == {"cycle_id": "gfs_2026050100"}
@@ -8019,7 +8014,7 @@ def test_chain_tile_publisher_compat_local_publish_failure_paths(
 
     monkeypatch.setattr(legacy_chain, "TilePublisher", _OwnerPublishErrorPublisher)
 
-    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-owner-error")
+    result = orchestrator._run_local_publish_stage(_legacy_publish_stage(), context, pipeline_job_id="job-owner-error")
 
     assert result.status == "failed"
     assert result.error_code == "NO_PUBLISHABLE_PRODUCTS"
@@ -8048,7 +8043,11 @@ def test_chain_tile_publisher_compat_local_publish_failure_paths(
 
     monkeypatch.setattr(legacy_chain, "TilePublisher", _GenericFailurePublisher)
 
-    result = orchestrator._run_local_publish_stage(M3_STAGES[-1], context, pipeline_job_id="job-generic-error")
+    result = orchestrator._run_local_publish_stage(
+        _legacy_publish_stage(),
+        context,
+        pipeline_job_id="job-generic-error",
+    )
 
     assert result.status == "failed"
     assert result.error_code == "PUBLISH_TILES_FAILED"
@@ -9902,11 +9901,12 @@ def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
     monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
     monkeypatch.setattr(orchestrator, "_run_local_publish_stage", _run_local_publish_stage)
 
-    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[-1], context)
+    publish_stage = _legacy_publish_stage()
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(publish_stage, context)
 
     assert result.status == "succeeded"
     assert aggregation is None
-    assert publish_calls == [f"job_{context.run_id}_{M3_STAGES[-1].stage}"]
+    assert publish_calls == [f"job_{context.run_id}_{publish_stage.stage}"]
 
 
 def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -> None:

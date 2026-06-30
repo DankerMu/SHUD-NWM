@@ -65,7 +65,7 @@ _TERMINAL_CYCLE_STATUSES = {
     "failed_publish",
     "cancelled",
 }
-_STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "state_save_qc", "frequency", "publish")
+_STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "state_save_qc")
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
 _MAX_PUBLIC_LOG_URI_LENGTH = PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH

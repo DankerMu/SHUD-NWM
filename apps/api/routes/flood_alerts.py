@@ -67,7 +67,7 @@ from services.tiles.mvt import (
 router = APIRouter(tags=["flood-alerts"])
 
 # Stable national-overview tile identity. The discharge layer aggregates every basin's
-# latest frequency-ready run, so the tile/cache identity is a fixed national id rather
+# latest display-ready run, so the tile/cache identity is a fixed national id rather
 # than a single run_id.
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
 HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin"
@@ -83,6 +83,7 @@ WARNING_COLORS = {
 }
 WARNING_LEVELS = tuple(WARNING_COLORS)
 USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
+DISPLAY_PRODUCT_READY_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
 FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
 # Single source of truth for the public layer catalog advertised by
 # `/api/v1/layers` and accepted by `/api/v1/layers/{layer_id}/valid-times`.
@@ -427,10 +428,10 @@ def list_layers(
 
     def _load() -> list[dict[str, Any]]:
         if run_id is not None:
-            run = _require_frequency_ready(session, run_id)
+            run = _require_display_ready(session, run_id)
         else:
-            # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/river-network
-            # 仅需 frequency-ready 水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
+            # 目录默认 run 选最新 display-ready（不要求洪频完整）：discharge/river-network
+            # 仅需可展示水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
             # 无洪频基线的流域（QHH/Heihe）因此仍能暴露 discharge，而非整目录空。
             run = latest_frequency_ready_run(session)
             if run is None:
@@ -494,7 +495,7 @@ def list_layer_valid_times(
         run_id = requested_run_id
         if run_id is None and layer_id == "discharge":
             # National discharge: union of valid-times across every basin's latest
-            # frequency-ready run, matching the run-less catalog/tile template.
+            # display-ready run, matching the run-less catalog/tile template.
             if duration is not None:
                 raise ApiError(
                     status_code=422,
@@ -505,10 +506,14 @@ def list_layer_valid_times(
             return national_discharge_valid_times(session).model_dump()
         if run_id is not None:
             validate_identifier(run_id, "run_id")
-            run = _require_frequency_ready(session, run_id)
+            run = (
+                _require_frequency_ready(session, run_id)
+                if layer_id in {"flood-return-period", "warning-level"}
+                else _require_display_ready(session, run_id)
+            )
         else:
             # 洪频/预警 valid-times 维持 latest_ready_run（要求洪频完整，无则空、不抛错）；
-            # discharge/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
+            # discharge/river-network 用 display-ready 选择器，使无洪频流域也能发现有效时间。
             if layer_id in {"flood-return-period", "warning-level"}:
                 run = latest_ready_run(session)
             else:
@@ -1073,7 +1078,7 @@ def hydro_mvt_tile(
     validate_identifier(variable, "variable")
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
-    run = _require_frequency_ready(session, run_id)
+    run = _require_display_ready(session, run_id)
     basin_version_id, river_network_version_id = _require_run_source_identity(
         run,
         layer_id=public_hydro_layer_id(variable),
@@ -1131,8 +1136,8 @@ def hydro_national_mvt_tile(
     """National discharge overview tile.
 
     Renders the requested hydrological variable for every basin by joining each river
-    network's latest frequency-ready run (selected inside the SQL). There is no single
-    run/basin identity, so the per-run frequency-ready / source-identity preconditions
+    network's latest display-ready run (selected inside the SQL). There is no single
+    run/basin identity, so the per-run display-ready / source-identity preconditions
     used by the single-run hydro route do not apply; the live-PostGIS gate still does.
     """
     validate_identifier(variable, "variable")
@@ -1894,6 +1899,34 @@ def _run_source_version(run: dict[str, Any] | Any) -> str:
 
 
 def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
+    row = _run_row(session, run_id)
+    if str(row["status"]) not in FLOOD_PRODUCT_READY_STATUSES:
+        raise ApiError(
+            status_code=409,
+            code="FREQUENCY_NOT_COMPUTED",
+            message="Return period results not yet available for this run",
+            details={"run_id": run_id, "status": row["status"]},
+        )
+    return row
+
+
+def _require_display_ready(session: Session, run_id: str) -> dict[str, Any]:
+    row = _run_row(session, run_id)
+    if str(row["status"]) not in DISPLAY_PRODUCT_READY_STATUSES:
+        raise ApiError(
+            status_code=409,
+            code="DISPLAY_PRODUCT_NOT_READY",
+            message="Display hydrology products are not yet available for this run",
+            details={
+                "run_id": run_id,
+                "status": row["status"],
+                "allowed_statuses": sorted(DISPLAY_PRODUCT_READY_STATUSES),
+            },
+        )
+    return row
+
+
+def _run_row(session: Session, run_id: str) -> dict[str, Any]:
     row = session.execute(
         text(
             """
@@ -1913,13 +1946,6 @@ def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
             code="RUN_NOT_FOUND",
             message=f"Run not found: {run_id}",
             details={"run_id": run_id},
-        )
-    if str(row["status"]) not in FLOOD_PRODUCT_READY_STATUSES:
-        raise ApiError(
-            status_code=409,
-            code="FREQUENCY_NOT_COMPUTED",
-            message="Return period results not yet available for this run",
-            details={"run_id": run_id, "status": row["status"]},
         )
     return dict(row)
 
@@ -2308,7 +2334,7 @@ def _default_layer_catalog(
         national_discharge = layer_id == "discharge"
         if national_discharge:
             # No run_id: discharge becomes a national overview (union across every
-            # basin's latest frequency-ready run), with a run-less tile template.
+            # basin's latest display-ready run), with a run-less tile template.
             valid_time_sample = national_discharge_valid_times(session)
         elif run_id is not None:
             valid_time_sample = valid_times_for_layer(

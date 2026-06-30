@@ -433,7 +433,7 @@ def apply_array_progress(
     deps = deps or _default_dependencies()
     deps.record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
     if aggregation.status == "succeeded":
-        if context.had_partial and stage.stage in {"parse", "state_save_qc", "frequency"}:
+        if context.had_partial and stage.stage in {"parse", "state_save_qc"}:
             context.last_partial_status = "parsed_partial"
         return
     if aggregation.status == "failed":

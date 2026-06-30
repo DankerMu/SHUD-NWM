@@ -50,15 +50,6 @@ M3_STAGES: tuple[StageDefinition, ...] = (
         "failed_publish",
         is_array=True,
     ),
-    StageDefinition(
-        "frequency",
-        "compute_frequency_array",
-        "compute_frequency_array.sbatch",
-        "complete",
-        "failed_parse",
-        is_array=True,
-    ),
-    StageDefinition("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish", is_array=False),
 )
 
 STAGES: tuple[StageDefinition, ...] = M3_STAGES

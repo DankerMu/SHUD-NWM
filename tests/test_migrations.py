@@ -43,6 +43,7 @@ EXPECTED_MIGRATIONS = [
     "000037_river_segment_multilinestring.sql",
     "000038_direct_grid_interp_weight_constraints.sql",
     "000039_crosswalk_external_identity.sql",
+    "000040_display_ready_succeeded_status_index.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -454,6 +455,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
     parsed_status_migration = dict(_migration_sql())["000030_qhh_latest_display_parsed_status_index.sql"]
     performance_migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
+    display_ready_migration = dict(_migration_sql())["000040_display_ready_succeeded_status_index.sql"]
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
     ).read_text(encoding="utf-8")
@@ -495,6 +497,10 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_product_basin_status_idx" in performance_migration
     assert "ON hydro.hydro_run (basin_version_id, status)" in performance_migration
     assert "WHERE status IN ('parsed', 'frequency_done', 'published')" in performance_migration
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_ready_candidate_idx" in display_ready_migration
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_ready_basin_status_idx" in display_ready_migration
+    assert "AND status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in display_ready_migration
+    assert "WHERE status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in display_ready_migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
         "basin_id",
         "basin_version_id",
@@ -533,8 +539,8 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
-    assert "h.status IN ('parsed', 'frequency_done', 'published')" in query_source
-    assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in query_source
+    assert "h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in query_source
+    assert "h.status NOT IN ('succeeded', 'parsed', 'frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
     # #5 起 _flood_product_quality_join 增加 node-27 缺表 fallback 分支（available=False
     # 用 LATERAL 聚合 flood.return_period_result），函数源码因此合法含 LATERAL/GROUP BY 字样。

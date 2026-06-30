@@ -16,7 +16,7 @@ QHH_LATEST_CANDIDATE_LIMIT = QHH_LATEST_SEARCH_LIMIT
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
-QHH_LATEST_READY_RUN_STATUSES = ("parsed", "frequency_done", "published")
+QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "frequency_done", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
 FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
@@ -1287,7 +1287,7 @@ class PsycopgForecastStore:
               ON fv.forcing_version_id = h.forcing_version_id
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
-              AND h.status IN ('parsed', 'frequency_done', 'published')
+              AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
               AND LOWER(h.source_id) = LOWER(%s)
               AND h.cycle_time IS NOT NULL
             ORDER BY h.cycle_time DESC, h.run_id DESC
@@ -1399,7 +1399,7 @@ class PsycopgForecastStore:
                 {_flood_product_quality_join("fpq", quality_mode)}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
-                  AND h.status IN ('parsed', 'frequency_done', 'published')
+                  AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
                   AND LOWER(h.source_id) = LOWER(%s)
                   {identity_sql}
                   AND h.cycle_time IS NOT NULL
@@ -1940,7 +1940,7 @@ class PsycopgForecastStore:
                 {_flood_product_quality_join("fpq", quality_mode)}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
-                  AND h.status IN ('parsed', 'frequency_done', 'published')
+                  AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
                   AND LOWER(h.source_id) = LOWER(%s)
                   {identity_sql}
                   AND h.cycle_time IS NOT NULL
@@ -2070,7 +2070,7 @@ class PsycopgForecastStore:
             {_flood_product_quality_join("fpq", quality_mode)}
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
-              AND h.status NOT IN ('parsed', 'frequency_done', 'published')
+              AND h.status NOT IN ('succeeded', 'parsed', 'frequency_done', 'published')
               AND LOWER(h.source_id) = LOWER(%s)
               {identity_sql}
               AND h.cycle_time IS NOT NULL
@@ -3555,7 +3555,7 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "index": "hydro_run_qhh_latest_candidate_idx",
             "status": "covered_by_latest_product_candidate_index",
             "columns": ["LOWER(source_id)", "run_type", "basin_version_id", "cycle_time DESC", "run_id DESC"],
-            "predicate": "cycle_time IS NOT NULL AND status IN ('parsed', 'frequency_done', 'published')",
+            "predicate": "cycle_time IS NOT NULL AND status IN ('succeeded', 'parsed', 'frequency_done', 'published')",
         },
         {
             "table": "core.basin_version",

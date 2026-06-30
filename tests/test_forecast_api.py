@@ -2845,7 +2845,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
     assert "bv.basin_id = %s" in candidate_cte
     assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
-    assert "h.status IN ('parsed', 'frequency_done', 'published')" in candidate_cte
+    assert "h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in candidate_cte
     assert "h.run_type = 'forecast'" in candidate_cte
     assert "h.cycle_time IS NOT NULL" in candidate_cte
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
@@ -2936,10 +2936,10 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
 
     ready_statement, ready_parameters = store.cursor.executions[0]
     context_statement, context_parameters = store.cursor.executions[1]
-    assert "h.status IN ('parsed', 'frequency_done', 'published')" in ready_statement
+    assert "h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in ready_statement
     assert "FROM met.forcing_station_timeseries" in ready_statement
     assert "FROM hydro.river_timeseries" in ready_statement
-    assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in context_statement
+    assert "h.status NOT IN ('succeeded', 'parsed', 'frequency_done', 'published')" in context_statement
     assert "FROM met.forcing_station_timeseries" not in context_statement
     assert "FROM hydro.river_timeseries" not in context_statement
     assert ready_parameters == (

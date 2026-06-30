@@ -718,7 +718,7 @@ class TilePublisher:
             forcing_columns = set()
         where_clauses = [
             "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
-            "h.status IN ('parsed', 'frequency_done', 'published')",
+            "h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')",
             "r.variable = 'q_down'",
             "lower(h.source_id) = :source_id",
         ]

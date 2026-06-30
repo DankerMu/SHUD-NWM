@@ -83,7 +83,7 @@ _COVERAGE_CTES = """
               ON fv.forcing_version_id = h.forcing_version_id
             WHERE (%(basin_id)s IS NULL OR bv.basin_id = %(basin_id)s)
               AND h.run_type = 'forecast'
-              AND h.status IN ('parsed', 'frequency_done', 'published')
+              AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
               AND h.cycle_time IS NOT NULL
               AND (%(run_id)s IS NULL OR h.run_id = %(run_id)s)
         ),
@@ -512,7 +512,7 @@ def _eligible_run_ids(connection: Any) -> list[str]:
             SELECT h.run_id
             FROM hydro.hydro_run h
             WHERE h.run_type = 'forecast'
-              AND h.status IN ('parsed', 'frequency_done', 'published')
+              AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
               AND h.cycle_time IS NOT NULL
             ORDER BY h.cycle_time DESC, h.run_id DESC
             """,

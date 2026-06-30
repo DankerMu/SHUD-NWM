@@ -102,6 +102,12 @@ def test_summary_errors_and_zero_usable_curves() -> None:
 
 
 def test_ready_status_set_is_explicit_contract() -> None:
+    assert flood_alert_routes.DISPLAY_PRODUCT_READY_STATUSES == {
+        "succeeded",
+        "parsed",
+        "frequency_done",
+        "published",
+    }
     assert flood_alert_routes.FLOOD_PRODUCT_READY_STATUSES == {"frequency_done", "published"}
 
 
@@ -569,7 +575,7 @@ def test_latest_ready_run_uses_explicit_ready_quality() -> None:
     run_id = "zz_no_peak_latest_ready"
     valid_time = datetime(2026, 5, 5, tzinfo=UTC)
     with _store() as session:
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running'"))
         session.execute(
             text(
                 """
@@ -628,7 +634,7 @@ def test_full_ready_explicit_quality_preserves_three_three_zero_zero_counters_th
     run_id = "zz_explicit_full_ready_quality"
     valid_time = datetime(2026, 5, 6, tzinfo=UTC)
     with _store() as session:
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running'"))
         _insert_hydro_run(session, run_id=run_id, cycle_time=valid_time)
         for index, segment_id in enumerate(("seg_001", "seg_002", "seg_003"), start=1):
             _insert_result(
@@ -4694,12 +4700,17 @@ def test_single_run_hydro_tile_sql_has_no_basin_id_column() -> None:
 
 
 @pytest.mark.parametrize(
-    "layer_id",
-    ["flood-return-period", "warning-level", "discharge"],
+    ("layer_id", "expected_code"),
+    [
+        ("flood-return-period", "FREQUENCY_NOT_COMPUTED"),
+        ("warning-level", "FREQUENCY_NOT_COMPUTED"),
+        ("discharge", "DISPLAY_PRODUCT_NOT_READY"),
+    ],
 )
 def test_layer_valid_times_explicit_non_ready_run_requires_frequency_ready_before_discovery(
     monkeypatch: pytest.MonkeyPatch,
     layer_id: str,
+    expected_code: str,
 ) -> None:
     monkeypatch.setattr(
         flood_alert_routes,
@@ -4707,11 +4718,18 @@ def test_layer_valid_times_explicit_non_ready_run_requires_frequency_ready_befor
         lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called for non-ready run"),
     )
 
-    with _client() as client:
-        response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id=run_pending")
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running' WHERE run_id = 'run_pending'"))
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id=run_pending")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
 
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+    assert response.json()["error"]["code"] == expected_code
 
 
 @pytest.mark.parametrize(
@@ -4728,7 +4746,7 @@ def test_layer_valid_times_unscoped_no_ready_run_returns_empty_without_discovery
         lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called without a ready run"),
     )
     with _store() as session:
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running'"))
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -4766,7 +4784,7 @@ def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
         lambda *_args, **_kwargs: pytest.fail("live tile SQL called during layer discovery"),
     )
     with _store() as session:
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running'"))
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -4779,18 +4797,18 @@ def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
     assert response.json()["data"] == []
 
 
-def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_exposes_discharge() -> None:
-    """无洪频基线的 frequency-ready run（QHH/Heihe 现实：有 q_down 无 return-period）仍应暴露 discharge。
+def test_layer_catalog_unscoped_display_ready_without_flood_product_still_exposes_discharge() -> None:
+    """无洪频基线的 display-ready run（QHH/Heihe 现实：有 q_down 无 return-period）仍应暴露 discharge。
 
-    解耦回归：目录默认 run 选最新 frequency-ready（latest_frequency_ready_run），不再像 latest_ready_run
+    解耦回归：目录默认 run 选最新 display-ready（latest_frequency_ready_run），不再像 latest_ready_run
     那样内连接 flood.return_period_result。discharge/river-network 暴露，flood/warning 层
     仍在目录但被 _annotate_flood_layer_quality 标注 unavailable，不阻塞水文图层。
     """
     with _store() as session:
-        # RUN_ID 设为唯一 frequency-ready run，并移除其洪频产品
+        # RUN_ID 设为唯一 display-ready run，并移除其洪频产品
         rid = {"rid": RUN_ID}
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed' WHERE run_id != :rid"), rid)
-        session.execute(text("UPDATE hydro.hydro_run SET status = 'frequency_done' WHERE run_id = :rid"), rid)
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'running' WHERE run_id != :rid"), rid)
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'succeeded' WHERE run_id = :rid"), rid)
         session.execute(text("DELETE FROM flood.return_period_result WHERE run_id = :rid"), rid)
         _refresh_run_quality(session, RUN_ID)
         session.commit()
@@ -4798,12 +4816,14 @@ def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_expo
         try:
             with TestClient(app) as client:
                 response = client.get("/api/v1/layers")
+                explicit_response = client.get(f"/api/v1/layers?run_id={RUN_ID}")
                 discharge_valid_times = client.get("/api/v1/layers/discharge/valid-times")
                 flood_valid_times = client.get("/api/v1/layers/flood-return-period/valid-times")
         finally:
             app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
 
     assert response.status_code == 200
+    assert explicit_response.status_code == 200
     data = response.json()["data"]
     by_id = {layer["layer_id"]: layer for layer in data}
     # 无洪频仍暴露 discharge，且带可渲染 MVT 瓦片契约
