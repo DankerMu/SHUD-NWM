@@ -381,8 +381,8 @@ def _after_cycle_stage_terminal(
     aggregation: ArrayAggregation | None,
 ) -> None:
     if result_status == "succeeded":
-        if stage.stage == "parse":
-            _copyback_parsed_run_trees(self, context)
+        if _stage_should_copyback_run_trees(self, stage):
+            _copyback_stage_run_trees(self, context, stage=stage.stage)
         status = self._success_cycle_status(stage, context)
         if not (stage.stage == "publish" and context.had_partial):
             self.repository.update_forecast_cycle_status(
@@ -421,7 +421,13 @@ def _after_cycle_stage_terminal(
     )
 
 
-def _copyback_parsed_run_trees(self, context: CycleOrchestrationContext) -> None:
+def _stage_should_copyback_run_trees(self, stage: StageDefinition) -> bool:
+    if stage.stage == "parse":
+        return True
+    return stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"
+
+
+def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage: str) -> None:
     copyback_root = os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip()
     if not copyback_root:
         return
@@ -442,10 +448,10 @@ def _copyback_parsed_run_trees(self, context: CycleOrchestrationContext) -> None
             event_type="object_store_copyback",
             status_from=None,
             status_to="failed",
-            message="Run-tree object-store copyback failed after parse.",
+            message=f"Run-tree object-store copyback failed after {stage}.",
             details=_safe_pipeline_event_details(
                 {
-                    "stage": "parse",
+                    "stage": stage,
                     "run_ids": run_ids,
                     "error_code": error.code,
                     "error_message": error.message,
@@ -462,8 +468,8 @@ def _copyback_parsed_run_trees(self, context: CycleOrchestrationContext) -> None
         event_type="object_store_copyback",
         status_from=None,
         status_to=str(summary.get("status") or "completed"),
-        message="Run-tree object-store copyback completed after parse.",
-        details=_safe_pipeline_event_details({"stage": "parse", **summary}),
+        message=f"Run-tree object-store copyback completed after {stage}.",
+        details=_safe_pipeline_event_details({"stage": stage, **summary}),
     )
 
 

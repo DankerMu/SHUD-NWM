@@ -2383,6 +2383,50 @@ def test_parse_success_copybacks_active_run_trees(
     assert event["details"]["run_ids"] == ["run_0", "run_1"]
 
 
+def test_forecast_state_save_qc_terminal_success_copybacks_active_run_trees(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    calls: list[dict[str, Any]] = []
+
+    def fake_copyback_run_trees(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "status": "copied",
+            "root": str(copyback_root),
+            "run_ids": list(kwargs["run_ids"]),
+            "file_count": 4,
+            "byte_count": 100,
+            "runs": [{"run_id": run_id, "object_key": f"runs/{run_id}"} for run_id in kwargs["run_ids"]],
+        }
+
+    monkeypatch.setattr(chain_forecast_execution, "copyback_run_trees", fake_copyback_run_trees)
+
+    result = orchestrator.orchestrate_cycle("IFS", "2026050100", _basins(2))
+
+    assert result.status == "succeeded"
+    assert calls == [
+        {
+            "object_store_root": orchestrator.config.object_store_root,
+            "copyback_root": str(copyback_root),
+            "run_ids": ["run_0", "run_1"],
+        }
+    ]
+    event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
+    assert event["entity_type"] == "forecast_cycle"
+    assert event["entity_id"] == "ifs_2026050100"
+    assert event["status_to"] == "copied"
+    assert event["details"]["stage"] == "state_save_qc"
+    assert event["details"]["run_ids"] == ["run_0", "run_1"]
+
+
 def test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
