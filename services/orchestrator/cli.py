@@ -197,16 +197,18 @@ def _plan_production(
         if cycle_lag_hours is not None
         else _env_int("NHMS_SCHEDULER_CYCLE_LAG_HOURS", 0)
     )
-    explicit_now: datetime | None = None
     if cycle_time not in (None, ""):
         if lookback_hours is not None or cycle_lag_hours is not None or max_cycles_per_source is not None:
             raise ValueError(
                 "plan-production --cycle-time cannot be combined with "
                 "--lookback-hours, --cycle-lag-hours, or --max-cycles-per-source"
             )
-        explicit_now = parse_cycle_time(str(cycle_time))
+        target_cycle = parse_cycle_time(str(cycle_time))
+        lag_seconds = (datetime.now(UTC) - target_cycle).total_seconds()
+        if lag_seconds < 0:
+            raise ValueError("plan-production --cycle-time must not be in the future")
         resolved_lookback = 0
-        resolved_cycle_lag = 0
+        resolved_cycle_lag = int(lag_seconds // 3600)
         resolved_max_cycles = 1
         disable_backfill = True
     config_kwargs: dict[str, object] = {
@@ -226,8 +228,6 @@ def _plan_production(
     }
     if disable_backfill:
         config_kwargs["backfill_enabled"] = False
-    if explicit_now is not None:
-        config_kwargs["now"] = explicit_now
     if workspace_root is not None and lock_path is None:
         config_kwargs["scheduler_lock_root"] = None
     if workspace_root is not None and evidence_dir is None:

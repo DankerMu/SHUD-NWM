@@ -15044,12 +15044,12 @@ def test_plan_production_cli_cycle_time_pins_single_cycle_and_disables_backfill(
     monkeypatch.setenv("NHMS_SCHEDULER_CYCLE_LAG_HOURS", "16")
     monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
 
-    rc = cli.main(["plan-production", "--cycle-time", "2026-06-27T00:00:00Z"])
+    rc = cli.main(["plan-production", "--cycle-time", "2000-01-01T00:00:00Z"])
 
     assert rc == 0
-    assert captured["config"].now == _dt("2026-06-27T00:00:00Z")
+    assert captured["config"].now is None
     assert captured["config"].lookback_hours == 0
-    assert captured["config"].cycle_lag_hours == 0
+    assert captured["config"].cycle_lag_hours > 0
     assert captured["config"].max_cycles_per_source == 1
     assert captured["config"].backfill_enabled is False
 
