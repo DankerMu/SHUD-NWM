@@ -1816,6 +1816,44 @@ def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> Non
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
 
 
+def test_terminal_stage_forecast_stops_before_parse_state_and_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast")
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    assert result.status == "succeeded"
+    assert [stage.stage for stage in orchestrator.stages] == ["convert", "forcing", "forecast"]
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing", "forecast"]
+    assert [stage.status for stage in result.stages] == ["succeeded", "succeeded", "succeeded"]
+    assert repository.cycle_statuses[-1] == "forecast_running"
+    assert "parse" not in {job["stage"] for job in repository.jobs.values()}
+    assert "state_save_qc" not in {job["stage"] for job in repository.jobs.values()}
+    assert "publish" not in {job["stage"] for job in repository.jobs.values()}
+
+
+def test_orchestrator_config_from_env_reads_terminal_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast")
+
+    config = OrchestratorConfig.from_env()
+
+    assert config.terminal_stage == "forecast"
+
+
+def test_orchestrator_config_rejects_unknown_terminal_stage(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="NHMS_ORCHESTRATOR_TERMINAL_STAGE"):
+        OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            terminal_stage="parse_output",
+        )
+
+
 def test_m3_forecast_publishes_q_down_after_state_save_qc() -> None:
     stages = [stage.stage for stage in M3_STAGES]
 
@@ -7417,6 +7455,7 @@ def _orchestrator(
     orchestrator_cls: type[ForecastOrchestrator] = ForecastOrchestrator,
     slurm_job_type_templates: dict[str, str] | None = None,
     slurm_env: dict[str, str] | None = None,
+    terminal_stage: str | None = None,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -7428,6 +7467,7 @@ def _orchestrator(
         job_timeout_seconds=5,
         slurm_job_type_templates=slurm_job_type_templates or {},
         slurm_env=slurm_env or {},
+        terminal_stage=terminal_stage,
     )
     return orchestrator_cls(
         config=config,

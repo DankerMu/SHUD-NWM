@@ -23,6 +23,9 @@ class ForecastOrchestratorCycleMixin:
         )
         self.retry_service = retry_service
         self.retry_config = getattr(retry_service, "config", None) or _chain.RetryConfig()
+        if config.terminal_stage is not None:
+            self.stages = _chain.stages_through(self.stages, config.terminal_stage)
+            self.final_pipeline_status = "succeeded"
         self._active_cycles: set[str] = set()
         self.duplicate_submission_skips: list[dict[str, _chain.Any]] = []
 

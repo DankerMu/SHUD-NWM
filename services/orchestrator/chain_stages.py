@@ -62,6 +62,20 @@ M3_STAGES: tuple[StageDefinition, ...] = (
 
 STAGES: tuple[StageDefinition, ...] = M3_STAGES
 
+
+def stages_through(
+    stages: tuple[StageDefinition, ...],
+    terminal_stage: str | None,
+) -> tuple[StageDefinition, ...]:
+    if terminal_stage is None:
+        return stages
+    terminal = terminal_stage.strip()
+    for index, stage in enumerate(stages):
+        if stage.stage == terminal:
+            return stages[: index + 1]
+    known = ", ".join(stage.stage for stage in stages)
+    raise ValueError(f"terminal_stage must be one of: {known}")
+
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         "era5_download",
@@ -100,4 +114,5 @@ __all__ = [
     "LEGACY_FORECAST_STAGES",
     "M3_STAGES",
     "STAGES",
+    "stages_through",
 ]

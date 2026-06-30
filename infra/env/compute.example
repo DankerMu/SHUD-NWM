@@ -95,6 +95,10 @@ NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
 NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true
 NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
 NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
+# Node-22 is compute-only in the two-node production topology. It stops after
+# SHUD forecast output lands in the shared object-store; node-27 owns
+# parse/QC/ingest/display from that output.
+NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

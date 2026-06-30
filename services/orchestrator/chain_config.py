@@ -8,6 +8,7 @@ from pathlib import Path
 
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
+from services.orchestrator.chain_stages import STAGES
 from services.orchestrator.chain_types import OrchestratorError
 from workers.data_adapters.base import format_cycle_time
 
@@ -69,6 +70,7 @@ class OrchestratorConfig:
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
     require_forecast_warm_start: bool = False
+    terminal_stage: str | None = None
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
 
@@ -80,6 +82,7 @@ class OrchestratorConfig:
         object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
+        object.__setattr__(self, "terminal_stage", _normalize_terminal_stage(self.terminal_stage))
         if self.templates_dir is None:
             repo_root = Path(__file__).resolve().parents[2]
             object.__setattr__(self, "templates_dir", repo_root / "infra" / "sbatch")
@@ -108,6 +111,7 @@ class OrchestratorConfig:
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
             state_hard_stale_threshold_days=int(os.getenv("STATE_HARD_STALE_THRESHOLD_DAYS", "30")),
             require_forecast_warm_start=_env_flag("NHMS_REQUIRE_FORECAST_WARM_START", default=False),
+            terminal_stage=os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE") or None,
         )
 
 
@@ -121,3 +125,16 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value.")
+
+
+def _normalize_terminal_stage(value: str | None) -> str | None:
+    if value is None:
+        return None
+    terminal_stage = value.strip()
+    if not terminal_stage:
+        return None
+    known_stages = {stage.stage for stage in STAGES}
+    if terminal_stage not in known_stages:
+        known = ", ".join(stage.stage for stage in STAGES)
+        raise ValueError(f"NHMS_ORCHESTRATOR_TERMINAL_STAGE must be one of: {known}.")
+    return terminal_stage

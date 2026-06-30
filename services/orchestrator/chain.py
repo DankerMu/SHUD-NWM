@@ -61,6 +61,7 @@ from services.orchestrator.chain_stages import (
     ANALYSIS_STAGES,  # noqa: F401
     LEGACY_FORECAST_STAGES,  # noqa: F401
     STAGES,
+    stages_through,
 )
 from services.orchestrator.chain_stages import (
     M3_STAGES as M3_STAGES,
