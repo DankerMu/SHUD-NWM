@@ -9127,6 +9127,61 @@ def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
     assert orchestrator.calls == []
 
 
+def test_active_cycle_orchestration_with_model_state_only_skips_active_model(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+
+    class ActiveCyclePerModelStateRepository(PerModelCandidateStateRepository):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "model_a": {
+                        "pipeline_status": "pending",
+                        "pipeline_jobs": [
+                            {
+                                "job_id": "job_model_a_pending",
+                                "run_id": "fcst_gfs_2026052106_model_a",
+                                "status": "pending",
+                                "stage": "forcing",
+                            }
+                        ],
+                    },
+                    "model_b": None,
+                }
+            )
+            self.orchestration_checks: list[tuple[str, datetime]] = []
+            self.active_pipeline_checks: list[tuple[str, datetime, str]] = []
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            self.orchestration_checks.append((source_id, cycle_time))
+            return True
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            self.active_pipeline_checks.append((source_id, cycle_time, model_id))
+            return model_id == "model_a"
+
+    active_repository = ActiveCyclePerModelStateRepository()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert [item["model_id"] for item in result.evidence["skipped_candidates"]] == ["model_a"]
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert [item["model_id"] for item in result.evidence["candidates"]] == ["model_b"]
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls[0]["basins"][0]["model_id"] == "model_b"
+    assert active_repository.orchestration_checks == [("gfs", _dt("2026-05-21T06:00:00Z"))]
+    assert active_repository.active_pipeline_checks == [("gfs", _dt("2026-05-21T06:00:00Z"), "model_b")]
+
+
 @pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published", "complete"])
 def test_completed_hydro_state_is_skipped_as_completed_not_active(
     tmp_path: Path,

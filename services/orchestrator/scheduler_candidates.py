@@ -716,8 +716,10 @@ def build_candidates(
                     }
                 )
                 continue
-            cycle_active_blocks_candidate = has_active_orchestration and not (
-                context.config.cancel_active_slurm and active_slurm_jobs
+            cycle_active_blocks_candidate = (
+                has_active_orchestration
+                and not callable(state_provider)
+                and not (context.config.cancel_active_slurm and active_slurm_jobs)
             )
             if cycle_active_blocks_candidate and context.candidate_state_scoped_retry_detector(
                 state_decision,
