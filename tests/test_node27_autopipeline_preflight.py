@@ -67,6 +67,26 @@ def _write_run(object_store_root: Path, run_id: str, *, basin: str) -> None:
     (input_dir / "manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
 
+def _inventory_model(basin_slug: str, *, status: str = "valid", publishable: bool = True) -> dict[str, Any]:
+    slug_id = autopipe._slug_id(basin_slug)
+    input_name = basin_slug.rsplit("/", maxsplit=1)[-1]
+    return {
+        "basin_slug": basin_slug,
+        "source_path": f"/Basins/{basin_slug}",
+        "resolved_source_path": f"/Basins/{basin_slug}",
+        "source_is_symlink": False,
+        "shud_input_name": input_name,
+        "status": status,
+        "model_id": f"basins_{slug_id}_shud",
+        "suggested_ids": {
+            "basin_id": f"basins_{slug_id}",
+            "model_id": f"basins_{slug_id}_shud",
+        },
+        "default_publish_eligible": publishable,
+        "missing_required_files": [] if publishable else ["*.tsd.rl"],
+    }
+
+
 def _args(object_store_root: Path, basins_root: Path, database_url: str | None = None) -> list[str]:
     args = [
         "--object-store-root",
@@ -703,6 +723,53 @@ def test_seed_registry_import_uses_database_url_env_not_subprocess_argv(
     assert "writer-secret" not in argv_text
     assert import_env["DATABASE_URL"] == database_url
     assert "writer-secret" not in rendered
+
+
+def test_seed_registry_discovers_all_basins_from_inventory_without_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, basins_root, _work_root, _log_root = _prepare_roots(monkeypatch, tmp_path)
+    (basins_root / "qhh").mkdir()
+    (basins_root / "zhaochen" / "BST").mkdir(parents=True)
+    inventory = {
+        "models": [
+            _inventory_model("qhh"),
+            _inventory_model("zhaochen/BST"),
+        ]
+    }
+    monkeypatch.setattr(autopipe, "discover_basins_inventory", lambda _root: inventory)
+    monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(autopipe, "_backfill_output_geometry", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(autopipe, "_activate_model", lambda *_args, **_kwargs: 1)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
+        del env
+        calls.append(list(argv))
+        if "import-basins-registry" in argv:
+            return 0, json.dumps({"status": "ok", "river_network_version_id": "rnv"}) + "\n", ""
+        if "discover-basins" in argv or "publish-basins" in argv:
+            return 0, "{}\n", ""
+        raise AssertionError(f"unexpected seed command: {argv}")
+
+    monkeypatch.setattr(autopipe, "_run", fake_run)
+
+    rc, summary, _rendered = _run_main(
+        capsys,
+        [*_args(object_store_root, basins_root, NODE27_DATABASE_URL), "--seed-only"],
+    )
+
+    assert rc == 0
+    assert summary["discovered_runs"] == 0
+    assert summary["basins"] == ["qhh", "zhaochen_bst"]
+    assert summary["basin_slugs"] == ["qhh", "zhaochen/BST"]
+    assert summary["seed"]["seeded"] == ["qhh", "zhaochen_bst"]
+    publish_calls = [argv for argv in calls if "publish-basins" in argv]
+    assert any("vbasins-zhaochen_bst-production" in argv for argv in publish_calls)
+    discover_calls = [argv for argv in calls if "discover-basins" in argv]
+    assert any("zhaochen_bst-only-root" in " ".join(argv) for argv in discover_calls)
 
 
 def test_basin_seed_failure_isolated_after_valid_preflight(

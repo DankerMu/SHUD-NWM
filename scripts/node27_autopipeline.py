@@ -4,16 +4,17 @@ registries, then register -> object-store forcing handoff -> parse ->
 refresh-coverage every run.
 
 Generalises the earlier qhh-hardcoded ingest into a basin-agnostic pipeline so
-node-27 can self-serve any basin/run that appears under ``<OBJECT_STORE_ROOT>/runs/``:
+node-27 can self-serve every publishable basin under ``BASINS_ROOT`` plus any
+run that appears under ``<OBJECT_STORE_ROOT>/runs/``:
 
   1. Scan ``runs/`` and parse ``fcst_{gfs,ifs}_<cycle10>_basins_<basin>_shud``
      into (basin, source, cycle). Non-matching dirs are ignored.
-  2. For every distinct basin whose registry is not yet seeded
-     (``core.basin`` has no ``basins_<basin>`` row), run the *generic* registry
-     seed via the model-registry CLI -- discover-basins -> publish-basins ->
-     import-basins-registry -> activate model_instance. Identity (model_id,
-     package version) is read from that basin's first run manifest, never
-     hard-coded.
+  2. Discover publishable basins directly from ``BASINS_ROOT`` and seed any
+     registry rows that are missing (``core.basin`` has no ``basins_<basin>``
+     row), using the generic model-registry CLI -- discover-basins ->
+     publish-basins -> import-basins-registry -> activate model_instance. If a
+     run manifest exists for the basin, its package identity overrides the
+     inventory-derived default.
   3. For every run, run the per-run pipeline (each step a subprocess so one
      run's failure never aborts the batch):
        register -> scripts/node27_ingest_run.py
@@ -45,6 +46,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,7 @@ from packages.common.forcing_domain_handoff_apply import (
     apply_forcing_domain_handoff_path,
 )
 from packages.common.redaction import redact_payload, redact_text
+from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
 
 PY = sys.executable
@@ -78,6 +81,8 @@ SEED_AUTH_ROLE = os.environ.get("AUTOPIPE_AUTH_ROLE", "model_admin")
 # /home is 1.7T) so a multi-GB basin copy never fills /. Scratch is removed
 # after every seed regardless (see _seed_basin).
 WORK_ROOT = os.environ.get("AUTOPIPE_WORK_ROOT") or tempfile.gettempdir()
+DEFAULT_SEED_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-production"
+SAFE_PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 INGEST_ROLE = "node27_data_plane_ingest"
 INGEST_SUMMARY_SCHEMA = "nhms.node27_ingest.autopipeline.v1"
@@ -713,7 +718,7 @@ def _discover_runs(object_store_root: Path, sources: tuple[str, ...]) -> list[di
                 "run_id": entry.name,
                 "source": m.group("source"),
                 "cycle": m.group("cycle"),
-                "basin": m.group("basin"),
+                "basin": _slug_id(m.group("basin")),
             }
         )
     return out
@@ -736,6 +741,7 @@ def _basin_identity(object_store_root: Path, run_id: str) -> dict[str, str]:
     model = manifest.get("model") or {}
     model_id = identity.get("model_id") or model.get("model_id")
     basin_id = identity.get("basin_id") or model.get("basin_id")
+    basin_slug = identity.get("basin_slug") or model.get("basin_slug")
     package_uri = identity.get("model_package_uri") or model.get("model_package_uri")
     if not (model_id and basin_id and package_uri):
         raise ValueError(f"manifest for {run_id} missing model_id/basin_id/model_package_uri")
@@ -745,9 +751,79 @@ def _basin_identity(object_store_root: Path, run_id: str) -> dict[str, str]:
     return {
         "model_id": str(model_id),
         "basin_id": str(basin_id),
+        "basin_key": _slug_id(str(basin_slug or basin_id).removeprefix("basins_")),
+        "basin_slug": str(basin_slug or str(basin_id).removeprefix("basins_")),
         "package_version": version,
         "package_uri": str(package_uri),
     }
+
+
+def _discover_seed_basin_identities(
+    basins_root: Path,
+    *,
+    only_basin: str | None = None,
+    object_store_prefix: str = "",
+) -> dict[str, dict[str, str]]:
+    inventory = discover_basins_inventory(basins_root)
+    models = inventory.get("models")
+    if not isinstance(models, Sequence) or isinstance(models, str | bytes | bytearray):
+        return {}
+    identities: dict[str, dict[str, str]] = {}
+    for item in models:
+        if not isinstance(item, Mapping) or not _seed_model_publishable_or_repairable(item):
+            continue
+        basin_slug = str(item.get("basin_slug") or "")
+        basin_key = _slug_id(basin_slug)
+        if only_basin and only_basin not in {basin_key, basin_slug}:
+            continue
+        model_id = str(item.get("model_id") or "")
+        suggested_ids = item.get("suggested_ids") if isinstance(item.get("suggested_ids"), Mapping) else {}
+        basin_id = str(suggested_ids.get("basin_id") or f"basins_{basin_key}")
+        if not model_id or not basin_slug:
+            continue
+        package_version = _seed_package_version_for_model(item)
+        prefix = object_store_prefix.rstrip("/")
+        package_uri = f"{prefix}/models/{model_id}/{package_version}/package/" if prefix else ""
+        identities[basin_key] = {
+            "model_id": model_id,
+            "basin_id": basin_id,
+            "basin_key": basin_key,
+            "basin_slug": basin_slug,
+            "package_version": package_version,
+            "package_uri": package_uri,
+            "identity_source": "basins_inventory",
+        }
+    return dict(sorted(identities.items()))
+
+
+def _seed_model_publishable_or_repairable(model: Mapping[str, Any]) -> bool:
+    if model.get("status") == "valid" and model.get("default_publish_eligible") is True:
+        return True
+    return (
+        model.get("status") == "partial"
+        and model.get("default_publish_eligible") is not True
+        and set(model.get("missing_required_files") or []) == {"*.tsd.rl"}
+    )
+
+
+def _seed_package_version_for_model(model: Mapping[str, Any]) -> str:
+    template = os.environ.get("AUTOPIPE_PACKAGE_VERSION_TEMPLATE", DEFAULT_SEED_PACKAGE_VERSION_TEMPLATE)
+    basin_slug = str(model.get("basin_slug") or "")
+    slug_id = _slug_id(basin_slug)
+    model_id = str(model.get("model_id") or f"basins_{slug_id}_shud")
+    version = template.format(
+        slug=basin_slug.replace("/", "_"),
+        slug_id=slug_id,
+        model_id=model_id,
+    )
+    if not SAFE_PACKAGE_VERSION_RE.fullmatch(version) or version in {".", ".."}:
+        raise ValueError(f"unsafe AUTOPIPE_PACKAGE_VERSION_TEMPLATE rendered version: {version!r}")
+    return version
+
+
+def _slug_id(value: str) -> str:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
+    return normalized or "unknown"
 
 
 # --------------------------------------------------------------------------- #
@@ -1022,11 +1098,13 @@ def _isolate_basin_root(basins_root: Path, basin: str) -> Path:
     """Copy a single basin subtree into a private root and strip Synology
     ``@eaDir`` sidecars, so discover-basins stays under its 2048-entry budget
     (scanning the whole multi-basin Basins root blows the limit)."""
-    only_root = Path(WORK_ROOT) / f"{basin}-only-root"
+    basin_key = _slug_id(basin)
+    only_root = Path(WORK_ROOT) / f"{basin_key}-only-root"
     dst = only_root / basin
     if dst.exists():
         shutil.rmtree(only_root, ignore_errors=True)
     only_root.mkdir(parents=True, exist_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(basins_root / basin, dst, symlinks=False)
     for ea in dst.rglob("@eaDir"):
         shutil.rmtree(ea, ignore_errors=True)
@@ -1047,11 +1125,12 @@ def _seed_basin(
     env: dict[str, str],
 ) -> dict[str, Any]:
     model_id = identity["model_id"]
-    work = Path(WORK_ROOT) / f"{basin}-seed"
+    basin_key = _slug_id(basin)
+    work = Path(WORK_ROOT) / f"{basin_key}-seed"
     work.mkdir(parents=True, exist_ok=True)
     inv = work / "inventory.json"
     pkg = work / "package-manifest.json"
-    obj_store = Path(WORK_ROOT) / f"{basin}-obj-store"  # writable; publish writes models/ here
+    obj_store = Path(WORK_ROOT) / f"{basin_key}-obj-store"  # writable; publish writes models/ here
 
     only_root = _isolate_basin_root(basins_root, basin)
 
@@ -1350,34 +1429,82 @@ def main(argv: list[str] | None = None) -> int:
 
     runs = _discover_runs(object_store_root, sources)
     if args.only_basin:
-        runs = [r for r in runs if r["basin"] == args.only_basin]
+        only_basin_key = _slug_id(args.only_basin)
+        runs = [r for r in runs if r["basin"] == only_basin_key]
 
-    # ---- phase 1: seed any unseeded basin (identity from first run manifest) --
+    # ---- phase 1: seed any unseeded basin -------------------------------
+    # Seed candidates come from BASINS_ROOT first so node-27 display metadata is
+    # ready for every publishable basin before the first node-22 run lands. If a
+    # run manifest already exists, it overrides the inventory-derived package
+    # identity for that basin.
     seed_results: list[dict[str, Any]] = []
-    basins = sorted({r["basin"] for r in runs})
-    for basin in basins:
-        first_run = next(r["run_id"] for r in runs if r["basin"] == basin)
+    seed_identities = _discover_seed_basin_identities(
+        basins_root,
+        only_basin=args.only_basin,
+        object_store_prefix=object_store_prefix,
+    )
+    for basin_key in sorted({r["basin"] for r in runs}):
+        first_run = next(r["run_id"] for r in runs if r["basin"] == basin_key)
         try:
-            identity = _basin_identity(object_store_root, first_run)
+            run_identity = _basin_identity(object_store_root, first_run)
         except Exception as exc:  # noqa: BLE001 - record + continue, isolate failure
+            if basin_key not in seed_identities:
+                seed_results.append(
+                    {
+                        "basin": basin_key,
+                        "outcome": "seed_failed",
+                        "stage": "identity",
+                        "error": redact_text(str(exc)),
+                    }
+                )
+            continue
+        inventory_identity = seed_identities.get(basin_key, {})
+        seed_identities[basin_key] = {
+            **inventory_identity,
+            **run_identity,
+            "basin_key": basin_key,
+            "basin_slug": inventory_identity.get("basin_slug") or run_identity.get("basin_slug") or basin_key,
+            "identity_source": "run_manifest",
+        }
+    basins = sorted(seed_identities)
+    for basin in basins:
+        identity = seed_identities[basin]
+        basin_slug = identity.get("basin_slug") or basin
+        if _basin_seeded(database_url, identity["basin_id"]):
             seed_results.append(
-                {"basin": basin, "outcome": "seed_failed", "stage": "identity", "error": redact_text(str(exc))}
+                {
+                    "basin": basin,
+                    "basin_slug": basin_slug,
+                    "outcome": "already_seeded",
+                    "basin_id": identity["basin_id"],
+                    "identity_source": identity.get("identity_source"),
+                }
             )
             continue
-        if _basin_seeded(database_url, identity["basin_id"]):
-            seed_results.append({"basin": basin, "outcome": "already_seeded", "basin_id": identity["basin_id"]})
-            continue
         if args.progress:
-            print(f"[seed] {basin} ({identity['model_id']} @ {identity['package_version']})",
-                  file=sys.stderr, flush=True)
+            print(
+                f"[seed] {basin_slug} ({identity['model_id']} @ {identity['package_version']})",
+                file=sys.stderr,
+                flush=True,
+            )
         result = _seed_basin(
-            basin=basin, identity=identity, database_url=database_url, basins_root=basins_root, env=env
+            basin=basin_slug,
+            identity=identity,
+            database_url=database_url,
+            basins_root=basins_root,
+            env=env,
         )
+        result["basin"] = basin
+        result["basin_slug"] = basin_slug
+        result["identity_source"] = identity.get("identity_source")
         seed_results.append(result)
         if args.progress:
-            print(f"[seed] {basin}: {result['outcome']}"
-                  + (f" ({result.get('stage')})" if result["outcome"] == "seed_failed" else ""),
-                  file=sys.stderr, flush=True)
+            print(
+                f"[seed] {basin_slug}: {result['outcome']}"
+                + (f" ({result.get('stage')})" if result["outcome"] == "seed_failed" else ""),
+                file=sys.stderr,
+                flush=True,
+            )
 
     seed_failed = [s for s in seed_results if s["outcome"] == "seed_failed"]
     seeded_basins = {s["basin"] for s in seed_results if s["outcome"] in ("seeded", "already_seeded")}
@@ -1430,6 +1557,7 @@ def main(argv: list[str] | None = None) -> int:
         "sources": list(sources),
         "discovered_runs": len(runs),
         "basins": basins,
+        "basin_slugs": [seed_identities[basin].get("basin_slug") for basin in basins],
         "seed": {
             "seeded": [s["basin"] for s in seed_results if s["outcome"] == "seeded"],
             "already_seeded": [s["basin"] for s in seed_results if s["outcome"] == "already_seeded"],
