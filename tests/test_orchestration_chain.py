@@ -2776,6 +2776,41 @@ def test_cycle_orchestration_active_guard_is_model_scoped_for_multi_basin_cycles
     assert repository.cycle_checks == []
 
 
+def test_candidate_scoped_full_cycle_ignores_sibling_cycle_jobs(tmp_path: Path) -> None:
+    run_id = "cycle_gfs_2026050100_full_model_0"
+
+    class SiblingActiveRepository(FakeCycleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.jobs["job_qhh_forcing"] = {
+                "job_id": "job_qhh_forcing",
+                "run_id": "cycle_gfs_2026050100_full_model_qhh",
+                "cycle_id": "gfs_2026050100",
+                "model_id": "model_qhh",
+                "stage": "forcing",
+                "job_type": "produce_forcing_array",
+                "status": "running",
+                "submitted_at": "2026-05-01T00:00:00Z",
+            }
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(f"candidate-scoped full run must not fall back to cycle active check: {source_id}")
+
+    repository = SiblingActiveRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    assert client.submissions
+    manifests = [dict(submission.get("manifest") or submission) for submission in client.submissions]
+    assert {manifest["run_id"] for manifest in manifests} == {run_id}
+    assert {manifest["model_id"] for manifest in manifests} == {"model_0"}
+
+
 def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:
     # M23-7 (#258): re-scans while a cycle is already active must be rejected by
     # the active guard and never produce a duplicate Slurm submission.

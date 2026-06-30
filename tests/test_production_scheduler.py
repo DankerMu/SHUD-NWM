@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2916,6 +2917,32 @@ def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_
     ((cohort_key, cohort_candidates),) = cohorts
     assert cohort_key == (0, "full")
     assert cohort_candidates == [candidate]
+
+
+def test_full_cohort_candidates_are_candidate_scoped_for_model_isolation() -> None:
+    candidate_a = _scheduler_candidate_fixture()
+    candidate_b = replace(
+        candidate_a,
+        candidate_id="gfs_2026052106_model_b",
+        model_id="model_b",
+        basin_id="basin_b",
+        basin_version_id="basin_b_v1",
+        river_network_version_id="basin_b_rivnet_v1",
+        run_id="fcst_gfs_2026052106_model_b",
+        forcing_version_id="forc_gfs_2026052106_model_b",
+    )
+
+    cohorts = scheduler_module._candidate_execution_cohorts(
+        "gfs",
+        _dt("2026-05-21T06:00:00Z"),
+        (0, "full"),
+        [candidate_a, candidate_b],
+    )
+
+    assert cohorts == [
+        ([candidate_a], "cycle_gfs_2026052106_full_model_a"),
+        ([candidate_b], "cycle_gfs_2026052106_full_model_b"),
+    ]
 
 
 def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> None:
@@ -9669,7 +9696,7 @@ def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_c
     assert calls_by_model["model_a"]["basins"][0]["restart_stage"] == "parse"
     assert calls_by_model["model_a"]["basins"][0]["orchestration_run_id"].endswith("_parse_model_a")
     assert "restart_stage" not in calls_by_model["model_b"]["basins"][0]
-    assert "orchestration_run_id" not in calls_by_model["model_b"]["basins"][0]
+    assert calls_by_model["model_b"]["basins"][0]["orchestration_run_id"].endswith("_full_model_b")
 
 
 def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_sees_active_truth(

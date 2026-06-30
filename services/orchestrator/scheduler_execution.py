@@ -502,7 +502,10 @@ def candidate_execution_cohorts(
     ],
 ) -> list[tuple[list[SchedulerExecutionCandidate], str | None]]:
     if cohort_key[1] == "full":
-        return [(list(candidates), None)]
+        return [
+            ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
+            for candidate in candidates
+        ]
     return [
         ([candidate], run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
         for candidate in candidates
