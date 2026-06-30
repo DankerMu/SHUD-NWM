@@ -2,7 +2,6 @@ import type { FeatureCollection } from 'geojson'
 import type { FilterSpecification } from 'maplibre-gl'
 import { Layer, Marker, Source, type LayerProps } from 'react-map-gl/maplibre'
 
-import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
 import {
   m11BasinLabelAnchor,
   segmentFilter,
@@ -60,7 +59,7 @@ export function M11OverlayPrimitive({
   selectedSegmentId,
 }: {
   overlay: M11RegisteredOverlay
-  data: FloodReturnPeriodFeatureCollection | null
+  data: FeatureCollection | null
   selectedSegmentId?: string | null
 }) {
   const isLine = overlay.layer.type === 'line'

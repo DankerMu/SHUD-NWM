@@ -1,8 +1,7 @@
 """display_readonly 进程内 TTL 缓存 + 自预热（目录类只读端点）。
 
-背景：runs 列表（flood_product_ready 过滤）与 layers 目录依赖对
-flood.return_period_result（61M+ 行）的逐 run LATERAL 聚合，只读副本上单次
-12-15s；展示端同一匿名请求高度重复、数据节奏为小时级 cycle。
+背景：runs、layers、basins 等展示目录端点由只读 display API 高频访问；
+目录数据节奏为小时级 cycle，同一匿名请求高度重复。
 
 机制（display_readonly 角色专属，其它角色直通）：
 - 新鲜（< TTL 60s）：直接命中。
@@ -10,10 +9,10 @@ flood.return_period_result（61M+ 行）的逐 run LATERAL 聚合，只读副本
   （stale-while-revalidate；展示数据小时级节奏下 10min 内陈旧诚实可接受）。
 - 超过 STALE_MAX：阻塞重算（真冷路径，仅进程刚启动或长期无人访问后出现）。
 - 自预热：记录最近访问的目录 GET path，后台线程每 45s 经 ASGI 回放
-  （带 force-refresh 头旁路缓存），保持热 key 常新——访客稳态永不踩 12s 慢查询。
+  （带 force-refresh 头旁路缓存），保持热 key 常新。
 
 边界（honest）：缓存的是 store 层 payload（不含 request_id 信封）；
-根治（partial index / 质量汇总物化）见后端慢查询专项。
+根治（目录查询索引与覆盖物化）见后端慢查询专项。
 """
 
 from __future__ import annotations

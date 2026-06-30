@@ -82,7 +82,7 @@ def _fake_http_get_ok(url):
 def _responses():
     return {
         "hydro_run": {
-            "gfs": [("published", 3), ("frequency_done", 1)],
+            "gfs": [("published", 3), ("parsed", 1)],
             "ifs": [("published", 2)],
         }
     }
@@ -114,7 +114,7 @@ def test_baseline_counts_are_collected():
     )
     by_stage = {stage["stage"]: stage for stage in receipt["stages"]}
     assert by_stage["active_models"]["counts"]["active_model_count"] == 7
-    assert by_stage["hydro_run_gfs"]["counts"]["by_status"] == {"published": 3, "frequency_done": 1}
+    assert by_stage["hydro_run_gfs"]["counts"]["by_status"] == {"published": 3, "parsed": 1}
     assert by_stage["hydro_run_gfs"]["counts"]["total"] == 4
     assert by_stage["hydro_run_ifs"]["counts"]["by_status"] == {"published": 2}
     assert by_stage["state_snapshot"]["counts"]["state_snapshot_count"] == 0

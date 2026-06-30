@@ -4,7 +4,6 @@ export const STAGE_NAMES = {
   forcing: '强迫场',
   forecast: '预报',
   parse: '解析',
-  frequency: '频率计算',
   publish: '发布',
 } as const
 

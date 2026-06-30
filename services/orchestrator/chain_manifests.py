@@ -26,8 +26,6 @@ from services.orchestrator.chain_manifest_contracts import (
     _forecast_state_checkpoint_hours,
     _format_time,
     _format_time_or_none,
-    _frequency_contract,
-    _frequency_quality_state,
     _has_uri_scheme,
     _model_package_manifest_uri,
     _model_run_stage_evidence,
@@ -99,8 +97,6 @@ __all__ = (
     "_forecast_state_checkpoint_hours",
     "_format_time",
     "_format_time_or_none",
-    "_frequency_contract",
-    "_frequency_quality_state",
     "_has_uri_scheme",
     "_model_package_manifest_uri",
     "_model_run_stage_evidence",
@@ -178,19 +174,10 @@ def build_cycle_stage_manifest(
     context: CycleOrchestrationContext,
     *,
     model_run_stage_evidence: Callable[..., dict[str, Any]] | None = None,
-    frequency_quality_state: Callable[..., dict[str, Any]] | None = None,
     publish_quality_state: Callable[..., dict[str, Any]] | None = None,
     cycle_residual_blockers: Callable[[Sequence[Mapping[str, Any]]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     model_run_stage_evidence = model_run_stage_evidence or _model_run_stage_evidence
-    if frequency_quality_state is None:
-        def frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-            return _frequency_quality_state(
-                entry,
-                cycle_id=cycle_id,
-                model_run_stage_evidence=model_run_stage_evidence,
-            )
-
     if publish_quality_state is None:
         def publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
             return _publish_quality_state(
@@ -244,10 +231,6 @@ def build_cycle_stage_manifest(
             "model_ids": [str(entry["model_id"]) for entry in manifest_index_entries],
         },
     }
-    if stage.stage == "frequency":
-        manifest["quality_states"] = [
-            frequency_quality_state(entry, cycle_id=context.cycle_id) for entry in manifest_index_entries
-        ]
     if stage.stage == "publish":
         active_keys = {_basin_key(basin) for basin in context.active_basins}
         excluded = [basin for basin in context.all_basins if _basin_key(basin) not in active_keys]
@@ -408,7 +391,6 @@ def build_forecast_runtime_manifest(
         },
         "runtime": dict(assembly.runtime),
         "outputs": dict(assembly.outputs),
-        "frequency": dict(assembly.frequency),
         "display": dict(assembly.display),
         "quality_states": dict(assembly.quality_states),
         "residual_blockers": [dict(item) for item in assembly.residual_blockers],
@@ -732,7 +714,6 @@ def build_model_run_assembly(
     preserve_directory_uri: DirectoryPreserver | None = None,
     station_metadata_for_basin: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     output_river_contract: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
-    frequency_contract: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     display_contract: Callable[..., dict[str, Any]] | None = None,
     assembly_quality_states: Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]] | None = None,
     project_name_for_basin: Callable[..., str] | None = None,
@@ -743,7 +724,6 @@ def build_model_run_assembly(
     preserve_directory_uri = preserve_directory_uri or _preserve_directory_uri
     station_metadata_for_basin = station_metadata_for_basin or _station_metadata_for_basin
     output_river_contract = output_river_contract or _output_river_contract
-    frequency_contract = frequency_contract or _frequency_contract
     display_contract = display_contract or _display_contract
     assembly_quality_states = assembly_quality_states or _assembly_quality_states
     project_name_for_basin = project_name_for_basin or _project_name_for_basin
@@ -787,13 +767,11 @@ def build_model_run_assembly(
     candidate_id = str(basin.get("candidate_id") or f"{source_id}:{_format_time(cycle_time)}:{model_id}:{scenario_id}")
     station_metadata = station_metadata_for_basin(basin)
     output_river = output_river_contract(basin)
-    frequency = frequency_contract(basin)
     display = display_contract(basin, output_uri=output_uri)
     quality_states, blockers = assembly_quality_states(
         basin,
         station_metadata=station_metadata,
         output_river=output_river,
-        frequency=frequency,
         display=display,
     )
     runtime = {
@@ -875,7 +853,6 @@ def build_model_run_assembly(
         forcing=forcing,
         runtime=runtime,
         outputs=outputs,
-        frequency=frequency,
         display=display,
         quality_states=quality_states,
         residual_blockers=tuple(blockers),

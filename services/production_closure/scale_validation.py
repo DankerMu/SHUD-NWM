@@ -51,15 +51,14 @@ MVT_MISSING_IMPLEMENTATION_WORK = [
     "Browser proof against real national MVT tiles rather than deterministic fixture metadata",
 ]
 MVT_ENDPOINT_REFERENCES = [
-    "/api/v1/tiles/flood-return-period",
-    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/hydro/{run_id}/{valid_time}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/hydro-national/{valid_time}/{z}/{x}/{y}.pbf",
     "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
-    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
 ]
 MVT_DETERMINISTIC_BLOCKER_ID = "m16-deterministic-mvt-contract-artifact"
 MVT_LIVE_POSTGIS_BLOCKER_ID = "m16-live-postgis-national-proof"
 TILE_BYTES_BLOCKER_ID = "m16-tile-byte-budget"
-MVT_CONTRACT_P95_THRESHOLD_KEY = "flood_alert_map_ms"
+MVT_CONTRACT_P95_THRESHOLD_KEY = "hydro_map_ms"
 MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME = "frontend_render_ms"
 MVT_CONTRACT_MIN_TILE_COUNT = 1
 MVT_CONTRACT_MIN_FEATURE_COUNT = 1
@@ -105,44 +104,44 @@ QUERY_TARGETS = {
             "  -> Bitmap Index Scan on river_segment_geom_gix",
         ),
     },
-    "flood_alert_summary": {
-        "endpoint": "/api/v1/flood-alerts/summary",
+    "run_catalog": {
+        "endpoint": "/api/v1/runs",
         "row_count": 8,
         "latency_samples_ms": (54.0, 57.0, 59.0, 58.0, 60.0),
-        "threshold_key": "flood_alert_summary_ms",
+        "threshold_key": "run_catalog_ms",
         "plan_lines": (
-            "Aggregate  (cost=120.00..120.01 rows=1 width=64)",
-            "  -> Index Scan using return_period_result_run_valid_idx on flood.return_period_result",
+            "Index Scan Backward using hydro_run_cycle_idx on hydro.hydro_run",
+            "  Filter: (run_type = 'forecast')",
         ),
     },
-    "flood_alert_ranking": {
-        "endpoint": "/api/v1/flood-alerts/ranking",
+    "layer_catalog": {
+        "endpoint": "/api/v1/layers",
         "row_count": 100,
         "latency_samples_ms": (66.0, 68.0, 71.0, 70.0, 72.0),
-        "threshold_key": "flood_alert_ranking_ms",
+        "threshold_key": "layer_catalog_ms",
         "plan_lines": (
-            "Limit  (cost=240.00..245.00 rows=100 width=128)",
-            "  -> Index Scan using return_period_result_rank_idx on flood.return_period_result",
+            "Index Scan using hydro_run_status_idx on hydro.hydro_run",
+            "  Filter: (status = ANY('{succeeded,parsed,published}'))",
         ),
     },
-    "flood_alert_timeline": {
-        "endpoint": "/api/v1/flood-alerts/timeline",
+    "basin_catalog": {
+        "endpoint": "/api/v1/basins",
         "row_count": 168,
         "latency_samples_ms": (76.0, 78.0, 83.0, 80.0, 84.0),
-        "threshold_key": "flood_alert_timeline_ms",
+        "threshold_key": "basin_catalog_ms",
         "plan_lines": (
-            "GroupAggregate  (cost=340.00..390.00 rows=168 width=72)",
-            "  -> Index Scan using return_period_result_time_idx on flood.return_period_result",
+            "Index Scan using basin_pkey on core.basin",
+            "  Filter: active_flag",
         ),
     },
-    "flood_alert_map": {
-        "endpoint": "/api/v1/tiles/flood-return-period?run_id={run_id}&duration=1h&valid_time={valid_time}",
+    "hydro_map": {
+        "endpoint": "/api/v1/tiles/hydro/{run_id}/{valid_time}/{z}/{x}/{y}.pbf?variable=q_down",
         "row_count": 21_000,
         "latency_samples_ms": (205.0, 214.0, 221.0, 218.0, 224.0),
-        "threshold_key": "flood_alert_map_ms",
+        "threshold_key": "hydro_map_ms",
         "plan_lines": (
-            "Nested Loop Left Join  (cost=480.00..850.00 rows=21000 width=256)",
-            "  -> Index Scan using return_period_result_tile_idx on flood.return_period_result",
+            "Nested Loop  (cost=480.00..850.00 rows=21000 width=256)",
+            "  -> Index Scan using river_timeseries_run_valid_idx on hydro.river_timeseries",
             "  -> Index Scan using river_segment_pkey on core.river_segment",
         ),
     },
@@ -177,14 +176,14 @@ QUERY_TARGETS = {
         ),
     },
     "tile_metadata": {
-        "endpoint": "/api/v1/tiles/flood-return-period",
+        "endpoint": "/api/v1/layers",
         "row_count": 24,
         "latency_samples_ms": (31.0, 34.0, 33.0, 35.0, 36.0),
         "threshold_key": "tile_metadata_ms",
         "plan_lines": (
             "Nested Loop Left Join  (cost=0.27..16.64 rows=24 width=256)",
             "  -> Index Scan using tile_layer_pkey on map.tile_layer",
-            "       Filter: ((layer_type = 'flood_return_period') AND published_flag)",
+            "       Filter: ((layer_type = 'hydro') AND published_flag)",
             "  -> Index Scan using tile_cache_pkey on map.tile_cache",
             "       Index Cond: (layer_id = map.tile_layer.layer_id)",
         ),
@@ -221,10 +220,10 @@ class ProductionScaleThresholds:
             p95_query_ms={
                 "model_listing_ms": 100.0,
                 "river_bbox_ms": 250.0,
-                "flood_alert_summary_ms": 125.0,
-                "flood_alert_ranking_ms": 150.0,
-                "flood_alert_timeline_ms": 160.0,
-                "flood_alert_map_ms": 300.0,
+                "run_catalog_ms": 125.0,
+                "layer_catalog_ms": 150.0,
+                "basin_catalog_ms": 160.0,
+                "hydro_map_ms": 300.0,
                 "forecast_series_ms": 150.0,
                 "jobs_ms": 120.0,
                 "job_logs_ms": 120.0,
@@ -751,7 +750,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
                 "missing_implementation_work": MVT_MISSING_IMPLEMENTATION_WORK,
                 "removal_criteria": (
                     "Run opt-in live PostGIS national tile validation plus browser proof in the target environment "
-                    "and record passing artifacts for river-network, hydro, and flood-return-period MVT endpoints."
+                    "and record passing artifacts for river-network and hydro MVT endpoints."
                 ),
                 "residual_risk": (
                     "Deterministic CI proves contract/cache/SQL shape only; it cannot prove target data volume "
@@ -818,16 +817,16 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         "mvt_deterministic_metrics": deterministic_contract["metrics"],
         "endpoint_references": endpoints,
         "layer_metadata": {
-            "layer_id": "flood-return-period",
+            "layer_id": "discharge",
             "tile_format": "mvt" if deterministic_mvt_passed else "geojson_compatibility",
-            "url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "flood_return_period",
+            "url_template": "/api/v1/tiles/hydro/{run_id}/{valid_time}/{z}/{x}/{y}.pbf?variable=q_down",
+            "maplibre_source_layer": "hydro",
             "property_schema_version": "m16-hydrology-mvt-v1",
             "min_zoom": 0,
             "max_zoom": 14,
             "source": config.dataset_source,
             "segment_count": dataset_manifest["segment_count"],
-            "fields": ["segment_id", "value", "unit", "quality_flag", "return_period", "warning_level"],
+            "fields": ["segment_id", "value", "unit", "quality_flag"],
             "legacy_pbf_route_behavior": (
                 "canonical .pbf route is live-PostGIS-only; bounded GeoJSON remains query compatibility"
             ),
@@ -1696,7 +1695,7 @@ def _query_row_count(
 ) -> int:
     if query_name == "model_listing":
         return int(dataset_manifest["model_count"])
-    if query_name in {"river_bbox", "flood_alert_map"}:
+    if query_name in {"river_bbox", "hydro_map"}:
         return min(int(fixture["row_count"]), int(dataset_manifest["segment_count"]))
     return int(fixture["row_count"])
 

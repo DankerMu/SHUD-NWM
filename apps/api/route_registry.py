@@ -2,9 +2,8 @@ from fastapi import APIRouter, FastAPI
 
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
-from apps.api.routes.flood_alerts import router as flood_alerts_router
 from apps.api.routes.forecast import router as forecast_router
-from apps.api.routes.hindcast import router as hindcast_router
+from apps.api.routes.hydro_display import router as hydro_display_router
 from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
@@ -14,12 +13,11 @@ from services.slurm_gateway.routes import router as slurm_router
 _BUSINESS_ROUTERS: tuple[APIRouter, ...] = (
     models_router,
     forecast_router,
-    hindcast_router,
     best_available_router,
     data_sources_router,
     state_snapshots_router,
     pipeline_router,
-    flood_alerts_router,
+    hydro_display_router,
 )
 
 

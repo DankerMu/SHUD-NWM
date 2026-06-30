@@ -125,7 +125,6 @@ class SchedulerCandidateLike(Protocol):
     model_package_uri: str
     resource_profile: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
-    frequency_capabilities: Mapping[str, Any]
     horizon: Mapping[str, Any]
     scenario_id: str
     run_id: str

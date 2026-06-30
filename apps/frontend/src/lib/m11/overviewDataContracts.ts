@@ -1,8 +1,6 @@
 import type { components } from '@/api/types'
-import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 import { defaultM11QueryState, m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
-import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
 export type ApiBasin = components['schemas']['Basin']
 export type ApiBasinVersion = components['schemas']['BasinVersion']
@@ -12,28 +10,12 @@ export type ApiRiverFeatureCollection = components['schemas']['RiverSegmentFeatu
 export type ApiRiverFeature = components['schemas']['RiverSegmentFeature']
 export type ApiHydroRun = components['schemas']['HydroRun']
 export type ApiHydroRunPage = components['schemas']['HydroRunPage']
-export type ApiFloodAlertSummary = components['schemas']['FloodAlertSummary']
-export type ApiFloodAlertRanking = components['schemas']['FloodAlertRanking']
-export type ApiFloodAlertRankingItem = components['schemas']['FloodAlertRankingItem']
-export type ApiFloodAlertTimeline = components['schemas']['FloodAlertTimeline']
-export type ApiFloodAlertSegmentList = components['schemas']['FloodAlertSegmentList']
 export type ApiLayer = components['schemas']['Layer']
 export type ApiPipelineStatus = components['schemas']['PipelineStatus']
 export type ApiQueueDepth = components['schemas']['QueueDepth']
 export type ApiLineageResponse = components['schemas']['LineageResponse']
 export type ApiForecastPayload = components['schemas']['RiverSeriesResponse'] | components['schemas']['SplicedForecastResponse']
 
-export type M11WarningLevel =
-  | 'normal'
-  | 'elevated'
-  | 'watch'
-  | 'warning'
-  | 'high_risk'
-  | 'severe'
-  | 'extreme'
-  | 'unavailable'
-
-export type M11QualityFlag = 'ok' | 'degraded' | 'unavailable' | 'failed' | 'unknown'
 export type M11ResolvedSource = 'GFS' | 'IFS' | 'GFS+IFS' | 'Unknown'
 
 export interface M11Bbox {
@@ -73,28 +55,6 @@ const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '1000-10000 m3/s', color: '#08306B', min: 1000, max: 10000 },
   { label: '>10000 m3/s', color: '#CB181D', min: 10000 },
   { label: '无径流数据', color: m11DischargeColor(null) },
-]
-
-const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
-  { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
-  { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
-  { label: '关注 5-10', color: ALERT_LEVEL_META.watch.color, min: 5, max: 10 },
-  { label: '警戒 10-20', color: ALERT_LEVEL_META.warning.color, min: 10, max: 20 },
-  { label: '高风险 20-50', color: ALERT_LEVEL_META.high_risk.color, min: 20, max: 50 },
-  { label: '严重 50-100', color: ALERT_LEVEL_META.severe.color, min: 50, max: 100 },
-  { label: '极端 >=100', color: ALERT_LEVEL_META.extreme.color, min: 100 },
-  { label: '无重现期数据', color: m11ReturnPeriodColor(null) },
-]
-
-const m11RiverWarningLevelLegend: LayerLegendEntry[] = [
-  { label: '正常', color: ALERT_LEVEL_META.normal.color },
-  { label: '偏高', color: ALERT_LEVEL_META.elevated.color },
-  { label: '关注', color: ALERT_LEVEL_META.watch.color },
-  { label: '警戒', color: ALERT_LEVEL_META.warning.color },
-  { label: '高风险', color: ALERT_LEVEL_META.high_risk.color },
-  { label: '严重', color: ALERT_LEVEL_META.severe.color },
-  { label: '极端', color: ALERT_LEVEL_META.extreme.color },
-  { label: '预警不可用', color: m11WarningLevelColor('unavailable') },
 ]
 
 export interface M11BasinGeometryBudgetStatus {
@@ -167,10 +127,6 @@ export interface OverviewBasin {
   riverCount: number | null
   activeModelCount: number
   latestForecastTime: string | null
-  // ranking 默认路径上不再 fetch（spec scenario "Default overview bootstrap omits ranking"）；
-  // `undefined` = ranking 尚未加载（panel pending 态，BasinDetailPanels 应渲染"未加载"占位而非
-  // 误导性的"全 0 警告"），与"加载后真实为全 0"明确区分。
-  warningCounts: Record<M11WarningLevel, number> | undefined
   basinVersions: BasinVersionOption[]
   selectedBasinVersionId: string | null
   unavailableReason: string | null
@@ -180,10 +136,8 @@ export interface OverviewBasin {
 export interface OverviewSummary {
   completedCyclesToday: number | null
   runningJobs: number | null
-  warningSegmentCount: number | null
   latestUpdate: string | null
   totalBasins: number
-  totalSegments: number | null
   sourceSelection: SourceScenarioSelectionState
   freshness: FreshnessMetadata
   qualityNotes: string[]
@@ -220,8 +174,6 @@ export interface BasinDetail {
   boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   segmentCount: number | null
-  // 同 OverviewBasin.warningCounts：`undefined` = ranking 尚未懒加载；UI 须渲染"未加载"占位而非全 0。
-  warningDistribution: Record<M11WarningLevel, number> | undefined
   activeModelCount: number
   latestRun: FreshnessMetadata
   sourceSelection: SourceScenarioSelectionState
@@ -239,10 +191,6 @@ export interface BasinSegmentRow {
   lengthM: number | null
   currentQ: number | null
   qUnit: string
-  returnPeriod: number | null
-  warningLevel: M11WarningLevel
-  qualityFlag: M11QualityFlag
-  qualityNote: string | null
   source: M11ResolvedSource | null
   cycleTime: string | null
   validTime: string | null
@@ -274,10 +222,6 @@ export interface SelectedSegmentDetail {
   riverNetworkVersionId: string | null
   currentQ: number | null
   qUnit: string
-  returnPeriod: number | null
-  warningLevel: M11WarningLevel
-  qualityFlag: M11QualityFlag
-  qualityNote: string | null
   sourceSelection: SourceScenarioSelectionState
   trendPoints: TrendPoint[]
   comparisonAvailable: boolean
@@ -310,21 +254,8 @@ export interface AggregationEndpointDecision {
   evidence: string
 }
 
-export const emptyWarningCounts: Record<M11WarningLevel, number> = {
-  normal: 0,
-  elevated: 0,
-  watch: 0,
-  warning: 0,
-  high_risk: 0,
-  severe: 0,
-  extreme: 0,
-  unavailable: 0,
-}
-
 const layerLabels: Record<M11Layer, string> = {
   discharge: 'Discharge',
-  'flood-return-period': 'Flood return period',
-  'warning-level': 'Warning level',
 }
 
 export function createSourceScenarioSelection(
@@ -383,10 +314,8 @@ export function createEmptyOverviewSummary(query: Pick<M11QueryState, 'source' |
   return {
     completedCyclesToday: null,
     runningJobs: null,
-    warningSegmentCount: null,
     latestUpdate: null,
     totalBasins: 0,
-    totalSegments: null,
     sourceSelection,
     freshness: createFreshnessMetadata({ source: sourceSelection.resolvedSource, unavailableReason: 'No overview data loaded.' }),
     qualityNotes: ['No overview data loaded.'],
@@ -408,8 +337,6 @@ export function createEmptyBasinDetail(
     boundary: null,
     bbox: null,
     segmentCount: null,
-    // 空详情：ranking 尚未懒加载 → undefined（pending），与"加载后真实全 0"区分。
-    warningDistribution: undefined,
     activeModelCount: 0,
     latestRun: createFreshnessMetadata({ source: sourceSelection.resolvedSource, unavailableReason: 'No basin data loaded.' }),
     sourceSelection,
@@ -456,14 +383,9 @@ export function normalizeOverviewBasins(input: {
   basinVersionUnavailableReason?: string | null
   models?: ApiModelInstance[]
   runs?: ApiHydroRun[]
-  // `undefined` = caller 未传 ranking（默认 overview bootstrap 路径）→ warningCounts 输出 `undefined`
-  // 表示 pending；显式空数组 `[]` = ranking 已 fetch 但无项 → warningCounts 输出全 0 真实态。
-  rankingItems?: ApiFloodAlertRankingItem[]
 }): OverviewBasin[] {
   const models = input.models ?? []
   const runs = input.runs ?? []
-  const rankingProvided = input.rankingItems !== undefined
-  const rankingItems = input.rankingItems ?? []
 
   return input.basins.map((basin) => {
     const versions = input.versionsByBasinId?.[basin.basin_id] ?? []
@@ -471,8 +393,6 @@ export function normalizeOverviewBasins(input: {
     const versionIds = new Set(versionOptions.map((version) => version.basinVersionId))
     const basinModels = models.filter((model) => model.basin_id === basin.basin_id || versionIds.has(model.basin_version_id))
     const basinRuns = runs.filter((run) => versionIds.has(run.basin_version_id))
-    const basinRankingItems = rankingItems.filter((item) => versionIds.has(item.basin_version_id))
-    const warningCounts = rankingProvided ? warningCountsFromRanking(basinRankingItems) : undefined
     const selectedVersion = versionOptions.find((version) => version.active) ?? versionOptions[0] ?? null
 
     return {
@@ -487,7 +407,6 @@ export function normalizeOverviewBasins(input: {
       riverCount: sumNullable(basinModels.map((model) => numberOrNull(model.segment_count))),
       activeModelCount: basinModels.filter((model) => model.active_flag).length,
       latestForecastTime: latestIso(basinRuns.map((run) => run.cycle_time ?? run.updated_at ?? run.created_at)),
-      warningCounts,
       basinVersions: versionOptions,
       selectedBasinVersionId: selectedVersion?.basinVersionId ?? null,
       unavailableReason:
@@ -500,9 +419,6 @@ export function normalizeOverviewBasins(input: {
 export function normalizeOverviewSummary(input: {
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
   basins?: OverviewBasin[]
-  floodSummary?: ApiFloodAlertSummary | null
-  // ranking 已从默认 overview path 删除（spec scenario "Default overview bootstrap omits ranking"）：
-  // normalizeOverviewSummary 不再消费 ranking；保留 ranking 入参会让调用者误以为可以接力 → 类型上直接拒绝。
   pipeline?: ApiPipelineStatus | null
   queue?: ApiQueueDepth | null
   latestRun?: ApiHydroRun | null
@@ -515,10 +431,6 @@ export function normalizeOverviewSummary(input: {
       ? { ...input.query, cycle: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle }
       : input.query
   const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
-  const levels = input.floodSummary?.levels ?? []
-  const warningSegmentCount = levels
-    .filter((level) => isSuperWarningLevel(normalizeWarningLevel(level.level)))
-    .reduce((total, level) => total + numberOrZero(level.count), 0)
   const completedCyclesToday = input.pipeline?.job_counts.succeeded ?? null
   const runningJobs = input.queue?.running ?? input.pipeline?.job_counts.running ?? null
   const latestUpdate = latestIso([
@@ -527,32 +439,24 @@ export function normalizeOverviewSummary(input: {
     input.latestRun?.cycle_time ?? null,
     input.query.validTime,
   ])
-  const qualityNotes = [
-    normalizeString(input.floodSummary?.quality_note),
-    input.floodSummary && input.floodSummary.unavailable_count > 0
-      ? `${input.floodSummary.unavailable_count} flood-alert segments unavailable.`
-      : null,
-  ].filter((note): note is string => Boolean(note))
 
   return {
     completedCyclesToday,
     runningJobs,
-    warningSegmentCount: input.floodSummary ? warningSegmentCount : null,
     latestUpdate,
     totalBasins: input.basins?.length ?? 0,
-    totalSegments: input.floodSummary?.total_segments ?? null,
     sourceSelection,
     freshness: createFreshnessMetadata({
       updatedAt: latestUpdate,
       cycleTime: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle,
       validTime: input.query.validTime,
-      runId: input.floodSummary?.run_id ?? input.latestRun?.run_id ?? null,
+      runId: input.latestRun?.run_id ?? null,
       basinVersionId: input.latestRun?.basin_version_id ?? null,
       riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: latestUpdate ? null : 'No freshness metadata is available.',
     }),
-    qualityNotes,
+    qualityNotes: [],
     partialErrors: input.partialErrors ?? [],
   }
 }
@@ -593,7 +497,7 @@ export function normalizeLayerStates(input: {
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
   const apiLayersById = new Map(input.layers.map((layer) => [layer.layer_id, layer]))
-  const requiredLayers: M11Layer[] = ['discharge', 'flood-return-period', 'warning-level']
+  const requiredLayers: M11Layer[] = ['discharge']
   const layerIds = [...new Set([...requiredLayers, ...input.layers.map((layer) => layer.layer_id)])]
 
   return layerIds.map((layerId) => {
@@ -655,9 +559,6 @@ export function normalizeBasinDetail(input: {
   versions: ApiBasinVersion[]
   models?: ApiModelInstance[]
   segments?: ApiRiverFeatureCollection | null
-  // `undefined` = caller 未传 ranking（默认路径 ranking 尚未懒加载）→ warningDistribution 输出
-  // `undefined`（pending 占位）；`[]` = ranking 已 fetch 但无项 → 输出全 0 真实态。
-  rankingItems?: ApiFloodAlertRankingItem[]
   latestRun?: ApiHydroRun | null
   runs?: ApiHydroRun[]
   partialErrors?: string[]
@@ -682,7 +583,6 @@ export function normalizeBasinDetail(input: {
     boundary: selectedVersion?.boundary ?? null,
     bbox: selectedVersion?.bbox ?? null,
     segmentCount: input.segments?.total ?? input.segments?.features.length ?? null,
-    warningDistribution: input.rankingItems === undefined ? undefined : warningCountsFromRanking(input.rankingItems),
     activeModelCount: models.filter((model) => model.active_flag).length,
     latestRun: createFreshnessMetadata({
       updatedAt: input.latestRun?.updated_at ?? null,
@@ -707,56 +607,29 @@ export function normalizeBasinDetail(input: {
 }
 
 export function normalizeBasinSegmentRows(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'q'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
   featureCollection: ApiRiverFeatureCollection | null
-  floodSegments?: ApiFloodAlertSegmentList | null
-  rankingItems?: ApiFloodAlertRankingItem[]
 }): BasinSegmentRow[] {
   const features = input.featureCollection?.features ?? []
-  const alertById = new Map<string, ApiFloodAlertRankingItem>()
-  ;(input.rankingItems ?? []).forEach((item) => {
-    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.river_segment_id, item)
-    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.segment_id, item)
-  })
-  ;(input.floodSegments?.segments ?? []).forEach((item) => {
-    const rankingLike: ApiFloodAlertRankingItem = {
-      rank: 0,
-      river_segment_id: item.river_segment_id,
-      segment_id: item.segment_id,
-      segment_name: item.segment_name,
-      basin_version_id: item.basin_version_id,
-      river_network_version_id: item.river_network_version_id,
-      q_value: item.q_value,
-      q_unit: 'm3/s',
-      return_period: item.return_period,
-      warning_level: item.warning_level,
-      duration: '',
-      valid_time: item.valid_time,
-    }
-    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.river_segment_id, rankingLike)
-    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.segment_id, rankingLike)
-  })
 
   const budgetState = createBasinRiverGeometryBudgetState()
-  return features.map((feature) => segmentRowFromFeature(feature, alertById, input.query, budgetState))
+  return features.map((feature) => segmentRowFromFeature(feature, input.query, budgetState))
 }
 
 export function filterBasinSegmentRows(
   rows: BasinSegmentRow[],
-  query: Pick<M11QueryState, 'warningLevel' | 'q'>,
+  query: Pick<M11QueryState, 'q'>,
 ): BasinSegmentRow[] {
-  const normalizedFilter = normalizeWarningLevel(query.warningLevel)
   const search = query.q?.toLowerCase() ?? null
 
   return rows.filter((row) => {
-    if (normalizedFilter && row.warningLevel !== normalizedFilter) return false
     if (!search) return true
     return `${row.displayName} ${row.riverSegmentId} ${row.segmentId}`.toLowerCase().includes(search)
   })
 }
 
 export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'metStations' | 'basemap' | 'q'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'layer' | 'metStations' | 'basemap' | 'q'>
   basin?: ApiBasin | null
   basinVersionId: string
   segmentId: string
@@ -764,11 +637,9 @@ export function normalizeSelectedSegmentDetail(input: {
   feature?: ApiRiverFeature | null
   model?: ApiModelInstance | null
   forecast?: ApiForecastPayload | null
-  floodTimeline?: ApiFloodAlertTimeline | null
   lineage?: ApiLineageResponse | null
   lineageError?: string | null
   lineageUnavailableReason?: string | null
-  floodAlert?: ApiFloodAlertRankingItem | null
   resolvedRun?: ApiHydroRun | null
   resolvedQuery?: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'> | null
 }): SelectedSegmentDetail {
@@ -790,14 +661,10 @@ export function normalizeSelectedSegmentDetail(input: {
       : input.query.source
   const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
   const effectiveValidTime = currentPoint?.validTime ?? normalizeIsoString(input.query.validTime)
-  const alert = input.floodAlert
-  const timelinePeak = input.floodTimeline?.peak ?? null
-  const warningLevel = normalizeWarningLevel(alert?.warning_level ?? timelinePeak?.warning_level) ?? 'unavailable'
   const lineageStatus = input.lineage ? 'available' : input.lineageError ? 'failed' : 'unavailable'
   const riverSegmentId =
     input.segment?.river_segment_id ??
     input.feature?.properties.river_segment_id ??
-    input.floodTimeline?.river_segment_id ??
     input.segmentId
   const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(input.segment?.geom ?? input.feature?.geometry ?? null)
 
@@ -806,23 +673,17 @@ export function normalizeSelectedSegmentDetail(input: {
     basinName: input.basin?.basin_name ?? input.model?.basin_name ?? null,
     basinVersionId: input.basinVersionId,
     riverSegmentId,
-    segmentId: input.feature?.properties.segment_id ?? input.floodTimeline?.segment_id ?? input.segmentId,
+    segmentId: input.feature?.properties.segment_id ?? input.segmentId,
     displayName:
       normalizeString(input.feature?.properties.name) ??
-      normalizeString(alert?.segment_name) ??
       riverSegmentId,
     modelId: input.model?.model_id ?? null,
     riverNetworkVersionId:
       input.segment?.river_network_version_id ??
       input.feature?.properties.river_network_version_id ??
-      input.floodTimeline?.river_network_version_id ??
       null,
-    currentQ: numberOrNull(alert?.q_value) ?? currentPoint?.value ?? numberOrNull(timelinePeak?.q_value),
-    qUnit: normalizeUnit(alert?.q_unit ?? forecastUnit(input.forecast)),
-    returnPeriod: numberOrNull(alert?.return_period) ?? numberOrNull(timelinePeak?.return_period),
-    warningLevel,
-    qualityFlag: qualityFlagFromValue(input.lineageError ? 'failed' : input.floodTimeline?.quality_note ?? null),
-    qualityNote: normalizeString(input.floodTimeline?.quality_note) ?? normalizeString(input.lineageError),
+    currentQ: currentPoint?.value ?? null,
+    qUnit: normalizeUnit(forecastUnit(input.forecast)),
     sourceSelection,
     trendPoints: forecastSeries,
     comparisonAvailable: sourceSelection.comparisonAvailable,
@@ -845,10 +706,8 @@ export function normalizeSelectedSegmentDetail(input: {
       riverNetworkVersionId:
         input.segment?.river_network_version_id ??
         input.feature?.properties.river_network_version_id ??
-        input.floodTimeline?.river_network_version_id ??
         null,
       segmentId: riverSegmentId,
-      warningLevel: input.query.warningLevel,
       q: input.query.q,
     }),
     geometry: geometryStatus.sanitizedGeometry,
@@ -856,11 +715,11 @@ export function normalizeSelectedSegmentDetail(input: {
       updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
       validTime: effectiveValidTime,
-      runId: input.floodTimeline?.run_id ?? input.resolvedRun?.run_id ?? null,
+      runId: input.resolvedRun?.run_id ?? null,
       basinVersionId: input.resolvedRun?.basin_version_id ?? null,
-      riverNetworkVersionId: input.floodTimeline?.river_network_version_id ?? input.resolvedRun?.river_network_version_id ?? null,
+      riverNetworkVersionId: input.resolvedRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
-      unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',
+      unavailableReason: forecastSeries.length > 0 ? null : 'No forecast values are available.',
     }),
     unavailableReason:
       (!input.segment && !input.feature ? 'Segment geometry/detail is unavailable.' : null) ?? geometryStatus.reason,
@@ -941,41 +800,6 @@ function isStale(value: unknown, staleAfterHours: number): boolean {
   const normalized = normalizeIsoString(value)
   if (!normalized) return false
   return Date.now() - Date.parse(normalized) > staleAfterHours * 3_600_000
-}
-
-export function normalizeWarningLevel(value: unknown): M11WarningLevel | null {
-  if (typeof value !== 'string') return null
-  const normalized = value.trim().toLowerCase().replace('-', '_')
-  if (
-    normalized === 'normal' ||
-    normalized === 'elevated' ||
-    normalized === 'watch' ||
-    normalized === 'warning' ||
-    normalized === 'high_risk' ||
-    normalized === 'severe' ||
-    normalized === 'extreme' ||
-    normalized === 'unavailable'
-  ) {
-    return normalized
-  }
-  if (normalized === 'orange') return 'warning'
-  if (normalized === 'red') return 'severe'
-  if (normalized === 'major' || normalized === 'danger' || normalized === 'high') return 'high_risk'
-  return null
-}
-
-function isSuperWarningLevel(level: M11WarningLevel | null): boolean {
-  return level === 'warning' || level === 'high_risk' || level === 'severe' || level === 'extreme'
-}
-
-function qualityFlagFromValue(value: unknown): M11QualityFlag {
-  if (typeof value !== 'string') return 'unknown'
-  const normalized = value.trim().toLowerCase().replace('-', '_')
-  if (normalized === 'ok' || normalized === 'good' || normalized === 'passed') return 'ok'
-  if (normalized === 'degraded' || normalized === 'partial' || normalized === 'warning') return 'degraded'
-  if (normalized === 'missing' || normalized === 'unavailable' || normalized === 'no_curve') return 'unavailable'
-  if (normalized === 'failed' || normalized === 'error') return 'failed'
-  return 'unknown'
 }
 
 function normalizeUnit(value: unknown): string {
@@ -1271,7 +1095,7 @@ function serializedByteLength(value: unknown): number {
 }
 
 function isM11RenderableLayer(layerId: string) {
-  return layerId === 'discharge' || layerId === 'flood-return-period' || layerId === 'warning-level'
+  return layerId === 'discharge'
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {
@@ -1309,15 +1133,6 @@ function degreesToRadians(value: number) {
   return (value * Math.PI) / 180
 }
 
-function warningCountsFromRanking(items: ApiFloodAlertRankingItem[]): Record<M11WarningLevel, number> {
-  const counts = { ...emptyWarningCounts }
-  items.forEach((item) => {
-    const level = normalizeWarningLevel(item.warning_level) ?? 'unavailable'
-    counts[level] += 1
-  })
-  return counts
-}
-
 function normalizeValidTimes(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map(normalizeIsoString).filter((value): value is string => Boolean(value)))].sort(
     (a, b) => Date.parse(a) - Date.parse(b),
@@ -1335,20 +1150,16 @@ function layerGroup(layer: ApiLayer | undefined, layerId: string): LayerState['g
   const type = `${layer?.layer_type ?? ''} ${layerId}`.toLowerCase()
   if (type.includes('met') || type.includes('precip') || type.includes('temperature')) return 'meteorology'
   if (type.includes('base') || type.includes('boundary') || type.includes('dem')) return 'base'
-  if (type.includes('hydro') || type.includes('flood') || type.includes('warning') || type.includes('discharge')) return 'hydrology'
+  if (type.includes('hydro') || type.includes('discharge')) return 'hydrology'
   return 'unknown'
 }
 
 function layerLegend(layerId: string): LayerLegendEntry[] {
-  if (layerId === 'warning-level') return m11RiverWarningLevelLegend.map((entry) => ({ ...entry }))
-  if (layerId === 'flood-return-period') return m11RiverReturnPeriodLegend.map((entry) => ({ ...entry }))
   if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
   return []
 }
 
-export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 'returnPeriod' | 'warningLevel'>, layer: M11Layer) {
-  if (layer === 'warning-level') return m11WarningLevelColor(row.warningLevel)
-  if (layer === 'flood-return-period') return m11ReturnPeriodColor(row.returnPeriod)
+export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ'>, _layer: M11Layer) {
   return m11DischargeColor(row.currentQ)
 }
 
@@ -1363,50 +1174,6 @@ export function m11DischargeColor(value: number | null) {
   if (value >= 10) return '#2171B5'
   if (value >= 1) return '#4292C6'
   return '#7FB8DC'
-}
-
-export function m11ReturnPeriodColor(value: number | null) {
-  if (value === null) return m11VisualTokens.warningLevels.unavailable
-  if (value >= 100) return ALERT_LEVEL_META.extreme.color
-  if (value >= 50) return ALERT_LEVEL_META.severe.color
-  if (value >= 20) return ALERT_LEVEL_META.high_risk.color
-  if (value >= 10) return ALERT_LEVEL_META.warning.color
-  if (value >= 5) return ALERT_LEVEL_META.watch.color
-  if (value >= 2) return ALERT_LEVEL_META.elevated.color
-  return ALERT_LEVEL_META.normal.color
-}
-
-export function m11WarningLevelColor(level: M11WarningLevel) {
-  if (level === 'high_risk') return ALERT_LEVEL_META.high_risk.color
-  if (level === 'severe') return ALERT_LEVEL_META.severe.color
-  if (level === 'extreme') return ALERT_LEVEL_META.extreme.color
-  if (level === 'warning') return ALERT_LEVEL_META.warning.color
-  if (level === 'watch') return ALERT_LEVEL_META.watch.color
-  if (level === 'elevated') return ALERT_LEVEL_META.elevated.color
-  if (level === 'normal') return ALERT_LEVEL_META.normal.color
-  return m11VisualTokens.warningLevels.unavailable
-}
-
-function versionedSegmentKey(basinVersionId: string, riverNetworkVersionId: string, segmentId: string): string {
-  return `${basinVersionId}::${riverNetworkVersionId}::${segmentId}`
-}
-
-function legacyVersionedSegmentKey(basinVersionId: string, segmentId: string): string {
-  return `${basinVersionId}::legacy::${segmentId}`
-}
-
-function addAlertLookup(
-  alertById: Map<string, ApiFloodAlertRankingItem>,
-  basinVersionId: string,
-  riverNetworkVersionId: string | null | undefined,
-  segmentId: string,
-  item: ApiFloodAlertRankingItem,
-) {
-  if (riverNetworkVersionId) {
-    alertById.set(versionedSegmentKey(basinVersionId, riverNetworkVersionId, segmentId), item)
-  } else {
-    alertById.set(legacyVersionedSegmentKey(basinVersionId, segmentId), item)
-  }
 }
 
 interface BasinRiverGeometryBudgetState {
@@ -1456,18 +1223,12 @@ function retainBasinRiverGeometryWithinBudget(
 
 function segmentRowFromFeature(
   feature: ApiRiverFeature,
-  alertById: Map<string, ApiFloodAlertRankingItem>,
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
   budgetState: BasinRiverGeometryBudgetState,
 ): BasinSegmentRow {
   const props = feature.properties
-  const alert =
-    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_network_version_id, props.river_segment_id)) ??
-    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_network_version_id, props.segment_id)) ??
-    alertById.get(legacyVersionedSegmentKey(props.basin_version_id, props.river_segment_id)) ??
-    alertById.get(legacyVersionedSegmentKey(props.basin_version_id, props.segment_id))
-  const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
-  const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
+  const currentQ = numberOrNull(props.q_down) ?? numberOrNull(props.value)
+  const sourceSelection = createSourceScenarioSelection(query, currentQ !== null ? [sourceFromQuery(query.source)] : [])
   const geometryStatus = retainBasinRiverGeometryWithinBudget(getM11SelectedSegmentGeometryBudgetStatus(feature.geometry), budgetState)
   return {
     riverSegmentId: props.river_segment_id,
@@ -1477,18 +1238,14 @@ function segmentRowFromFeature(
     basinVersionId: props.basin_version_id,
     streamOrder: numberOrNull(props.stream_order),
     lengthM: numberOrNull(props.length_m),
-    currentQ: numberOrNull(alert?.q_value),
-    qUnit: normalizeUnit(alert?.q_unit),
-    returnPeriod: numberOrNull(alert?.return_period),
-    warningLevel,
-    qualityFlag: alert ? 'ok' : 'unavailable',
-    qualityNote: null,
+    currentQ,
+    qUnit: normalizeUnit(props.unit),
     source: sourceSelection.resolvedSource,
     cycleTime: query.cycle,
-    validTime: normalizeIsoString(alert?.valid_time) ?? query.validTime,
+    validTime: normalizeIsoString(props.valid_time) ?? query.validTime,
     hasGeometry: Boolean(geometryStatus.sanitizedGeometry),
     geometry: geometryStatus.sanitizedGeometry,
-    unavailableReason: geometryStatus.reason ?? (alert ? null : 'No flood-alert value is available for this segment/time.'),
+    unavailableReason: geometryStatus.reason,
   }
 }
 

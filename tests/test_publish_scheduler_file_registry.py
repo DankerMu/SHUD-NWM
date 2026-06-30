@@ -84,7 +84,6 @@ def test_publish_all_basin_scheduler_registry_writes_all_publishable_models(
     rows = {row["model_id"]: row for row in payload["models"]}
     assert set(rows) == {"basins_qhh_shud", "basins_zhaochen_bst_shud"}
     assert rows["basins_qhh_shud"]["display_capabilities"] == {"q_down": True, "tiles": True}
-    assert rows["basins_qhh_shud"]["frequency_capabilities"] == {"return_periods": False}
     assert rows["basins_qhh_shud"]["resource_profile"]["lineage"] == "basins_scheduler_file_registry"
     assert rows["basins_zhaochen_bst_shud"]["resource_profile"]["project_name"] == "BST"
     assert rows["basins_zhaochen_bst_shud"]["output_segment_count"] == 7

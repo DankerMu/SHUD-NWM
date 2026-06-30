@@ -11,10 +11,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List basins */
-        get: operations["listBasins"];
+        /** List Basins */
+        get: operations["list_basins_api_v1_basins_get"];
         put?: never;
-        post?: never;
+        /** Create Basin */
+        post: operations["create_basin_api_v1_basins_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -28,112 +29,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List versions for a basin */
-        get: operations["listBasinVersions"];
+        /** List Basin Versions */
+        get: operations["list_basin_versions_api_v1_basins__basin_id__versions_get"];
         put?: never;
-        post?: never;
+        /** Create Basin Version */
+        post: operations["create_basin_version_api_v1_basins__basin_id__versions_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/data-sources": {
+    "/api/v1/river-networks": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List data sources */
-        get: operations["listDataSources"];
+        get?: never;
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/data-sources/{source_id}/cycles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List forecast cycles for a data source */
-        get: operations["listForecastCycles"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/models": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List model instances */
-        get: operations["listModels"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/models/{model_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get model instance detail */
-        get: operations["getModel"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/models/{model_id}/flood-frequency-curves": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List flood frequency curves for a model */
-        get: operations["listFloodFrequencyCurves"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/basin-versions/{basin_version_id}/river-network-versions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List river network versions for a basin version */
-        get: operations["listRiverNetworkVersions"];
-        put?: never;
-        post?: never;
+        /** Create River Network */
+        post: operations["create_river_network_api_v1_river_networks_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -147,13 +64,62 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List river segments as GeoJSON
-         * @description Segment-level features sliced from each parent reach polyline via PostGIS ST_LineSubstring (Path C). Reach geometry is stored in core.river_segment, derived from gis/river.shp (single-part, flow-ordered) per the PR-2 contract; segment slices are produced at request time using the (iRiv, iEle) crosswalk so the historical segment-level frontend contract is preserved without storing fabricated cross-gap bridge polylines.
-         */
-        get: operations["listRiverSegments"];
+        /** List River Segments */
+        get: operations["list_river_segments_api_v1_basin_versions__basin_version_id__river_segments_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get River Segment */
+        get: operations["get_river_segment_api_v1_basin_versions__basin_version_id__river_segments__segment_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mesh-versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Mesh Version */
+        post: operations["create_mesh_version_api_v1_mesh_versions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Models */
+        get: operations["list_models_api_v1_models_get"];
+        put?: never;
+        /** Create Model */
+        post: operations["create_model_api_v1_models_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -168,8 +134,8 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set active model flag through lifecycle operation */
-        put: operations["setModelActive"];
+        /** Set Model Active */
+        put: operations["set_model_active_api_v1_models__model_id__active_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -186,8 +152,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Preflight model lifecycle operation */
-        post: operations["preflightModelLifecycle"];
+        /** Preflight Model Lifecycle */
+        post: operations["preflight_model_lifecycle_api_v1_models__model_id__preflight_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -203,25 +169,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Execute model lifecycle operation */
-        post: operations["modelLifecycleOperation"];
+        /** Model Lifecycle Operation */
+        post: operations["model_lifecycle_operation_api_v1_models__model_id__lifecycle_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}": {
+    "/api/v1/models/{model_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get river segment detail */
-        get: operations["getRiverSegment"];
+        /** Get Model */
+        get: operations["get_model_api_v1_models__model_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/river-segment-crosswalks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create River Segment Crosswalks */
+        post: operations["create_river_segment_crosswalks_api_v1_river_segment_crosswalks_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -235,8 +218,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get river segment forecast series */
-        get: operations["getRiverSegmentForecastSeries"];
+        /** Get Forecast Series */
+        get: operations["get_forecast_series_api_v1_basin_versions__basin_version_id__river_segments__segment_id__forecast_series_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -245,15 +228,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/met/stations": {
+    "/api/v1/runs/{run_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List meteorological stations */
-        get: operations["listMetStations"];
+        /** Get Run */
+        get: operations["get_run_api_v1_runs__run_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -262,15 +245,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/met/stations/{station_id}/series": {
+    "/api/v1/runs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get station forcing time series */
-        get: operations["getMetStationSeries"];
+        /** List Runs */
+        get: operations["list_runs_api_v1_runs_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -296,15 +279,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs": {
+    "/api/v1/met/best-available": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List hydrological runs */
-        get: operations["listRuns"];
+        /** List Best Available */
+        get: operations["list_best_available_api_v1_met_best_available_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -313,15 +296,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs/{run_id}": {
+    "/api/v1/data-sources": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get hydrological run detail */
-        get: operations["getRun"];
+        /** List Data Sources */
+        get: operations["list_data_sources_api_v1_data_sources_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -330,52 +313,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs/{run_id}/retry": {
+    "/api/v1/data-sources/{source_id}/cycles": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
-        /** Retry a failed or cancelled run */
-        post: operations["retryRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runs/{run_id}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Cancel an active run */
-        post: operations["cancelRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get river network vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for river-network geometry. Responses use Web Mercator XYZ semantics, the `river_network` source layer, stable cache headers, and MVT schema version `m16-hydrology-mvt-v1`.
-         */
-        get: operations["getRiverNetworkTile"];
+        /** List Cycles */
+        get: operations["list_cycles_api_v1_data_sources__source_id__cycles_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -384,18 +330,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf": {
+    "/api/v1/met/stations": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get meteorological station vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for meteorological station points scoped by basin version. The vector source-layer is `met_stations` and features include `station_id`, `basin_version_id`, `station_name`, `station_role`, and `active_flag`.
-         */
-        get: operations["getMetStationTile"];
+        /** List Met Stations */
+        get: operations["list_met_stations_api_v1_met_stations_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -404,18 +347,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
+    "/api/v1/met/stations/{station_id}/series": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get hydrological output vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for hydrological values. The vector source-layer is `hydro` and features include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality metadata.
-         */
-        get: operations["getHydroTile"];
+        /** Get station forcing time series */
+        get: operations["getMetStationSeries"];
         put?: never;
         post?: never;
         delete?: never;
@@ -424,18 +364,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/flood-return-period": {
+    "/api/v1/state-snapshots": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get flood return period GeoJSON map data
-         * @description Bounded GeoJSON compatibility endpoint for small or degraded flood-return-period rendering. National rendering must use the canonical `.pbf` MVT route discovered through layer metadata.
-         */
-        get: operations["getFloodReturnPeriodMap"];
+        /** List State Snapshots */
+        get: operations["list_state_snapshots_api_v1_state_snapshots_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -444,18 +381,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf": {
+    "/api/v1/state-snapshots/{state_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get flood return period vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for flood return-period data. The vector source-layer is `flood_return_period`; bounded GeoJSON remains available only at `/api/v1/tiles/flood-return-period`. Features include `run_id`, `duration`, `valid_time`, segment/network identity, value, return_period, warning_level, unit, and quality metadata.
-         */
-        get: operations["getFloodReturnPeriodTile"];
+        /** Get State Snapshot */
+        get: operations["get_state_snapshot_api_v1_state_snapshots__state_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -532,6 +466,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/{run_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry a failed or cancelled run */
+        post: operations["retryRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Run */
+        post: operations["cancel_run_api_v1_runs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/metrics/stage-duration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stage Duration Metrics */
+        get: operations["stage_duration_metrics_api_v1_metrics_stage_duration_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/metrics/success-rate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Success Rate Metrics */
+        get: operations["success_rate_metrics_api_v1_metrics_success_rate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/queue/depth": {
         parameters: {
             query?: never;
@@ -539,8 +541,110 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get queue depth by state */
-        get: operations["getQueueDepth"];
+        /** Queue Depth */
+        get: operations["queue_depth_api_v1_queue_depth_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/layers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Layers */
+        get: operations["list_layers_api_v1_layers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/layers/{layer_id}/valid-times": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Layer Valid Times */
+        get: operations["list_layer_valid_times_api_v1_layers__layer_id__valid_times_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Hydro Mvt Tile */
+        get: operations["hydro_mvt_tile_api_v1_tiles_hydro__run_id___variable___valid_time___z___x___y__pbf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Hydro National Mvt Tile */
+        get: operations["hydro_national_mvt_tile_api_v1_tiles_hydro_national__variable___valid_time___z___x___y__pbf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** River Network Mvt Tile */
+        get: operations["river_network_mvt_tile_api_v1_tiles_river_network__basin_version_id___z___x___y__pbf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Met Station Mvt Tile */
+        get: operations["getMetStationTile"];
         put?: never;
         post?: never;
         delete?: never;
@@ -566,15 +670,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/metrics/stage-duration": {
+    "/api/v1/slurm/health": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get average stage duration by day */
-        get: operations["getStageDurationMetrics"];
+        /** Health Check */
+        get: operations["health_check_api_v1_slurm_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -583,15 +687,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/metrics/success-rate": {
+    "/api/v1/slurm/jobs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get cycle success rate by day */
-        get: operations["getSuccessRateMetrics"];
+        /** List Jobs */
+        get: operations["list_jobs_api_v1_slurm_jobs_get"];
+        put?: never;
+        /** Submit Job */
+        post: operations["submit_job_api_v1_slurm_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/slurm/job-arrays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit Job Array */
+        post: operations["submit_job_array_api_v1_slurm_job_arrays_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/slurm/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job Status */
+        get: operations["get_job_status_api_v1_slurm_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        /** Cancel Job */
+        delete: operations["cancel_job_api_v1_slurm_jobs__job_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/slurm/jobs/{job_id}/array-tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Array Task Results */
+        get: operations["get_array_task_results_api_v1_slurm_jobs__job_id__array_tasks_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -600,15 +757,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/flood-alerts/summary": {
+    "/api/v1/slurm/jobs/{job_id}/logs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get flood alert summary */
-        get: operations["getFloodAlertSummary"];
+        /** Fetch Logs */
+        get: operations["fetch_logs_api_v1_slurm_jobs__job_id__logs_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -617,15 +774,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/flood-alerts/ranking": {
+    "/api/v1/slurm/internal/reset": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Rank segments by flood alert severity */
-        get: operations["listFloodAlertRanking"];
+        get?: never;
+        put?: never;
+        /** Reset Registry */
+        post: operations["reset_registry_api_v1_slurm_internal_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Health */
+        get: operations["health_health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -634,134 +808,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/flood-alerts/segments": {
+    "/{full_path}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List flood alert segments */
-        get: operations["listFloodAlertSegments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flood-alerts/timeline": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get flood alert timeline for a segment */
-        get: operations["getFloodAlertTimeline"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/lineage/river-point": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get lineage for a river point value */
-        get: operations["getRiverPointLineage"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/lineage/forcing-point": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get lineage for a forcing point value */
-        get: operations["getForcingPointLineage"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/lineage/product/{product_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get lineage for a product */
-        get: operations["getProductLineage"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/layers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List available map layers */
-        get: operations["listLayers"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/layers/{layer_id}/valid-times": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List bounded valid times for a map layer
-         * @description Returns the newest valid-time window up to the server configured sample
-         *     limit, sorted ascending for timeline controls. When run_id is supplied,
-         *     discovery is scoped to that concrete hydro run/source identity. A true
-         *     truncated flag means more distinct times were observed than are included
-         *     in valid_times/items.
-         *
-         *     BREAKING (2026-06-20): the route now returns HTTP 422 for any layer_id
-         *     outside the canonical supported set
-         *     `{discharge, flood-return-period, warning-level, river-network}`. The
-         *     prior behaviour silently fell through to an empty `ValidTimeDiscovery`
-         *     with HTTP 200 for unknown layer_ids; that fallback was removed together
-         *     with the retired hydrology variant. The 422 envelope is the standard
-         *     `ErrorResponse` shape with
-         *     `error.code = "VALIDATION_ERROR"` and
-         *     `error.details = { layer_id, supported }`.
-         */
-        get: operations["listLayerValidTimes"];
+        /** Spa Fallback */
+        get: operations["spa_fallback__full_path__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -774,6 +829,249 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActiveFlagPayload */
+        ActiveFlagPayload: {
+            /**
+             * Active
+             * @description Canonical active flag. The legacy active_flag key is accepted for compatibility.
+             */
+            active: boolean;
+        };
+        /** ArraySubmitJobRequest */
+        ArraySubmitJobRequest: {
+            /** Job Type */
+            job_type: string;
+            /** Cycle Id */
+            cycle_id: string;
+            /** Stage Name */
+            stage_name?: string | null;
+            /** Tasks */
+            tasks?: {
+                [key: string]: unknown;
+            }[];
+            /** Manifest */
+            manifest?: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** BasinCreatePayload */
+        BasinCreatePayload: {
+            /** Basin Id */
+            basin_id: string;
+            /** Basin Name */
+            basin_name: string;
+            /** Basin Group */
+            basin_group?: string | null;
+            /** Description */
+            description?: string | null;
+            basin_version: components["schemas"]["BasinVersionPayload"];
+        };
+        /** BasinVersionPayload */
+        BasinVersionPayload: {
+            /** Basin Version Id */
+            basin_version_id?: string | null;
+            /** Version Label */
+            version_label: string;
+            /** Geom */
+            geom: {
+                [key: string]: unknown;
+            } | string;
+            /**
+             * Active Flag
+             * @default false
+             */
+            active_flag: boolean;
+            /** Valid From */
+            valid_from?: string | null;
+            /** Valid To */
+            valid_to?: string | null;
+            /** Source Uri */
+            source_uri?: string | null;
+            /** Checksum */
+            checksum?: string | null;
+        };
+        /** CrosswalkCreatePayload */
+        CrosswalkCreatePayload: {
+            /** River Network Version Id */
+            river_network_version_id: string;
+            /** Entries */
+            entries: components["schemas"]["CrosswalkEntryPayload"][];
+        };
+        /** CrosswalkEntryPayload */
+        CrosswalkEntryPayload: {
+            /** River Segment Id */
+            river_segment_id: string;
+            /** Source */
+            source: string;
+            /** External Id */
+            external_id: string;
+            /** Properties Json */
+            properties_json?: {
+                [key: string]: unknown;
+            };
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /** MeshVersionCreatePayload */
+        MeshVersionCreatePayload: {
+            /** Mesh Version Id */
+            mesh_version_id?: string | null;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** Version Label */
+            version_label: string;
+            /** Mesh Uri */
+            mesh_uri: string;
+            /** Checksum */
+            checksum?: string | null;
+            /** Properties Json */
+            properties_json?: {
+                [key: string]: unknown;
+            };
+        };
+        /** ModelCreatePayload */
+        ModelCreatePayload: {
+            /** Model Id */
+            model_id: string;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** River Network Version Id */
+            river_network_version_id: string;
+            /** Mesh Version Id */
+            mesh_version_id: string;
+            /** Calibration Version Id */
+            calibration_version_id: string;
+            /** Shud Code Version */
+            shud_code_version: string;
+            /** Rshud Code Version */
+            rshud_code_version?: string | null;
+            /** Autoshud Code Version */
+            autoshud_code_version?: string | null;
+            /** Container Image */
+            container_image?: string | null;
+            /** Model Package Uri */
+            model_package_uri: string;
+            /**
+             * Active Flag
+             * @description Must be false on creation; activate models through the lifecycle operation endpoint.
+             * @default false
+             */
+            active_flag: boolean;
+            /** Resource Profile */
+            resource_profile?: {
+                [key: string]: unknown;
+            };
+        };
+        /** ModelLifecyclePayload */
+        ModelLifecyclePayload: {
+            /**
+             * Operation
+             * @enum {string}
+             */
+            operation: "activate" | "deactivate" | "switch_version" | "rollback_version" | "supersede" | "deprecate";
+            /** Previous Model Id */
+            previous_model_id?: string | null;
+            /**
+             * Override Missing Active
+             * @default false
+             */
+            override_missing_active: boolean;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** ResetRequest */
+        ResetRequest: {
+            /**
+             * Restore Defaults
+             * @default false
+             */
+            restore_defaults: boolean;
+            /** Delay To Running Seconds */
+            delay_to_running_seconds?: number | null;
+            /** Delay To Succeeded Seconds */
+            delay_to_succeeded_seconds?: number | null;
+            /** Failure Rate */
+            failure_rate?: number | null;
+            /** Failure Seed */
+            failure_seed?: number | null;
+            /** Force Fail Run Ids */
+            force_fail_run_ids?: string[] | null;
+        };
+        /** RiverNetworkCreatePayload */
+        RiverNetworkCreatePayload: {
+            /** River Network Version Id */
+            river_network_version_id?: string | null;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** Version Label */
+            version_label: string;
+            /** Segment Count */
+            segment_count?: number | null;
+            /** Source Uri */
+            source_uri?: string | null;
+            /** Checksum */
+            checksum?: string | null;
+            /** Segments */
+            segments: components["schemas"]["RiverSegmentPayload"][];
+        };
+        /** RiverSegmentPayload */
+        RiverSegmentPayload: {
+            /** River Segment Id */
+            river_segment_id: string;
+            /** Segment Order */
+            segment_order?: number | null;
+            /** Downstream Segment Id */
+            downstream_segment_id?: string | null;
+            /** Length M */
+            length_m?: number | null;
+            /** Geom */
+            geom: {
+                [key: string]: unknown;
+            } | string;
+            /** Properties Json */
+            properties_json?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * SubmitJobRequest
+         * @description Job submission request.
+         *
+         *     The gateway accepts either a compact body with run_id/model_id or a manifest-shaped body
+         *     where model_id is nested under model.model_id.
+         */
+        SubmitJobRequest: {
+            /** Run Id */
+            run_id?: string | null;
+            /** Model Id */
+            model_id?: string | null;
+            /** Job Type */
+            job_type?: string | null;
+            /** Manifest */
+            manifest?: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
+        };
         /** @description Standard success envelope returned by API endpoints using the `_ok()` response pattern. */
         SuccessEnvelope: {
             /** @example req_01J0NHMS */
@@ -810,198 +1108,6 @@ export interface components {
             reason: string;
         } & {
             [key: string]: unknown;
-        };
-        Basin: {
-            basin_id: string;
-            basin_name: string;
-            basin_group?: string | null;
-            description?: string | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        BasinVersion: {
-            basin_version_id: string;
-            basin_id: string;
-            version_label: string;
-            geom: components["schemas"]["GeoJsonMultiPolygon"];
-            active_flag: boolean;
-            /** Format: date-time */
-            valid_from?: string | null;
-            /** Format: date-time */
-            valid_to?: string | null;
-            /** @description Public responses redact local/source lineage URIs and return null. */
-            source_uri?: string | null;
-            /** @description Public responses redact raw lineage checksums and return null. */
-            checksum?: string | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        ModelInstance: {
-            model_id: string;
-            model_name?: string | null;
-            basin_id?: string | null;
-            basin_name?: string | null;
-            basin_version_id: string;
-            river_network_version_id: string;
-            mesh_version_id: string;
-            calibration_version_id: string;
-            segment_count?: number | null;
-            mesh_uri?: string | null;
-            mesh_checksum?: string | null;
-            shud_code_version: string;
-            rshud_code_version?: string | null;
-            autoshud_code_version?: string | null;
-            active_flag: boolean;
-            /**
-             * @default inactive
-             * @enum {string}
-             */
-            lifecycle_state: "inactive" | "active" | "deprecated" | "superseded";
-            container_image?: string | null;
-            model_package_uri: string | null;
-            package_checksum?: string | null;
-            manifest_uri?: string | null;
-            source_inventory_checksum?: string | null;
-            basin_slug?: string | null;
-            shud_input_name?: string | null;
-            source_path?: string | null;
-            resolved_source_path?: string | null;
-            source_uri?: string | null;
-            source_is_symlink?: boolean | null;
-            resource_profile: {
-                [key: string]: unknown;
-            };
-            /** Format: date-time */
-            created_at: string;
-        };
-        ModelInstancePage: {
-            items: components["schemas"]["ModelInstance"][];
-            total: number;
-            limit: number;
-            offset: number;
-        };
-        ModelLifecycleRequest: {
-            /** @enum {string} */
-            operation: "activate" | "deactivate" | "switch_version" | "rollback_version" | "supersede" | "deprecate";
-            previous_model_id?: string | null;
-            override_missing_active?: boolean;
-            reason?: string | null;
-        };
-        ModelOperationPreflight: {
-            schema: string;
-            request_id?: string | null;
-            operation: string;
-            action_id?: string | null;
-            actor_id?: string | null;
-            roles?: string[];
-            /** @enum {string} */
-            status: "ready" | "blocked";
-            model_id: string;
-            basin_id?: string | null;
-            basin_version_id?: string | null;
-            current_active_model_id?: string | null;
-            previous_model_id?: string | null;
-            restored_model_id?: string | null;
-            prior_audit_log_id?: number | null;
-            rollback_history?: {
-                [key: string]: unknown;
-            } | null;
-            river_network_version_id?: string | null;
-            mesh_version_id?: string | null;
-            lineage?: {
-                [key: string]: unknown;
-            };
-            object_uri_prefix?: {
-                [key: string]: unknown;
-            };
-            impact: {
-                [key: string]: unknown;
-            };
-            blockers: {
-                [key: string]: unknown;
-            }[];
-            warnings: {
-                [key: string]: unknown;
-            }[];
-            override_missing_active?: boolean;
-            reason?: string | null;
-        };
-        ModelLifecycleResult: {
-            /** @enum {string} */
-            status: "allowed" | "blocked" | "already_current" | "rollback";
-            operation: string;
-            model: components["schemas"]["ModelInstance"];
-            previous_model?: components["schemas"]["ModelInstance"] | null;
-            preflight: components["schemas"]["ModelOperationPreflight"];
-            audit_reference?: {
-                [key: string]: unknown;
-            } | null;
-        };
-        RiverSegment: {
-            river_segment_id: string;
-            river_network_version_id: string;
-            segment_order?: number | null;
-            downstream_segment_id?: string | null;
-            length_m?: number | null;
-            geom: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
-            properties_json: {
-                [key: string]: unknown;
-            };
-            /** Format: date-time */
-            created_at: string;
-        };
-        RiverSegmentFeature: {
-            /** @enum {string} */
-            type: "Feature";
-            properties: {
-                segment_id: string;
-                river_segment_id: string;
-                basin_version_id: string;
-                river_network_version_id: string;
-                name: string;
-                stream_order: number;
-                segment_order?: number | null;
-                downstream_segment_id?: string | null;
-                length_m?: number | null;
-            } & {
-                [key: string]: unknown;
-            };
-            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
-        };
-        RiverSegmentFeatureCollection: {
-            /** @enum {string} */
-            type: "FeatureCollection";
-            features: components["schemas"]["RiverSegmentFeature"][];
-            /** @description Total matching stored river segment rows, including rows omitted from features because geom is null. */
-            total: number;
-            /** @description Total matching river segment rows with non-null LineString geometry that can be emitted as GeoJSON features. */
-            feature_total: number;
-            limit: number;
-            offset: number;
-        };
-        MetStation: {
-            station_id: string;
-            basin_version_id: string;
-            station_name?: string | null;
-            geom: components["schemas"]["GeoJsonPoint"];
-            elevation_m?: number | null;
-            station_role: string;
-            active_flag: boolean;
-            properties_json?: {
-                [key: string]: unknown;
-            } | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        MetStationPage: {
-            items: components["schemas"]["MetStation"][];
-            total_count: number;
-            limit: number;
-            offset: number;
-            /** @description Applied filters plus per-filter availability so the UI can degrade advanced filters honestly (e.g. qc_status unavailable) without errors. */
-            filters?: {
-                [key: string]: unknown;
-            };
         };
         StationSeriesPoint: {
             /** Format: date-time */
@@ -1112,63 +1218,17 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @enum {string} */
-        FloodReturnPeriodQualityState: "ready" | "degraded" | "unavailable";
-        FloodReturnPeriodProductQuality: {
-            quality_state: components["schemas"]["FloodReturnPeriodQualityState"];
-            /**
-             * @description Source of the run-level flood product quality. `legacy_row_count` is used only when current explicit quality columns are absent and the API falls back to pre-explicit row-count semantics.
-             * @enum {string}
-             */
-            quality_source: "explicit" | "historical_backfill" | "legacy_row_count";
-            /** @description True when counters are based on peak/max-over-window rows, false when timestep rows were used, or null when no result rows exist. */
-            max_over_window: boolean | null;
-            result_rows: number;
-            return_period_rows: number;
-            warning_rows: number;
-            expected_result_rows: number;
-            expected_max_result_rows: number;
-            expected_timestep_result_rows: number;
-            meaningful_result_rows: number;
-            meaningful_max_result_rows: number;
-            meaningful_timestep_result_rows: number;
-            no_frequency_curve_rows: number;
-            no_usable_frequency_curve_rows: number;
-            warning_threshold_unavailable_rows: number;
-            unavailable_products: string[];
-            residual_blockers: {
-                [key: string]: unknown;
-            }[];
-            /** @description Hydro run status when the quality object is attached to a route scoped to a run. */
-            status?: string | null;
-        } & {
-            [key: string]: unknown;
-        };
-        QhhLatestProductQuality: {
-            flood_return_period: components["schemas"]["FloodReturnPeriodProductQuality"];
-        } & {
-            [key: string]: unknown;
-        };
         QhhLatestAvailability: {
             ready: boolean;
             unavailable_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
             quality_flags: string[];
             quality_notes: components["schemas"]["QhhLatestQualityNote"][];
-            /**
-             * @description Supplemental flood return-period availability for this run. Current explicit schemas derive it from `product_quality.flood_return_period.quality_state`: `ready` maps to ready, while `degraded` and `unavailable` map to unavailable. Only missing or pre-explicit quality schemas fall back to the legacy row-count signal (`flood_return_period_rows > 0`). Independent of `ready`: a run with streamflow output but no return-period baseline still returns with `return_period_status = unavailable`. Never part of the blocking `unavailable_reasons` set.
-             * @enum {string}
-             */
-            return_period_status: "ready" | "unavailable";
-            /** @description Populated only when `return_period_status = unavailable`; carries the reason code RETURN_PERIOD_RESULT_UNAVAILABLE. Supplemental, not blocking. */
-            return_period_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
         };
         QhhLatestQuality: {
             station_sample_count: number;
             river_sample_count: number;
             required_station_variables: ("PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press")[];
             station_variable_coverage: components["schemas"]["QhhLatestStationVariableCoverage"][];
-            /** @description Supplemental per-product quality details. `flood_return_period` carries explicit flood run quality when available and never blocks q_down display readiness. */
-            product_quality?: components["schemas"]["QhhLatestProductQuality"] | null;
             candidate_limit: number;
             search_limit: number;
             context_limit: number;
@@ -1212,184 +1272,78 @@ export interface components {
             availability: components["schemas"]["QhhLatestAvailability"];
             quality: components["schemas"]["QhhLatestQuality"];
         };
-        DataSource: {
-            source_id: string;
-            source_name: string;
-            source_type: string;
-            status: string;
-            adapter_name: string;
-            config_json: {
-                [key: string]: unknown;
-            };
-            /** Format: date-time */
-            created_at: string;
+        Layer: {
+            layer_id: string;
+            layer_name: string;
+            layer_type: string;
+            variables: string[];
+            metadata?: components["schemas"]["LayerMetadata"] | null;
         };
-        DataSourcePage: {
-            items: components["schemas"]["DataSource"][];
-            total_count: number;
-            limit: number;
-            offset: number;
-        };
-        ForecastCycle: {
-            cycle_id: string;
-            source_id: string;
-            /** Format: date-time */
-            cycle_time: string;
-            /** Format: date-time */
-            issue_time: string;
-            status: string;
-            /** Format: date-time */
-            created_at: string;
-        };
-        ForecastCyclePage: {
-            items: components["schemas"]["ForecastCycle"][];
-            total_count: number;
-            limit: number;
-            offset: number;
-        };
-        ForcingVersion: {
-            forcing_version_id: string;
-            model_id: string;
-            source_id: string;
-            /** Format: date-time */
-            cycle_time?: string | null;
-            /** Format: date-time */
-            start_time: string;
-            /** Format: date-time */
-            end_time: string;
-            station_count: number;
-            forcing_package_uri: string;
-            checksum?: string | null;
-            lineage_json?: {
+        LayerMetadata: {
+            layer_id: string;
+            /** @enum {string} */
+            tile_format: "mvt" | "geojson_compatibility";
+            url_template?: string | null;
+            tile_url_template?: string | null;
+            required_placeholders?: string[];
+            maplibre_source_layer?: string | null;
+            source_layer?: string | null;
+            property_schema_version?: string | null;
+            schema_version?: string | null;
+            encoder_version?: string | null;
+            property_schema?: {
                 [key: string]: unknown;
             } | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        /** @enum {string} */
-        RunType: "analysis" | "forecast" | "hindcast";
-        /** @enum {string} */
-        RunStatus: "created" | "staged" | "pending" | "submitted" | "running" | "succeeded" | "parsed" | "frequency_done" | "published" | "failed" | "cancelled" | "superseded";
-        HydroRun: {
-            run_id: string;
-            run_type: components["schemas"]["RunType"];
-            scenario_id: string;
-            model_id: string;
-            basin_version_id: string;
-            river_network_version_id: string | null;
-            forcing_version_id?: string | null;
-            init_state_id?: string | null;
-            source_id?: string | null;
-            /** Format: date-time */
-            cycle_time?: string | null;
-            status: components["schemas"]["RunStatus"];
-            slurm_job_id?: string | null;
-            /** Format: date-time */
-            start_time: string;
-            /** Format: date-time */
-            end_time: string;
-            run_manifest_uri?: string | null;
-            output_uri?: string | null;
-            log_uri?: string | null;
-            error_code?: string | null;
-            error_message?: string | null;
-            /** @description Product readiness evidence keyed by product family, including flood_return_period readiness. */
-            product_quality?: ({
+            min_zoom?: number | null;
+            max_zoom?: number | null;
+            bounds_crs?: string | null;
+            bounds?: number[] | null;
+            wgs84_bounds?: number[] | null;
+            valid_times?: string[];
+            valid_time_limit?: number;
+            valid_time_observed_count?: number;
+            valid_times_truncated?: boolean;
+            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, river_network_version_id, and bounded source_version/run revision when advertised by required_placeholders. */
+            source_refs?: {
                 [key: string]: unknown;
-            } & components["schemas"]["QhhLatestProductQuality"]) | null;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
+            } | null;
+            cache_layer_id?: string | null;
+            route_variable?: string | null;
+            legacy_layer_ids?: string[];
+            alias_of?: string | null;
+            alias_semantic?: string | null;
+            canonical_route_layer_id?: string | null;
+            cache_etag?: string | null;
+            cache_version?: string | null;
+            fallback_available: boolean;
+            fallback_endpoint?: string | null;
+            release_blocking: boolean;
+            production_mvt_readiness_claimed?: boolean | null;
         };
-        HydroRunPage: {
-            items: components["schemas"]["HydroRun"][];
-            total: number;
-            /** @description Backward-compatible alias of total. */
-            total_count?: number;
+        LayerValidTimes: {
+            valid_times: string[];
+            items: string[];
             limit: number;
-            offset: number;
+            observed_count: number;
+            truncated: boolean;
         };
-        RiverSeriesResponse: {
-            segment_id: string;
+        JobStatusCounts: {
+            succeeded: number;
+            failed: number;
+            running: number;
+            pending: number;
+        };
+        PipelineStatus: {
+            cycle_id: string;
+            source: string | null;
             /** Format: date-time */
-            issue_time: string | null;
-            unit: string;
-            series: components["schemas"]["SeriesSegment"][];
-            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
-        };
-        /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
-        SplicedForecastResponse: {
-            river_segment_id: string;
-            segments: {
-                scenario: string;
-                /** @description Canonical scenario identifier. */
-                scenario_id?: string;
-                source: string;
-                /** @description Forecast source identifier when available. */
-                source_id?: string | null;
-                /**
-                 * Format: date-time
-                 * @description Forecast source cycle time when available.
-                 */
-                cycle_time?: string | null;
-                /** @description Available forecast lead time in hours when available. */
-                available_lead_hours?: number | null;
-                /** @enum {string} */
-                segment_role: "past_7_days" | "future_7_days";
-                data: {
-                    /** Format: date-time */
-                    valid_time: string;
-                    value: number;
-                }[];
-            }[];
+            cycle_time: string | null;
+            current_state: string;
             /** Format: date-time */
-            issue_time: string | null;
-            variable: string;
-            unit: string;
-            frequency_thresholds?: components["schemas"]["FloodFrequencyThresholds"] | null;
-        };
-        SeriesSegment: {
-            scenario_id: string;
-            /** @example GFS */
-            source_id?: string | null;
+            started_at: string | null;
             /** Format: date-time */
-            cycle_time?: string | null;
-            /** @example 168 */
-            available_lead_hours?: number | null;
-            segment_role: string;
-            points: (string | number)[][];
-        };
-        FloodAlertSummary: {
-            run_id: string;
-            total_segments: number;
-            usable_curves: number;
-            unavailable_count: number;
-            quality_note?: string | null;
-            levels: components["schemas"]["FloodAlertLevelCount"][];
-        };
-        FloodAlertLevelCount: {
-            /** @enum {string} */
-            level: "normal" | "elevated" | "watch" | "warning" | "high_risk" | "severe" | "extreme";
-            count: number;
-            color: string;
-        };
-        PipelineStage: {
-            stage: string;
-            /** @enum {string} */
-            display_status: "pending" | "running" | "succeeded" | "partially_failed" | "failed" | "skipped";
-            /**
-             * @description Backward-compatible alias of display_status.
-             * @enum {string}
-             */
-            status?: "pending" | "running" | "succeeded" | "partially_failed" | "failed" | "skipped";
-            duration_seconds: number | null;
-            basin_progress: components["schemas"]["BasinProgress"];
-            basin_results_limit: number;
-            basin_results_total: number;
-            basin_results_returned: number;
-            basin_results_truncated: boolean;
-            basin_results: components["schemas"]["BasinResult"][];
+            updated_at: string | null;
+            job_counts: components["schemas"]["JobStatusCounts"];
         };
         BasinProgress: {
             completed: number;
@@ -1418,6 +1372,23 @@ export interface components {
             error_code: string | null;
             error_message: string | null;
             log_uri: string | null;
+        };
+        PipelineStage: {
+            stage: string;
+            /** @enum {string} */
+            display_status: "pending" | "running" | "succeeded" | "partially_failed" | "failed" | "skipped";
+            /**
+             * @description Backward-compatible alias of display_status.
+             * @enum {string}
+             */
+            status?: "pending" | "running" | "succeeded" | "partially_failed" | "failed" | "skipped";
+            duration_seconds: number | null;
+            basin_progress: components["schemas"]["BasinProgress"];
+            basin_results_limit: number;
+            basin_results_total: number;
+            basin_results_returned: number;
+            basin_results_truncated: boolean;
+            basin_results: components["schemas"]["BasinResult"][];
         };
         PipelineJob: {
             job_id: string;
@@ -1450,100 +1421,10 @@ export interface components {
             limit: number;
             offset: number;
         };
-        QcResult: {
-            qc_id: number;
-            qc_checkpoint: string;
-            target_type: string;
-            target_id: string;
-            run_id?: string | null;
-            passed: boolean;
-            severity: string;
-            checks_json: {
-                [key: string]: unknown;
-            };
-            message?: string | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        GeoJsonPoint: {
-            /** @enum {string} */
-            type: "Point";
-            coordinates: number[];
-        };
-        GeoJsonLineString: {
-            /** @enum {string} */
-            type: "LineString";
-            coordinates: number[][];
-        };
-        /** @description GeoJSON MultiLineString. The underlying core.river_segment.geom column type is MultiLineString(4490); since the PR-2 contract, every reach row currently stored holds exactly one part (the single-part flow-ordered polyline derived from gis/river.shp). The wrapper type is retained to allow a basin's input to express a genuine multi-part reach in the future without a schema change. */
-        GeoJsonMultiLineString: {
-            /** @enum {string} */
-            type: "MultiLineString";
-            coordinates: number[][][];
-        };
-        GeoJsonMultiPolygon: {
-            /** @enum {string} */
-            type: "MultiPolygon";
-            coordinates: number[][][][];
-        };
-        RiverNetworkVersion: {
-            river_network_version_id: string;
-            basin_version_id: string;
-            version_label: string;
-            source_uri?: string | null;
-            /** Format: date-time */
-            created_at: string;
-        };
-        FloodFrequencyCurve: {
-            model_id: string;
-            segment_id: string;
-            thresholds: {
-                [key: string]: number;
-            };
-        };
-        TimeseriesResponse: {
-            target_id: string;
-            unit: string;
-            variables: {
-                [key: string]: (string | number)[][];
-            };
-        };
-        JobStatusCounts: {
-            succeeded: number;
-            failed: number;
-            running: number;
-            pending: number;
-        };
-        PipelineStatus: {
-            cycle_id: string;
-            source: string | null;
-            /** Format: date-time */
-            cycle_time: string | null;
-            current_state: string;
-            /** Format: date-time */
-            started_at: string | null;
-            /** Format: date-time */
-            updated_at: string | null;
-            job_counts: components["schemas"]["JobStatusCounts"];
-        };
         JobLogs: {
             job_id: string;
             log_uri: string;
             content: string;
-        };
-        QueueDepth: {
-            running: number;
-            pending: number;
-            idle: number;
-        };
-        RuntimeConfig: {
-            /** @enum {string} */
-            service_role: "dev_monolith" | "compute_control" | "display_readonly" | "slurm_gateway";
-            control_mutations_enabled: boolean;
-            slurm_routes_enabled: boolean;
-            /** @enum {string} */
-            queue_depth_mode: "slurm_gateway" | "display_readonly_unavailable";
-            display_readonly: boolean;
         };
         RetryRunResult: {
             job_id: string;
@@ -1557,304 +1438,17 @@ export interface components {
             /** @enum {string} */
             execution_status: "submitted";
         };
-        CancelRunResult: {
-            run_id: string;
-            cancelled_jobs: components["schemas"]["PipelineJob"][];
-            /** @description Backward-compatible alias of cancelled_jobs. */
-            cancelled?: components["schemas"]["PipelineJob"][];
-            failed_jobs?: components["schemas"]["SlurmCancelFailure"][];
-            /** @description Alias of failed_jobs for Slurm cancellation failures. */
-            slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
-            /** @description Jobs whose Slurm cancellation could not be proven; local job state is preserved. */
-            blocked_jobs?: components["schemas"]["SlurmCancellationGap"][];
-            /** @description Alias of blocked_jobs for unproven Slurm cancellation gaps. */
-            slurm_cancellation_gaps?: components["schemas"]["SlurmCancellationGap"][];
-            partial_failure?: boolean;
-            idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
-            /** @description hydro_run transition (CancelTransition shape), or null if not applicable */
-            hydro_run?: Record<string, never> | null;
-            /** @description forecast_cycle transition (CancelTransition shape), or null if not applicable */
-            forecast_cycle?: Record<string, never> | null;
-        };
-        SlurmCancelFailure: {
-            job_id: string;
-            run_id: string;
-            status: string;
-            slurm_job_id: string | null;
-            error: {
-                status_code: number;
-                code: string;
-                message: string;
-                details: {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        SlurmCancellationGap: {
-            job_id: string;
-            run_id: string;
-            status: string;
-            slurm_job_id: string | null;
-            /** @enum {boolean} */
-            cancellation_proven: false;
-            error?: {
-                status_code: number;
-                code: string;
-                message: string;
-                details: {
-                    [key: string]: unknown;
-                };
-            };
-            gateway_response?: {
-                [key: string]: unknown;
-            };
-        };
-        IdempotentCancelJob: {
-            job_id: string;
-            slurm_job_id: string | null;
-            note: string;
-        };
-        CancelTransition: {
-            run_id?: string;
-            cycle_id?: string;
-            previous_status: string;
-            status: string;
-            preserved: boolean;
-        };
-        StageDurationMetric: {
-            /** Format: date */
-            date: string;
-            stage: string;
-            average_duration_seconds: number;
-            job_count: number;
-        };
-        SuccessRateMetric: {
-            /** Format: date */
-            date: string;
-            success_rate: number;
-            succeeded_cycles: number;
-            total_cycles: number;
-        };
-        FloodAlertRankingItem: {
-            rank: number;
-            river_segment_id: string;
-            segment_id: string;
-            segment_name: string | null;
-            basin_version_id: string;
-            river_network_version_id: string | null;
-            q_value: number;
-            q_unit: string;
-            return_period: number | null;
-            warning_level: string | null;
-            duration: string;
-            /** Format: date-time */
-            valid_time: string;
-            /** @description GeoJSON point centroid, or null */
-            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
-        };
-        FloodAlertRanking: {
-            items: components["schemas"]["FloodAlertRankingItem"][];
-            total: number;
-            limit: number;
-            offset: number;
-        };
-        FloodAlertSegment: {
-            river_segment_id: string;
-            segment_id: string;
-            segment_name: string | null;
-            basin_version_id: string;
-            river_network_version_id: string | null;
-            q_value: number;
-            return_period: number | null;
-            warning_level: string | null;
-            /** Format: date-time */
-            valid_time: string;
-            /** @description GeoJSON point centroid, or null */
-            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
-        };
-        FloodAlertSegmentList: {
-            segments: components["schemas"]["FloodAlertSegment"][];
-            total: number;
-            limit: number;
-            offset: number;
-        };
-        FloodAlertTimelinePoint: {
-            /** Format: date-time */
-            valid_time: string;
-            return_period: number | null;
-            warning_level: string | null;
-            q_value: number;
-        };
-        FloodFrequencyThresholds: {
-            Q2?: number | null;
-            Q5?: number | null;
-            Q10?: number | null;
-            Q20?: number | null;
-            Q50?: number | null;
-            Q100?: number | null;
-            sample_quality?: {
-                [key: string]: unknown;
-            } | null;
-        };
-        FloodAlertTimeline: {
-            run_id: string;
-            segment_id: string;
-            river_segment_id: string;
-            river_network_version_id: string;
-            timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
-            timeline: components["schemas"]["FloodAlertTimelinePoint"][];
-            /** @description Peak timeline point, or null */
-            peak: components["schemas"]["FloodAlertTimelinePoint"] | null;
-            /** @description Flood frequency thresholds, or null */
-            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
-            quality_note: string | null;
-        };
-        /** @description GeoJSON FeatureCollection for flood return-period map rendering. */
-        FloodReturnPeriodFeatureCollection: {
+        RuntimeConfig: {
             /** @enum {string} */
-            type: "FeatureCollection";
-            features: components["schemas"]["FloodReturnPeriodFeature"][];
-            /** @description Flood return-period readiness evidence for the selected run. */
-            product_quality?: ({
-                [key: string]: unknown;
-            } & components["schemas"]["FloodReturnPeriodProductQuality"]) | null;
-        };
-        FloodReturnPeriodFeature: {
+            service_role: "dev_monolith" | "compute_control" | "display_readonly" | "slurm_gateway";
+            control_mutations_enabled: boolean;
+            slurm_routes_enabled: boolean;
             /** @enum {string} */
-            type: "Feature";
-            properties: components["schemas"]["FloodReturnPeriodFeatureProperties"];
-            /** @description GeoJSON geometry (LineString, MultiLineString, or Point), or null */
-            geometry: Record<string, never> | null;
-        };
-        FloodReturnPeriodFeatureProperties: {
-            /** @description Composite GeoJSON feature identity in river_network_version_id::segment_id form. */
-            feature_id: string;
-            /** @description River segment identifier. */
-            segment_id: string;
-            /** @description Displayed return-period flow value. */
-            value: number;
-            /** @description Measurement unit, for example m³/s. */
-            unit: string;
-            /** @description Data quality indicator from flood.return_period_result. */
-            quality_flag: string;
-            basin_version_id: string;
-            river_network_version_id: string;
-            /** @description Return period in years. */
-            return_period: number;
-            /** @description Alert level such as normal, warning, danger, or unavailable. */
-            warning_level: string;
-        };
-        GeoJSONPoint: {
-            /** @enum {string} */
-            type: "Point";
-            coordinates: number[];
-        };
-        GeoJSONLineString: {
-            /** @enum {string} */
-            type: "LineString";
-            coordinates: number[][];
-        };
-        GeoJSONMultiLineString: {
-            /** @enum {string} */
-            type: "MultiLineString";
-            coordinates: number[][][];
-        };
-        LineageResponse: {
-            target_type: string;
-            target_id: string;
-            nodes: {
-                [key: string]: unknown;
-            }[];
-            edges: {
-                [key: string]: unknown;
-            }[];
-            forcing_versions?: components["schemas"]["ForcingVersion"][];
-            qc_results?: components["schemas"]["QcResult"][];
-        };
-        Layer: {
-            layer_id: string;
-            layer_name: string;
-            layer_type: string;
-            variables: string[];
-            metadata?: components["schemas"]["LayerMetadata"] | null;
-        };
-        LayerMetadata: {
-            layer_id: string;
-            /** @enum {string} */
-            tile_format: "mvt" | "geojson_compatibility";
-            url_template?: string | null;
-            tile_url_template?: string | null;
-            required_placeholders?: string[];
-            maplibre_source_layer?: string | null;
-            source_layer?: string | null;
-            property_schema_version?: string | null;
-            /** @description MVT tile property schema version included in X-MVT-Schema-Version and cache identity. */
-            schema_version?: string | null;
-            /** @description Deterministic MVT encoder version included in cache identity. */
-            encoder_version?: string | null;
-            /** @description MVT feature property contract. For `hydro` source-layer features, required properties include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality_flag. For `flood_return_period` source-layer features, required properties include `run_id`, `duration`, `valid_time`, segment/network identity, value, unit, return_period, warning_level, and quality_flag. */
-            property_schema?: {
-                [key: string]: unknown;
-            } | null;
-            min_zoom?: number | null;
-            max_zoom?: number | null;
-            bounds_crs?: string | null;
-            bounds?: number[] | null;
-            wgs84_bounds?: number[] | null;
-            /** @description Bounded newest-window valid-time sample for catalog display, sorted ascending so the final item is the newest sampled valid_time. See valid_time_limit and valid_times_truncated before treating it as complete. */
-            valid_times?: string[];
-            /** @description Maximum number of valid_times included in this metadata record. */
-            valid_time_limit?: number;
-            /** @description Number of distinct valid times observed by the capped limit-plus-one discovery query; this is not a full total count when valid_times_truncated is true. */
-            valid_time_observed_count?: number;
-            /** @description True when the bounded catalog sample omitted at least one additional distinct valid_time. */
-            valid_times_truncated?: boolean;
-            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, river_network_version_id, and bounded source_version/run revision when advertised by required_placeholders. */
-            source_refs?: {
-                [key: string]: unknown;
-            } | null;
-            /** @description Stable public layer ID used in X-Tile-Layer-ID and map.tile_cache.layer_id. */
-            cache_layer_id?: string | null;
-            /** @description Hydro or flood variable carried by the tile route path. */
-            route_variable?: string | null;
-            /** @description Backward-compatible publisher or internal layer IDs that alias this public layer. */
-            legacy_layer_ids?: string[];
-            /** @description Canonical advertised layer ID when this metadata record is a style or semantic alias. */
-            alias_of?: string | null;
-            /** @description Alias behavior such as style_layer when route/cache identity is intentionally shared. */
-            alias_semantic?: string | null;
-            /** @description Layer ID used by the canonical tile route, response header, and cache rows. */
-            canonical_route_layer_id?: string | null;
-            cache_etag?: string | null;
-            cache_version?: string | null;
-            fallback_available: boolean;
-            fallback_endpoint?: string | null;
-            release_blocking: boolean;
-            production_mvt_readiness_claimed?: boolean | null;
-        };
-        LayerValidTimes: {
-            /** @description Bounded newest-window valid-time sample sorted ascending so the final item is the newest sampled valid_time. This aliases items for compatibility with layer metadata naming. */
-            valid_times: string[];
-            /** @description Bounded newest-window valid-time sample, duplicated from valid_times for endpoint envelope consumers. */
-            items: string[];
-            /** @description Maximum number of valid times returned by this endpoint. */
-            limit: number;
-            /** @description Number of distinct valid times observed by the capped limit-plus-one query; this is not a full total count when truncated is true. */
-            observed_count: number;
-            /** @description True when at least one additional distinct valid_time exists beyond the returned sample. */
-            truncated: boolean;
+            queue_depth_mode: "slurm_gateway" | "display_readonly_unavailable";
+            display_readonly: boolean;
         };
     };
     responses: {
-        /** @description Error response */
-        Error: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["ErrorResponse"];
-            };
-        };
         /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
         MvtLivePostgisUnavailable: {
             headers: {
@@ -1874,6 +1468,15 @@ export interface components {
                         } | null;
                     };
                 };
+            };
+        };
+        /** @description Error response */
+        Error: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
         /** @description Control-plane mutation is unavailable from a display_readonly API node; the authorized actor must perform the action from the compute_control runbook on node 22. */
@@ -1918,7 +1521,7 @@ export interface components {
                 };
             };
         };
-        /** @description Pipeline job log retrieval failed. JOB_LOG_NOT_PUBLISHED and JOB_LOG_URI_UNSUPPORTED are 400 client errors; JOB_LOG_ACCESS_DENIED is 403; JOB_LOG_NOT_FOUND is 404. All payloads use the canonical error envelope with redacted log identity details. */
+        /** @description Pipeline job log retrieval failed using the canonical error envelope. */
         JobLogError: {
             headers: {
                 [name: string]: unknown;
@@ -1940,65 +1543,18 @@ export interface components {
             };
         };
     };
-    parameters: {
-        BasinId: string;
-        BasinVersionId: string;
-        BasinVersionIdQuery: string;
-        CycleStatus: "discovered" | "downloading" | "raw_complete" | "canonical_ready" | "forcing_ready_partial" | "forcing_ready" | "forecast_running" | "parsed_partial" | "complete" | "published" | "failed_download" | "failed_convert" | "failed_forcing" | "failed_run" | "failed_parse" | "failed_publish" | "cancelled";
-        CycleTimeQuery: string;
-        CycleTimeQueryRequired: string;
-        FromTime: string;
-        /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
-        IssueTime: "latest" | string;
-        JobId: string;
-        Limit: number;
-        ModelId: string;
-        ModelIdQuery: string;
-        Offset: number;
-        ProductId: string;
-        RunId: string;
-        RunIdQuery: string;
-        RunIdQueryOptional: string;
-        SegmentId: string;
-        SegmentIdQuery: string;
-        SourceId: string;
-        SourceQuery: string;
-        SourceQueryRequired: string;
-        StationId: string;
-        StationIdQuery: string;
-        /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-        MvtTileX: number;
-        /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-        MvtTileY: number;
-        MvtTileZ: number;
-        ToTime: string;
-        UserRole: "operator" | "model_admin" | "sys_admin";
-        ValidTimePath: string;
-        ValidTimeQuery: string;
-        /**
-         * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
-         *     (variable id `water_level`, layer id `water-level`) has been removed
-         *     end-to-end. The enum is tightened to `[q_down]`. Clients still
-         *     requesting either the legacy tile path or the legacy layer valid-times
-         *     path receive HTTP 422 from the backend boundary. The frontend
-         *     (sole external consumer) is regenerated against this enum and no
-         *     longer advertises the retired layer in the M11 user selector.
-         */
-        HydroMvtVariable: "q_down";
-        VariableQuery: string;
-    };
+    parameters: never;
     requestBodies: never;
     headers: never;
     pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    listBasins: {
+    list_basins_api_v1_basins_get: {
         parameters: {
             query?: {
                 limit?: number;
-                offset?: components["parameters"]["Offset"];
-                /** @description When true, only basins that have at least one display-ready forecast run with non-null cycle_time are returned, aligned with the latest-product candidate caliber; the forcing/product source is not constrained. When omitted or false, all registered basins are returned (default behaviour). */
+                offset?: number;
                 has_display_product?: boolean;
             };
             header?: never;
@@ -2007,117 +1563,307 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Basin list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["Basin"][];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listBasinVersions: {
-        parameters: {
-            query?: {
-                limit?: number;
-                offset?: components["parameters"]["Offset"];
-            };
-            header?: never;
-            path: {
-                basin_id: components["parameters"]["BasinId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Basin version list */
-            200: {
+            /** @description Validation Error */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["BasinVersion"][];
-                    };
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
         };
     };
-    listDataSources: {
+    create_basin_api_v1_basins_post: {
         parameters: {
-            query?: {
-                limit?: components["parameters"]["Limit"];
-                offset?: components["parameters"]["Offset"];
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BasinCreatePayload"];
+            };
+        };
         responses: {
-            /** @description Data source list */
-            200: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["DataSourcePage"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    listForecastCycles: {
+    list_basin_versions_api_v1_basins__basin_id__versions_get: {
         parameters: {
             query?: {
-                from?: components["parameters"]["FromTime"];
-                to?: components["parameters"]["ToTime"];
-                status?: components["parameters"]["CycleStatus"];
-                limit?: components["parameters"]["Limit"];
-                offset?: components["parameters"]["Offset"];
+                limit?: number;
+                offset?: number;
             };
             header?: never;
             path: {
-                source_id: components["parameters"]["SourceId"];
+                basin_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Forecast cycle list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ForecastCyclePage"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    listModels: {
+    create_basin_version_api_v1_basins__basin_id__versions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                basin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BasinVersionPayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_river_network_api_v1_river_networks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RiverNetworkCreatePayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_river_segments_api_v1_basin_versions__basin_version_id__river_segments_get: {
         parameters: {
             query?: {
-                basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
+                river_network_version_id?: string | null;
+                /** @description Case-insensitive substring match over river_segment_id and name (backend-applied). */
+                search?: string | null;
+                /** @description Inclusive lower bound on stream order (river_segment.segment_order). */
+                stream_order_min?: number | null;
+                /** @description Inclusive upper bound on stream order (river_segment.segment_order). */
+                stream_order_max?: number | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                basin_version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description River segment GeoJSON payload budget exceeded. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_river_segment_api_v1_basin_versions__basin_version_id__river_segments__segment_id__get: {
+        parameters: {
+            query: {
+                river_network_version_id: string;
+            };
+            header?: never;
+            path: {
+                basin_version_id: string;
+                segment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description River segment GeoJSON payload budget exceeded. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_mesh_version_api_v1_mesh_versions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeshVersionCreatePayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_models_api_v1_models_get: {
+        parameters: {
+            query?: {
+                basin_version_id?: string | null;
                 /** @description Filter by active model flag. Omitted defaults to active models only; use all for no active filter. */
                 active?: "true" | "false" | "all";
                 limit?: number;
-                offset?: components["parameters"]["Offset"];
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -2125,311 +1871,326 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Model instance list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstancePage"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    getModel: {
+    create_model_api_v1_models_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelCreatePayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_model_active_api_v1_models__model_id__active_put: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                model_id: components["parameters"]["ModelId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Model instance detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstance"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listFloodFrequencyCurves: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                model_id: components["parameters"]["ModelId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Flood frequency curves */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodFrequencyCurve"][];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listRiverNetworkVersions: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description River network versions */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverNetworkVersion"][];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listRiverSegments: {
-        parameters: {
-            query?: {
-                river_network_version_id?: string;
-                /** @description Case-insensitive substring match over river_segment_id and name (backend-applied). */
-                search?: string;
-                /** @description Inclusive lower bound on stream order (river_segment.segment_order). */
-                stream_order_min?: number;
-                /** @description Inclusive upper bound on stream order (river_segment.segment_order). */
-                stream_order_max?: number;
-                limit?: number;
-                offset?: components["parameters"]["Offset"];
-            };
-            header?: never;
-            path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description River segment GeoJSON feature collection */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverSegmentFeatureCollection"];
-                    };
-                };
-            };
-            413: components["responses"]["Error"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    setModelActive: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                model_id: components["parameters"]["ModelId"];
+                model_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": {
-                    /** @description Set model active flag. The legacy key name active_flag is also accepted by the backend for backward compatibility. */
-                    active: boolean;
-                };
+                "application/json": components["schemas"]["ActiveFlagPayload"];
             };
         };
         responses: {
-            /** @description Lifecycle operation result */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelLifecycleResult"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    preflightModelLifecycle: {
+    preflight_model_lifecycle_api_v1_models__model_id__preflight_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                model_id: components["parameters"]["ModelId"];
+                model_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ModelLifecycleRequest"];
+                "application/json": components["schemas"]["ModelLifecyclePayload"];
             };
         };
         responses: {
-            /** @description Model lifecycle preflight summary */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelOperationPreflight"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    modelLifecycleOperation: {
+    model_lifecycle_operation_api_v1_models__model_id__lifecycle_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                model_id: components["parameters"]["ModelId"];
+                model_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ModelLifecycleRequest"];
+                "application/json": components["schemas"]["ModelLifecyclePayload"];
             };
         };
         responses: {
-            /** @description Model lifecycle operation result */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelLifecycleResult"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    getRiverSegment: {
+    get_model_api_v1_models__model_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_river_segment_crosswalks_api_v1_river_segment_crosswalks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CrosswalkCreatePayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_forecast_series_api_v1_basin_versions__basin_version_id__river_segments__segment_id__forecast_series_get: {
         parameters: {
             query: {
                 /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
                 river_network_version_id: string;
-            };
-            header?: never;
-            path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-                segment_id: components["parameters"]["SegmentId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description River segment detail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverSegment"];
-                    };
-                };
-            };
-            413: components["responses"]["Error"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getRiverSegmentForecastSeries: {
-        parameters: {
-            query: {
-                /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
-                river_network_version_id: string;
-                /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
-                issue_time?: components["parameters"]["IssueTime"];
-                /** @description Comma-separated hydrological variables. */
+                issue_time?: string;
                 variables?: string;
-                /** @description Comma-separated scenario identifiers. */
                 scenarios?: string;
-                /** @description Include analysis period data before the forecast window. */
                 include_analysis?: boolean;
-                /** @description Comma-separated run types to include (e.g. forecast,hindcast). */
-                run_types?: string;
+                run_types?: string | null;
             };
             header?: never;
             path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-                segment_id: components["parameters"]["SegmentId"];
+                basin_version_id: string;
+                segment_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description River forecast time series. Returns RiverSeriesResponse for forecast-only requests, or SplicedForecastResponse when include_analysis=true splices analysis data before the forecast. */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RiverSeriesResponse"] | components["schemas"]["SplicedForecastResponse"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    listMetStations: {
+    get_run_api_v1_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_runs_api_v1_runs_get: {
         parameters: {
             query?: {
-                basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
-                model_id?: components["parameters"]["ModelIdQuery"];
-                /** @description Case-insensitive substring match over station_id and station name (backend-applied). */
-                search?: string;
-                /** @description Variable coverage filter. Repeat or comma-separate values (PRCP, TEMP, RH, wind, Rn, Press). Applied only when model_id is set; otherwise reported unavailable in the response filters block. */
-                variables?: string | string[];
-                /** @description QC status filter (advisory). Reported unavailable in the response filters block because QC fields are not present on the station inventory. */
-                qc_status?: string;
-                limit?: components["parameters"]["Limit"];
-                offset?: components["parameters"]["Offset"];
+                basin_id?: string | null;
+                source?: string | null;
+                cycle_time?: string | null;
+                status?: string | null;
+                limit?: number;
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -2437,73 +2198,24 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Meteorological station list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["MetStationPage"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getMetStationSeries: {
-        parameters: {
-            query?: {
-                /**
-                 * @deprecated
-                 * @description Deprecated compatibility parameter. The disk-only route ignores this value when model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series.
-                 */
-                forcing_version_id?: string;
-                model_id?: string;
-                source_id?: string;
-                cycle_time?: string;
-                /** @description Station forcing variables. Repeat the parameter or provide comma-separated values. Public station-series variables are PRCP, TEMP, RH, wind, and Rn. */
-                variables?: string | string[];
-                from?: string;
-                to?: string;
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                station_id: components["parameters"]["StationId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Station time series */
-            200: {
+            /** @description Validation Error */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["StationSeriesResponse"];
-                    };
-                };
-            };
-            /** @description Station series client error */
-            "4XX": {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Station series server error */
-            "5XX": {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2545,17 +2257,12 @@ export interface operations {
             "5XX": components["responses"]["Error"];
         };
     };
-    listRuns: {
+    list_best_available_api_v1_met_best_available_get: {
         parameters: {
-            query?: {
-                basin_id?: string;
-                source?: string;
-                cycle_time?: string;
-                status?: components["schemas"]["RunStatus"];
-                /** @description When true, returns only frequency_done/published runs with ready flood return-period products and warning thresholds. */
-                flood_product_ready?: boolean;
-                limit?: components["parameters"]["Limit"];
-                offset?: components["parameters"]["Offset"];
+            query: {
+                from: string;
+                to: string;
+                variable?: string | null;
             };
             header?: never;
             path?: never;
@@ -2563,307 +2270,274 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Run list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["HydroRunPage"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_data_sources_api_v1_data_sources_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    getRun: {
+    list_cycles_api_v1_data_sources__source_id__cycles_get: {
         parameters: {
-            query?: never;
+            query?: {
+                from?: string | null;
+                to?: string | null;
+                status?: string | null;
+                limit?: number;
+                offset?: number;
+            };
             header?: never;
             path: {
-                run_id: components["parameters"]["RunId"];
+                source_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Run detail */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["HydroRun"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    retryRun: {
+    list_met_stations_api_v1_met_stations_get: {
         parameters: {
-            query?: never;
-            header?: {
-                "X-User-Role"?: components["parameters"]["UserRole"];
+            query?: {
+                basin_version_id?: string | null;
+                model_id?: string | null;
+                /** @description Case-insensitive substring match over station_id and station name (backend-applied). */
+                search?: string | null;
+                /** @description Variable coverage filter. Repeat or comma-separate values (PRCP, TEMP, RH, wind, Rn, Press). Applied only when model_id is set; otherwise reported unavailable in the response filters block. */
+                variables?: string | string[];
+                /** @description QC status filter (advisory). Reported unavailable in the response filters block because QC fields are not present on the station inventory. */
+                qc_status?: string | null;
+                limit?: number;
+                offset?: number;
             };
-            path: {
-                run_id: components["parameters"]["RunId"];
-            };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Retry request accepted */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RetryRunResult"];
+                    "application/json": {
+                        [key: string]: unknown;
                     };
                 };
             };
-            409: components["responses"]["ControlPlaneManualActionRequired"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    cancelRun: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-User-Role"?: components["parameters"]["UserRole"];
-            };
-            path: {
-                run_id: components["parameters"]["RunId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Cancel request accepted */
-            200: {
+            /** @description Validation Error */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["CancelRunResult"];
-                    };
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            409: components["responses"]["ControlPlaneManualActionRequired"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
         };
     };
-    getRiverNetworkTile: {
+    getMetStationSeries: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-                z: components["parameters"]["MvtTileZ"];
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["MvtTileX"];
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["MvtTileY"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Raw Mapbox vector tile */
-            200: {
-                headers: {
-                    "Cache-Control"?: string;
-                    ETag?: string;
-                    "X-Tile-Layer-ID"?: string;
-                    "X-Tile-Checksum"?: string;
-                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
-                    "X-Tile-Cache-Key"?: string;
-                    "X-MVT-Schema-Version"?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/x-protobuf": string;
-                };
-            };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getMetStationTile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                basin_version_id: components["parameters"]["BasinVersionId"];
-                z: components["parameters"]["MvtTileZ"];
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["MvtTileX"];
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["MvtTileY"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Raw Mapbox vector tile */
-            200: {
-                headers: {
-                    "Cache-Control"?: string;
-                    ETag?: string;
-                    "X-Tile-Layer-ID"?: string;
-                    "X-Tile-Checksum"?: string;
-                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
-                    "X-Tile-Cache-Key"?: string;
-                    "X-MVT-Schema-Version"?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/x-protobuf": string;
-                };
-            };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getHydroTile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: components["parameters"]["RunId"];
+            query?: {
                 /**
-                 * @description BREAKING (2026-06-20): the previously-supported `wl` hydrology variant
-                 *     (variable id `water_level`, layer id `water-level`) has been removed
-                 *     end-to-end. The enum is tightened to `[q_down]`. Clients still
-                 *     requesting either the legacy tile path or the legacy layer valid-times
-                 *     path receive HTTP 422 from the backend boundary. The frontend
-                 *     (sole external consumer) is regenerated against this enum and no
-                 *     longer advertises the retired layer in the M11 user selector.
+                 * @deprecated
+                 * @description Deprecated compatibility parameter. The disk-only route ignores this value when model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series.
                  */
-                variable: components["parameters"]["HydroMvtVariable"];
-                valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["MvtTileZ"];
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["MvtTileX"];
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["MvtTileY"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Raw Mapbox vector tile */
-            200: {
-                headers: {
-                    "Cache-Control"?: string;
-                    ETag?: string;
-                    "X-Tile-Layer-ID"?: string;
-                    "X-Tile-Checksum"?: string;
-                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
-                    "X-Tile-Cache-Key"?: string;
-                    "X-MVT-Schema-Version"?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/x-protobuf": string;
-                };
-            };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getFloodReturnPeriodMap: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                /** @description Supported return-period aggregation duration. */
-                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
-                /** @description Forecast valid time to render. */
-                valid_time: string;
-                /** @description Optional minLon,minLat,maxLon,maxLat spatial filter. */
-                bbox?: string;
-                /** @description Optional minimum return period in years. */
-                return_period?: number;
-                /** @description Maximum GeoJSON features to return; requests exceeding this budget fail with 413. */
+                forcing_version_id?: string;
+                model_id?: string;
+                source_id?: string;
+                cycle_time?: string;
+                /** @description Station forcing variables. Repeat the parameter or provide comma-separated values. Public station-series variables are PRCP, TEMP, RH, wind, and Rn. */
+                variables?: string | string[];
+                from?: string;
+                to?: string;
                 limit?: number;
             };
             header?: never;
+            path: {
+                station_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Station time series */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["StationSeriesResponse"];
+                    };
+                };
+            };
+            /** @description Station series client error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Station series server error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_state_snapshots_api_v1_state_snapshots_get: {
+        parameters: {
+            query?: {
+                model_id?: string | null;
+                usable?: boolean | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description GeoJSON flood return-period FeatureCollection */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FloodReturnPeriodFeatureCollection"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    getFloodReturnPeriodTile: {
+    get_state_snapshot_api_v1_state_snapshots__state_id__get: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                run_id: components["parameters"]["RunId"];
-                /** @description Supported return-period aggregation duration. */
-                duration: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
-                valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["MvtTileZ"];
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["MvtTileX"];
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["MvtTileY"];
+                state_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Raw Mapbox vector tile */
+            /** @description Successful Response */
             200: {
                 headers: {
-                    "Cache-Control"?: string;
-                    ETag?: string;
-                    "X-Tile-Layer-ID"?: string;
-                    "X-Tile-Checksum"?: string;
-                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
-                    "X-Tile-Cache-Key"?: string;
-                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/x-protobuf": string;
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     getPipelineStatus: {
         parameters: {
             query: {
-                source: components["parameters"]["SourceQueryRequired"];
-                cycle_time: components["parameters"]["CycleTimeQueryRequired"];
-                run_id?: components["parameters"]["RunIdQueryOptional"];
+                source: string;
+                cycle_time: string;
+                run_id?: string;
                 model_id?: string;
             };
             header?: never;
@@ -2890,9 +2564,9 @@ export interface operations {
     listPipelineStages: {
         parameters: {
             query: {
-                source: components["parameters"]["SourceQueryRequired"];
-                cycle_time: components["parameters"]["CycleTimeQueryRequired"];
-                run_id?: components["parameters"]["RunIdQueryOptional"];
+                source: string;
+                cycle_time: string;
+                run_id?: string;
                 model_id?: string;
             };
             header?: never;
@@ -2919,9 +2593,9 @@ export interface operations {
     listPipelineJobs: {
         parameters: {
             query?: {
-                source?: components["parameters"]["SourceQuery"];
-                cycle_time?: components["parameters"]["CycleTimeQuery"];
-                run_id?: components["parameters"]["RunIdQueryOptional"];
+                source?: string;
+                cycle_time?: string;
+                run_id?: string;
                 status?: string;
                 model_id?: string;
                 stage?: string;
@@ -2956,14 +2630,14 @@ export interface operations {
     getPipelineJobLogs: {
         parameters: {
             query?: {
-                source?: components["parameters"]["SourceQuery"];
-                cycle_time?: components["parameters"]["CycleTimeQuery"];
-                run_id?: components["parameters"]["RunIdQueryOptional"];
+                source?: string;
+                cycle_time?: string;
+                run_id?: string;
                 model_id?: string;
             };
             header?: never;
             path: {
-                job_id: components["parameters"]["JobId"];
+                job_id: string;
             };
             cookie?: never;
         };
@@ -2987,7 +2661,140 @@ export interface operations {
             "5XX": components["responses"]["Error"];
         };
     };
-    getQueueDepth: {
+    retryRun: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-User-Role"?: "operator" | "model_admin" | "sys_admin";
+            };
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retry request accepted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RetryRunResult"];
+                    };
+                };
+            };
+            409: components["responses"]["ControlPlaneManualActionRequired"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    cancel_run_api_v1_runs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            409: components["responses"]["ControlPlaneManualActionRequired"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stage_duration_metrics_api_v1_metrics_stage_duration_get: {
+        parameters: {
+            query?: {
+                days?: number;
+                source?: string | null;
+                scenario?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    success_rate_metrics_api_v1_metrics_success_rate_get: {
+        parameters: {
+            query?: {
+                days?: number;
+                source?: string | null;
+                scenario?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queue_depth_api_v1_queue_depth_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2996,18 +2803,258 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Queue depth */
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            503: components["responses"]["ControlPlaneQueueUnavailable"];
+        };
+    };
+    list_layers_api_v1_layers_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                run_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["QueueDepth"];
+                        data: components["schemas"]["Layer"][];
                     };
                 };
             };
-            503: components["responses"]["ControlPlaneQueueUnavailable"];
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_layer_valid_times_api_v1_layers__layer_id__valid_times_get: {
+        parameters: {
+            query?: {
+                run_id?: string | null;
+            };
+            header?: never;
+            path: {
+                layer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["LayerValidTimes"];
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    hydro_mvt_tile_api_v1_tiles_hydro__run_id___variable___valid_time___z___x___y__pbf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                variable: "q_down";
+                valid_time: string;
+                /** @description Web Mercator XYZ zoom level. */
+                z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    hydro_national_mvt_tile_api_v1_tiles_hydro_national__variable___valid_time___z___x___y__pbf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                variable: string;
+                valid_time: string;
+                z: number;
+                x: number;
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
+            424: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description MVT request validation error. */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description MVT server error. */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    river_network_mvt_tile_api_v1_tiles_river_network__basin_version_id___z___x___y__pbf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                basin_version_id: string;
+                /** @description Web Mercator XYZ zoom level. */
+                z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    getMetStationTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                basin_version_id: string;
+                /** @description Web Mercator XYZ zoom level. */
+                z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3036,276 +3083,31 @@ export interface operations {
             "5XX": components["responses"]["Error"];
         };
     };
-    getStageDurationMetrics: {
-        parameters: {
-            query?: {
-                days?: number;
-                source?: components["parameters"]["SourceQuery"];
-                scenario?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Stage duration metrics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["StageDurationMetric"][];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getSuccessRateMetrics: {
-        parameters: {
-            query?: {
-                days?: number;
-                source?: components["parameters"]["SourceQuery"];
-                scenario?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Success rate metrics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["SuccessRateMetric"][];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getFloodAlertSummary: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                threshold?: string;
-                valid_time?: components["parameters"]["ValidTimeQuery"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Flood alert summary */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertSummary"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listFloodAlertRanking: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                limit?: number;
-                offset?: components["parameters"]["Offset"];
-                basin_id?: string;
-                valid_time?: components["parameters"]["ValidTimeQuery"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Flood alert ranking */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertRanking"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listFloodAlertSegments: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                min_return_period?: number;
-                /** @description Comma-separated warning levels. */
-                warning_level?: string;
-                valid_time?: components["parameters"]["ValidTimeQuery"];
-                limit?: number;
-                offset?: components["parameters"]["Offset"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Flood alert segment list */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertSegmentList"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getFloodAlertTimeline: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                segment_id: components["parameters"]["SegmentIdQuery"];
-                /** @description River network version for the selected segment. */
-                river_network_version_id: string;
-                /** @description Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413. */
-                max_points?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Flood alert timeline */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertTimeline"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getRiverPointLineage: {
-        parameters: {
-            query: {
-                run_id: components["parameters"]["RunIdQuery"];
-                segment_id: components["parameters"]["SegmentIdQuery"];
-                /** @description River network version for the selected segment. */
-                river_network_version_id: string;
-                valid_time?: components["parameters"]["ValidTimeQuery"];
-                variable: components["parameters"]["VariableQuery"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description River point lineage */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["LineageResponse"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getForcingPointLineage: {
-        parameters: {
-            query: {
-                forcing_version_id: string;
-                station_id: components["parameters"]["StationIdQuery"];
-                valid_time?: components["parameters"]["ValidTimeQuery"];
-                variable: components["parameters"]["VariableQuery"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Forcing point lineage */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["LineageResponse"];
-                    };
-                };
-            };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getProductLineage: {
+    health_check_api_v1_slurm_health_get: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                product_id: components["parameters"]["ProductId"];
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Product lineage */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["LineageResponse"];
-                    };
+                    "application/json": unknown;
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
         };
     };
-    listLayers: {
+    list_jobs_api_v1_slurm_jobs_get: {
         parameters: {
             query?: {
-                limit?: components["parameters"]["Limit"];
-                offset?: components["parameters"]["Offset"];
-                /** @description Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity. */
-                run_id?: string;
+                limit?: number;
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -3313,65 +3115,300 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Layer list */
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["Layer"][];
-                    };
+                    "application/json": unknown;
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    listLayerValidTimes: {
-        parameters: {
-            query?: {
-                /** @description Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery. */
-                run_id?: string;
-                /** @description Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h. */
-                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d" | null;
-            };
-            header?: never;
-            path: {
-                layer_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Layer valid times */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["LayerValidTimes"];
-                    };
-                };
-            };
-            /**
-             * @description Validation error. Returned when `layer_id` is not one of the
-             *     canonical supported set (`discharge`, `flood-return-period`,
-             *     `warning-level`, `river-network`), or when `duration` is supplied
-             *     for a layer that does not support it. `error.details` carries
-             *     `{ layer_id, supported }` for the unsupported-layer case.
-             */
+            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
+        };
+    };
+    submit_job_api_v1_slurm_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitJobRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_job_array_api_v1_slurm_job_arrays_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArraySubmitJobRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_status_api_v1_slurm_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v1_slurm_jobs__job_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_array_task_results_api_v1_slurm_jobs__job_id__array_tasks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    fetch_logs_api_v1_slurm_jobs__job_id__logs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_registry_api_v1_slurm_internal_reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ResetRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    spa_fallback__full_path__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                full_path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
 }

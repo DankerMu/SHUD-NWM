@@ -1759,7 +1759,7 @@ def _qc_blocking_evidence(
             "marker": CONTROLLED_FAILURE_LOG_MARKER,
             "failure_stage": "parse_output_array",
             "publication_blocked": evidence_verified,
-            "frequency_blocked": evidence_verified,
+            "publish_blocked": evidence_verified,
             "tile_blocked": evidence_verified,
             "api_publication_blocked": evidence_verified,
         },

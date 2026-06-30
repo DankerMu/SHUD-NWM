@@ -6462,7 +6462,6 @@ def test_entropy_audit_hard_gate_keeps_delegated_and_fingerprint_openapi_signals
     [
         "packages/common/synthetic_api_import.py",
         "services/production_closure/synthetic_api_import.py",
-        "workers/flood_frequency/synthetic_api_import.py",
     ],
 )
 def test_entropy_audit_apps_api_layer_inversion_remains_standalone_report_only_finding(
@@ -7353,17 +7352,17 @@ def test_route_authority_current_runbook_allowlist_contexts_are_distinct(
         """
         /hydro-met -> / redirect alias
         Compatibility context keeps /meteorology deep links
-        Historical pre-M26 evidence used /flood-alerts
+        Historical pre-M26 evidence used /overview
         """,
     )
 
     findings = _route_authority_findings(tmp_path)
     by_token = _route_authority_findings_by_token(findings)
 
-    assert set(by_token) == {"/hydro-met", "/meteorology", "/flood-alerts"}
+    assert set(by_token) == {"/hydro-met", "/meteorology", "/overview"}
     redirect = by_token["/hydro-met"]
     compatibility = by_token["/meteorology"]
-    historical = by_token["/flood-alerts"]
+    historical = by_token["/overview"]
     assert redirect["allowlist_reason"] == "M26 route-consolidation redirect alias"
     assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
     assert compatibility["allowlist_reason"] == "legacy route compatibility context"
@@ -7390,7 +7389,7 @@ def test_route_authority_markdown_table_list_and_wrapped_contexts_allowlist_gove
         | `/overview`, `/hydro-met`, `/forecast` | `/` |
 
         - Legacy compatibility aliases:
-          `/meteorology`, `/flood-alerts`
+          `/meteorology`
 
         Current route authority: `/` is active display proof. `/basins/:id` and
         `/segments/:id` only belong to legacy redirect /
@@ -7406,7 +7405,6 @@ def test_route_authority_markdown_table_list_and_wrapped_contexts_allowlist_gove
         "/hydro-met",
         "/forecast",
         "/meteorology",
-        "/flood-alerts",
         "/basins/:id",
         "/segments/:id",
     }
@@ -7441,7 +7439,7 @@ def test_route_authority_wrapped_list_redirect_continuation_allowlists_route_lis
         - Legacy display routes:
           (`/hydro-met`/`/overview`/`/forecast`/`/meteorology`)
         {continuation}
-        - Open /flood-alerts for current live browser proof.
+        - Open /basins/demo for current live browser proof.
         """,
     )
 
@@ -7453,7 +7451,7 @@ def test_route_authority_wrapped_list_redirect_continuation_allowlists_route_lis
         "/overview",
         "/forecast",
         "/meteorology",
-        "/flood-alerts",
+        "/basins/demo",
     }
     for token in ("/hydro-met", "/overview", "/forecast", "/meteorology"):
         assert by_token[token]["allowlist_key"] == (
@@ -7461,7 +7459,7 @@ def test_route_authority_wrapped_list_redirect_continuation_allowlists_route_lis
         )
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
-    _assert_unallowlisted_budget_counted_report_only_finding(by_token["/flood-alerts"])
+    _assert_unallowlisted_budget_counted_report_only_finding(by_token["/basins/demo"])
 
 
 def test_route_authority_top_level_sibling_list_context_does_not_allowlist_active_route(
@@ -7993,7 +7991,6 @@ def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_
     expected_token_counts_by_path = {
         f"{archive_root}/proposal.md": {
             "/basins/:basinId": 3,
-            "/flood-alerts": 2,
             "/forecast": 2,
             "/hydro-met": 3,
             "/meteorology": 2,
@@ -8004,7 +8001,6 @@ def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_
         f"{archive_root}/specs/single-map-shell-routing/spec.md": {
             "/basins/:basinId": 1,
             "/basins/basins_qhh": 1,
-            "/flood-alerts": 2,
             "/forecast": 2,
             "/hydro-met": 2,
             "/meteorology": 3,
@@ -8015,7 +8011,6 @@ def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_
         f"{archive_root}/tasks.md": {
             "/basins/:basinId": 1,
             "/basins/:id": 1,
-            "/flood-alerts": 2,
             "/forecast": 2,
             "/hydro-met": 2,
             "/meteorology": 2,
@@ -8053,7 +8048,7 @@ def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_sha
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tokens = ["/forecast", "/hydro-met", "/meteorology", "/flood-alerts"]
+    tokens = ["/forecast", "/hydro-met", "/meteorology", "/overview"]
     large_line = " ".join(f"Open {tokens[index % len(tokens)]} for current proof." for index in range(800))
     _write(tmp_path / "docs" / "runbooks" / "current.md", f"{large_line}\n")
 
@@ -8292,7 +8287,6 @@ def test_route_authority_legacy_alias_coverage_includes_all_current_redirect_for
         "/hydro-met",
         "/forecast",
         "/meteorology",
-        "/flood-alerts",
         "/basins/:id",
         "/segments/:id",
         "/basins/demo",
@@ -8320,7 +8314,6 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_to
         """
         await page.goto('/overview')
         await page.goto('/forecast')
-        await page.goto('/flood-alerts')
         await page.goto('/basins/demo')
         await page.goto('/segments/demo')
         """,
@@ -8333,7 +8326,6 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_to
         """
         await page.goto('/overview')
         await page.goto('/forecast')
-        await page.goto('/flood-alerts')
         await page.goto('/basins/demo')
         await page.goto('/segments/demo')
         await page.goto('/hydro-met')
@@ -8348,7 +8340,7 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_to
     assert "/hydro-met" in finding["description"]
     assert all(
         token not in str(finding["description"])
-        for token in ("/overview", "/forecast", "/flood-alerts", "/basins/demo", "/segments/demo")
+        for token in ("/overview", "/forecast", "/basins/demo", "/segments/demo")
     )
 
 
@@ -8360,7 +8352,6 @@ def test_route_authority_expanded_aliases_do_not_scan_app_route_source_of_truth(
         """
         <Route path="/overview" element={<LegacyRedirect />} />
         <Route path="/forecast" element={<LegacyRedirect />} />
-        <Route path="/flood-alerts" element={<LegacyRedirect />} />
         <Route
           path="/basins/:basinId"
           element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
@@ -8384,7 +8375,6 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_fixtures(
         export const fixtureRoutes = [
           '/overview',
           '/forecast',
-          '/flood-alerts',
           '/basins/demo',
           '/segments/demo',
         ]

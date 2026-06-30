@@ -1,6 +1,6 @@
 DO $$
 BEGIN
-  CREATE TYPE hydro.run_type AS ENUM ('analysis', 'forecast', 'hindcast');
+  CREATE TYPE hydro.run_type AS ENUM ('analysis', 'forecast');
 EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
@@ -14,7 +14,6 @@ BEGIN
     'running',
     'succeeded',
     'parsed',
-    'frequency_done',
     'published',
     'failed',
     'cancelled',

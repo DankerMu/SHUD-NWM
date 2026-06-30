@@ -37,7 +37,6 @@ class RegisteredSchedulerModel:
     resource_profile: Mapping[str, Any]
     resource_profile_summary: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
-    frequency_capabilities: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -54,7 +53,6 @@ class RegisteredSchedulerModel:
             "shud_code_version": self.shud_code_version,
             "resource_profile": _scheduler._resource_profile_evidence(self.resource_profile_summary),
             "display_capabilities": dict(self.display_capabilities),
-            "frequency_capabilities": dict(self.frequency_capabilities),
         }
         project_identity = _resource_profile_project_identity(self.resource_profile)
         if project_identity is not None:
@@ -87,7 +85,6 @@ class SchedulerCandidate:
     model_package_uri: str
     resource_profile: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
-    frequency_capabilities: Mapping[str, Any]
     horizon: Mapping[str, Any]
     scenario_id: str
     run_id: str
@@ -118,7 +115,6 @@ class SchedulerCandidate:
             ),
             "resource_profile": _scheduler._resource_profile_evidence(self.resource_profile),
             "display_capabilities": dict(self.display_capabilities),
-            "frequency_capabilities": dict(self.frequency_capabilities),
             "horizon": dict(self.horizon),
             "scenario_id": self.scenario_id,
             "run_id": self.run_id,

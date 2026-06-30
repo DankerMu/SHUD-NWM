@@ -65,10 +65,6 @@ export default function App() {
               element={<LegacyRedirect extraParams={{ metStations: '1' }} />}
             />
             <Route
-              path="/flood-alerts"
-              element={<LegacyRedirect />}
-            />
-            <Route
               path="/basins/:basinId"
               element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
             />

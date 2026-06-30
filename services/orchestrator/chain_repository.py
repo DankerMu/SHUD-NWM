@@ -16,7 +16,7 @@ from services.orchestrator.chain_types import (
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
-COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 _first_optional_int = chain_runtime_utils._first_optional_int
@@ -927,8 +927,7 @@ class PsycopgOrchestratorRepository:
                 WHEN 'forecast' THEN 4
                 WHEN 'parse' THEN 5
                 WHEN 'state_save_qc' THEN 6
-                WHEN 'frequency' THEN 7
-                WHEN 'publish' THEN 8
+                WHEN 'publish' THEN 7
                 WHEN 'download_gfs' THEN 1
                 WHEN 'convert_canonical' THEN 2
                 WHEN 'produce_forcing' THEN 3

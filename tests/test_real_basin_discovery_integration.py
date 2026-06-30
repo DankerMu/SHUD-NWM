@@ -123,8 +123,8 @@ def test_list_basins_has_display_product_reflects_real_run_status(integration_da
     apply_migrations_from_zero(integration_database_url)
     with psycopg_connection(integration_database_url) as connection:
         _clear(connection)
-        # frequency_done is in QHH_LATEST_READY_RUN_STATUSES => display-ready.
-        _seed_basin(connection, basin_id=_BASIN_READY, basin_name="ZZ Discovery Ready", run_status="frequency_done")
+        # parsed is in QHH_LATEST_READY_RUN_STATUSES => display-ready.
+        _seed_basin(connection, basin_id=_BASIN_READY, basin_name="ZZ Discovery Ready", run_status="parsed")
         # running is a valid run_status but NOT display-ready.
         _seed_basin(connection, basin_id=_BASIN_PENDING, basin_name="ZZ Discovery Pending", run_status="running")
 
@@ -164,7 +164,7 @@ def test_list_basins_has_display_product_excludes_non_forecast_and_null_cycle(
             connection,
             basin_id=_BASIN_ANALYSIS,
             basin_name="ZZ Discovery Analysis",
-            run_status="frequency_done",
+            run_status="parsed",
             run_type="analysis",
         )
         # Ready forecast but cycle_time IS NULL => not a latest-product candidate.
@@ -172,7 +172,7 @@ def test_list_basins_has_display_product_excludes_non_forecast_and_null_cycle(
             connection,
             basin_id=_BASIN_NO_CYCLE,
             basin_name="ZZ Discovery No Cycle",
-            run_status="frequency_done",
+            run_status="parsed",
             run_type="forecast",
             cycle_time=None,
         )

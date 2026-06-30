@@ -26,8 +26,8 @@ receipt text.
 - `/ops` is the current operational display path for browser proof. It remains
   RBAC-protected and must not be replaced by a mocked monitoring page when
   documenting live display evidence.
-- `/overview`, `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`,
-  `/basins/:id`, and `/segments/:id` are legacy redirect alias routes or
+- `/overview`, `/hydro-met`, `/forecast`, `/meteorology`, `/basins/:id`, and
+  `/segments/:id` are legacy redirect alias routes or
   compatibility references. Preserve redirect semantics and query propagation;
   do not recreate them as independent active display pages without a new route
   authority change.

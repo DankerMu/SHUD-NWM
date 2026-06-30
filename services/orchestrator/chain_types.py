@@ -237,7 +237,6 @@ class ModelRunAssembly:
     forcing: dict[str, Any]
     runtime: dict[str, Any]
     outputs: dict[str, Any]
-    frequency: dict[str, Any]
     display: dict[str, Any]
     quality_states: dict[str, Any]
     residual_blockers: tuple[dict[str, Any], ...]
@@ -248,7 +247,6 @@ class ModelRunAssembly:
             "forcing_metadata": dict(self.forcing),
             "shud_runtime": dict(self.runtime),
             "outputs": dict(self.outputs),
-            "frequency_contract": dict(self.frequency),
             "display_contract": dict(self.display),
             "quality_states": dict(self.quality_states),
             "residual_blockers": [dict(item) for item in self.residual_blockers],

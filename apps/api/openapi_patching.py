@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from apps.api.routes.flood_alerts import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
+from apps.api.routes.hydro_display import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
 from apps.api.routes.pipeline import (
     PIPELINE_JOB_STATUS_VALUES,
     PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH,
@@ -13,10 +13,8 @@ from apps.api.routes.pipeline import (
 )
 from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
 from services.tiles.mvt import (
-    DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
     MVT_MAX_TILE_COORDINATE,
     MVT_MAX_ZOOM,
-    SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
     SUPPORTED_HYDRO_MVT_VARIABLES,
 )
 
@@ -45,8 +43,6 @@ def custom_openapi_factory(api: FastAPI, *, patch_schema: OpenApiPatchSchema | N
 
 def patch_openapi_schema(schema: dict) -> None:
     _patch_mvt_tile_openapi(schema)
-    _patch_flood_duration_openapi(schema)
-    _patch_flood_product_quality_openapi(schema)
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
     _patch_met_stations_list_openapi(schema)
@@ -60,7 +56,6 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
     _ensure_mvt_live_postgis_unavailable_response(schema)
     for path in mvt_paths:
@@ -74,11 +69,6 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
             name = parameter.get("name")
             if path == "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf" and name == "variable":
                 parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_HYDRO_MVT_VARIABLES)}
-            if (
-                path == "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf"
-                and name == "duration"
-            ):
-                parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)}
             if name == "z":
                 parameter["description"] = "Web Mercator XYZ zoom level."
                 parameter.setdefault("schema", {})["minimum"] = 0
@@ -122,65 +112,6 @@ def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
             }
         },
     }
-
-
-def _patch_flood_duration_openapi(schema: dict) -> None:
-    duration_schema = {
-        "type": "string",
-        "default": DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
-        "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
-    }
-    flood_map_duration = _operation_parameter(
-        schema,
-        "/api/v1/tiles/flood-return-period",
-        name="duration",
-        location="query",
-    )
-    if flood_map_duration is not None:
-        flood_map_duration["schema"] = dict(duration_schema)
-
-    valid_times_duration = _operation_parameter(
-        schema,
-        "/api/v1/layers/{layer_id}/valid-times",
-        name="duration",
-        location="query",
-    )
-    if valid_times_duration is not None:
-        valid_times_duration["schema"] = {
-            "type": "string",
-            "nullable": True,
-            "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
-        }
-
-
-def _patch_flood_product_quality_openapi(schema: dict) -> None:
-    schemas = schema.setdefault("components", {}).setdefault("schemas", {})
-    schemas["FloodReturnPeriodQualityState"] = _flood_return_period_quality_state_schema()
-    schemas["FloodReturnPeriodProductQuality"] = _flood_return_period_product_quality_schema()
-    schemas["QhhLatestProductQuality"] = _qhh_latest_product_quality_schema()
-
-    hydro_run = schemas.get("HydroRun")
-    if isinstance(hydro_run, dict):
-        hydro_run.setdefault("properties", {})["product_quality"] = {
-            "type": "object",
-            "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
-            "additionalProperties": True,
-            "nullable": True,
-            "description": (
-                "Product readiness evidence keyed by product family, including flood_return_period readiness."
-            ),
-        }
-
-    collection = schemas.get("TileFeatureCollection")
-    if isinstance(collection, dict):
-        collection["description"] = "GeoJSON FeatureCollection for flood return-period map rendering."
-        collection.setdefault("properties", {})["product_quality"] = {
-            "type": "object",
-            "allOf": [{"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}],
-            "additionalProperties": True,
-            "nullable": True,
-            "description": "Flood return-period readiness evidence for the selected run.",
-        }
 
 
 def _patch_met_stations_list_openapi(schema: dict) -> None:
@@ -313,9 +244,6 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
     schemas["QhhLatestQualityNote"] = _qhh_latest_quality_note_schema()
     schemas["QhhLatestStationVariableCoverage"] = _qhh_latest_station_variable_coverage_schema()
     schemas["QhhLatestQueryIndex"] = _qhh_latest_query_index_schema()
-    schemas["FloodReturnPeriodQualityState"] = _flood_return_period_quality_state_schema()
-    schemas["FloodReturnPeriodProductQuality"] = _flood_return_period_product_quality_schema()
-    schemas["QhhLatestProductQuality"] = _qhh_latest_product_quality_schema()
     schemas["QhhLatestAvailability"] = _qhh_latest_availability_schema()
     schemas["QhhLatestQuality"] = _qhh_latest_quality_schema()
     schemas["QhhLatestProduct"] = _qhh_latest_product_schema()
@@ -1345,90 +1273,6 @@ def _qhh_latest_query_index_schema() -> dict:
     }
 
 
-def _flood_return_period_quality_state_schema() -> dict:
-    return {"type": "string", "enum": ["ready", "degraded", "unavailable"]}
-
-
-def _flood_return_period_product_quality_schema() -> dict:
-    non_negative_integer = {"type": "integer", "minimum": 0}
-    return {
-        "type": "object",
-        "required": [
-            "quality_state",
-            "quality_source",
-            "max_over_window",
-            "result_rows",
-            "return_period_rows",
-            "warning_rows",
-            "expected_result_rows",
-            "expected_max_result_rows",
-            "expected_timestep_result_rows",
-            "meaningful_result_rows",
-            "meaningful_max_result_rows",
-            "meaningful_timestep_result_rows",
-            "no_frequency_curve_rows",
-            "no_usable_frequency_curve_rows",
-            "warning_threshold_unavailable_rows",
-            "unavailable_products",
-            "residual_blockers",
-        ],
-        "properties": {
-            "quality_state": {"$ref": "#/components/schemas/FloodReturnPeriodQualityState"},
-            "quality_source": {
-                "type": "string",
-                "enum": ["explicit", "historical_backfill", "legacy_row_count"],
-                "description": (
-                    "Source of the run-level flood product quality. `legacy_row_count` is used only "
-                    "when current explicit quality columns are absent and the API falls back to "
-                    "pre-explicit row-count semantics."
-                ),
-            },
-            "max_over_window": {
-                "type": "boolean",
-                "nullable": True,
-                "description": (
-                    "True when counters are based on peak/max-over-window rows, false when timestep rows "
-                    "were used, or null when no result rows exist."
-                ),
-            },
-            "result_rows": dict(non_negative_integer),
-            "return_period_rows": dict(non_negative_integer),
-            "warning_rows": dict(non_negative_integer),
-            "expected_result_rows": dict(non_negative_integer),
-            "expected_max_result_rows": dict(non_negative_integer),
-            "expected_timestep_result_rows": dict(non_negative_integer),
-            "meaningful_result_rows": dict(non_negative_integer),
-            "meaningful_max_result_rows": dict(non_negative_integer),
-            "meaningful_timestep_result_rows": dict(non_negative_integer),
-            "no_frequency_curve_rows": dict(non_negative_integer),
-            "no_usable_frequency_curve_rows": dict(non_negative_integer),
-            "warning_threshold_unavailable_rows": dict(non_negative_integer),
-            "unavailable_products": {"type": "array", "items": {"type": "string"}},
-            "residual_blockers": {
-                "type": "array",
-                "items": {"type": "object", "additionalProperties": True},
-            },
-            "status": {
-                "type": "string",
-                "nullable": True,
-                "description": "Hydro run status when the quality object is attached to a route scoped to a run.",
-            },
-        },
-        "additionalProperties": True,
-    }
-
-
-def _qhh_latest_product_quality_schema() -> dict:
-    return {
-        "type": "object",
-        "required": ["flood_return_period"],
-        "properties": {
-            "flood_return_period": {"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}
-        },
-        "additionalProperties": True,
-    }
-
-
 def _qhh_latest_availability_schema() -> dict:
     return {
         "type": "object",
@@ -1437,8 +1281,6 @@ def _qhh_latest_availability_schema() -> dict:
             "unavailable_reasons",
             "quality_flags",
             "quality_notes",
-            "return_period_status",
-            "return_period_reasons",
         ],
         "properties": {
             "ready": {"type": "boolean"},
@@ -1450,28 +1292,6 @@ def _qhh_latest_availability_schema() -> dict:
             "quality_notes": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/QhhLatestQualityNote"},
-            },
-            "return_period_status": {
-                "type": "string",
-                "enum": ["ready", "unavailable"],
-                "description": (
-                    "Supplemental flood return-period availability for this run. Current explicit "
-                    "schemas derive it from `product_quality.flood_return_period.quality_state`: "
-                    "`ready` maps to ready, while `degraded` and `unavailable` map to unavailable. "
-                    "Only missing or pre-explicit quality schemas fall back to the legacy row-count "
-                    "signal (`flood_return_period_rows > 0`). Independent of `ready`: a run with "
-                    "streamflow output but no return-period baseline still returns with "
-                    "`return_period_status = unavailable`. Never part of the blocking "
-                    "`unavailable_reasons` set."
-                ),
-            },
-            "return_period_reasons": {
-                "type": "array",
-                "description": (
-                    "Populated only when `return_period_status = unavailable`; carries the reason "
-                    "code RETURN_PERIOD_RESULT_UNAVAILABLE. Supplemental, not blocking."
-                ),
-                "items": {"$ref": "#/components/schemas/QhhLatestUnavailableReason"},
             },
         },
     }
@@ -1500,15 +1320,6 @@ def _qhh_latest_quality_schema() -> dict:
             "station_variable_coverage": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/QhhLatestStationVariableCoverage"},
-            },
-            "product_quality": {
-                "type": "object",
-                "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
-                "nullable": True,
-                "description": (
-                    "Supplemental per-product quality details. `flood_return_period` carries explicit "
-                    "flood run quality when available and never blocks q_down display readiness."
-                ),
             },
             "candidate_limit": {"type": "integer", "minimum": 1},
             "search_limit": {"type": "integer", "minimum": 1},

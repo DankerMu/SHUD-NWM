@@ -12,19 +12,6 @@ export const m11VisualTokens = {
   fontCaption: '12px',
   fontTitle: '16px',
   fontMetric: '24px',
-  warningLevels: {
-    normal: '#4FC3F7',
-    elevated: '#81C784',
-    watch: '#FFD54F',
-    warning: '#FFB74D',
-    high_risk: '#FF8A65',
-    major: '#FF8A65',
-    severe: '#E57373',
-    extreme: '#AB47BC',
-    orange: '#FF9800',
-    red: '#F44336',
-    unavailable: '#CCCCCC',
-  },
   statuses: {
     success: '#4CAF50',
     warning: '#FF9800',
@@ -32,5 +19,3 @@ export const m11VisualTokens = {
     info: '#2196F3',
   },
 } as const
-
-export type M11WarningLevel = keyof typeof m11VisualTokens.warningLevels

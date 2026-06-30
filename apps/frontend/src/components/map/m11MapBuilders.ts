@@ -3,9 +3,6 @@ import type { FilterSpecification } from 'maplibre-gl'
 import type { LayerProps } from 'react-map-gl/maplibre'
 
 import type { components } from '@/api/types'
-import { floodTileLayerPaint } from '@/components/flood/alertLevels'
-import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
-import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
 import {
   buildMvtTileUrlTemplate,
   isMvtLayerMetadata,
@@ -21,7 +18,6 @@ import {
   m11BasinRiverLayerColor,
   type BasinSegmentRow,
   type LayerState,
-  type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
@@ -65,8 +61,6 @@ export interface BasinRiverFeatureProperties {
   segment_name: string
   q_value: number | null
   q_unit: string
-  return_period: number | null
-  warning_level: M11WarningLevel
   layer_color: string
 }
 
@@ -136,7 +130,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const variable = 'q_down'
   const replacements: Record<string, string> = national
     ? { valid_time: validTime, variable }
-    : { run_id: runId as string, duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION, valid_time: validTime, variable }
+    : { run_id: runId as string, valid_time: validTime, variable }
 
   return {
     layerId: state.layer,
@@ -161,7 +155,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
       type: 'line',
       source: sourceId,
       'source-layer': metadata.maplibre_source_layer,
-      paint: m11RegisteredOverlayPaint(selectedLayer.layerId),
+      paint: dischargeTileLayerPaint(),
     },
   }
 }
@@ -184,7 +178,6 @@ export function m11VectorSourceKey({
     cache_etag: metadata.cache_etag ?? null,
     cache_version: metadata.cache_version ?? null,
     canonical_route_layer_id: metadata.canonical_route_layer_id ?? metadata.layer_id,
-    duration: layerId === 'flood-return-period' || layerId === 'warning-level' ? DEFAULT_FLOOD_RETURN_PERIOD_DURATION : null,
     encoder_version: metadata.encoder_version ?? null,
     layer_id: layerId,
     maplibre_source_layer: metadata.maplibre_source_layer,
@@ -256,8 +249,6 @@ export function buildBasinRiverFeatureCollection(
         segment_name: row.displayName,
         q_value: row.currentQ,
         q_unit: row.qUnit,
-        return_period: row.returnPeriod,
-        warning_level: row.warningLevel,
         layer_color: m11BasinRiverLayerColor(row, layer),
       },
     }
@@ -350,14 +341,14 @@ export function m11SelectedLayerUnavailableReason(
   state: M11QueryState,
   layers: LayerState[],
   overlay: M11RegisteredOverlay | null,
-  overlayData: FloodReturnPeriodFeatureCollection | null,
+  overlayData: FeatureCollection | null,
   hasBasinRiverNetwork = false,
 ) {
   if (overlay && (overlay.source.type === 'vector' || overlayData)) return null
-  if (hasBasinRiverNetwork && (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level')) {
+  if (hasBasinRiverNetwork && state.layer === 'discharge') {
     return null
   }
-  if (overlay) return '洪水重现期地图数据正在加载或已被客户端预算拦截，地图暂不显示该叠加层。'
+  if (overlay) return '水文地图数据正在加载或已被客户端预算拦截，地图暂不显示该叠加层。'
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer) return '当前图层尚未由 /api/v1/layers 注册，地图不会渲染该叠加层。'
   if (!selectedLayer.available) return selectedLayer.disabledReason ?? '当前图层没有可渲染的有效时间。'
@@ -365,7 +356,7 @@ export function m11SelectedLayerUnavailableReason(
     return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
   }
   if (!selectedLayer.currentValidTime) return '当前图层缺少有效时间，地图不会注册叠加层。'
-  if (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level') {
+  if (state.layer === 'discharge') {
     return '当前水文图层缺少可用 MVT 元数据或处于 release-blocked 状态，地图不会请求无边界 GeoJSON 兼容源。'
   }
   return '当前图层缺少可用地图源，地图不会注册叠加层。'
@@ -410,11 +401,6 @@ export function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number
     ...valueStops.map((stop, index) => (index % 2 === 1 ? Math.round(stop * scale * 100) / 100 : stop)),
   ]
   return ['interpolate', ['linear'], ['zoom'], 4, widthAt(lowZoomFactor), 7, widthAt(1)] as unknown as number
-}
-
-function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
-  if (layerId === 'flood-return-period' || layerId === 'warning-level') return floodTileLayerPaint()
-  return dischargeTileLayerPaint()
 }
 
 function dischargeTileLayerPaint(): LayerProps['paint'] {

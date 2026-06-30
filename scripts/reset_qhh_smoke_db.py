@@ -42,7 +42,6 @@ def main() -> int:
             "forcing_version_id",
         )
 
-        _delete(cur, deleted, "flood.return_period_result", "run_id = ANY(%s)", (run_ids,))
         _delete(cur, deleted, "hydro.river_timeseries", "run_id = ANY(%s)", (run_ids,))
         _delete(cur, deleted, "hydro.state_snapshot", "model_id = %s OR run_id = ANY(%s)", (MODEL_ID, run_ids))
         _delete(cur, deleted, "ops.qc_result", _qc_where(), (MODEL_ID, run_ids, forcing_ids, "qhh_%_smoke"))
@@ -85,7 +84,6 @@ def main() -> int:
             (STATION_ID, "qhh_forc_%", ids["basin_version_id"]),
         )
 
-        _delete(cur, deleted, "flood.flood_frequency_curve", "model_id = %s", (MODEL_ID,))
         _delete(cur, deleted, "core.model_instance", "model_id = %s", (MODEL_ID,))
         _delete(
             cur,

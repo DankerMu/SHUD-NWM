@@ -78,7 +78,6 @@
         "forecast",
         "parse",
         "q_down_publish",
-        "frequency_publish",
         "production_run"
       ]
     },

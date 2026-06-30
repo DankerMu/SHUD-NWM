@@ -39,7 +39,6 @@ The required loaded routes are captured at `1920x1080`, `1440x900`, and `1280x90
 
 - `/overview`
 - `/basins/basin-demo?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009`
-- `/flood-alerts`
 - `/monitoring`
 
 The same command also captures deterministic extended routes:
@@ -53,7 +52,7 @@ retain the full three-viewport coverage above. The canonical state matrix covers
 
 - overview loading, partial data, and API error.
 - basin detail empty segments, partial/unavailable data, and API error.
-- flood alerts empty alerts, warning levels, and API error.
+- discharge detail empty states, unavailable data, and API error.
 - monitoring empty jobs, failed job/error, and RBAC denied/restricted.
 - segment detail missing segment and chart/error state.
 - meteorology stations empty stations and station detail/forcing unavailable state.
@@ -67,7 +66,7 @@ retain the full three-viewport coverage above. The canonical state matrix covers
   the map surface.
 - Required desktop viewports have no horizontal document scroll.
 - Side panel collapse controls, monitoring actions, and icon-only controls keep accessible names.
-- Warning/status colors stay aligned across overview, basin detail, and flood alerts.
+- Status colors stay aligned across overview, basin detail, monitoring, and detail panels.
 - Shared select/dropdown popovers, dialogs/overlays, and toast layers render above map chrome and
   page controls; the assertion compares computed z-index values against the observed map chrome
   threshold rather than accepting a fixed low value.
@@ -96,7 +95,7 @@ Visual regression review should block a PR when any of these are observed in the
 - Text overflow outside cards, panels, buttons, tables, or timeline controls.
 - Missing accessible names for icon controls or primary route actions.
 - Lost keyboard focus ring on interactive controls.
-- Inconsistent warning colors across overview, basin detail, and flood alerts.
+- Inconsistent status colors across overview, basin detail, monitoring, and detail panels.
 - Error, restricted, RBAC-denied, or empty states that display fake success data.
 - Missing required manifest metadata, missing state labels, placeholder SHA values, or missing
   screenshot artifacts for required route/viewports.

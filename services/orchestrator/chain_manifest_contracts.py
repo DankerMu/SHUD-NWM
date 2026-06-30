@@ -192,34 +192,6 @@ def _output_river_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _frequency_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
-    capabilities = _nested_mapping(basin.get("frequency_capabilities"))
-    has_curves = _tri_state(
-        basin.get("frequency_curves_available"),
-        capabilities.get("curves_available"),
-        capabilities.get("return_periods"),
-    )
-    has_thresholds = _tri_state(
-        basin.get("warning_thresholds_available"),
-        capabilities.get("warning_thresholds_available"),
-        capabilities.get("warning_thresholds"),
-    )
-    unavailable: list[str] = []
-    if has_curves is False:
-        unavailable.append("frequency_curves")
-    if has_thresholds is False:
-        unavailable.append("warning_thresholds")
-    state = "ready" if not unavailable else "unavailable"
-    return {
-        "state": state,
-        "return_periods_enabled": bool(capabilities.get("return_periods", True)),
-        "frequency_curves": "available" if has_curves is not False else "unavailable",
-        "warning_thresholds": "available" if has_thresholds is not False else "unavailable",
-        "quality_flag": "ok" if state == "ready" else "frequency_inputs_unavailable",
-        "unavailable_products": unavailable,
-    }
-
-
 def _display_contract(basin: Mapping[str, Any], *, output_uri: str) -> dict[str, Any]:
     capabilities = _nested_mapping(basin.get("display_capabilities"))
     optional_weather = _tri_state(
@@ -246,18 +218,12 @@ def _assembly_quality_states(
     *,
     station_metadata: Mapping[str, Any],
     output_river: Mapping[str, Any],
-    frequency: Mapping[str, Any],
     display: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     states = {
         "station_forcing": {
             "state": station_metadata.get("state"),
             "quality_flag": station_metadata.get("quality_flag"),
-        },
-        "frequency": {
-            "state": frequency.get("state"),
-            "quality_flag": frequency.get("quality_flag"),
-            "unavailable_products": list(frequency.get("unavailable_products") or []),
         },
         "display": {
             "state": display.get("state"),
@@ -288,17 +254,6 @@ def _assembly_quality_states(
                 "quality_flag": output_river.get("quality_flag"),
                 "residual_risk": (
                     "SHUD output-river segment metadata is unavailable; segment_count was not fabricated."
-                ),
-            }
-        )
-    for product in frequency.get("unavailable_products") or []:
-        blockers.append(
-            {
-                "code": str(product).upper() + "_UNAVAILABLE",
-                "state": "unavailable",
-                "quality_flag": frequency.get("quality_flag"),
-                "residual_risk": (
-                    f"{product} is unavailable; downstream products must carry null values or quality flags."
                 ),
             }
         )
@@ -342,23 +297,6 @@ def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id:
         "output_uri": _nested_mapping(assembly.get("outputs")).get("output_uri") or entry.get("output_uri"),
         "quality_states": dict(assembly.get("quality_states") or entry.get("quality_states") or {}),
         "residual_blockers": list(assembly.get("residual_blockers") or entry.get("residual_blockers") or []),
-    }
-
-
-def _frequency_quality_state(
-    entry: Mapping[str, Any],
-    *,
-    cycle_id: str,
-    model_run_stage_evidence: Callable[..., dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    model_run_stage_evidence = model_run_stage_evidence or _model_run_stage_evidence
-    evidence = model_run_stage_evidence("frequency", entry, cycle_id=cycle_id)
-    frequency_state = _nested_mapping(evidence.get("quality_states")).get("frequency") or {}
-    return {
-        **evidence,
-        "state": _nested_mapping(frequency_state).get("state", "ready"),
-        "quality_flag": _nested_mapping(frequency_state).get("quality_flag", "ok"),
-        "unavailable_products": list(_nested_mapping(frequency_state).get("unavailable_products") or []),
     }
 
 
@@ -406,7 +344,6 @@ def _assembly_payload_from_runtime_manifest(manifest: Mapping[str, Any]) -> dict
         "forcing": dict(_nested_mapping(manifest.get("forcing"))),
         "runtime": dict(_nested_mapping(manifest.get("runtime"))),
         "outputs": dict(_nested_mapping(manifest.get("outputs"))),
-        "frequency": dict(_nested_mapping(manifest.get("frequency"))),
         "display": dict(_nested_mapping(manifest.get("display"))),
         "quality_states": dict(_nested_mapping(manifest.get("quality_states"))),
         "residual_blockers": list(manifest.get("residual_blockers") or []),

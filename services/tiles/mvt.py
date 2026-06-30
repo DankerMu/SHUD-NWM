@@ -30,25 +30,6 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
-SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
-DEFAULT_FLOOD_RETURN_PERIOD_DURATION = "1h"
-FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS = frozenset(
-    {
-        "quality_state",
-        "quality_source",
-        "unavailable_products",
-        "residual_blockers",
-        "expected_result_rows",
-        "expected_max_result_rows",
-        "expected_timestep_result_rows",
-        "meaningful_result_rows",
-        "meaningful_max_result_rows",
-        "meaningful_timestep_result_rows",
-        "no_frequency_curve_rows",
-        "no_usable_frequency_curve_rows",
-        "warning_threshold_unavailable_rows",
-    }
-)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
 )
@@ -449,7 +430,7 @@ def postgis_tile_sql(layer: str) -> str:
                            h.run_id, mi.river_network_version_id
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.model_id = h.model_id
-                    WHERE h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+                    WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
                 ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
@@ -503,7 +484,7 @@ def postgis_tile_sql(layer: str) -> str:
                            h.run_id, mi.river_network_version_id
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.model_id = h.model_id
-                    WHERE h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+                    WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
                 ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
@@ -529,48 +510,6 @@ def postgis_tile_sql(layer: str) -> str:
                        ELSE 0.04
                    END
                )
-        """
-    elif layer == "flood-return-period":
-        required_property_checks = {
-            "feature_id": "feature_id IS NULL OR feature_id::text = ''",
-            "segment_id": "segment_id IS NULL OR segment_id::text = ''",
-            "river_segment_id": "river_segment_id IS NULL OR river_segment_id::text = ''",
-            "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
-            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
-            "value": f"value IS NULL OR value::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})",
-            "unit": "unit IS NULL OR unit::text = ''",
-            "quality_flag": "quality_flag IS NULL OR quality_flag::text = ''",
-            "return_period": (
-                "return_period IS NULL "
-                f"OR return_period::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})"
-            ),
-            "warning_level": "warning_level IS NULL OR warning_level::text = ''",
-            "run_id": "run_id IS NULL OR run_id::text = ''",
-            "duration": "duration IS NULL OR duration::text = ''",
-            "valid_time": "valid_time IS NULL",
-        }
-        source_cte = """
-            SELECT (r.river_network_version_id || '::' || r.river_segment_id) AS feature_id,
-                   r.river_segment_id AS segment_id,
-                   r.river_segment_id,
-                   r.river_network_version_id,
-                   r.basin_version_id,
-                   r.q_value AS value,
-                   r.q_unit AS unit,
-                   r.quality_flag, r.return_period, r.warning_level,
-                   r.run_id, r.duration,
-                   to_char(r.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
-                   rs.geom
-            FROM flood.return_period_result r
-            JOIN core.river_segment rs
-              ON rs.river_segment_id = r.river_segment_id
-             AND rs.river_network_version_id = r.river_network_version_id
-            WHERE r.run_id = :run_id
-              AND r.basin_version_id = :basin_version_id
-              AND r.river_network_version_id = :river_network_version_id
-              AND r.duration = :duration
-              AND r.valid_time = :valid_time
-              AND r.max_over_window = false
         """
     elif layer == "met-stations":
         required_property_checks = {
@@ -750,23 +689,6 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "valid_time",
             "mvt_geom",
         )
-    if layer == "flood-return-period":
-        return (
-            "feature_id",
-            "segment_id",
-            "river_segment_id",
-            "river_network_version_id",
-            "basin_version_id",
-            "value",
-            "unit",
-            "quality_flag",
-            "return_period",
-            "warning_level",
-            "run_id",
-            "duration",
-            "valid_time",
-            "mvt_geom",
-        )
     if layer == "met-stations":
         return (
             "station_id",
@@ -852,46 +774,6 @@ def layer_metadata(
                 "valid_time",
             ],
         },
-        "flood-return-period": {
-            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "flood_return_period",
-            "required_placeholders": ["run_id", "duration", "valid_time", "z", "x", "y"],
-            "properties": [
-                "feature_id",
-                "segment_id",
-                "river_segment_id",
-                "basin_version_id",
-                "river_network_version_id",
-                "value",
-                "unit",
-                "return_period",
-                "warning_level",
-                "quality_flag",
-                "run_id",
-                "duration",
-                "valid_time",
-            ],
-        },
-        "warning-level": {
-            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "flood_return_period",
-            "required_placeholders": ["run_id", "duration", "valid_time", "z", "x", "y"],
-            "properties": [
-                "feature_id",
-                "segment_id",
-                "river_segment_id",
-                "basin_version_id",
-                "river_network_version_id",
-                "value",
-                "unit",
-                "return_period",
-                "warning_level",
-                "quality_flag",
-                "run_id",
-                "duration",
-                "valid_time",
-            ],
-        },
     }
     base = metadata_by_layer.get(layer_id)
     if base is None:
@@ -906,8 +788,7 @@ def layer_metadata(
     national_discharge = national and layer_id == "discharge"
     if national_discharge:
         base = {**base, **_NATIONAL_DISCHARGE_METADATA}
-    cache_layer_id = "flood-return-period" if layer_id == "warning-level" else layer_id
-    is_warning_alias = layer_id == "warning-level"
+    cache_layer_id = layer_id
     source_refs = (
         {}
         if national_discharge
@@ -927,27 +808,13 @@ def layer_metadata(
         return {
             "layer_id": layer_id,
             "tile_format": "geojson_compatibility",
-            "fallback_available": layer_id == "flood-return-period",
+            "fallback_available": False,
             "release_blocking": True,
         }
-    route_variable = (
-        "q_down"
-        if layer_id == "discharge"
-        else "return_period"
-        if layer_id in {"flood-return-period", "warning-level"}
-        else None
-    )
-    alias_of = "flood-return-period" if is_warning_alias else None
-    alias_semantic = "style_layer" if is_warning_alias else None
-    legacy_layer_ids = (
-        ["hydro:q_down"]
-        if layer_id == "discharge"
-        else ["flood_return_period_{run_id}"]
-        if layer_id == "flood-return-period"
-        else ["flood-return-period", "flood_return_period_{run_id}"]
-        if is_warning_alias
-        else []
-    )
+    route_variable = "q_down" if layer_id == "discharge" else None
+    alias_of = None
+    alias_semantic = None
+    legacy_layer_ids = ["hydro:q_down"] if layer_id == "discharge" else []
     property_schema = {"version": MVT_SCHEMA_VERSION, "required": base["properties"]}
     version = _stable_json_hash(
         {
@@ -1002,8 +869,8 @@ def layer_metadata(
         "cache_version": version,
         "schema_version": MVT_SCHEMA_VERSION,
         "encoder_version": MVT_ENCODER_VERSION,
-        "fallback_available": layer_id == "flood-return-period",
-        "fallback_endpoint": "/api/v1/tiles/flood-return-period" if layer_id == "flood-return-period" else None,
+        "fallback_available": False,
+        "fallback_endpoint": None,
         "release_blocking": release_blocking,
         "production_mvt_readiness_claimed": False,
     }
@@ -1032,106 +899,11 @@ def _layer_source_refs(
         }.items()
         if value is not None
     }
-    if layer_id in {"flood-return-period", "warning-level"}:
-        refs["duration"] = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
     return refs
 
 
-def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
-    mode = _flood_product_quality_mode(session)
-    if mode == "missing_table":
-        quality_join = ""
-        quality_ready = """
-              AND EXISTS (
-                    SELECT 1
-                    FROM flood.return_period_result result
-                    WHERE result.run_id = h.run_id
-              )
-        """
-    elif mode == "explicit":
-        quality_join = "JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id"
-        quality_ready = "AND product_quality.quality_state = 'ready'"
-    else:
-        quality_join = "JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id"
-        quality_ready = """
-              AND CASE
-                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows
-                    ELSE product_quality.result_rows
-                  END > 0
-              AND CASE
-                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_return_period_rows
-                    ELSE product_quality.return_period_rows
-                  END = CASE
-                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows
-                    ELSE product_quality.result_rows
-                  END
-              AND CASE
-                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_warning_rows
-                    ELSE product_quality.warning_rows
-                  END = CASE
-                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_return_period_rows
-                    ELSE product_quality.return_period_rows
-                  END
-        """
-    row = session.execute(
-        text(
-            f"""
-            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
-                   mi.river_network_version_id
-            FROM hydro.hydro_run h
-            LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
-            {quality_join}
-            WHERE h.status IN ('frequency_done', 'published')
-              {quality_ready}
-            ORDER BY h.cycle_time DESC, h.run_id DESC
-            LIMIT 1
-            """
-        )
-    ).mappings().first()
-    return dict(row) if row is not None else None
-
-
-def _flood_product_quality_mode(session: Session) -> str:
-    columns = _flood_run_product_quality_columns(session)
-    if not columns:
-        return "missing_table"
-    return "explicit" if FLOOD_PRODUCT_QUALITY_EXPLICIT_COLUMNS <= columns else "legacy_table"
-
-
-def _flood_run_product_quality_columns(session: Session) -> set[str]:
-    if session.get_bind().dialect.name == "sqlite":
-        try:
-            rows = session.execute(text("PRAGMA flood.table_info(run_product_quality)")).mappings()
-            return {str(row["name"]) for row in rows}
-        except SQLAlchemyError:
-            return set()
-    try:
-        rows = session.execute(
-            text(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'flood'
-                  AND table_name = 'run_product_quality'
-                """
-            )
-        ).mappings()
-        return {str(row["column_name"]) for row in rows}
-    except SQLAlchemyError:
-        return set()
-
-
-def latest_frequency_ready_run(session: Session) -> Mapping[str, Any] | None:
-    """Latest display-ready run for the layer catalog, independent of flood return-period completeness.
-
-    `/api/v1/layers` exposes hydrology layers (discharge / river-network) that only need a
-    display-ready hydro run; flood return-period / warning-level availability is annotated separately
-    (see `_annotate_flood_layer_quality`). Unlike `latest_ready_run`, this does NOT inner-join
-    `flood.return_period_result`, so basins without a flood baseline (e.g. QHH/Heihe) still expose
-    discharge instead of an empty catalog. Source-identity resolution and the stable 404 contract for a
-    ready run missing source identity stay with the caller (`_require_run_source_identity`), matching
-    `latest_ready_run`.
-    """
+def display_ready_run(session: Session) -> Mapping[str, Any] | None:
+    """Latest display-ready hydro run for layer catalog discovery."""
     row = session.execute(
         text(
             """
@@ -1139,7 +911,7 @@ def latest_frequency_ready_run(session: Session) -> Mapping[str, Any] | None:
                    mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
-            WHERE h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+            WHERE h.status IN ('succeeded', 'parsed', 'published')
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT 1
             """
@@ -1155,7 +927,6 @@ def valid_times_for_layer(
     run_id: str | None = None,
     basin_version_id: str | None = None,
     river_network_version_id: str | None = None,
-    duration: str = DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
     limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
 ) -> ValidTimeDiscovery:
     sample_limit = max(0, limit)
@@ -1166,32 +937,7 @@ def valid_times_for_layer(
         "river_network_version_id": river_network_version_id,
         "limit": query_limit,
     }
-    if layer_id in {"flood-return-period", "warning-level"}:
-        if run_id is not None and (basin_version_id is None or river_network_version_id is None):
-            raise ValueError("Concrete flood valid-time discovery requires selected basin and river-network identity.")
-        sql = (
-            """
-                SELECT DISTINCT valid_time
-                FROM flood.return_period_result
-                WHERE run_id = :run_id
-                  AND basin_version_id = :basin_version_id
-                  AND river_network_version_id = :river_network_version_id
-                  AND duration = :duration
-                  AND max_over_window = false
-                ORDER BY valid_time DESC
-                LIMIT :limit
-            """
-            if run_id is not None
-            else """
-                SELECT DISTINCT valid_time
-                FROM flood.return_period_result
-                WHERE duration = :duration
-                  AND max_over_window = false
-                ORDER BY valid_time DESC
-                LIMIT :limit
-            """
-        )
-    elif layer_id == "discharge":
+    if layer_id == "discharge":
         if run_id is not None and (basin_version_id is None or river_network_version_id is None):
             raise ValueError("Concrete hydro valid-time discovery requires selected basin and river-network identity.")
         variable = "q_down"
@@ -1223,8 +969,6 @@ def valid_times_for_layer(
         return _valid_time_discovery(rows, sample_limit)
     else:
         return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-    rows = session.execute(text(sql), {**selected_identity_params, "duration": duration}).mappings().all()
-    return _valid_time_discovery(rows, sample_limit)
 
 
 def national_discharge_valid_times(
@@ -1257,7 +1001,7 @@ def national_discharge_valid_times(
                                ) AS rn
                         FROM hydro.hydro_run h
                         JOIN core.model_instance mi ON mi.model_id = h.model_id
-                        WHERE h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+                        WHERE h.status IN ('succeeded', 'parsed', 'published')
                           AND mi.river_network_version_id IS NOT NULL
                     ) ranked
                     WHERE rn = 1
@@ -1299,7 +1043,6 @@ def _source_layer_id(layer: str) -> str:
         "river-network": "river_network",
         "hydro": "hydro",
         "hydro-national": "hydro",
-        "flood-return-period": "flood_return_period",
         "met-stations": "met_stations",
     }[layer]
 
@@ -1522,14 +1265,6 @@ def _ensure_tile_layer(session: Session, tile: TileInput) -> bool:
 
 
 def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
-    if tile.layer_id == "flood-return-period":
-        return {
-            "layer_type": "flood_return_period",
-            "tile_uri_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "flood_return_period",
-            "variable": "return_period",
-            "fallback_available": True,
-        }
     if tile.layer_id == "river-network":
         return {
             "layer_type": "river_network",
@@ -1580,7 +1315,7 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
         "tile_uri_template": f"/api/v1/tiles/{tile.layer_id}/{{z}}/{{x}}/{{y}}.pbf",
         "maplibre_source_layer": (
             _source_layer_id(tile.layer_id)
-            if tile.layer_id in {"river-network", "flood-return-period", "met-stations"}
+            if tile.layer_id in {"river-network", "met-stations"}
             else tile.layer_id
         ),
         "variable": None,

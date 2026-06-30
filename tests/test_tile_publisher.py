@@ -1,10 +1,10 @@
 """Requirement-driven unit tests for ``TilePublisher.publish_qdown_cycle``.
 
-These tests exercise the q_down display-publication contract that is decoupled
-from flood-frequency readiness. Because ``publish_qdown_cycle`` constructs its
-own SQLAlchemy engine internally (and sqlite cannot resolve ``schema.table``
-without an ATTACH on that same connection), most success / identity / frequency /
-private-path assertions drive the lower-level ``_publish_qdown_from_database``
+These tests exercise the q_down display-publication contract. Because
+``publish_qdown_cycle`` constructs its own SQLAlchemy engine internally (and
+sqlite cannot resolve ``schema.table`` without an ATTACH on that same
+connection), most success / identity / private-path assertions drive the
+lower-level ``_publish_qdown_from_database``
 entry point with a session whose connection has the schemas ATTACHed. The
 ``DATABASE_URL_MISSING`` case and the F6 public-entry happy path exercise the
 public ``publish_qdown_cycle`` directly.
@@ -58,13 +58,12 @@ CYCLE_ID = f"{SOURCE_ID}_{COMPACT_TIME}"
 
 
 # --------------------------------------------------------------------------- #
-# sqlite schema harness (mirrors tests/test_flood_frequency.py)
+# sqlite schema harness
 # --------------------------------------------------------------------------- #
 def _attach_schemas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _attach(dbapi_connection: Any, _record: Any) -> None:  # pragma: no cover - sqlite hook
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
-        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
@@ -108,24 +107,6 @@ def _create_hydro_tables(connection: Any) -> None:
                 unit TEXT,
                 quality_flag TEXT DEFAULT 'ok',
                 PRIMARY KEY (run_id, river_network_version_id, river_segment_id, variable, valid_time)
-            )
-            """
-        )
-    )
-
-
-def _create_flood_table(connection: Any) -> None:
-    connection.execute(
-        text(
-            """
-            CREATE TABLE flood.return_period_result (
-                run_id TEXT NOT NULL,
-                river_segment_id TEXT NOT NULL,
-                river_network_version_id TEXT,
-                return_period REAL,
-                warning_level TEXT,
-                max_over_window REAL,
-                quality_flag TEXT DEFAULT 'ok'
             )
             """
         )
@@ -190,7 +171,6 @@ def _create_forcing_version_table(connection: Any) -> None:
 def _store(
     *,
     create_hydro: bool = True,
-    create_flood: bool = False,
     create_tile_layer: bool = True,
     create_met: bool = False,
 ) -> Iterator[Session]:
@@ -204,8 +184,6 @@ def _store(
     with engine.begin() as connection:
         if create_hydro:
             _create_hydro_tables(connection)
-        if create_flood:
-            _create_flood_table(connection)
         if create_tile_layer:
             _create_tile_layer_table(connection)
         if create_met:
@@ -310,21 +288,6 @@ def _insert_run(
     session.commit()
 
 
-def _insert_return_period(session: Session, *, run_id: str) -> None:
-    session.execute(
-        text(
-            """
-            INSERT INTO flood.return_period_result (
-                run_id, river_segment_id, river_network_version_id,
-                return_period, warning_level, max_over_window
-            ) VALUES (:run_id, 'seg-0', 'rivnet-1', 100.0, 'major', 42.0)
-            """
-        ),
-        {"run_id": run_id},
-    )
-    session.commit()
-
-
 def _layer_id(run_id: str, network: str = "rivnet-1") -> str:
     return f"q_down_{run_id}_{network}"
 
@@ -413,7 +376,7 @@ def _assert_copyback_publish_error(
     seed_forcing: bool = True,
     forcing_options: dict[str, Any] | None = None,
 ) -> PublishError:
-    with _store(create_flood=False, create_met=seed_forcing) as session:
+    with _store(create_met=seed_forcing) as session:
         _insert_run(session, run_id=session_run_id, segments=3)
         if seed_forcing:
             _seed_forcing_package(publisher, session, **(forcing_options or {}))
@@ -457,11 +420,11 @@ def test_parse_forcing_lineage_malformed_json_records_stable_parse_error() -> No
 
 
 # --------------------------------------------------------------------------- #
-# Scenario 1: q_down publish success (no flood table)
+# Scenario 1: q_down publish success
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_success_publishes_one_layer_per_run(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=3)
         _insert_run(session, run_id="run-b", segments=2)
 
@@ -501,7 +464,7 @@ def test_publish_qdown_success_publishes_one_layer_per_run(tmp_path: Any) -> Non
 def test_publish_qdown_mirrors_artifacts_to_published_root(tmp_path: Any) -> None:
     published_root = tmp_path / "published"
     publisher = _publisher(tmp_path, published_artifact_root=published_root)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=3)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -525,7 +488,7 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
     publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _checksum, forcing_manifest_bytes = _seed_forcing_package(publisher, session)
 
@@ -588,7 +551,7 @@ def test_publish_qdown_copyback_accepts_s3_prefix_package_and_manifest_file_uris
         "files": [{"role": "tsd_forc", "uri": publisher.object_store.uri_for_key(output_key)}],
     }
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _checksum, manifest_bytes = _seed_forcing_package(
             publisher,
@@ -608,7 +571,7 @@ def test_publish_qdown_copyback_accepts_s3_prefix_package_and_manifest_file_uris
 def test_publish_qdown_copyback_missing_run_products_fails_publish(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -671,7 +634,7 @@ def test_publish_qdown_copyback_manifest_without_run_id_is_allowed(tmp_path: Any
     publisher.object_store.write_bytes_atomic("runs/run-a/output/q.rivqdown.csv", b"seg,q\n1,2\n")
     publisher.object_store.write_bytes_atomic("runs/run-a/logs/shud_stdout.log", b"ok\n")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -703,7 +666,7 @@ def test_publish_qdown_copyback_replaces_stale_target_tree(tmp_path: Any) -> Non
     stale_log.parent.mkdir(parents=True, exist_ok=True)
     stale_log.write_text("old\n", encoding="utf-8")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -745,7 +708,7 @@ def test_publish_qdown_copyback_rolls_back_run_tree_when_later_forcing_copy_fail
 
     monkeypatch.setattr("packages.common.object_store.LocalObjectStore.write_bytes_atomic", fail_forcing_target_write)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -785,7 +748,7 @@ def test_publish_qdown_copyback_revalidates_copied_forcing_package_before_succes
 
     monkeypatch.setattr(publisher, "_validate_forcing_source_tree", mutate_after_copy_source_validation)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -826,7 +789,7 @@ def test_publish_qdown_copyback_rejects_file_grown_after_scan_before_copy_read(
 
     monkeypatch.setattr("packages.common.object_store.LocalObjectStore.read_bytes_limited", grow_before_copy_read)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -851,7 +814,7 @@ def test_publish_qdown_copyback_rejects_over_limit_source_tree_before_target_pro
     _seed_run_products(publisher, "run-a")
     monkeypatch.setattr("services.tile_publisher.publisher._COPYBACK_MAX_TOTAL_BYTES", 1)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -875,7 +838,7 @@ def test_publish_qdown_copyback_rejects_single_file_over_per_file_limit_before_t
     publisher.object_store.write_bytes_atomic("runs/run-a/output/large.bin", b"x" * 41)
     monkeypatch.setattr("services.tile_publisher.publisher._COPYBACK_MAX_FILE_BYTES", 40)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -918,7 +881,7 @@ def test_publish_qdown_copyback_cleanup_failure_blocks_publish_and_rolls_back(
 
     monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_backup_cleanup)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -978,7 +941,7 @@ def test_publish_qdown_copyback_partial_backup_cleanup_failure_restores_all_targ
 
     monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_second_backup_cleanup)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _insert_run(session, run_id="run-b", segments=2)
         _seed_forcing_package(publisher, session)
@@ -1039,7 +1002,7 @@ def test_publish_qdown_copyback_rollback_clone_cleanup_failure_after_commit_does
 
     monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_second_rollback_clone_cleanup)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _insert_run(session, run_id="run-b", segments=2)
         _seed_forcing_package(publisher, session)
@@ -1095,7 +1058,7 @@ def test_publish_qdown_copyback_exact_root_validates_complete_run_tree(tmp_path:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
 
@@ -1139,7 +1102,7 @@ def test_publish_qdown_copyback_exact_root_rejects_forcing_integrity_failure(
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session, **forcing_options)
 
@@ -1294,7 +1257,7 @@ def test_publish_qdown_copyback_failure_does_not_advance_stable_display_artifact
     )
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session)
         publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -1323,7 +1286,7 @@ def test_publish_qdown_copyback_deduplicates_shared_forcing_package(tmp_path: An
     _seed_run_products(publisher, "run-a")
     _seed_run_products(publisher, "run-b")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _insert_run(session, run_id="run-b", segments=2)
         _checksum, manifest_bytes = _seed_forcing_package(publisher, session)
@@ -1352,7 +1315,7 @@ def test_publish_qdown_copyback_deduplicates_copy_but_validates_sibling_forcing_
     _seed_run_products(publisher, "run-a")
     _seed_run_products(publisher, "run-b")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3, forcing_version_id="forcing-1")
         _insert_run(session, run_id="run-b", segments=2, forcing_version_id="forcing-2")
         checksum, _manifest_bytes = _seed_forcing_package(publisher, session, forcing_version_id="forcing-1")
@@ -1402,7 +1365,7 @@ def test_publish_qdown_copyback_missing_forcing_metadata_fails_before_artifact_a
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=create_met) as session:
+    with _store(create_met=create_met) as session:
         _insert_run(session, run_id="run-a", segments=3)
         if create_met:
             _seed_forcing_package(publisher, session, **forcing_options)
@@ -1434,7 +1397,7 @@ def test_publish_qdown_copyback_rejects_forcing_key_identity_mismatch_before_dis
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session, package_key=package_key)
 
@@ -1469,7 +1432,7 @@ def test_publish_qdown_copyback_forcing_integrity_failures_do_not_publish_displa
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session, **forcing_options)
 
@@ -1492,7 +1455,7 @@ def test_publish_qdown_copyback_validates_manifest_output_file_checksum_when_pre
         "files": [{"role": "tsd_forc", "uri": f"{FORCING_KEY}/forcing.tsd.forc", "checksum": "0" * 64}],
     }
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session, manifest_payload=manifest_payload)
 
@@ -1524,7 +1487,7 @@ def test_publish_qdown_copyback_rejects_unsafe_forcing_keys(
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(publisher, session, package_uri=package_uri)
 
@@ -1547,7 +1510,7 @@ def test_publish_qdown_copyback_rejects_forcing_source_symlink(tmp_path: Any) ->
     (outside_forcing / "gfs/2026061400/basin-1/model-1").mkdir(parents=True)
     (object_store_root / "forcing").symlink_to(outside_forcing, target_is_directory=True)
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(
             publisher,
@@ -1573,7 +1536,7 @@ def test_publish_qdown_copyback_rejects_forcing_source_regular_file(tmp_path: An
     source_file.parent.mkdir(parents=True)
     source_file.write_text("not a directory", encoding="utf-8")
 
-    with _store(create_flood=False, create_met=True) as session:
+    with _store(create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
         _seed_forcing_package(
             publisher,
@@ -1594,7 +1557,7 @@ def test_publish_qdown_copyback_rejects_forcing_source_regular_file(tmp_path: An
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=3)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -1625,104 +1588,7 @@ def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Scenario 2: frequency unavailable -> degraded but still published
-# --------------------------------------------------------------------------- #
-def test_publish_qdown_without_flood_table_is_degraded_but_published(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
-        _insert_run(session, run_id="run-a", segments=2)
-
-        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
-
-    # q_down still published despite missing flood-frequency.
-    assert result.status == "published"
-    assert len(result.layers) == 1
-
-    layer = result.layers[0]
-    assert set(layer["unavailable_products"]) == {
-        "return_period_result",
-        "frequency_curves",
-        "warning_thresholds",
-    }
-    assert layer["quality_state"] == "degraded"
-
-    lineage = result.lineage
-    assert lineage["quality_state"] == "degraded"
-    assert set(lineage["unavailable_products"]) == {
-        "return_period_result",
-        "frequency_curves",
-        "warning_thresholds",
-    }
-    blocker_codes = {blocker["code"] for blocker in lineage["residual_blockers"]}
-    assert "RETURN_PERIOD_RESULT_UNAVAILABLE" in blocker_codes
-
-    # No fabricated return-period / warning fields leak into identity or layer.
-    assert "return_period" not in layer
-    assert "warning_level" not in layer
-    assert "warning_thresholds" not in layer["identity"]
-    assert "return_period" not in layer["identity"]
-
-
-def test_publish_qdown_flood_table_present_but_no_rows_is_degraded(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    with _store(create_flood=True) as session:
-        _insert_run(session, run_id="run-a", segments=2)
-        # flood table exists but holds no return-period rows for this run.
-
-        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
-
-    assert result.status == "published"
-    layer = result.layers[0]
-    assert layer["quality_state"] == "degraded"
-    assert "return_period_result" in layer["unavailable_products"]
-    blocker_codes = {blocker["code"] for blocker in result.lineage["residual_blockers"]}
-    assert "RETURN_PERIOD_RESULT_UNAVAILABLE" in blocker_codes
-
-
-# --------------------------------------------------------------------------- #
-# Scenario 3: frequency ready (decoupled readiness)
-# --------------------------------------------------------------------------- #
-def test_publish_qdown_with_return_period_rows_is_ready(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    with _store(create_flood=True) as session:
-        _insert_run(session, run_id="run-a", segments=2)
-        _insert_return_period(session, run_id="run-a")
-
-        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
-
-    assert result.status == "published"
-    assert result.lineage["quality_state"] == "ready"
-    assert result.lineage["unavailable_products"] == []
-    assert result.lineage["residual_blockers"] == []
-
-    layer = result.layers[0]
-    assert layer["quality_state"] == "ready"
-    assert layer["unavailable_products"] == []
-
-
-def test_display_readiness_independent_from_frequency_readiness(tmp_path: Any) -> None:
-    """Same display layer publishes either way; only quality_state differs."""
-    publisher_degraded = _publisher(tmp_path / "a")
-    with _store(create_flood=False) as session:
-        _insert_run(session, run_id="run-a", segments=2)
-        degraded = publisher_degraded._publish_qdown_from_database(session, CYCLE_ID)
-
-    publisher_ready = _publisher(tmp_path / "b")
-    with _store(create_flood=True) as session:
-        _insert_run(session, run_id="run-a", segments=2)
-        _insert_return_period(session, run_id="run-a")
-        ready = publisher_ready._publish_qdown_from_database(session, CYCLE_ID)
-
-    # Display layer is published in both cases (decoupled readiness).
-    assert degraded.status == ready.status == "published"
-    assert len(degraded.layers) == len(ready.layers) == 1
-    # The only material difference is the frequency-driven quality state.
-    assert degraded.lineage["quality_state"] == "degraded"
-    assert ready.lineage["quality_state"] == "ready"
-
-
-# --------------------------------------------------------------------------- #
-# Scenario 4: private workspace URI rejection
+# Scenario 2: private workspace URI rejection
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "output_uri",
@@ -1735,7 +1601,7 @@ def test_display_readiness_independent_from_frequency_readiness(tmp_path: Any) -
 )
 def test_publish_qdown_rejects_private_workspace_uri(tmp_path: Any, output_uri: str) -> None:
     publisher = _publisher(tmp_path / output_uri.replace("/", "_"))
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=2, output_uri=output_uri)
 
         with pytest.raises(PublishError) as excinfo:
@@ -1746,7 +1612,7 @@ def test_publish_qdown_rejects_private_workspace_uri(tmp_path: Any, output_uri: 
 
 def test_publish_qdown_rejects_private_run_manifest_uri(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(
             session,
             run_id="run-a",
@@ -1766,7 +1632,7 @@ def test_publish_qdown_rejects_private_run_manifest_uri(tmp_path: Any) -> None:
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_missing_lineage_raises_identity_incomplete(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         # Sole run is identity-incomplete -> the whole cycle has nothing
         # publishable, so the cycle-level PUBLISH_IDENTITY_INCOMPLETE is raised.
         _insert_run(session, run_id="run-a", segments=2, forcing_version_id=None)
@@ -1784,7 +1650,7 @@ def test_publish_qdown_missing_lineage_raises_identity_incomplete(tmp_path: Any)
 
 def test_publish_qdown_missing_model_id_raises_identity_incomplete(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=2, model_id=None)
 
         with pytest.raises(PublishError) as excinfo:
@@ -1813,7 +1679,7 @@ def test_publish_qdown_cycle_without_database_url_raises(tmp_path: Any) -> None:
 
 def test_publish_qdown_non_canonical_cycle_id_raises(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=2)
 
         with pytest.raises(PublishError) as excinfo:
@@ -1824,7 +1690,7 @@ def test_publish_qdown_non_canonical_cycle_id_raises(tmp_path: Any) -> None:
 
 def test_publish_qdown_no_publishable_runs_raises(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         # A run that does not qualify (wrong status) -> nothing publishable.
         _insert_run(session, run_id="run-a", segments=2, status="running")
 
@@ -1836,7 +1702,7 @@ def test_publish_qdown_no_publishable_runs_raises(tmp_path: Any) -> None:
 
 def test_publish_qdown_missing_hydro_run_table_raises_schema_missing(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_hydro=False, create_flood=False) as session:
+    with _store(create_hydro=False) as session:
         with pytest.raises(PublishError) as excinfo:
             publisher._publish_qdown_from_database(session, CYCLE_ID)
 
@@ -1848,7 +1714,7 @@ def test_publish_qdown_missing_hydro_run_table_raises_schema_missing(tmp_path: A
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_twice_is_idempotent(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False) as session:
+    with _store() as session:
         _insert_run(session, run_id="run-a", segments=3)
         _insert_run(session, run_id="run-b", segments=2)
 
@@ -1872,7 +1738,7 @@ def test_publish_qdown_twice_is_idempotent(tmp_path: Any) -> None:
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_registers_layer_in_tile_layer_table(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False, create_tile_layer=True) as session:
+    with _store(create_tile_layer=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -1908,7 +1774,7 @@ def test_publish_qdown_registers_layer_in_tile_layer_table(tmp_path: Any) -> Non
 def test_publish_qdown_tolerates_missing_tile_layer_table(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
     # never-break: no map.tile_layer table at all.
-    with _store(create_flood=False, create_tile_layer=False) as session:
+    with _store(create_tile_layer=False) as session:
         _insert_run(session, run_id="run-a", segments=2)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -1927,7 +1793,7 @@ def test_publish_qdown_tolerates_missing_tile_layer_table(tmp_path: Any) -> None
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_run_across_two_networks_yields_two_layers(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False, create_tile_layer=True) as session:
+    with _store(create_tile_layer=True) as session:
         # Single run_id, q_down rows split over two river_network_version_ids.
         _insert_run(session, run_id="run-a", river_network_version_id="rivnet-1", segments=3)
         _insert_run(
@@ -1972,7 +1838,7 @@ def test_publish_qdown_run_across_two_networks_yields_two_layers(tmp_path: Any) 
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_skips_only_identity_incomplete_run(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False, create_tile_layer=True) as session:
+    with _store(create_tile_layer=True) as session:
         _insert_run(session, run_id="run-a", segments=3)  # complete
         _insert_run(session, run_id="run-b", segments=2, forcing_version_id=None)  # incomplete
 
@@ -2001,7 +1867,7 @@ def test_publish_qdown_skips_only_identity_incomplete_run(tmp_path: Any) -> None
 
 def test_publish_qdown_all_runs_incomplete_raises(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
-    with _store(create_flood=False, create_tile_layer=True) as session:
+    with _store(create_tile_layer=True) as session:
         _insert_run(session, run_id="run-a", segments=2, forcing_version_id=None)
         _insert_run(session, run_id="run-b", segments=2, model_id=None)
 
@@ -2023,7 +1889,7 @@ def test_publish_qdown_all_runs_incomplete_raises(tmp_path: Any) -> None:
 # finally block to avoid polluting other fixtures/tests.
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_cycle_public_entry_happy_path(tmp_path: Any) -> None:
-    schemas = ("hydro", "flood", "ops", "map")
+    schemas = ("hydro", "ops", "map")
     schema_files = {name: tmp_path / f"{name}.db" for name in schemas}
     db_url = f"sqlite:///{tmp_path / 'main.db'}"
 
@@ -2104,91 +1970,3 @@ def test_is_private_display_path_rejects_private(private_path: str) -> None:
 )
 def test_is_private_display_path_allows_public(public_path: str) -> None:
     assert _is_private_display_path(public_path) is False
-
-
-# --------------------------------------------------------------------------- #
-# Degrade-to-display contract (#290): the flood publish entrypoint
-# (_publish_from_database) degrades to the q_down display product when no flood
-# return-period tiles are publishable, and only hard-fails when neither flood
-# nor q_down is publishable. Product-approved behavior change: the empty-flood
-# scenario used to raise NO_PUBLISHABLE_PRODUCTS; it now publishes q_down.
-# --------------------------------------------------------------------------- #
-def _insert_publishable_flood_run(session: Session, *, run_id: str, segments: int = 3) -> None:
-    """Seed a flood run that _discover_publishable_runs treats as ready.
-
-    Status must be frequency_done/published, and every result row needs a
-    non-null return_period + warning_level with max_over_window true.
-    """
-    _insert_run(session, run_id=run_id, status="frequency_done", segments=segments)
-    for index in range(segments):
-        session.execute(
-            text(
-                """
-                INSERT INTO flood.return_period_result (
-                    run_id, river_segment_id, river_network_version_id,
-                    return_period, warning_level, max_over_window
-                ) VALUES (:run_id, :segment, 'rivnet-1', 100.0, 'major', 1)
-                """
-            ),
-            {"run_id": run_id, "segment": f"seg-{index}"},
-        )
-    session.commit()
-
-
-def test_publish_from_database_degrades_to_qdown_when_no_flood_runs(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    # q_down river_timeseries present (parsed), but no publishable flood rows.
-    with _store(create_flood=True) as session:
-        _insert_run(session, run_id="run-a", status="parsed", segments=3)
-
-        result = publisher._publish_from_database(session, CYCLE_ID)
-
-    assert isinstance(result, PublishResult)
-    assert result.status == "published"
-    # Layers are the q_down display layers, not flood return-period layers.
-    assert {layer["layer_type"] for layer in result.layers} == {"q_down_timeseries"}
-    assert result.lineage["degraded_to_display"] is True
-    # Missing flood return-period is recorded honestly, not silently dropped.
-    assert "return_period_result" in result.lineage["unavailable_products"]
-    assert result.lineage["quality_state"] == "degraded"
-
-
-def test_publish_from_database_happy_path_publishes_flood_without_degrade(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    with _store(create_flood=True) as session:
-        _insert_publishable_flood_run(session, run_id="run-a", segments=3)
-
-        result = publisher._publish_from_database(session, CYCLE_ID)
-
-    assert result.status == "published"
-    # Flood layers published exactly as before; NO degrade.
-    assert {layer["layer_type"] for layer in result.layers} == {"flood_return_period"}
-    assert result.lineage.get("degraded_to_display") in (None, False)
-
-
-def test_publish_from_database_raises_when_neither_flood_nor_qdown(tmp_path: Any) -> None:
-    publisher = _publisher(tmp_path)
-    # No flood rows AND no q_down river_timeseries → genuinely nothing publishable.
-    with _store(create_flood=True) as session:
-        session.execute(
-            text(
-                """
-                INSERT INTO hydro.hydro_run (
-                    run_id, run_type, status, source_id, cycle_time, run_manifest_uri
-                ) VALUES (
-                    'run-a', 'forecast', 'parsed', :source_id, :cycle_time,
-                    'published://tiles/hydro/manifest.json'
-                )
-                """
-            ),
-            {"source_id": SOURCE_ID, "cycle_time": CYCLE_TIME},
-        )
-        session.commit()
-
-        with pytest.raises(PublishError) as excinfo:
-            publisher._publish_from_database(session, CYCLE_ID)
-
-    assert excinfo.value.error_code == "NO_PUBLISHABLE_PRODUCTS"
-    # Chained from the qdown empty-runs error.
-    assert isinstance(excinfo.value.__cause__, PublishError)
-    assert excinfo.value.__cause__.error_code == "NO_PUBLISHABLE_QDOWN_PRODUCTS"

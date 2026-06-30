@@ -141,7 +141,6 @@ def _candidate_state_decision(
                 "durable_output_reused": bool(_state_output_uri(decision_state)),
                 "native_shud_resubmitted": False,
                 "parse_resubmitted": False,
-                "frequency_resubmitted": False,
                 "publish_resubmitted": False,
             },
         )

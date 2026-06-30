@@ -107,11 +107,9 @@ STRICT_IDENTIFIER_FIELDS = {
 }
 
 ARRAY_CAPABLE_JOB_TYPES = {
-    "hindcast",
     "produce_forcing_array",
     "run_shud_forecast_array",
     "parse_output_array",
-    "compute_frequency_array",
 }
 
 SLURM_STATE_MAP = {

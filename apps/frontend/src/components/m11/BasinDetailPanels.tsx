@@ -62,7 +62,6 @@ export function useBasinDetailMode({
       riverNetworkVersionId: state.riverNetworkVersionId,
       basinId: state.basinId,
       segmentId: state.segmentId,
-      warningLevel: null,
       q: null,
     }),
     [state.basinId, state.basinVersionId, state.cycle, state.layer, state.riverNetworkVersionId, state.segmentId, state.source, state.validTime],
@@ -300,8 +299,6 @@ export function bboxToMapFit(bbox: M11Bbox | null | undefined) {
   }
 }
 
-// Export 出来供单元测试断言 warningDistribution 空态降级（spec scenario "Default overview bootstrap
-// omits ranking" 的第 4 条 AND clause：MUST tolerate empty / pending warningDistribution）。
 export function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
   return {
     basinId: detail.basinId,
@@ -315,7 +312,6 @@ export function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
     riverCount: detail.segmentCount,
     activeModelCount: detail.activeModelCount,
     latestForecastTime: detail.latestRun.validTime,
-    warningCounts: detail.warningDistribution,
     basinVersions: detail.basinVersions,
     selectedBasinVersionId: detail.selectedBasinVersionId,
     unavailableReason: detail.unavailableReason,

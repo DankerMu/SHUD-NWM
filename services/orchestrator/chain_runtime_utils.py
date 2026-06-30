@@ -241,7 +241,6 @@ def _canonical_restart_stage(value: Any) -> str | None:
     normalized = str(value)
     aliases = {
         "parse_output": "parse",
-        "compute_frequency": "frequency",
         "publish_tiles": "publish",
     }
     normalized = aliases.get(normalized, normalized)

@@ -51,8 +51,8 @@ VALID_QC_FIXTURES = {
     "count_mismatch",
     "time_axis_mismatch",
 }
-STAGE_NAMES = ("download", "canonical", "forcing", "slurm", "parse", "frequency", "tile", "api", "frontend")
-DOWNSTREAM_STAGE_NAMES = {"parse", "frequency", "tile", "api", "frontend"}
+STAGE_NAMES = ("download", "canonical", "forcing", "slurm", "parse", "publish", "tile", "api", "frontend")
+DOWNSTREAM_STAGE_NAMES = {"parse", "publish", "tile", "api", "frontend"}
 DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
@@ -1400,7 +1400,7 @@ def _write_stage_artifacts(
         "forcing": [str(artifacts_dir / "forcing" / "forcing_manifest.json")],
         "slurm": [str(artifacts_dir / "slurm" / "slurm_manifest.json"), str(config.lane_dir / "raw" / "shud")],
         "parse": [str(artifacts_dir / "parse" / "parsed_timeseries_manifest.json")],
-        "frequency": [str(artifacts_dir / "frequency" / "return_period_manifest.json")],
+        "publish": [str(artifacts_dir / "publish" / "qdown_manifest.json")],
         "tile": [
             str(artifacts_dir / "tile" / "tilejson.json"),
             str(artifacts_dir / "tile" / "0" / "0" / "0.pbf"),
@@ -1498,13 +1498,13 @@ def _write_stage_artifacts(
             },
         )
         writer.write_json(
-            Path(outputs["frequency"][0]),
+            Path(outputs["publish"][0]),
             {
                 **base_payload,
-                "schema": "nhms.production_closure.e2e.stage.frequency.v1",
+                "schema": "nhms.production_closure.e2e.stage.publish.v1",
                 "status": "ready",
                 "input_manifest": outputs["parse"][0],
-                "return_periods": [2, 5, 10],
+                "product": "q_down",
                 "segment_id": derived_ids["segment_id"],
             },
         )
@@ -1512,15 +1512,14 @@ def _write_stage_artifacts(
             Path(outputs["tile"][0]),
             {
                 "tilejson": "3.0.0",
-                "name": f"{config.run_id}-flood-return-period",
-                "tiles": [f"{config.object_prefix}/tiles/{config.run_id}/{{z}}/{{x}}/{{y}}.pbf"],
+                "name": f"{config.run_id}-q-down",
+                "tiles": [f"{config.object_prefix}/tiles/hydro/{config.run_id}/{{z}}/{{x}}/{{y}}.pbf"],
                 "metadata": {
                     **base_payload,
                     "schema": "nhms.production_closure.e2e.stage.tile.v1",
                     "status": "ready",
                     "layer_id": derived_ids["layer_id"],
                     "run_id": config.run_id,
-                    "duration": "PT3H",
                     "valid_time": derived_ids["publication_time"],
                 },
             },
@@ -1630,24 +1629,16 @@ def _api_contract_queries(derived_ids: Mapping[str, Any]) -> list[dict[str, Any]
             "status": "deterministic_evidence",
         },
         {
-            "contract": "flood_alerts_summary",
+            "contract": "run_detail",
             "method": "GET",
-            "path": "/api/v1/flood-alerts/summary",
+            "path": f"/api/v1/runs/{run_id}",
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "layer_catalog",
+            "method": "GET",
+            "path": "/api/v1/layers",
             "query": {"run_id": run_id},
-            "status": "deterministic_evidence",
-        },
-        {
-            "contract": "flood_alerts_ranking",
-            "method": "GET",
-            "path": "/api/v1/flood-alerts/ranking",
-            "query": {"run_id": run_id, "limit": 10, "offset": 0, "valid_time": derived_ids["publication_time"]},
-            "status": "deterministic_evidence",
-        },
-        {
-            "contract": "flood_alerts_timeline",
-            "method": "GET",
-            "path": "/api/v1/flood-alerts/timeline",
-            "query": {"run_id": run_id, "segment_id": segment_id},
             "status": "deterministic_evidence",
         },
         {
@@ -1670,11 +1661,9 @@ def _api_contract_queries(derived_ids: Mapping[str, Any]) -> list[dict[str, Any]
         {
             "contract": "tile_metadata",
             "method": "GET",
-            "path": "/api/v1/tiles/flood-return-period",
+            "path": f"/api/v1/tiles/hydro/{run_id}/{derived_ids['publication_time']}/0/0/0.pbf",
             "query": {
-                "run_id": run_id,
-                "duration": "PT3H",
-                "valid_time": derived_ids["publication_time"],
+                "variable": "q_down",
             },
             "status": "deterministic_evidence",
         },
@@ -1688,8 +1677,8 @@ def _stage_inputs(config: ProductionE2EConfig, stage_name: str, derived_ids: Map
         "forcing": [f"{config.object_prefix}/canonical/{derived_ids['source']}/{derived_ids['cycle_time']}"],
         "slurm": [f"{config.object_prefix}/forcing/{config.run_id}/forcing.json"],
         "parse": [str(config.lane_dir / "raw" / "shud")],
-        "frequency": [f"db:{config.db_target}:river_timeseries:{config.run_id}"],
-        "tile": [f"db:{config.db_target}:flood_frequency:{config.run_id}"],
+        "publish": [f"db:{config.db_target}:river_timeseries:{config.run_id}"],
+        "tile": [f"db:{config.db_target}:q_down:{config.run_id}"],
         "api": [f"db:{config.db_target}", f"layer:{derived_ids['layer_id']}"],
         "frontend": [config.frontend_api_base, f"run:{config.run_id}"],
     }

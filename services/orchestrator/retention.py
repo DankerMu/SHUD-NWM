@@ -130,10 +130,9 @@ def _parse_cycle_name(name: str) -> datetime | None:
     """Parse a ``%Y%m%d%H`` cycle directory name, or None if not a cycle.
 
     Scope note (intentional): retention only cleans **forecast cycles** named
-    ``%Y%m%d%H``. Reanalysis ``date_key`` directories (``%Y-%m-%d``, e.g. ERA5
-    hindcast) are deliberately out of scope -- they are long-lived reference
-    data for flood-frequency hindcasts and must be retained. Such names fail
-    the length/``isdigit`` checks below and are therefore never selected for
+    ``%Y%m%d%H``. Reanalysis/reference ``date_key`` directories (``%Y-%m-%d``)
+    are deliberately out of scope and must be retained. Such names fail the
+    length/``isdigit`` checks below and are therefore never selected for
     deletion. This is a design choice, not an oversight.
     """
     if len(name) != CYCLE_NAME_LENGTH or not name.isdigit():

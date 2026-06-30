@@ -158,10 +158,6 @@ def build_station_id(index: int) -> str:
     return f"{BASIN_VERSION_ID}_stn_{index:04d}"
 
 
-def build_curve_id(index: int) -> str:
-    return f"freq_piii_1h_{MODEL_ID}_riv{index:04d}"
-
-
 def build_river_segments() -> list[RiverSegment]:
     downstream_ids = {
         1: build_river_segment_id(2),
@@ -759,126 +755,6 @@ def _build_river_timeseries_rows(
     return rows
 
 
-def seed_flood(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
-    curve_rows = []
-    return_period_rows = []
-    return_period_values = (1.5, 3.0, 8.0, 22.0, 55.0)
-
-    for index, segment in enumerate(build_river_segments()[:5], start=1):
-        q2 = 850.0 + index * 140.0
-        curve_rows.append(
-            (
-                build_curve_id(index),
-                MODEL_ID,
-                RIVER_NETWORK_VERSION_ID,
-                BASIN_VERSION_ID,
-                segment.river_segment_id,
-                "1h",
-                "piii",
-                "2010-01-01",
-                "2025-12-31",
-                16,
-                json_adapter({"distribution": "Pearson Type III", "cv": round(0.32 + index * 0.01, 3), "skew": 0.7}),
-                q2,
-                q2 * 1.25,
-                q2 * 1.5,
-                q2 * 1.85,
-                q2 * 2.35,
-                q2 * 2.8,
-                "m3/s",
-                "demo",
-            )
-        )
-
-        for hour_offset, return_period in enumerate(return_period_values):
-            warning_level = None
-            if return_period >= 30:
-                warning_level = "red"
-            elif return_period >= 10:
-                warning_level = "orange"
-            elif return_period >= 2:
-                warning_level = "yellow"
-
-            return_period_rows.append(
-                (
-                    RUN_ID,
-                    SCENARIO_ID,
-                    BASIN_VERSION_ID,
-                    RIVER_NETWORK_VERSION_ID,
-                    MODEL_ID,
-                    segment.river_segment_id,
-                    START_TIME + timedelta(hours=hour_offset),
-                    "1h",
-                    round(q2 * (0.82 + return_period / 70.0), 3),
-                    "m3/s",
-                    return_period,
-                    warning_level,
-                    SOURCE_ID,
-                    START_TIME,
-                    True,
-                    "ok",
-                )
-            )
-
-    execute_values(
-        cursor,
-        """
-        INSERT INTO flood.flood_frequency_curve (
-            curve_id,
-            model_id,
-            river_network_version_id,
-            basin_version_id,
-            river_segment_id,
-            duration,
-            method,
-            sample_period_start,
-            sample_period_end,
-            sample_size,
-            parameters_json,
-            q2,
-            q5,
-            q10,
-            q20,
-            q50,
-            q100,
-            unit,
-            quality_flag
-        )
-        VALUES %s
-        ON CONFLICT DO NOTHING
-        """,
-        curve_rows,
-        page_size=1000,
-    )
-    execute_values(
-        cursor,
-        """
-        INSERT INTO flood.return_period_result (
-            run_id,
-            scenario_id,
-            basin_version_id,
-            river_network_version_id,
-            model_id,
-            river_segment_id,
-            valid_time,
-            duration,
-            q_value,
-            q_unit,
-            return_period,
-            warning_level,
-            source_id,
-            cycle_time,
-            max_over_window,
-            quality_flag
-        )
-        VALUES %s
-        ON CONFLICT DO NOTHING
-        """,
-        return_period_rows,
-        page_size=1000,
-    )
-
-
 def seed_map(cursor: Any, json_adapter: Any) -> None:
     cursor.execute(
         """
@@ -996,8 +872,6 @@ def seed_ops(cursor: Any, json_adapter: Any) -> None:
 
 
 def collect_counts(cursor: Any) -> dict[str, int]:
-    segment_ids = [segment.river_segment_id for segment in build_river_segments()]
-    flood_segment_ids = segment_ids[:5]
     station_ids = [station.station_id for station in build_met_stations()]
     queries = [
         ("core.basin", "SELECT COUNT(*) FROM core.basin WHERE basin_id = %s", (BASIN_ID,)),
@@ -1054,22 +928,6 @@ def collect_counts(cursor: Any) -> dict[str, int]:
             "SELECT COUNT(*) FROM hydro.river_timeseries WHERE run_id = ANY(%s)",
             ([IFS_RUN_ID, IFS_06Z_RUN_ID],),
         ),
-        (
-            "flood.flood_frequency_curve",
-            """
-            SELECT COUNT(*)
-            FROM flood.flood_frequency_curve
-            WHERE model_id = %s
-              AND river_network_version_id = %s
-              AND river_segment_id = ANY(%s)
-            """,
-            (MODEL_ID, RIVER_NETWORK_VERSION_ID, flood_segment_ids),
-        ),
-        (
-            "flood.return_period_result",
-            "SELECT COUNT(*) FROM flood.return_period_result WHERE run_id = %s",
-            (RUN_ID,),
-        ),
         ("map.tile_layer", "SELECT COUNT(*) FROM map.tile_layer WHERE layer_id = %s", (TILE_LAYER_ID,)),
         ("ops.pipeline_job", "SELECT COUNT(*) FROM ops.pipeline_job WHERE job_id = %s", (PIPELINE_JOB_ID,)),
         (
@@ -1100,7 +958,6 @@ def seed_database(connection: Any) -> dict[str, int]:
         seed_core(cursor, Json, execute_values)
         seed_met(cursor, Json, execute_values, rng)
         seed_hydro(cursor, execute_values, rng)
-        seed_flood(cursor, Json, execute_values)
         seed_map(cursor, Json)
         seed_ops(cursor, Json)
         return collect_counts(cursor)

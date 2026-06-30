@@ -142,12 +142,12 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     assert delivery_blocker["surface"] == "live_postgis_national_frontend_evidence"
     assert delivery_blocker["status"] == "not_executed"
     assert "readiness is not claimed" in delivery_blocker["message"]
-    assert "/api/v1/tiles/flood-return-period" in delivery_blocker["affected_endpoints"]
+    assert any(endpoint.startswith("/api/v1/tiles/hydro/") for endpoint in delivery_blocker["affected_endpoints"])
     assert "removal_criteria" in delivery_blocker
     assert "residual_risk" in delivery_blocker
     assert tile["mvt_deterministic_metrics"]["payload_bytes"] == 0
     assert tile["layer_metadata"]["tile_format"] == "geojson_compatibility"
-    assert tile["layer_metadata"]["maplibre_source_layer"] == "flood_return_period"
+    assert tile["layer_metadata"]["maplibre_source_layer"] == "hydro"
 
 
 def test_validate_scale_mvt_expectation_with_measured_artifact_records_deterministic_pass(tmp_path: Path) -> None:

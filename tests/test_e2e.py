@@ -350,7 +350,7 @@ class E2ERepository:
                     "points": points,
                 }
             ],
-            "frequency_thresholds": {},
+            "series_metadata": {},
         }
 
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:

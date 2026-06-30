@@ -854,7 +854,7 @@ def _already_ingested_runs(database_url: str, run_ids: list[str]) -> set[str]:
                 SELECT h.run_id
                 FROM hydro.hydro_run h
                 WHERE h.run_id = ANY(%s)
-                  AND h.status IN ('parsed', 'frequency_done', 'published')
+                  AND h.status IN ('parsed', 'published')
                   AND EXISTS (
                       SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id
                   )
@@ -952,14 +952,10 @@ def _backfill_output_geometry(database_url: str, river_network_version_id: str) 
 def _publish_display_runs(database_url: str) -> int:
     """Advance fully-ingested display runs from 'parsed' to 'published'.
 
-    ``/api/v1/layers`` (``latest_frequency_ready_run``) only surfaces hydro runs
-    whose status is in ('frequency_done', 'published'); a display node never
-    computes flood frequency, so without this the catalog stays empty and the
-    q_down overlay never registers. 'published' (display products available) is
-    the honest terminal state here -- flood/warning availability is still
-    annotated separately from the actual ``flood.return_period_result``, so this
-    does not fabricate return-period products. Idempotent (published runs and
-    runs without timeseries are left untouched), matching the
+    ``/api/v1/layers`` surfaces display-ready hydro runs. A display node
+    publishes q_down products after parsed river_timeseries rows appear so the
+    overlay registers without waiting for compute-side jobs. Idempotent
+    (published runs and runs without timeseries are left untouched), matching the
     ``_already_ingested_runs`` completeness predicate."""
     conn = psycopg2.connect(database_url)
     try:

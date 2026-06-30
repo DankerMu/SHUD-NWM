@@ -5,50 +5,38 @@ import {
   createEmptyBasinDetail,
   createFreshnessMetadata,
   createSourceScenarioSelection,
-  emptyWarningCounts,
   type BasinDetail,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
-
-// PR 4/7 task 4.5 (b)：BasinDetailPanels 在 warningDistribution === undefined 时必须传递 pending
-// 占位（warningCounts === undefined），而非把 undefined 错误地填成"全 0 警告"误导前端 UI。
-// spec: "Default overview bootstrap omits ranking" / "BasinDetailPanels MUST tolerate an empty /
-// `pending` `warningDistribution` until lazy ranking settles, without rendering a misleading
-// 'all zero warnings' state"。
 
 function buildDetail(overrides: Partial<BasinDetail>): BasinDetail {
   return { ...createEmptyBasinDetail('yangtze', defaultM11QueryState), ...overrides }
 }
 
-describe('BasinDetailPanels.basinDetailToOverviewBasin warningCounts pending degradation', () => {
-  it('forwards undefined warningDistribution as undefined warningCounts (pending / not-loaded placeholder)', () => {
+describe('BasinDetailPanels.basinDetailToOverviewBasin', () => {
+  it('maps basin detail into overview basin fields used by the map shell', () => {
     const detail = buildDetail({
       basinId: 'yangtze',
       displayName: 'Yangtze',
-      warningDistribution: undefined,
+      segmentCount: 12,
+      activeModelCount: 1,
+      selectedBasinVersionId: 'bv-001',
+      latestRun: createFreshnessMetadata({ validTime: '2026-05-18T06:00:00Z' }),
     })
 
     const overviewBasin = basinDetailToOverviewBasin(detail)
 
-    // 关键合同：pending 态必须保留为 undefined；任何"为零填充"都会让消费 UI 错把 pending 当 ready。
-    expect(overviewBasin.warningCounts).toBeUndefined()
-  })
-
-  it('forwards an explicitly-loaded all-zero warningDistribution as a zero record (real all-zero is not pending)', () => {
-    const detail = buildDetail({
+    expect(overviewBasin).toMatchObject({
       basinId: 'yangtze',
       displayName: 'Yangtze',
-      // ranking 已 settle 但确实全 0 → 显式的 record，不应误降级为 undefined。
-      warningDistribution: { ...emptyWarningCounts },
+      riverCount: 12,
+      activeModelCount: 1,
+      latestForecastTime: '2026-05-18T06:00:00.000Z',
+      selectedBasinVersionId: 'bv-001',
     })
-
-    const overviewBasin = basinDetailToOverviewBasin(detail)
-
-    expect(overviewBasin.warningCounts).toBeDefined()
-    expect(overviewBasin.warningCounts).toEqual(emptyWarningCounts)
   })
 
-  it('createEmptyBasinDetail starts with undefined warningDistribution (pre-ranking placeholder)', () => {
+  it('createEmptyBasinDetail still initializes source and freshness metadata', () => {
     const empty = createEmptyBasinDetail('yangtze', {
       ...defaultM11QueryState,
       source: 'gfs',
@@ -56,13 +44,7 @@ describe('BasinDetailPanels.basinDetailToOverviewBasin warningCounts pending deg
       validTime: null,
     })
 
-    // 空详情即 pending 起点：warningDistribution 必须为 undefined（不是 0 填充）。
-    expect(empty.warningDistribution).toBeUndefined()
-    // 与之对照：sourceSelection 仍正常构造，确认 warningDistribution 的 undefined 是设计选择而非
-    // 整体未初始化。
-    expect(empty.sourceSelection).toEqual(
-      createSourceScenarioSelection({ source: 'gfs', cycle: null, validTime: null }),
-    )
+    expect(empty.sourceSelection).toEqual(createSourceScenarioSelection({ source: 'gfs', cycle: null, validTime: null }))
     expect(empty.latestRun).toEqual(
       createFreshnessMetadata({
         source: empty.sourceSelection.resolvedSource,

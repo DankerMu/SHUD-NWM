@@ -60,7 +60,6 @@ GATEWAY_FORBIDDEN_ROUTE_PREFIXES = (
     "/api/v1/models",
     "/api/v1/runs",
     "/api/v1/pipeline",
-    "/api/v1/hindcast",
     "/api/v1/data-sources",
     "/api/v1/best-available",
     "/api/v1/layers",
@@ -72,8 +71,6 @@ GATEWAY_FORBIDDEN_ROUTE_MARKERS = (
     "forecast",
     "model",
     "pipeline",
-    "hindcast",
-    "flood",
     "data-source",
     "static",
     "frontend",
@@ -309,9 +306,6 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
         "not permanent",
         "`packages/common/model_registry.py` | `apps.api.auth`",
         "`services/orchestrator/retry.py` | `apps.api.auth`",
-        "`workers/flood_frequency/cli.py` | `apps.api.auth`",
-        "`workers/flood_frequency/frequency.py` | `apps.api.auth`",
-        "`workers/flood_frequency/hindcast.py` | `apps.api.auth`",
         "`workers/model_registry/basins_registry_import.py` | `apps.api.auth`",
         "`workers/model_registry/cli.py` | `apps.api.auth`",
     }
@@ -339,7 +333,7 @@ def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() 
     assert "display API (`:8080`), and the frontend" in role_boundary
     assert "node-27 是当前 active production service host" in current_ops
     assert "本机 PostgreSQL `:55432`" in current_ops
-    assert "cron-driven ingest、display API 和前端公网入口都在 27" in current_ops
+    assert "source download、systemd-driven ingest、display API 和前端公网入口都在 27" in current_ops
 
     assert "node-22 runs the Slurm/SHUD compute wrapper" in role_boundary
     assert "node-22 currently\nhosts compute/Slurm/artifact production only" in role_boundary

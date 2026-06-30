@@ -23,7 +23,6 @@ _CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES = (
     "_ensure_segment_utc",
     "_era5_reanalysis_latency_minutes",
     "_forecast_state_checkpoint_hours",
-    "_frequency_contract",
     "_has_uri_scheme",
     "_model_package_manifest_uri",
     "_model_run_stage_evidence",
@@ -82,12 +81,10 @@ for _chain_manifest_alias_name, _chain_manifest_owner_value in _CHAIN_MANIFEST_C
 del _chain_manifest_alias_name, _chain_manifest_owner_value
 _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES = (
     "build_model_run_assembly",
-    "_frequency_quality_state",
     "_publish_quality_state",
 )
 _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES = (
     "build_model_run_assembly",
-    "_frequency_quality_state",
     "_publish_quality_state",
 )
 _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES = (
@@ -119,17 +116,14 @@ _CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS = _chain.MappingProxyType(
             ("preserve_directory_uri", "_preserve_directory_uri"),
             ("station_metadata_for_basin", "_station_metadata_for_basin"),
             ("output_river_contract", "_output_river_contract"),
-            ("frequency_contract", "_frequency_contract"),
             ("display_contract", "_display_contract"),
             ("assembly_quality_states", "_assembly_quality_states"),
             ("project_name_for_basin", "_project_name_for_basin"),
             ("model_package_manifest_uri", "_model_package_manifest_uri"),
         ),
-        "_frequency_quality_state": (("model_run_stage_evidence", "_model_run_stage_evidence"),),
         "_publish_quality_state": (("model_run_stage_evidence", "_model_run_stage_evidence"),),
         "ForecastOrchestrator._build_cycle_stage_manifest": (
             ("model_run_stage_evidence", "_model_run_stage_evidence"),
-            ("frequency_quality_state", "_frequency_quality_state"),
             ("publish_quality_state", "_publish_quality_state"),
             ("cycle_residual_blockers", "_cycle_residual_blockers"),
         ),

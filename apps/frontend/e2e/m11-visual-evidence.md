@@ -46,9 +46,8 @@ Traceability:
 Routes:
 - `/` and `/overview` render the national overview workflow.
 - `/basins/:basinId` renders the basin drill-down workflow and restores `source`, `cycle`,
-  `validTime`, `layer`, `basemap`, `basinVersionId`, `segmentId`, `warningLevel`, and `q`.
-- `/forecast`, `/flood-alerts`, and `/monitoring` remain the implemented handoff
-  destinations.
+  `validTime`, `layer`, `basemap`, `basinVersionId`, `segmentId`, and `q`.
+- `/forecast` and `/monitoring` remain the implemented handoff destinations.
 
 Data contracts:
 - Overview and basin pages consume typed view models from
@@ -58,20 +57,20 @@ Data contracts:
   oversized, or over-budget river geometry is omitted with a scoped unavailable note; no river
   coordinates are fabricated.
 - Selected segment detail uses `SelectedSegmentDetail` for IDs, basin/model metadata, Q,
-  return period, warning state, forecast time, source/cycle provenance, quality, lineage,
+  forecast time, source/cycle provenance, quality, lineage,
   trend points, comparison availability, and forecast handoff URL.
 
 Source/scenario behavior:
 - `gfs` and `ifs` resolve to concrete forecast APIs.
 - `best` must expose the concrete resolved source when available; handoff URLs use that
   concrete source instead of a backend-only best-available value.
-- `compare` keeps unavailable flood ranking/timeline/lineage states scoped until a real
-  GFS+IFS aggregation endpoint exists.
+- `compare` keeps unavailable discharge detail/lineage states scoped until a real GFS+IFS
+  aggregation endpoint exists.
 
 Map layer limits:
 - Basin detail renders river segments from the bounded river-segment GeoJSON returned by
-  existing basin-version APIs. It colors the same river network by discharge, return period,
-  or warning level depending on the active layer.
+  existing basin-version APIs. It colors the same river network by discharge or availability
+  depending on the active layer.
 - Basin detail passes real basin boundary context from the loaded basin version when available.
   City and station labels remain explicitly unavailable because M11 currently has no
   city/station label contract or feed.

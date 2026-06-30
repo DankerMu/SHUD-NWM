@@ -158,7 +158,6 @@ def coerce_registered_model(row: Mapping[str, Any]) -> Any:
         resource_profile=dict(resource_profile),
         resource_profile_summary=resource_profile_summary(resource_profile),
         display_capabilities=mapping_value(resource_profile.get("display_capabilities")),
-        frequency_capabilities=mapping_value(resource_profile.get("frequency_capabilities")),
     )
 
 
@@ -257,7 +256,6 @@ def resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, A
         "output_segment_count",
         "output_uri",
         "display_capabilities",
-        "frequency_capabilities",
     )
     return {key: resource_profile[key] for key in keys if key in resource_profile}
 

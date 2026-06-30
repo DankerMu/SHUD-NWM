@@ -151,7 +151,6 @@ class _UnavailableCanonicalReadinessProvider:
             model_package_uri=None,
             resource_profile={},
             display_capabilities={},
-            frequency_capabilities={},
             horizon={},
             scenario_id="canonical_readiness",
             run_id="",

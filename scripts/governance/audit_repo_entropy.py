@@ -56,7 +56,6 @@ RETIRED_ACTIVE_TREE_PREFIXES = (
     "workers/forcing-producer",
     "workers/shud-runtime",
     "workers/output-parser",
-    "workers/flood-frequency",
     "workers/sbatch_templates",
     "services/tile-publisher",
 )
@@ -223,7 +222,7 @@ ARCHIVE_STATUS_FRONT_MATTER_MAX_LINES = 200
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
 LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
     r"(?P<token>"
-    r"/(?:overview|hydro-met|forecast|meteorology|flood-alerts)"
+    r"/(?:overview|hydro-met|forecast|meteorology)"
     r"|/(?:basins|segments)/(?::[A-Za-z][A-Za-z0-9_-]*|[A-Za-z0-9][A-Za-z0-9_-]*)"
     r")"
     r"(?=$|[^A-Za-z0-9_/-])"

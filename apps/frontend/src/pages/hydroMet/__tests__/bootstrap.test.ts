@@ -58,7 +58,7 @@ function latestProduct(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProd
     segment_count: 1633,
     expected_segment_count: 1633,
     status: 'ready',
-    run_status: 'frequency_done',
+    run_status: 'published',
     valid_time_start: '2026-05-21T00:00:00Z',
     valid_time_end: '2026-05-28T00:00:00Z',
     river_valid_time_start: '2026-05-21T00:00:00Z',
@@ -156,7 +156,6 @@ function riverForecastResponse(
     segment_id: 'seg-001',
     issue_time: '2026-05-21T00:00:00Z',
     unit: 'm3/s',
-    frequency_thresholds: null,
     series: [
       {
         scenario_id: 'forecast_gfs_deterministic',

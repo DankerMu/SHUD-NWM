@@ -26,8 +26,6 @@ def test_seed_sql_strings_contain_expected_tables() -> None:
         "met.forcing_station_timeseries",
         "hydro.hydro_run",
         "hydro.river_timeseries",
-        "flood.flood_frequency_curve",
-        "flood.return_period_result",
         "map.tile_layer",
         "ops.pipeline_job",
         "ops.qc_result",
@@ -63,6 +61,3 @@ def test_seed_ids_follow_convention() -> None:
 
     station_ids = [station.station_id for station in seed_demo.build_met_stations()]
     assert station_ids == [f"{seed_demo.BASIN_VERSION_ID}_stn_{index:04d}" for index in range(1, 6)]
-
-    curve_ids = [seed_demo.build_curve_id(index) for index in range(1, 6)]
-    assert curve_ids == [f"freq_piii_1h_{seed_demo.MODEL_ID}_riv{index:04d}" for index in range(1, 6)]

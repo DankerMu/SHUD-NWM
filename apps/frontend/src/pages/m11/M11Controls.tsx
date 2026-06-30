@@ -25,14 +25,12 @@ import {
 import { cn } from '@/lib/cn'
 import {
   getM11LayerLegend,
-  m11WarningLevelColor,
   type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
   type SourceScenarioSelectionState,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
-import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
 type QueryChangeHandler = (patch: M11QueryPatch) => void
 
@@ -96,8 +94,6 @@ const basePlaceholders = [
 const dischargeFallbackLegend = getM11LayerLegend('discharge')
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   discharge: dischargeFallbackLegend,
-  'flood-return-period': dischargeFallbackLegend,
-  'warning-level': dischargeFallbackLegend,
 }
 
 export function M11MapSurface({
@@ -572,8 +568,3 @@ function formatDuration(milliseconds: number) {
 }
 
 export { fallbackLegends as m11FallbackLegends, basemapOptions as m11BasemapOptions }
-
-export const m11ControlColorEvidence = {
-  warningMajor: m11VisualTokens.warningLevels.major,
-  floodWarning: m11WarningLevelColor('warning'),
-}

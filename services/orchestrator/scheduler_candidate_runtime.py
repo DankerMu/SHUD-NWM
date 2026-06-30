@@ -167,7 +167,6 @@ _SCHEDULER_CANDIDATE_QUALITY_FORWARDER_NAMES = (
     "_candidate_output_evidence",
     "_candidate_display_evidence",
     "_candidate_quality_states",
-    "_candidate_frequency_evidence",
     "_candidate_residual_blockers",
     "_candidate_product_counts",
     "_candidate_output_river_manifest",
@@ -203,7 +202,6 @@ _candidate_forcing_evidence = _scheduler_candidate_quality_forwarder("_candidate
 _candidate_output_evidence = _scheduler_candidate_quality_forwarder("_candidate_output_evidence")
 _candidate_display_evidence = _scheduler_candidate_quality_forwarder("_candidate_display_evidence")
 _candidate_quality_states = _scheduler_candidate_quality_forwarder("_candidate_quality_states")
-_candidate_frequency_evidence = _scheduler_candidate_quality_forwarder("_candidate_frequency_evidence")
 _candidate_residual_blockers = _scheduler_candidate_quality_forwarder("_candidate_residual_blockers")
 _candidate_product_counts = _scheduler_candidate_quality_forwarder("_candidate_product_counts")
 _candidate_output_river_manifest = _scheduler_candidate_quality_forwarder("_candidate_output_river_manifest")
@@ -746,7 +744,6 @@ EXPORTS = {
         "_candidate_forcing_blocked_evidence",
         "_candidate_forcing_evidence",
         "_candidate_forcing_ready_evidence",
-        "_candidate_frequency_evidence",
         "_candidate_identity_evidence",
         "_candidate_model_run_review_evidence",
         "_candidate_output_evidence",

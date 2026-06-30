@@ -37,7 +37,6 @@ PRODUCTION_STAGE_TAXONOMY: tuple[str, ...] = (
     "forecast",
     "parse",
     "q_down_publish",
-    "frequency_publish",
     "production_run",
 )
 PRODUCTION_STATUS_TAXONOMY: tuple[str, ...] = (
@@ -347,9 +346,6 @@ def production_stage_for(value: Any) -> str:
         "parse_output_array": "parse",
         "publish": "q_down_publish",
         "publish_tiles": "q_down_publish",
-        "frequency": "frequency_publish",
-        "compute_frequency": "frequency_publish",
-        "compute_frequency_array": "frequency_publish",
     }
     normalized = aliases.get(raw, raw)
     return normalized if normalized in PRODUCTION_STAGE_TAXONOMY else "production_run"
@@ -370,7 +366,6 @@ def production_status_for(value: Any) -> str:
         "complete": "succeeded",
         "published": "succeeded",
         "parsed": "succeeded",
-        "frequency_done": "succeeded",
         "skipped": "superseded",
         "skip": "superseded",
         "not_run": "unavailable",

@@ -9,7 +9,6 @@ import {
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
   M11OpsLink,
-  resolveM11FloatingLegend,
 } from '@/components/map/M11FloatingControls'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 
@@ -95,14 +94,6 @@ describe('M11FloatingLegend', () => {
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
-  })
-
-  it('keeps retired layer states on the public discharge legend title', () => {
-    expect(resolveM11FloatingLegend('warning-level', []).length).toBeGreaterThan(0)
-    render(<M11FloatingLegend layer="warning-level" layers={[]} />)
-    expect(screen.getByText('径流量图例')).toBeInTheDocument()
-    expect(screen.queryByText('预警等级图例')).not.toBeInTheDocument()
-    expect(screen.queryByText('高风险')).not.toBeInTheDocument()
   })
 
   it('keeps the legend tied to the hydrology layer while stations are an overlay', () => {

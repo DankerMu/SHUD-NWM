@@ -48,7 +48,7 @@ ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
-DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
+DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
 DOWNLOAD_SOURCE_CYCLE_JOB_TYPE = "download_source_cycle"
@@ -110,7 +110,7 @@ def failure_classifier(error_code: str | None) -> str:
         return "forcing_failure"
     if code in {"PARSE_FAILED", "FAILED_PARSE", "OUTPUT_INCOMPLETE"}:
         return "parse_failure"
-    if code in {"PUBLISH_FAILED", "FAILED_PUBLISH", "FREQUENCY_FAILED", "NO_PUBLISHABLE_PRODUCTS"}:
+    if code in {"PUBLISH_FAILED", "FAILED_PUBLISH", "NO_PUBLISHABLE_PRODUCTS"}:
         return "publication_failure"
     if code in {
         "SLURM_TIMEOUT",

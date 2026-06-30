@@ -25,7 +25,7 @@
 #   - /health                       (sanity)
 #   - /api/v1/layers                (canonical 21.8s baseline; spec target < 200 ms p95)
 #   - /api/v1/basins
-#   - /api/v1/runs?source=best      (default discharge — should NOT carry flood_product_ready=true post PR 5/7)
+#   - /api/v1/runs?source=best      (default discharge catalog)
 #   - /api/v1/models
 #   - /api/v1/queue-depth
 #   - /api/v1/pipeline-status
@@ -232,17 +232,17 @@ echo "3. \`GET /api/v1/basins\` → ${ROUND_TIMES["/api/v1/basins|1"]:-N/A} ms"
 echo
 echo "Enrichment stage (decoupled, runs in background after map is interactive):"
 echo
-echo "4. \`GET /api/v1/runs?source=best\` → ${ROUND_TIMES["/api/v1/runs?source=best|1"]:-N/A} ms (default discharge, post PR 5/7 no \`flood_product_ready=true\`)"
+echo "4. \`GET /api/v1/runs?source=best\` → ${ROUND_TIMES["/api/v1/runs?source=best|1"]:-N/A} ms (default discharge catalog)"
 echo "5. \`GET /api/v1/models\` → ${ROUND_TIMES["/api/v1/models|1"]:-N/A} ms"
 echo "6. \`GET /api/v1/queue-depth\` → ${ROUND_TIMES["/api/v1/queue-depth|1"]:-N/A} ms"
 echo "7. \`GET /api/v1/pipeline-status\` → ${ROUND_TIMES["/api/v1/pipeline-status|1"]:-N/A} ms"
 echo
 echo "## Verification"
 echo
-echo "Discharge \`/runs\` request MUST NOT include \`flood_product_ready=true\` (PR 5/7 spec):"
+echo "Discharge \`/runs\` request uses the default q_down catalog:"
 echo
 echo "\`\`\`bash"
 echo "curl -sv '${BASE}/api/v1/runs?source=best' 2>&1 | grep -i 'GET /api/v1/runs'"
 echo "\`\`\`"
 echo
-echo "(Frontend would set \`flood_product_ready=true\` only on \`layer ∈ {flood-return-period, warning-level}\`; this script hits the raw endpoint without that param.)"
+echo "(This script hits the raw endpoint without retired product filters.)"

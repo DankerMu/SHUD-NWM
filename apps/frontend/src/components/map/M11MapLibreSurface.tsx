@@ -56,7 +56,6 @@ import {
 import {
   type BasinSegmentRow,
   type LayerState,
-  type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryState } from '@/lib/m11/queryState'
@@ -137,7 +136,7 @@ export function M11MapLibreSurface({
 }: M11MapLibreSurfaceProps) {
   const mapRef = useRef<MapRef | null>(null)
   const initialViewState = useM11MapCamera({ fitTo, flyTo, mapRef })
-  const [overlayData, setOverlayData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
+  const [overlayData, setOverlayData] = useState<FeatureCollection | null>(null)
   const [overlayUnavailableReason, setOverlayUnavailableReason] = useState<string | null>(null)
   const [hoveredRiverSegmentId, setHoveredRiverSegmentId] = useState<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
@@ -330,25 +329,7 @@ function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
         <dd className="min-w-0 truncate font-mono text-neutral-900">{props.river_segment_id}</dd>
         <dt>当前流量</dt>
         <dd>{props.q_value === null ? '无数据' : `${props.q_value.toLocaleString('en-US')} ${props.q_unit}`}</dd>
-        <dt>重现期</dt>
-        <dd>{props.return_period === null ? '无数据' : `${props.return_period} 年一遇`}</dd>
-        <dt>预警</dt>
-        <dd>{warningLabel(props.warning_level)}</dd>
       </dl>
     </div>
   )
-}
-
-function warningLabel(level: M11WarningLevel) {
-  const labels: Record<M11WarningLevel, string> = {
-    normal: '正常',
-    elevated: '偏高',
-    watch: '关注',
-    warning: '警戒',
-    high_risk: '高风险',
-    severe: '严重',
-    extreme: '极端',
-    unavailable: '无数据',
-  }
-  return labels[level]
 }

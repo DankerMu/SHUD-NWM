@@ -62,14 +62,13 @@ describe('StageCard', () => {
     expect(screen.getByText(/完成率 75% \(3\/4\)/)).toBeInTheDocument()
   })
 
-  it('renders the seven canonical stages in display order with raw ids', () => {
+  it('renders the canonical stages in display order with raw ids', () => {
     const canonicalStages = [
       ['download', '下载'],
       ['convert', '标准化'],
       ['forcing', '强迫场'],
       ['forecast', '预报'],
       ['parse', '解析'],
-      ['frequency', '频率计算'],
       ['publish', '发布'],
     ] as const
 

@@ -53,8 +53,8 @@ def _published_result(cycle_id: str) -> PublishResult:
                 "layer_id": f"q_down_{cycle_id}_seg",
                 "layer_type": "q_down_timeseries",
                 "source_run_id": "run-1",
-                "quality_state": "degraded",
-                "unavailable_products": ["return_period_result"],
+                "quality_state": "ready",
+                "unavailable_products": [],
             },
         ),
         artifacts=(

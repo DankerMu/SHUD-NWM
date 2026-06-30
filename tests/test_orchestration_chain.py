@@ -258,7 +258,7 @@ class PublishFailureSlurmClient(FakeCycleSlurmClient):
             job["finished_at"] = _fmt(submitted_at + timedelta(minutes=1))
             job["exit_code"] = 1
             job["error_code"] = "NO_PUBLISHABLE_PRODUCTS"
-            job["error_message"] = "No publishable flood return-period products found for cycle_id=gfs_2026050100."
+            job["error_message"] = "No publishable q_down products found for cycle_id=gfs_2026050100."
             return dict(job)
         return super().get_job_status(job_id)
 
@@ -1155,7 +1155,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("forcing", "required"),
                 ("runtime", "required"),
                 ("outputs", "required"),
-                ("frequency", "required"),
                 ("display", "required"),
                 ("quality_states", "required"),
                 ("residual_blockers", "required"),
@@ -1190,7 +1189,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
         forcing={"forcing_version_id": "forcing-v1"},
         runtime={"dt": 60},
         outputs={"output_uri": "s3://outputs/model-a"},
-        frequency={"enabled": True},
         display={"layer_id": "q-down"},
         quality_states={"state": "ready"},
         residual_blockers=({"code": "none"},),
@@ -1201,7 +1199,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
         "forcing_metadata",
         "shud_runtime",
         "outputs",
-        "frequency_contract",
         "display_contract",
         "quality_states",
         "residual_blockers",
@@ -1211,7 +1208,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
         "forcing_metadata",
         "shud_runtime",
         "outputs",
-        "frequency_contract",
         "display_contract",
         "quality_states",
         "residual_blockers",
@@ -1750,6 +1746,7 @@ def test_chain_stage_catalog_preserves_static_snapshots_and_legacy_identity() ->
             "failed_publish",
             True,
         ),
+        ("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish", False),
     ]
 
     assert {
@@ -1819,7 +1816,7 @@ def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> Non
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
 
 
-def test_m3_forecast_ends_after_state_save_qc() -> None:
+def test_m3_forecast_publishes_q_down_after_state_save_qc() -> None:
     stages = [stage.stage for stage in M3_STAGES]
 
     assert stages == [
@@ -1828,6 +1825,7 @@ def test_m3_forecast_ends_after_state_save_qc() -> None:
         "forecast",
         "parse",
         "state_save_qc",
+        "publish",
     ]
 
 
@@ -1850,7 +1848,7 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
         for submission in client.submissions
         if submission["stage"] in {"convert", "publish"}
     }
-    assert set(non_array_submissions) == {"convert"}
+    assert set(non_array_submissions) == {"convert", "publish"}
     for submission in non_array_submissions.values():
         assert submission["slurm_job_type_templates"] == dict(DEFAULT_JOB_TYPE_TEMPLATES)
         assert submission["slurm_env"] == {
@@ -2032,7 +2030,6 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
             "model_package_uri": f"s3://nhms/models/{model_id}/v1/package/",
             "output_uri": f"s3://nhms/runs/fcst_gfs_2026050100_{model_id}/output/",
             "station_count": 2,
-            "frequency_capabilities": {"return_periods": True},
             "display_capabilities": {"tiles": True},
             "orchestration_run_id": f"cycle_gfs_2026050100_parse_{model_id}",
             "restart_stage": "parse",
@@ -2046,8 +2043,9 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     assert [submission["stage"] for submission in client.submissions] == [
         "parse",
         "state_save_qc",
+        "publish",
     ]
-    for stage in ("parse", "state_save_qc"):
+    for stage in ("parse", "state_save_qc", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_0_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse_model_0"
         assert job["model_id"] == "model_0"
@@ -2077,12 +2075,14 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     assert [submission["stage"] for submission in client.submissions[first_submission_count:]] == [
         "parse",
         "state_save_qc",
+        "publish",
     ]
     assert [stage.pipeline_job_id for stage in second_result.stages] == [
         "job_cycle_gfs_2026050100_parse_model_1_parse",
         "job_cycle_gfs_2026050100_parse_model_1_state_save_qc",
+        "job_cycle_gfs_2026050100_parse_model_1_publish",
     ]
-    for stage in ("parse", "state_save_qc", "frequency", "publish"):
+    for stage in ("parse", "state_save_qc", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_1_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse_model_1"
         assert job["model_id"] == "model_1"
@@ -2226,11 +2226,6 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
         "station_count": 2,
         "segment_count": 3,
         "station_ids": ["sta_001", "sta_002"],
-        "frequency_capabilities": {
-            "return_periods": True,
-            "curves_available": False,
-            "warning_thresholds_available": False,
-        },
         "display_capabilities": {"tiles": True, "optional_weather_available": False},
     }
 
@@ -2238,7 +2233,6 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
 
     forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
     parse_submission = next(submission for submission in client.submissions if submission["stage"] == "parse")
-    frequency_submission = next(submission for submission in client.submissions if submission["stage"] == "frequency")
     publish_submission = next(submission for submission in client.submissions if submission["stage"] == "publish")
     task = forecast_submission["tasks"][0]
     runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
@@ -2260,18 +2254,11 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert runtime_manifest["runtime"]["mode"] == "native_shud_project"
     assert runtime_manifest["runtime"]["output_river"]["river_network_version_id"] == "river_v0"
     assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
-    assert runtime_manifest["quality_states"]["frequency"]["unavailable_products"] == [
-        "frequency_curves",
-        "warning_thresholds",
-    ]
     assert runtime_manifest["quality_states"]["display"]["unavailable_products"] == ["optional_weather_products"]
     assert {blocker["code"] for blocker in runtime_manifest["residual_blockers"]} == {
-        "FREQUENCY_CURVES_UNAVAILABLE",
-        "WARNING_THRESHOLDS_UNAVAILABLE",
         "OPTIONAL_WEATHER_PRODUCTS_UNAVAILABLE",
     }
     parse_entry = parse_submission["tasks"][0]
-    frequency_entry = frequency_submission["tasks"][0]
     model_run_evidence = parse_submission["manifest"]["model_runs"][0]
     assert model_run_evidence["production_stage"] == "parse"
     assert model_run_evidence["canonical_product_id"] == "canon_gfs_2026050100"
@@ -2279,8 +2266,6 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert model_run_evidence["basin_id"] == basin["basin_id"]
     assert "pipeline_job_id" not in model_run_evidence
     assert parse_entry["model_run_assembly"]["identity"]["candidate_id"] == basin["candidate_id"]
-    assert frequency_entry["model_run_assembly"]["identity"]["run_id"] == basin["run_id"]
-    assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"
     assert publish_submission["metadata"]["residual_blockers"]
     assert publish_submission["metadata"]["quality_states"][0]["run_id"] == basin["run_id"]
 
@@ -2403,7 +2388,6 @@ def test_nested_forcing_station_metadata_reaches_runtime_manifest(tmp_path: Path
                 "shud_station": "qhh.tsd.forc",
             }
         },
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2432,7 +2416,6 @@ def test_missing_station_forcing_is_quality_state_without_discarding_output_uri(
         **_basins(1)[0],
         "run_id": "fcst_gfs_2026050100_model_0",
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True, "optional_weather_available": False},
     }
 
@@ -2461,7 +2444,6 @@ def test_missing_output_river_metadata_is_unavailable_not_fabricated_ready_segme
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "station_count": 2,
         "segment_count": None,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2495,7 +2477,6 @@ def test_valid_output_river_metadata_remains_ready(tmp_path: Path) -> None:
             "river_segment_ids": ["seg_001", "seg_002"],
             "identity_source": "package_manifest",
         },
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2519,7 +2500,6 @@ def test_scheduler_style_relative_output_key_does_not_downgrade_runtime_output_u
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "output_key": "runs/fcst_gfs_2026050100_model_0/output/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2544,7 +2524,6 @@ def test_relative_output_uri_falls_back_to_object_store_output_uri(tmp_path: Pat
         "output_uri": "runs/fcst_gfs_2026050100_model_0/output/",
         "log_uri": "runs/fcst_gfs_2026050100_model_0/logs/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2568,7 +2547,6 @@ def test_legacy_explicit_absolute_output_uri_is_preserved_outside_production_can
         "output_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/output",
         "log_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/logs",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2593,7 +2571,6 @@ def test_production_candidate_wrong_absolute_output_uri_rejected_before_manifest
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "output_uri": "s3://wrong-bucket/prod/runs/fcst_gfs_2026050100_model_0/output/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2618,7 +2595,6 @@ def test_production_candidate_relative_output_uri_normalizes_to_canonical_uri(tm
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "output_uri": "runs/fcst_gfs_2026050100_model_0/output",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
 
@@ -2644,7 +2620,6 @@ def test_production_candidate_missing_package_or_version_metadata_rejected_befor
         "run_id": "fcst_gfs_2026050100_model_0",
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
     basin.pop(missing_field, None)
@@ -2702,7 +2677,6 @@ def test_prefilled_identity_mismatch_rejected_before_manifest_writes(
         "run_id": "fcst_gfs_2026050100_model_0",
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
     }
     basin[field_name] = field_value
@@ -3347,7 +3321,6 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
         "restart_stage": "parse",
         "durable_shud_output_reused": True,
@@ -3360,17 +3333,18 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
     assert [submission["stage"] for submission in client.submissions] == [
         "parse",
         "state_save_qc",
+        "publish",
     ]
     assert "job_cycle_gfs_2026050100_download" not in repository.jobs
     assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
 
 
 @pytest.mark.parametrize(
-    ("restart_stage", "expected_stages"),
-    [
-        ("state_save_qc", ["state_save_qc"]),
-    ],
-)
+        ("restart_stage", "expected_stages"),
+        [
+            ("state_save_qc", ["state_save_qc", "publish"]),
+        ],
+    )
 def test_restart_stage_state_save_qc_skips_durable_upstream_stages(
     tmp_path: Path,
     restart_stage: str,
@@ -3386,7 +3360,6 @@ def test_restart_stage_state_save_qc_skips_durable_upstream_stages(
         "model_package_uri": "s3://nhms/models/model_0/v1/package/",
         "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
         "station_count": 2,
-        "frequency_capabilities": {"return_periods": True},
         "display_capabilities": {"tiles": True},
         "restart_stage": restart_stage,
         "durable_shud_output_reused": True,
@@ -3468,7 +3441,6 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
     assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [
         "state_save_qc",
-        "frequency",
         "publish",
     ]
 
@@ -3889,7 +3861,7 @@ def test_forecast_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp
     assert result.status == "parsed_partial"
     assert repository.cycle_statuses[-1] == "parsed_partial"
     # B basins (0, 2) proceed to publish; A (basin_1/model_1/run_1) is excluded everywhere downstream.
-    for submission in _downstream_submissions(client, ("parse", "frequency")):
+    for submission in _downstream_submissions(client, ("parse", "state_save_qc")):
         assert [(task["task_id"], task["original_task_id"], task["model_id"]) for task in submission["tasks"]] == [
             (0, 0, "model_0"),
             (1, 2, "model_2"),
@@ -3919,10 +3891,10 @@ def test_parse_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_pa
     publish = _publish_submission(client)
     assert result.status == "parsed_partial"
     assert repository.cycle_statuses[-1] == "parsed_partial"
-    # Failed basin_1 is dropped from the downstream frequency array; survivors reindex with original_task_id.
+    # Failed basin_1 is dropped from downstream arrays; survivors reindex with original_task_id.
     assert [
         (task["task_id"], task["original_task_id"], task["model_id"])
-        for submission in _downstream_submissions(client, ("frequency",))
+        for submission in _downstream_submissions(client, ("state_save_qc",))
         for task in submission["tasks"]
     ] == [(0, 0, "model_0"), (1, 2, "model_2")]
     assert publish["metadata"]["excluded_basins"] == ["basin_1"]
@@ -3936,35 +3908,13 @@ def test_parse_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_pa
     assert "run_1" not in publish["identity_contract"]["run_ids"]
 
 
-def test_frequency_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_path: Path) -> None:
-    repository = FakeCycleRepository()
-    client = FakeCycleSlurmClient(array_results_by_stage={"frequency": ["succeeded", "failed", "succeeded"]})
-    orchestrator = _orchestrator(tmp_path, repository, client)
-
-    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
-
-    publish = _publish_submission(client)
-    assert result.status == "parsed_partial"
-    assert repository.cycle_statuses[-1] == "parsed_partial"
-    assert publish["metadata"]["excluded_basins"] == ["basin_1"]
-    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_2"]
-    assert publish["identity_contract"]["run_ids"] == ["run_0", "run_2"]
-    failure = _array_partial_typed_failure(repository, "frequency")
-    assert failure["status"] == "failed"
-    assert failure["model_id"] == "model_1"
-    assert failure["run_id"] == "run_1"
-    assert failure["error_code"]
-    assert "model_1" not in publish["identity_contract"]["model_ids"]
-    assert "run_1" not in publish["identity_contract"]["run_ids"]
-
-
 def test_publish_manifest_excludes_basin_failed_at_last_array_stage(tmp_path: Path) -> None:
     # §3B.4 case 5: the publish-MANIFEST isolation surface. A fails at the last array stage
-    # before publish (frequency); the single non-array publish job must then publish only the
+    # before publish (state_save_qc); the single non-array publish job must then publish only the
     # survivors. Publish is all-or-nothing per JOB, so per-basin isolation is expressed purely
     # through the manifest the publish job receives. No production change is required.
     repository = FakeCycleRepository()
-    client = FakeCycleSlurmClient(array_results_by_stage={"frequency": ["succeeded", "failed", "succeeded"]})
+    client = FakeCycleSlurmClient(array_results_by_stage={"state_save_qc": ["succeeded", "failed", "succeeded"]})
     orchestrator = _orchestrator(tmp_path, repository, client)
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
@@ -8989,7 +8939,6 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
 
     owner_callable_by_binding = {
         "build_model_run_assembly": chain_manifests.build_model_run_assembly,
-        "_frequency_quality_state": chain_manifests._frequency_quality_state,
         "_publish_quality_state": chain_manifests._publish_quality_state,
         "ForecastOrchestrator._build_cycle_stage_manifest": chain_manifests.build_cycle_stage_manifest,
         "ForecastOrchestrator._prepare_forecast_runtime_manifests": (
@@ -9017,17 +8966,11 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
         return _fake
 
     assembly_result = object()
-    frequency_result = {"state": "frequency"}
     publish_result = {"state": "publish"}
     monkeypatch.setattr(
         chain_manifests,
         "build_model_run_assembly",
         capture_top_level("build_model_run_assembly", assembly_result),
-    )
-    monkeypatch.setattr(
-        chain_manifests,
-        "_frequency_quality_state",
-        capture_top_level("_frequency_quality_state", frequency_result),
     )
     monkeypatch.setattr(
         chain_manifests,
@@ -9050,12 +8993,10 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
         )
         is assembly_result
     )
-    assert legacy_chain._frequency_quality_state({"run_id": "run-1"}, cycle_id="cycle-1") == frequency_result
     assert legacy_chain._publish_quality_state({"run_id": "run-1"}, cycle_id="cycle-1") == publish_result
 
     for binding_owner in (
         "build_model_run_assembly",
-        "_frequency_quality_state",
         "_publish_quality_state",
     ):
         _args, kwargs = top_level_calls[binding_owner]
@@ -9261,7 +9202,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "_ensure_segment_utc",
         "_era5_reanalysis_latency_minutes",
         "_forecast_state_checkpoint_hours",
-        "_frequency_contract",
         "_has_uri_scheme",
         "_model_package_manifest_uri",
         "_model_run_stage_evidence",
@@ -9283,7 +9223,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
     assert chain_runtime.production_status_for is production_contract.production_status_for
     assert chain_runtime.build_model_run_assembly is not chain_manifests.build_model_run_assembly
-    assert chain_runtime._frequency_quality_state is not chain_manifests._frequency_quality_state
     assert chain_runtime._publish_quality_state is not chain_manifests._publish_quality_state
 
     for method_name in (
@@ -9338,7 +9277,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     assert call_by_name["build_cycle_stage_manifest"][0][1:] == (stage, cycle_context)
     assert call_by_name["build_cycle_stage_manifest"][1] == {
         "model_run_stage_evidence": chain_runtime._model_run_stage_evidence,
-        "frequency_quality_state": chain_runtime._frequency_quality_state,
         "publish_quality_state": chain_runtime._publish_quality_state,
         "cycle_residual_blockers": chain_runtime._cycle_residual_blockers,
     }
@@ -9398,11 +9336,6 @@ def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evi
             "run_id": entry["run_id"],
             "cycle_id": cycle_id,
             "quality_states": {
-                "frequency": {
-                    "state": "degraded",
-                    "quality_flag": "frequency_inputs_unavailable",
-                    "unavailable_products": ["return_period"],
-                },
                 "display": {
                     "state": "degraded",
                     "quality_flag": "display_inputs_unavailable",
@@ -9414,34 +9347,10 @@ def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evi
     entry = {"run_id": "run-1"}
     monkeypatch.setattr(chain_runtime, "_model_run_stage_evidence", fake_stage_evidence)
 
-    assert chain_runtime._frequency_quality_state(entry, cycle_id="cycle-1") == {
-        "run_id": "run-1",
-        "cycle_id": "cycle-1",
-        "quality_states": {
-            "frequency": {
-                "state": "degraded",
-                "quality_flag": "frequency_inputs_unavailable",
-                "unavailable_products": ["return_period"],
-            },
-            "display": {
-                "state": "degraded",
-                "quality_flag": "display_inputs_unavailable",
-                "unavailable_products": ["tiles"],
-            },
-        },
-        "state": "degraded",
-        "quality_flag": "frequency_inputs_unavailable",
-        "unavailable_products": ["return_period"],
-    }
     assert chain_runtime._publish_quality_state(entry, cycle_id="cycle-1") == {
         "run_id": "run-1",
         "cycle_id": "cycle-1",
         "quality_states": {
-            "frequency": {
-                "state": "degraded",
-                "quality_flag": "frequency_inputs_unavailable",
-                "unavailable_products": ["return_period"],
-            },
             "display": {
                 "state": "degraded",
                 "quality_flag": "display_inputs_unavailable",
@@ -9453,7 +9362,6 @@ def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evi
         "unavailable_products": ["tiles"],
     }
     assert calls == [
-        ("frequency", entry, "cycle-1"),
         ("publish", entry, "cycle-1"),
     ]
 

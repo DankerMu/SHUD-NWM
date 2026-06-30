@@ -143,12 +143,4 @@ test.describe('production preview deep links', () => {
     await expect(page.getByRole('button', { name: /取消/ })).toHaveCount(0)
   })
 
-  test('loads /flood-alerts without local role selector', async ({ page }) => {
-    await mockMinimalApis(page)
-    await page.goto('/flood-alerts')
-
-    await expect(page.getByText('NHMS')).toBeVisible()
-    await expect(page.getByRole('heading', { name: '暂无洪水预警数据' })).toBeVisible()
-    await expect(page.getByLabel('Role')).toHaveCount(0)
-  })
 })

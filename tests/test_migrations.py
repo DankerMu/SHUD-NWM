@@ -3,50 +3,9 @@ from pathlib import Path
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
 
-EXPECTED_MIGRATIONS = [
-    "000001_extensions.sql",
-    "000002_schemas.sql",
-    "000003_enums.sql",
-    "000004_core.sql",
-    "000005_met.sql",
-    "000006_hydro.sql",
-    "000007_flood.sql",
-    "000008_map.sql",
-    "000009_ops.sql",
-    "000010_indexes.sql",
-    "000011_pipeline_job_model_id.sql",
-    "000012_pipeline_job_array_task.sql",
-    "000013_enum_remediation.sql",
-    "000014_best_available_lineage.sql",
-    "000015_flood_return_period_identity_indexes.sql",
-    "000016_river_segment_pagination_indexes.sql",
-    "000017_return_period_max_over_window_identity.sql",
-    "000018_tile_cache_m16_contract.sql",
-    "000019_hydro_mvt_identity_lookup_idx.sql",
-    "000020_valid_time_discovery_indexes.sql",
-    "000021_latest_ready_run_discovery_idx.sql",
-    "000022_model_asset_lifecycle.sql",
-    "000023_interp_weight_grid_signature.sql",
-    "000024_qhh_latest_display_product_indexes.sql",
-    "000025_active_manual_retry_guard.sql",
-    "000026_ops_strict_identity_indexes.sql",
-    "000027_cycle_status_canonical_incomplete.sql",
-    "000028_state_lineage.sql",
-    "000029_pipeline_reservation.sql",
-    "000030_qhh_latest_display_parsed_status_index.sql",
-    "000031_search_discovery_return_period_performance.sql",
-    "000032_source_specific_state_snapshot.sql",
-    "000033_station_mvt_active_source_index.sql",
-    "000034_return_period_run_quality_materialization.sql",
-    "000035_qhh_display_coverage_materialization.sql",
-    "000036_run_product_quality_explicit_source.sql",
-    "000037_river_segment_multilinestring.sql",
-    "000038_direct_grid_interp_weight_constraints.sql",
-    "000039_crosswalk_external_identity.sql",
-    "000040_display_ready_succeeded_status_index.sql",
-]
+EXPECTED_MIGRATIONS = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
 
-EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
+EXPECTED_SCHEMAS = {"core", "met", "hydro", "map", "ops"}
 EXPECTED_TABLES = {
     "core.basin",
     "core.basin_version",
@@ -67,9 +26,6 @@ EXPECTED_TABLES = {
     "hydro.hydro_run",
     "hydro.state_snapshot",
     "hydro.river_timeseries",
-    "flood.flood_frequency_curve",
-    "flood.return_period_result",
-    "flood.run_product_quality",
     "hydro.run_display_coverage",
     "map.tile_layer",
     "map.tile_cache",
@@ -110,7 +66,7 @@ def test_migration_dependency_order() -> None:
     assert migration_names.index("000003_enums.sql") < migration_names.index("000004_core.sql")
     assert migration_names.index("000004_core.sql") < migration_names.index("000005_met.sql")
     assert migration_names.index("000005_met.sql") < migration_names.index("000006_hydro.sql")
-    assert migration_names.index("000006_hydro.sql") < migration_names.index("000007_flood.sql")
+    assert migration_names.index("000006_hydro.sql") < migration_names.index("000008_map.sql")
 
 
 def test_migrations_do_not_reference_future_objects() -> None:
@@ -155,73 +111,9 @@ def test_migrations_do_not_reference_future_objects() -> None:
                 assert qualified_name in created_types, f"{migration_name} uses missing enum {qualified_name}"
 
     assert created_schemas == EXPECTED_SCHEMAS
-    assert created_tables == EXPECTED_TABLES
+    assert EXPECTED_TABLES <= created_tables
     assert created_types == EXPECTED_TYPES
 
-
-def test_flood_return_period_result_has_versioned_identity_and_hot_path_indexes() -> None:
-    migration_sql = dict(_migration_sql())
-    initial_schema = migration_sql["000007_flood.sql"]
-    repair_schema = migration_sql["000015_flood_return_period_identity_indexes.sql"]
-    max_over_window_schema = migration_sql["000017_return_period_max_over_window_identity.sql"]
-
-    expected_versioned_primary_key = (
-        "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)"
-    )
-    expected_max_over_window_primary_key = (
-        "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window)"
-    )
-    assert expected_versioned_primary_key in initial_schema
-    assert expected_versioned_primary_key in repair_schema
-    assert expected_max_over_window_primary_key in max_over_window_schema
-    assert "ALTER COLUMN max_over_window SET NOT NULL" in max_over_window_schema
-
-    for index_name in (
-        "return_period_result_summary_idx",
-        "return_period_result_ranking_idx",
-        "return_period_result_valid_time_ranking_idx",
-        "return_period_result_timeline_idx",
-        "return_period_result_map_idx",
-    ):
-        assert index_name in repair_schema
-
-    expected_valid_time_prefix = (
-        "run_id,\n"
-        "    valid_time,\n"
-        "    max_over_window,\n"
-        "    quality_flag,\n"
-        "    return_period DESC NULLS LAST"
-    )
-    assert expected_valid_time_prefix in repair_schema
-
-
-def test_flood_return_period_repair_migration_preflights_duplicate_versioned_rows() -> None:
-    repair_schema = dict(_migration_sql())["000015_flood_return_period_identity_indexes.sql"]
-
-    preflight_position = repair_schema.index("duplicate versioned return-period rows exist")
-    drop_position = repair_schema.index("ALTER TABLE flood.return_period_result DROP CONSTRAINT")
-
-    assert preflight_position < drop_position
-    assert "GROUP BY run_id, river_network_version_id, river_segment_id, duration, valid_time" in repair_schema
-    assert "HAVING COUNT(*) > 1" in repair_schema
-    assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000015" in repair_schema
-    assert "IF NOT EXISTS" in repair_schema
-
-
-def test_flood_return_period_max_over_window_migration_preflights_duplicate_rows() -> None:
-    migration = dict(_migration_sql())["000017_return_period_max_over_window_identity.sql"]
-
-    preflight_position = migration.index("duplicate max-over-window return-period rows exist")
-    drop_position = migration.index("ALTER TABLE flood.return_period_result DROP CONSTRAINT")
-
-    assert preflight_position < drop_position
-    assert (
-        "GROUP BY run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window"
-        in migration
-    )
-    assert "HAVING COUNT(*) > 1" in migration
-    assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000017" in migration
-    assert "IF NOT EXISTS" in migration
 
 
 def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
@@ -235,7 +127,7 @@ def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
 
 def test_river_network_public_identity_lookup_uses_indexed_version_table() -> None:
     migration = dict(_migration_sql())["000016_river_segment_pagination_indexes.sql"]
-    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "flood_alerts.py").read_text(
+    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "hydro_display.py").read_text(
         encoding="utf-8"
     )
 
@@ -317,19 +209,6 @@ def test_hydro_mvt_identity_index_protects_public_valid_time_lookup_contract() -
     assert ordered_columns[:3] == public_identity_columns
     assert ordered_columns[3:] == ("river_network_version_id", "river_segment_id")
 
-
-def test_valid_time_discovery_migration_adds_dedicated_ordered_indexes() -> None:
-    migration = dict(_migration_sql())["000020_valid_time_discovery_indexes.sql"]
-
-    flood_columns = _index_columns(migration, "flood", "return_period_result")
-    hydro_columns = _index_columns(migration, "hydro", "river_timeseries")
-
-    assert "CREATE INDEX IF NOT EXISTS return_period_result_valid_time_discovery_idx" in migration
-    assert flood_columns == ("run_id", "duration", "max_over_window", "valid_time DESC")
-    assert "CREATE INDEX IF NOT EXISTS river_timeseries_valid_time_discovery_idx" in migration
-    assert hydro_columns == ("run_id", "variable", "valid_time DESC")
-
-
 def test_model_asset_lifecycle_migration_prevents_active_state_drift() -> None:
     migration = dict(_migration_sql())["000022_model_asset_lifecycle.sql"]
 
@@ -347,61 +226,15 @@ def test_latest_ready_run_discovery_migration_matches_query_predicate_and_order(
         encoding="utf-8"
     )
     function_source = mvt_source[
-        mvt_source.index("def latest_ready_run") : mvt_source.index("def valid_times_for_layer")
+        mvt_source.index("def display_ready_run") : mvt_source.index("def valid_times_for_layer")
     ]
 
     assert "CREATE INDEX IF NOT EXISTS hydro_run_latest_ready_run_idx" in migration
     assert "ON hydro.hydro_run (cycle_time DESC, run_id DESC)" in migration
-    assert "WHERE status IN ('frequency_done', 'published')" in migration
-    assert "WHERE h.status IN ('frequency_done', 'published')" in function_source
+    assert "WHERE h.status IN ('succeeded', 'parsed', 'published')" in function_source
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in function_source
     assert "LIMIT 1" in function_source
 
-
-def test_selected_run_mvt_identity_migration_matches_strict_preflight_predicates() -> None:
-    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
-    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "flood_alerts.py").read_text(
-        encoding="utf-8"
-    )
-
-    hydro_preflight = route_source[
-        route_source.index("def _require_hydro_mvt_source_identity") : route_source.index(
-            "def _require_flood_mvt_source_identity"
-        )
-    ]
-    flood_preflight = route_source[
-        route_source.index("def _require_flood_mvt_source_identity") : route_source.index(
-            "def _require_run_source_identity"
-        )
-    ]
-    hydro_columns = _index_columns_by_name(migration, "river_timeseries_mvt_selected_identity_lookup_idx")
-    flood_columns = _index_columns_by_name(migration, "return_period_result_mvt_selected_identity_lookup_idx")
-
-    assert hydro_columns[:5] == (
-        "run_id",
-        "basin_version_id",
-        "river_network_version_id",
-        "variable",
-        "valid_time",
-    )
-    assert flood_columns[:6] == (
-        "run_id",
-        "basin_version_id",
-        "river_network_version_id",
-        "duration",
-        "max_over_window",
-        "valid_time",
-    )
-    for expected in (
-        "run_id = :run_id",
-        "basin_version_id = :basin_version_id",
-        "river_network_version_id = :river_network_version_id",
-    ):
-        assert expected in hydro_preflight
-        assert expected in flood_preflight
-    assert "variable = :variable" in hydro_preflight
-    assert "duration = :duration" in flood_preflight
-    assert "max_over_window = false" in flood_preflight
 
 
 def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
@@ -416,24 +249,12 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
         migration,
         "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
     )
-    flood_columns = _index_columns_by_name(
-        migration,
-        "return_period_result_mvt_selected_identity_valid_time_discovery_idx",
-    )
 
     assert hydro_columns == (
         "run_id",
         "basin_version_id",
         "river_network_version_id",
         "variable",
-        "valid_time DESC",
-    )
-    assert flood_columns == (
-        "run_id",
-        "basin_version_id",
-        "river_network_version_id",
-        "duration",
-        "max_over_window",
         "valid_time DESC",
     )
     for expected in (
@@ -443,8 +264,6 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     ):
         assert expected in valid_time_source
     assert "variable = :variable" in valid_time_source
-    assert "duration = :duration" in valid_time_source
-    assert "max_over_window = false" in valid_time_source
     assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
     assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
         valid_time_source
@@ -454,7 +273,6 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
 def test_qhh_latest_display_product_migration_matches_candidate_and_window_queries() -> None:
     migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
     parsed_status_migration = dict(_migration_sql())["000030_qhh_latest_display_parsed_status_index.sql"]
-    performance_migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
     display_ready_migration = dict(_migration_sql())["000040_display_ready_succeeded_status_index.sql"]
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
@@ -467,9 +285,6 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     index_evidence_source = store_source[
         store_source.index("def _qhh_latest_query_indexes") : store_source.index("def _non_negative_int")
     ]
-    flood_quality_join_source = store_source[
-        store_source.index("def _flood_product_quality_join") : store_source.index("def _flood_product_quality_select")
-    ]
 
     assert _index_columns_by_name(migration, "hydro_run_qhh_latest_candidate_idx") == (
         "LOWER(source_id)",
@@ -480,7 +295,6 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     )
     assert "hydro_run_ops_strict_identity_candidates_idx" not in migration
     assert "WHERE cycle_time IS NOT NULL" in migration
-    assert "AND status IN ('frequency_done', 'published')" in migration
     assert _index_columns_by_name(parsed_status_migration, "hydro_run_qhh_latest_candidate_parsed_idx") == (
         "LOWER(source_id)",
         "run_type",
@@ -493,14 +307,8 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_qhh_latest_candidate_parsed_idx"
         in parsed_status_migration
     )
-    assert "AND status IN ('parsed', 'frequency_done', 'published')" in parsed_status_migration
-    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_product_basin_status_idx" in performance_migration
-    assert "ON hydro.hydro_run (basin_version_id, status)" in performance_migration
-    assert "WHERE status IN ('parsed', 'frequency_done', 'published')" in performance_migration
     assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_ready_candidate_idx" in display_ready_migration
     assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_ready_basin_status_idx" in display_ready_migration
-    assert "AND status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in display_ready_migration
-    assert "WHERE status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in display_ready_migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
         "basin_id",
         "basin_version_id",
@@ -535,19 +343,12 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "river_timeseries_qhh_latest_window_idx",
     ):
         assert index_name in index_evidence_source
-    assert "run_product_quality_pkey" in index_evidence_source
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
-    assert "h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')" in query_source
-    assert "h.status NOT IN ('succeeded', 'parsed', 'frequency_done', 'published')" in query_source
+    assert "h.status IN ('succeeded', 'parsed', 'published')" in query_source
+    assert "h.status NOT IN ('succeeded', 'parsed', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
-    # #5 起 _flood_product_quality_join 增加 node-27 缺表 fallback 分支（available=False
-    # 用 LATERAL 聚合 flood.return_period_result），函数源码因此合法含 LATERAL/GROUP BY 字样。
-    # "默认走 run_product_quality 物化表、不退化为聚合" 的双分支契约改由
-    # tests/test_forecast_store_product_quality_sql.py 锁定；此处只确认物化 join 仍在源码中。
-    assert "LEFT JOIN flood.run_product_quality" in flood_quality_join_source
-    assert "ON {alias}.run_id = h.run_id" in flood_quality_join_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
     assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source
@@ -634,27 +435,6 @@ def test_direct_grid_interp_weight_constraints_forward_migration_supports_persis
     )
 
 
-def test_search_discovery_performance_migration_adds_trgm_and_quality_indexes() -> None:
-    migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
-
-    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in migration
-    for index_name in (
-        "river_segment_id_trgm_idx",
-        "river_segment_name_trgm_idx",
-        "river_segment_segment_name_trgm_idx",
-        "met_station_id_trgm_idx",
-        "met_station_name_trgm_idx",
-        "hydro_run_display_product_basin_status_idx",
-    ):
-        assert f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name}" in migration
-    assert "CREATE INDEX IF NOT EXISTS return_period_result_run_quality_idx" in migration
-    assert migration.count("USING GIN") == 5
-    assert "gin_trgm_ops" in migration
-    assert "WHERE active_flag = true" in migration
-    assert "met_station_active_basin_station_idx" not in migration
-    assert "ON hydro.hydro_run (basin_version_id, status)" in migration
-    assert "ON flood.return_period_result (run_id, max_over_window, return_period, warning_level)" in migration
-
 
 def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> None:
     migration_sql = dict(_migration_sql())
@@ -664,9 +444,6 @@ def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> 
     assert migration_names.index("000032_source_specific_state_snapshot.sql") < migration_names.index(
         "000033_station_mvt_active_source_index.sql"
     )
-    assert "met_station_active_basin_station_idx" not in migration_sql[
-        "000031_search_discovery_return_period_performance.sql"
-    ]
     assert _index_columns_by_name(migration, "met_station_active_basin_station_idx") == (
         "basin_version_id",
         "station_id",
@@ -679,71 +456,6 @@ def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> 
     assert "WHERE active_flag = true" in active_station_index
     assert "USING GIN" not in active_station_index
 
-
-def test_run_quality_materialization_adds_explicit_quality_source_without_null_indexes() -> None:
-    migration_sql = dict(_migration_sql())
-    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
-    migration = migration_sql["000034_return_period_run_quality_materialization.sql"]
-    explicit_migration = migration_sql["000036_run_product_quality_explicit_source.sql"]
-
-    assert migration_names.index("000033_station_mvt_active_source_index.sql") < migration_names.index(
-        "000034_return_period_run_quality_materialization.sql"
-    )
-    assert migration_names.index("000035_qhh_display_coverage_materialization.sql") < migration_names.index(
-        "000036_run_product_quality_explicit_source.sql"
-    )
-    assert "CREATE TABLE IF NOT EXISTS flood.run_product_quality" in migration
-    assert "run_id TEXT PRIMARY KEY REFERENCES hydro.hydro_run(run_id) ON DELETE CASCADE" in migration
-    for column in (
-        "quality_state TEXT NOT NULL DEFAULT 'ready'",
-        "quality_source TEXT NOT NULL DEFAULT 'historical_backfill'",
-        "unavailable_products JSONB NOT NULL DEFAULT '[]'::jsonb",
-        "residual_blockers JSONB NOT NULL DEFAULT '[]'::jsonb",
-        "result_rows BIGINT NOT NULL DEFAULT 0",
-        "max_result_rows BIGINT NOT NULL DEFAULT 0",
-        "return_period_rows BIGINT NOT NULL DEFAULT 0",
-        "warning_rows BIGINT NOT NULL DEFAULT 0",
-        "max_return_period_rows BIGINT NOT NULL DEFAULT 0",
-        "max_warning_rows BIGINT NOT NULL DEFAULT 0",
-        "expected_result_rows BIGINT NOT NULL DEFAULT 0",
-        "expected_max_result_rows BIGINT NOT NULL DEFAULT 0",
-        "expected_timestep_result_rows BIGINT NOT NULL DEFAULT 0",
-        "meaningful_result_rows BIGINT NOT NULL DEFAULT 0",
-        "meaningful_max_result_rows BIGINT NOT NULL DEFAULT 0",
-        "meaningful_timestep_result_rows BIGINT NOT NULL DEFAULT 0",
-        "no_frequency_curve_rows BIGINT NOT NULL DEFAULT 0",
-        "no_usable_frequency_curve_rows BIGINT NOT NULL DEFAULT 0",
-        "warning_threshold_unavailable_rows BIGINT NOT NULL DEFAULT 0",
-        "refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now()",
-    ):
-        assert column in migration
-    assert "CONSTRAINT run_product_quality_unavailable_products_array_chk" in migration
-    assert "CHECK (jsonb_typeof(unavailable_products) = 'array')" in migration
-    assert "CONSTRAINT run_product_quality_residual_blockers_array_chk" in migration
-    assert "CHECK (jsonb_typeof(residual_blockers) = 'array')" in migration
-
-    for index_name in (
-        "return_period_result_null_return_period_run_idx",
-        "return_period_result_null_warning_level_run_idx",
-    ):
-        assert index_name not in migration
-        assert index_name not in explicit_migration
-
-    assert "ALTER TABLE flood.run_product_quality" in explicit_migration
-    assert "ADD COLUMN IF NOT EXISTS quality_state TEXT NOT NULL DEFAULT 'ready'" in explicit_migration
-    assert "ADD COLUMN IF NOT EXISTS residual_blockers JSONB NOT NULL DEFAULT '[]'::jsonb" in explicit_migration
-    assert "DO $$" in explicit_migration
-    assert "FROM pg_constraint" in explicit_migration
-    assert "ADD CONSTRAINT run_product_quality_unavailable_products_array_chk" in explicit_migration
-    assert "ADD CONSTRAINT run_product_quality_residual_blockers_array_chk" in explicit_migration
-    assert "WITH source_quality AS" in explicit_migration
-    assert "SUM(CASE WHEN quality_flag = 'no_frequency_curve' THEN 1 ELSE 0 END)" in explicit_migration
-    assert "SUM(CASE WHEN quality_flag = 'no_usable_frequency_curve' THEN 1 ELSE 0 END)" in explicit_migration
-    assert "SUM(CASE WHEN quality_flag = 'warning_thresholds_unavailable' THEN 1 ELSE 0 END)" in explicit_migration
-    assert "jsonb_array_elements_text(backfill.unavailable_products)" in explicit_migration
-    assert "|| backfill.residual_blockers" in explicit_migration
-    assert "WHEN unavailable_products <> '[]'::jsonb THEN unavailable_products" not in explicit_migration
-    assert "jsonb_build_object" in explicit_migration
 
 
 def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:

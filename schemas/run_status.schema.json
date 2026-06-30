@@ -61,7 +61,6 @@
         "unavailable",
         "partial",
         "parsed",
-        "frequency_done",
         "published",
         "failed",
         "cancelled",
@@ -103,7 +102,6 @@
         "forecast",
         "parse",
         "q_down_publish",
-        "frequency_publish",
         "production_run"
       ]
     },

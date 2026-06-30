@@ -1,10 +1,6 @@
 export type M11Source = 'gfs' | 'ifs' | 'best' | 'compare'
-export type M11Layer =
-  | 'discharge'
-  | 'flood-return-period'
-  | 'warning-level'
+export type M11Layer = 'discharge'
 export type M11Basemap = 'terrain' | 'satellite' | 'vector'
-export type M11QueryWarningLevel = 'normal' | 'elevated' | 'watch' | 'warning' | 'major' | 'severe' | 'extreme' | 'orange' | 'red'
 
 export interface M11QueryState {
   source: M11Source
@@ -17,7 +13,6 @@ export interface M11QueryState {
   riverNetworkVersionId: string | null
   basinId: string | null
   segmentId: string | null
-  warningLevel: M11QueryWarningLevel | null
   q: string | null
 }
 
@@ -28,7 +23,6 @@ export type M11QueryPatch = Partial<{
 const sources = ['gfs', 'ifs', 'best', 'compare'] as const
 const layers = ['discharge'] as const
 const basemaps = ['terrain', 'satellite', 'vector'] as const
-const warningLevels = ['normal', 'elevated', 'watch', 'warning', 'major', 'severe', 'extreme', 'orange', 'red'] as const
 const legacyMetStationsLayer = 'met-stations'
 
 export const defaultM11QueryState: M11QueryState = {
@@ -42,7 +36,6 @@ export const defaultM11QueryState: M11QueryState = {
   riverNetworkVersionId: null,
   basinId: null,
   segmentId: null,
-  warningLevel: null,
   q: null,
 }
 
@@ -138,7 +131,6 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
   const layerValues = params.getAll('layer')
   const layer = layerValues.find((value): value is M11Layer => isOneOf(value, layers)) ?? null
   const basemap = params.get('basemap')
-  const warningLevel = params.get('warningLevel')
   const hasLegacyMetStationsLayer = layerValues.includes(legacyMetStationsLayer)
 
   return {
@@ -152,7 +144,6 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
     riverNetworkVersionId: normalizeM11Identifier(params.get('riverNetworkVersionId')),
     basinId: normalizeM11Identifier(params.get('basinId')),
     segmentId: normalizeM11Identifier(params.get('segmentId')),
-    warningLevel: isOneOf(warningLevel, warningLevels) ? warningLevel : defaultM11QueryState.warningLevel,
     q: normalizeSearch(params.get('q')),
   }
 }
@@ -184,7 +175,6 @@ export function serializeM11QueryState(state: M11QueryPatch) {
   if (normalized.riverNetworkVersionId) params.set('riverNetworkVersionId', normalized.riverNetworkVersionId)
   if (normalized.basinId) params.set('basinId', normalized.basinId)
   if (normalized.segmentId) params.set('segmentId', normalized.segmentId)
-  if (normalized.warningLevel) params.set('warningLevel', normalized.warningLevel)
   if (normalized.q) params.set('q', normalized.q)
 
   return params.toString()

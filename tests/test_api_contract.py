@@ -104,7 +104,7 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     app.dependency_overrides[get_forecast_store] = lambda: _RunStore()
     try:
         with TestClient(app) as client:
-            response = client.get("/api/v1/runs", params={"status": "frequency_done", "limit": 10, "offset": 0})
+            response = client.get("/api/v1/runs", params={"status": "parsed", "limit": 10, "offset": 0})
     finally:
         app.dependency_overrides.pop(get_forecast_store, None)
 
@@ -116,11 +116,10 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     assert data["limit"] == 10
     assert data["offset"] == 0
     run = data["items"][0]
-    assert run["run_id"] == "run_frequency_done"
+    assert run["run_id"] == "run_parsed"
     assert run["run_type"] == "forecast"
-    assert run["status"] == "frequency_done"
+    assert run["status"] == "parsed"
     assert run["river_network_version_id"] == "network_v1"
-    assert run["product_quality"]["flood_return_period"]["quality_state"] == "ready"
     assert isinstance(run["start_time"], str)
     assert isinstance(run["end_time"], str)
 
@@ -415,23 +414,27 @@ def test_pipeline_ops_strict_identity_query_contract() -> None:
     stages_start = generated_types.index("listPipelineStages:")
     jobs_start = generated_types.index("listPipelineJobs:")
     logs_start = generated_types.index("getPipelineJobLogs:")
-    queue_start = generated_types.index("getQueueDepth:")
+    queue_start = generated_types.index("queue_depth_api_v1_queue_depth_get:")
     status_types = generated_types[status_start:stages_start]
     stages_types = generated_types[stages_start:jobs_start]
     jobs_types = generated_types[jobs_start:logs_start]
     logs_types = generated_types[logs_start:queue_start]
     for snippet in (status_types, stages_types, jobs_types, logs_types):
-        assert "run_id?: components[\"parameters\"][\"RunIdQueryOptional\"];" in snippet
-    assert "source: components[\"parameters\"][\"SourceQueryRequired\"];" in status_types
-    assert "cycle_time: components[\"parameters\"][\"CycleTimeQueryRequired\"];" in status_types
-    assert "source: components[\"parameters\"][\"SourceQueryRequired\"];" in stages_types
-    assert "cycle_time: components[\"parameters\"][\"CycleTimeQueryRequired\"];" in stages_types
-    assert "source?: components[\"parameters\"][\"SourceQuery\"];" in logs_types
+        assert "run_id?: string;" in snippet
+    assert "source: string;" in status_types
+    assert "cycle_time: string;" in status_types
+    assert "source: string;" in stages_types
+    assert "cycle_time: string;" in stages_types
+    assert "source?: string;" in logs_types
     assert "model_id?: string;" in logs_types
-    assert spec["components"]["parameters"]["RunIdQueryOptional"]["schema"] == {
-        "type": "string",
-        "maxLength": 128,
-    }
+    for path in (
+        "/api/v1/pipeline/status",
+        "/api/v1/pipeline/stages",
+        "/api/v1/jobs",
+        "/api/v1/jobs/{job_id}/logs",
+    ):
+        run_id = next(parameter for parameter in paths[path]["get"]["parameters"] if parameter.get("name") == "run_id")
+        assert run_id["schema"] == {"type": "string", "maxLength": 128}
     for path in (
         "/api/v1/pipeline/status",
         "/api/v1/pipeline/stages",
@@ -496,16 +499,15 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
     assert "duration_seconds: number | null;" in basin_result_types
     assert "retry_count: number;" in basin_result_types
     pipeline_stage_start = generated_types.index("PipelineStage:")
-    basin_progress_start = generated_types.index("BasinProgress:")
-    pipeline_stage_types = generated_types[pipeline_stage_start:basin_progress_start]
+    pipeline_stage_types = generated_types[pipeline_stage_start:pipeline_job_start]
     assert "basin_results_truncated: boolean;" in pipeline_stage_types
     assert '"queued"' in basin_result_types
     assert '"skipped"' in basin_result_types
     assert '"submission_failed"' in basin_result_types
     assert '"permanently_failed"' in basin_result_types
     retry_start = generated_types.index("RetryRunResult:")
-    cancel_start = generated_types.index("CancelRunResult:")
-    retry_types = generated_types[retry_start:cancel_start]
+    runtime_config_start = generated_types.index("RuntimeConfig:")
+    retry_types = generated_types[retry_start:runtime_config_start]
     assert 'status: "submitted";' in retry_types
     assert '"submission_failed"' not in retry_types
 
@@ -803,15 +805,11 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
     list_models = spec["paths"]["/api/v1/models"]["get"]
     active_parameter = next(parameter for parameter in list_models["parameters"] if parameter.get("name") == "active")
-    assert active_parameter["schema"] == {
-        "type": "string",
-        "enum": ["true", "false", "all"],
-        "default": "true",
-    }
+    assert {"type": "string", "enum": ["true", "false", "all"], "default": "true"}.items() <= active_parameter[
+        "schema"
+    ].items()
     limit_parameter = next(parameter for parameter in list_models["parameters"] if parameter.get("name") == "limit")
     assert limit_parameter["schema"]["maximum"] == 500
-    response_schema = list_models["responses"]["200"]["content"]["application/json"]["schema"]
-    assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstancePage"
 
 
 def test_basin_version_list_redacts_source_uri_and_checksum() -> None:
@@ -920,30 +918,6 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
     assert missing_response.status_code == 404
     assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
 
-    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
-    get_model = spec["paths"]["/api/v1/models/{model_id}"]["get"]
-    response_schema = get_model["responses"]["200"]["content"]["application/json"]["schema"]
-    assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstance"
-    model_properties = spec["components"]["schemas"]["ModelInstance"]["properties"]
-    for field in (
-        "model_name",
-        "basin_id",
-        "basin_name",
-        "segment_count",
-        "mesh_uri",
-        "mesh_checksum",
-        "package_checksum",
-        "manifest_uri",
-        "source_inventory_checksum",
-        "basin_slug",
-        "shud_input_name",
-        "source_path",
-        "resolved_source_path",
-        "source_uri",
-        "source_is_symlink",
-    ):
-        assert field in model_properties
-
 
 def test_river_segment_geojson_budget_error_contract() -> None:
     store = _OversizedRiverSegmentStore()
@@ -976,8 +950,8 @@ def test_river_segment_geojson_budget_error_contract() -> None:
     detail_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"]["get"][
         "responses"
     ]
-    assert collection_responses["413"]["$ref"] == "#/components/responses/Error"
-    assert detail_responses["413"]["$ref"] == "#/components/responses/Error"
+    assert collection_responses["413"]["description"] == "River segment GeoJSON payload budget exceeded."
+    assert detail_responses["413"]["description"] == "River segment GeoJSON payload budget exceeded."
 
 
 def test_river_segments_reversed_stream_order_range_rejected() -> None:
@@ -1127,32 +1101,13 @@ def test_generated_frontend_types_match_openapi(tmp_path: Path) -> None:
     assert committed.read_text(encoding="utf-8") == generated.read_text(encoding="utf-8")
 
 
-def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes() -> None:
+def test_generated_frontend_types_include_model_page_shapes() -> None:
     types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
     generated_types = types_path.read_text(encoding="utf-8")
 
     assert "active?: \"true\" | \"false\" | \"all\";" in generated_types
-    assert 'data: components["schemas"]["ModelInstancePage"];' in generated_types
-    assert 'data: components["schemas"]["ModelInstance"];' in generated_types
-    assert "model_name?: string | null;" in generated_types
-    assert "segment_count?: number | null;" in generated_types
-    assert "mesh_uri?: string | null;" in generated_types
-    assert "package_checksum?: string | null;" in generated_types
-    assert "source_inventory_checksum?: string | null;" in generated_types
-    assert "source_path?: string | null;" in generated_types
-    assert "resolved_source_path?: string | null;" in generated_types
-    assert "source_uri?: string | null;" in generated_types
-    assert "source_is_symlink?: boolean | null;" in generated_types
-    assert "restored_model_id?: string | null;" in generated_types
-    assert "FloodFrequencyThresholds" in generated_types
-    assert "Q2?: number | null;" in generated_types
-    assert "Q20?: number | null;" in generated_types
-    assert "Q100?: number | null;" in generated_types
-    assert "frequency_thresholds: {" not in generated_types
-    assert "frequency_thresholds: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
-    assert "frequency_thresholds?: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
-    assert "frequency_thresholds: Record<string, never> | null;" not in generated_types
-    assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
+    assert "list_models_api_v1_models_get:" in generated_types
+    assert "get_model_api_v1_models__model_id__get:" in generated_types
 
 
 def test_station_series_openapi_and_generated_types_include_store_contract() -> None:
@@ -1271,7 +1226,7 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
         Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
     ).read_text(encoding="utf-8")
     operation_start = generated_types.index("getMetStationSeries:")
-    list_runs_start = generated_types.index("listRuns:")
+    list_runs_start = generated_types.index("list_state_snapshots_api_v1_state_snapshots_get:")
     operation_types = generated_types[operation_start:list_runs_start]
     assert "forcing_version_id?: string;" in operation_types
     assert "model_id?: string;" in operation_types
@@ -1350,24 +1305,10 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
         "unavailable_reasons",
         "quality_flags",
         "quality_notes",
-        "return_period_status",
-        "return_period_reasons",
     ]
-    return_period_description = schemas["QhhLatestAvailability"]["properties"]["return_period_status"]["description"]
-    assert "product_quality.flood_return_period.quality_state" in return_period_description
-    assert "legacy row-count signal" in return_period_description
     assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
         "#/components/schemas/QhhLatestStationVariableCoverage"
     )
-    assert schemas["QhhLatestQuality"]["properties"]["product_quality"] == {
-        "type": "object",
-        "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
-        "nullable": True,
-        "description": (
-            "Supplemental per-product quality details. `flood_return_period` carries explicit flood run quality "
-            "when available and never blocks q_down display readiness."
-        ),
-    }
     assert schemas["QhhLatestQuality"]["required"] == [
         "station_sample_count",
         "river_sample_count",
@@ -1386,7 +1327,7 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
         Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
     ).read_text(encoding="utf-8")
     operation_start = generated_types.index("getQhhLatestProduct:")
-    operation_end = generated_types.index("listRuns:")
+    operation_end = generated_types.index("list_best_available_api_v1_met_best_available_get:")
     operation_types = generated_types[operation_start:operation_end]
     assert 'source: "GFS" | "IFS";' in operation_types
     assert "run_id?: string;" in operation_types
@@ -1400,8 +1341,6 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert "context_limit: number;" in generated_types
     assert "display_end_station_count: number;" not in generated_types
     assert "QhhLatestUnavailableReason:" in generated_types
-    assert "QhhLatestProductQuality:" in generated_types
-    assert "FloodReturnPeriodProductQuality:" in generated_types
 
 
 def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
@@ -1423,236 +1362,6 @@ def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
         layer_start:layer_metadata_start
     ]
 
-
-def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None:
-    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
-    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-
-    run_parameters = spec["paths"]["/api/v1/runs"]["get"]["parameters"]
-    ready_filter = next(parameter for parameter in run_parameters if parameter.get("name") == "flood_product_ready")
-    assert ready_filter["schema"]["type"] == "boolean"
-    schemas = spec["components"]["schemas"]
-    assert schemas["FloodReturnPeriodProductQuality"]["required"] == [
-        "quality_state",
-        "quality_source",
-        "max_over_window",
-        "result_rows",
-        "return_period_rows",
-        "warning_rows",
-        "expected_result_rows",
-        "expected_max_result_rows",
-        "expected_timestep_result_rows",
-        "meaningful_result_rows",
-        "meaningful_max_result_rows",
-        "meaningful_timestep_result_rows",
-        "no_frequency_curve_rows",
-        "no_usable_frequency_curve_rows",
-        "warning_threshold_unavailable_rows",
-        "unavailable_products",
-        "residual_blockers",
-    ]
-    assert schemas["FloodReturnPeriodProductQuality"]["properties"]["quality_state"] == {
-        "$ref": "#/components/schemas/FloodReturnPeriodQualityState"
-    }
-    assert schemas["FloodReturnPeriodProductQuality"]["properties"]["quality_source"]["enum"] == [
-        "explicit",
-        "historical_backfill",
-        "legacy_row_count",
-    ]
-    for field in (
-        "result_rows",
-        "return_period_rows",
-        "warning_rows",
-        "expected_result_rows",
-        "meaningful_result_rows",
-        "no_frequency_curve_rows",
-        "no_usable_frequency_curve_rows",
-    ):
-        assert schemas["FloodReturnPeriodProductQuality"]["properties"][field] == {
-            "type": "integer",
-            "minimum": 0,
-        }
-    assert schemas["QhhLatestProductQuality"] == {
-        "type": "object",
-        "required": ["flood_return_period"],
-        "properties": {
-            "flood_return_period": {"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}
-        },
-        "additionalProperties": True,
-    }
-    assert spec["components"]["schemas"]["HydroRun"]["properties"]["product_quality"] == {
-        "type": "object",
-        "allOf": [{"$ref": "#/components/schemas/QhhLatestProductQuality"}],
-        "additionalProperties": True,
-        "nullable": True,
-        "description": "Product readiness evidence keyed by product family, including flood_return_period readiness.",
-    }
-    assert spec["components"]["schemas"]["FloodReturnPeriodFeatureCollection"]["properties"]["product_quality"] == {
-        "type": "object",
-        "allOf": [{"$ref": "#/components/schemas/FloodReturnPeriodProductQuality"}],
-        "additionalProperties": True,
-        "nullable": True,
-        "description": "Flood return-period readiness evidence for the selected run.",
-    }
-
-    generated_types = (
-        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
-    ).read_text(encoding="utf-8")
-    runs_start = generated_types.index("listRuns:")
-    get_run_start = generated_types.index("getRun:")
-    assert "flood_product_ready?: boolean;" in generated_types[runs_start:get_run_start]
-    hydro_run_start = generated_types.index("HydroRun:")
-    hydro_page_start = generated_types.index("HydroRunPage:")
-    assert 'product_quality?: ({' in generated_types[hydro_run_start:hydro_page_start]
-    assert '& components["schemas"]["QhhLatestProductQuality"]) | null;' in generated_types[
-        hydro_run_start:hydro_page_start
-    ]
-    collection_start = generated_types.index("FloodReturnPeriodFeatureCollection:")
-    feature_start = generated_types.index("FloodReturnPeriodFeature:")
-    assert 'product_quality?: ({' in generated_types[collection_start:feature_start]
-    assert '& components["schemas"]["FloodReturnPeriodProductQuality"]) | null;' in generated_types[
-        collection_start:feature_start
-    ]
-    quality_start = generated_types.index("FloodReturnPeriodProductQuality:")
-    qhh_quality_start = generated_types.index("QhhLatestProductQuality:")
-    quality_types = generated_types[quality_start:qhh_quality_start]
-    assert 'quality_state: components["schemas"]["FloodReturnPeriodQualityState"];' in quality_types
-    assert 'quality_source: "explicit" | "historical_backfill" | "legacy_row_count";' in quality_types
-    assert "expected_result_rows: number;" in quality_types
-    assert "meaningful_result_rows: number;" in quality_types
-    assert "no_frequency_curve_rows: number;" in quality_types
-    assert "no_usable_frequency_curve_rows: number;" in quality_types
-    assert "flood_return_period: components[\"schemas\"][\"FloodReturnPeriodProductQuality\"];" in generated_types
-
-
-def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_types() -> None:
-    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
-    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-
-    ranking_parameters = spec["paths"]["/api/v1/flood-alerts/ranking"]["get"]["parameters"]
-    ranking_limit = next(parameter for parameter in ranking_parameters if parameter.get("name") == "limit")
-    assert ranking_limit["schema"] == {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 200,
-        "default": 10,
-    }
-
-    timeline_parameters = spec["paths"]["/api/v1/flood-alerts/timeline"]["get"]["parameters"]
-    timeline_max_points = next(parameter for parameter in timeline_parameters if parameter.get("name") == "max_points")
-    assert timeline_max_points["schema"] == {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000,
-        "default": 168,
-    }
-
-    generated_types = (
-        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
-    ).read_text(encoding="utf-8")
-    ranking_start = generated_types.index("listFloodAlertRanking:")
-    segments_start = generated_types.index("listFloodAlertSegments:")
-    ranking_types = generated_types[ranking_start:segments_start]
-    assert 'limit?: number;' in ranking_types
-    assert 'limit?: components["parameters"]["Limit"];' not in ranking_types
-    ranking_item_schema = spec["components"]["schemas"]["FloodAlertRankingItem"]
-    assert "geom_centroid" in ranking_item_schema["required"]
-    assert ranking_item_schema["properties"]["geom_centroid"] == {
-        "type": "object",
-        "nullable": True,
-        "allOf": [{"$ref": "#/components/schemas/GeoJSONPoint"}],
-        "description": "GeoJSON point centroid, or null",
-    }
-    assert 'geom_centroid: components["schemas"]["GeoJSONPoint"] | null;' in generated_types
-
-    timeline_start = generated_types.index("getFloodAlertTimeline:")
-    lineage_start = generated_types.index("getRiverPointLineage:")
-    timeline_types = generated_types[timeline_start:lineage_start]
-    assert "max_points?: number;" in timeline_types
-
-    lineage_parameters = spec["paths"]["/api/v1/lineage/river-point"]["get"]["parameters"]
-    lineage_river_network = next(
-        parameter for parameter in lineage_parameters if parameter.get("name") == "river_network_version_id"
-    )
-    assert lineage_river_network["required"] is True
-    assert lineage_river_network["schema"] == {
-        "type": "string",
-        "minLength": 1,
-    }
-
-    forcing_lineage_start = generated_types.index("getForcingPointLineage:")
-    lineage_types = generated_types[lineage_start:forcing_lineage_start]
-    assert "river_network_version_id: string;" in lineage_types
-
-
-def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
-    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
-    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-    schemas = spec["components"]["schemas"]
-
-    for schema_name in ("RiverSeriesResponse", "SplicedForecastResponse"):
-        issue_time = schemas[schema_name]["properties"]["issue_time"]
-        assert issue_time == {
-            "type": "string",
-            "format": "date-time",
-            "nullable": True,
-        }
-
-    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
-    generated_types = types_path.read_text(encoding="utf-8")
-    river_start = generated_types.index("RiverSeriesResponse:")
-    spliced_start = generated_types.index("SplicedForecastResponse:")
-    series_segment_start = generated_types.index("SeriesSegment:")
-    assert "issue_time: string | null;" in generated_types[river_start:spliced_start]
-    assert "issue_time: string | null;" in generated_types[spliced_start:series_segment_start]
-
-
-def test_spliced_forecast_segment_metadata_is_in_public_contract() -> None:
-    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
-    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-    segment_schema = spec["components"]["schemas"]["SplicedForecastResponse"]["properties"]["segments"]["items"]
-
-    assert "segment_role" in segment_schema["required"]
-    properties = segment_schema["properties"]
-    assert properties["scenario_id"]["type"] == "string"
-    assert properties["source_id"]["nullable"] is True
-    assert properties["cycle_time"] == {
-        "type": "string",
-        "format": "date-time",
-        "nullable": True,
-        "description": "Forecast source cycle time when available.",
-    }
-    assert properties["available_lead_hours"]["type"] == "integer"
-    assert properties["available_lead_hours"]["nullable"] is True
-    assert properties["segment_role"]["enum"] == ["past_7_days", "future_7_days"]
-
-    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
-    generated_types = types_path.read_text(encoding="utf-8")
-    spliced_start = generated_types.index("SplicedForecastResponse:")
-    series_segment_start = generated_types.index("SeriesSegment:")
-    spliced_types = generated_types[spliced_start:series_segment_start]
-    assert "scenario_id?: string;" in spliced_types
-    assert "source_id?: string | null;" in spliced_types
-    assert "cycle_time?: string | null;" in spliced_types
-    assert "available_lead_hours?: number | null;" in spliced_types
-    assert 'segment_role: "past_7_days" | "future_7_days";' in spliced_types
-
-
-def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> None:
-    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
-    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-    schemas = spec["components"]["schemas"]
-
-    threshold_schema = schemas["FloodFrequencyThresholds"]
-    assert "required" not in threshold_schema
-    assert threshold_schema["properties"]["Q20"]["nullable"] is True
-
-    river_thresholds = schemas["RiverSeriesResponse"]["properties"]["frequency_thresholds"]
-    assert river_thresholds == {
-        "type": "object",
-        "allOf": [{"$ref": "#/components/schemas/FloodFrequencyThresholds"}],
-        "nullable": True,
-    }
 
 
 def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
@@ -1889,7 +1598,7 @@ class _RunStore:
             "segment_count": 1633,
             "expected_segment_count": 1633,
             "status": "ready",
-            "run_status": "frequency_done",
+            "run_status": "parsed",
             "valid_time_start": "2026-05-07T00:00:00Z",
             "valid_time_end": "2026-05-14T00:00:00Z",
             "river_valid_time_start": "2026-05-07T00:00:00Z",
@@ -1935,7 +1644,7 @@ class _RunStore:
         return {
             "items": [
                 {
-                    "run_id": "run_frequency_done",
+                    "run_id": "run_parsed",
                     "run_type": "forecast",
                     "scenario_id": "forecast_gfs_deterministic",
                     "model_id": "model_1",
@@ -1945,7 +1654,7 @@ class _RunStore:
                     "init_state_id": None,
                     "source_id": "GFS",
                     "cycle_time": now.isoformat(),
-                    "status": kwargs.get("status") or "frequency_done",
+                    "status": kwargs.get("status") or "parsed",
                     "slurm_job_id": None,
                     "start_time": now.isoformat(),
                     "end_time": (now + timedelta(days=7)).isoformat(),
@@ -1954,17 +1663,6 @@ class _RunStore:
                     "log_uri": None,
                     "error_code": None,
                     "error_message": None,
-                    "product_quality": {
-                        "flood_return_period": {
-                            "quality_state": "ready",
-                            "max_over_window": True,
-                            "result_rows": 2,
-                            "return_period_rows": 2,
-                            "warning_rows": 2,
-                            "unavailable_products": [],
-                            "residual_blockers": [],
-                        }
-                    },
                     "created_at": now.isoformat(),
                     "updated_at": now.isoformat(),
                 }

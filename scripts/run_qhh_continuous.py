@@ -15,7 +15,7 @@ Smoke (manual debugging) — run a single pass and exit:
 
 Minimal PASS condition: process exits 0 and the printed pass summary contains no failed
 candidate (``run_pass`` -> ``_has_failed`` is false), i.e. each discovered cycle reaches
-the terminal ``frequency_done``/``published`` status. See
+the terminal ``parsed``/``published`` status. See
 ``docs/runbooks/qhh-22-business-bringup.md`` §3 for the documented bring-up invocation.
 """
 
@@ -45,7 +45,7 @@ from packages.common.source_identity import normalize_source_id
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUN_ROOT = ROOT / ".nhms-runs" / "qhh-continuous"
 MODEL_ID = "basins_qhh_shud"
-TERMINAL_SUCCESS = {"frequency_done", "published", "already_done"}
+TERMINAL_SUCCESS = {"parsed", "published", "already_done"}
 KNOWN_RETRYABLE_DOWNLOAD_STATE = {"probe_failed", "rate_limited", "unavailable"}
 RETRYABLE_STATE = {"failed", *KNOWN_RETRYABLE_DOWNLOAD_STATE}
 ACTIVE_STATE = {"submitted", "running"}

@@ -65,8 +65,6 @@ def test_pipeline_stages_endpoint() -> None:
             "forecast",
             "parse",
             "state_save_qc",
-            "frequency",
-            "publish",
         ]
         download = stages[0]
         assert download["display_status"] == "succeeded"
@@ -511,7 +509,6 @@ def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_s
             "forecast",
             "parse",
             "state_save_qc",
-            "frequency",
             "publish",
         ]
         assert [stage["display_status"] for stage in stages] == [
@@ -520,28 +517,27 @@ def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_s
             "succeeded",
             "succeeded",
             "succeeded",
-            "succeeded",
             "partially_failed",
             "succeeded",
         ]
-        frequency_job = next(stage for stage in stages if stage["stage"] == "frequency")["basin_results"][0]
-        assert frequency_job["job_id"] == "qhh_frequency"
-        assert frequency_job["run_id"] == "cycle_gfs_qhh"
-        assert frequency_job["cycle_id"] == cycle_id
-        assert frequency_job["stage"] == "frequency"
-        assert frequency_job["status"] == "partially_failed"
-        assert frequency_job["slurm_job_id"] == "slurm_qhh_frequency"
-        assert frequency_job["submitted_at"] is not None
-        assert frequency_job["started_at"] is not None
-        assert frequency_job["finished_at"] is not None
-        assert frequency_job["duration_seconds"] == 180
-        assert frequency_job["retry_count"] == 2
-        assert frequency_job["log_uri"] == "qhh/frequency.log"
-        frequency_stage = next(stage for stage in stages if stage["stage"] == "frequency")
-        assert frequency_stage["basin_results_limit"] == 50
-        assert frequency_stage["basin_results_total"] == 1
-        assert frequency_stage["basin_results_returned"] == 1
-        assert frequency_stage["basin_results_truncated"] is False
+        qc_job = next(stage for stage in stages if stage["stage"] == "state_save_qc")["basin_results"][0]
+        assert qc_job["job_id"] == "qhh_state_save_qc"
+        assert qc_job["run_id"] == "cycle_gfs_qhh"
+        assert qc_job["cycle_id"] == cycle_id
+        assert qc_job["stage"] == "state_save_qc"
+        assert qc_job["status"] == "partially_failed"
+        assert qc_job["slurm_job_id"] == "slurm_qhh_state_save_qc"
+        assert qc_job["submitted_at"] is not None
+        assert qc_job["started_at"] is not None
+        assert qc_job["finished_at"] is not None
+        assert qc_job["duration_seconds"] == 180
+        assert qc_job["retry_count"] == 2
+        assert qc_job["log_uri"] == "qhh/state_save_qc.log"
+        qc_stage = next(stage for stage in stages if stage["stage"] == "state_save_qc")
+        assert qc_stage["basin_results_limit"] == 50
+        assert qc_stage["basin_results_total"] == 1
+        assert qc_stage["basin_results_returned"] == 1
+        assert qc_stage["basin_results_truncated"] is False
 
 
 def test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identity(
@@ -1930,12 +1926,12 @@ def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_f
         base_time = _cycle_time()
         partial = _create_job(
             store,
-            job_id="job_frequency_partial",
+            job_id="job_parse_partial",
             run_id="cycle_gfs_qhh",
-            job_type="frequency_qhh_stage",
-            stage="frequency",
+            job_type="parse_qhh_stage",
+            stage="parse",
             status="partially_failed",
-            error_code="NO_FREQUENCY_CURVE",
+            error_code="PARSE_FAILED",
             submitted_at=base_time,
             started_at=base_time,
             finished_at=base_time + timedelta(minutes=3),
@@ -1966,9 +1962,9 @@ def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_f
         retry_jobs = [job for job in store.query_jobs_by_run("cycle_gfs_qhh") if job.job_id.endswith("_retry_active")]
         assert len(retry_jobs) == 1
         retry_job = retry_jobs[0]
-        assert retry_job.stage == "frequency"
+        assert retry_job.stage == "parse"
         retry_event = next(event for event in _events(store) if event.event_type == "retry")
-        assert retry_event.details["previous_job_id"] == "job_frequency_partial"
+        assert retry_event.details["previous_job_id"] == "job_parse_partial"
 
 
 def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
@@ -3279,11 +3275,9 @@ def _seed_monitoring_jobs(store: PipelineStore, *, cycle_id: str) -> None:
 
 def _seed_qhh_canonical_stage_jobs(store: PipelineStore, *, cycle_id: str) -> None:
     base_time = _cycle_time()
-    for index, stage in enumerate(
-        ("download", "convert", "forcing", "forecast", "parse", "state_save_qc", "frequency", "publish")
-    ):
-        status = "partially_failed" if stage == "frequency" else "succeeded"
-        retry_count = 2 if stage == "frequency" else 0
+    for index, stage in enumerate(("download", "convert", "forcing", "forecast", "parse", "state_save_qc", "publish")):
+        status = "partially_failed" if stage == "state_save_qc" else "succeeded"
+        retry_count = 2 if stage == "state_save_qc" else 0
         job = _create_job(
             store,
             job_id=f"qhh_{stage}",
@@ -3297,8 +3291,8 @@ def _seed_qhh_canonical_stage_jobs(store: PipelineStore, *, cycle_id: str) -> No
             submitted_at=base_time + timedelta(minutes=index * 10),
             started_at=base_time + timedelta(minutes=index * 10 + 1),
             finished_at=base_time + timedelta(minutes=index * 10 + 4),
-            error_code="NO_FREQUENCY_CURVE" if stage == "frequency" else None,
-            error_message="Frequency curve unavailable for one basin." if stage == "frequency" else None,
+            error_code="Q_DOWN_DISPLAY_NOT_READY" if stage == "state_save_qc" else None,
+            error_message="q_down display readiness check failed for one basin." if stage == "state_save_qc" else None,
             log_uri=f"qhh/{stage}.log",
         )
         job.retry_count = retry_count

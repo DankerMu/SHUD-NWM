@@ -52,7 +52,7 @@ PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH = 512
 _ACTIVE_JOB_STATUSES = {"pending", "queued", "submitted", "running"}
 _PENDING_JOB_STATUSES = {"pending", "queued"}
 _FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
-_TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "failed", "cancelled", "superseded"}
+_TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "published", "failed", "cancelled", "superseded"}
 _TERMINAL_CYCLE_STATUSES = {
     "complete",
     "published",

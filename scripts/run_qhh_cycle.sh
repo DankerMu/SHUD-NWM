@@ -14,8 +14,8 @@ set -euo pipefail
 #
 # Smoke (manual debugging) — single cycle via the diagnostic continuous runner:
 #   uv run python scripts/run_qhh_continuous.py --once --executor slurm
-# Minimal PASS condition: exits 0 and the cycle reaches the `frequency_done` status —
-# i.e. this script writes its terminal state file with status="frequency_done" after
+# Minimal PASS condition: exits 0 and the cycle reaches the `published` status —
+# i.e. this script writes its terminal state file with status="published" after
 # create_qhh_shud_manifest -> SHUD runtime -> parse -> publish complete. See
 # docs/runbooks/qhh-22-business-bringup.md §3 for the documented bring-up invocation.
 
@@ -384,7 +384,7 @@ require_database
 
 if [[ "${QHH_SKIP_COMPLETED:-1}" == "1" ]]; then
   EXISTING_STATUS="$(db_run_status "$RUN_ID")"
-  if [[ "$EXISTING_STATUS" == "frequency_done" || "$EXISTING_STATUS" == "published" ]]; then
+  if [[ "$EXISTING_STATUS" == "parsed" || "$EXISTING_STATUS" == "published" ]]; then
     log "skip completed run $RUN_ID with status $EXISTING_STATUS"
     json_status "$STATE_FILE" "already_done" "run already completed" \
       "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID" "run_status=$EXISTING_STATUS"
@@ -510,7 +510,7 @@ uv run python scripts/create_qhh_shud_manifest.py | tee "$CYCLE_ROOT/create-qhh-
 MANIFEST_PATH="$RUN_ROOT/runs/$RUN_ID/input/manifest.json"
 
 HYDRO_STATUS="$(db_run_status "$RUN_ID")"
-if [[ "$HYDRO_STATUS" == "succeeded" || "$HYDRO_STATUS" == "parsed" || "$HYDRO_STATUS" == "frequency_done" || "$HYDRO_STATUS" == "published" ]]; then
+if [[ "$HYDRO_STATUS" == "succeeded" || "$HYDRO_STATUS" == "parsed" || "$HYDRO_STATUS" == "published" ]]; then
   OUTPUT_URI="$(db_run_field "$RUN_ID" output_uri)"
   if [[ -z "$OUTPUT_URI" ]]; then
     log "blocked: existing $RUN_ID status $HYDRO_STATUS has no output_uri for parse resume"
@@ -527,7 +527,7 @@ else
 fi
 
 HYDRO_STATUS="$(db_run_status "$RUN_ID")"
-if [[ "$HYDRO_STATUS" == "parsed" || "$HYDRO_STATUS" == "frequency_done" || "$HYDRO_STATUS" == "published" ]]; then
+if [[ "$HYDRO_STATUS" == "parsed" || "$HYDRO_STATUS" == "published" ]]; then
   log "skip parse for $RUN_ID; hydro_run already $HYDRO_STATUS"
   json_status "$CYCLE_ROOT/parse-shud-output.stdout.json" "already_done" "hydro run already parsed" \
     "run_id=$RUN_ID" "run_status=$HYDRO_STATUS"
@@ -538,7 +538,7 @@ fi
 
 log "summarizing and publishing qhh display products for $RUN_ID"
 uv run python scripts/summarize_qhh_smoke_results.py | tee "$CYCLE_ROOT/qhh-result-summary.stdout.json"
-uv run python scripts/publish_qhh_display_products.py | tee "$CYCLE_ROOT/qhh-display-products.stdout.json"
+uv run nhms-orchestrator publish-qdown --cycle-id "$CYCLE_ID" | tee "$CYCLE_ROOT/qhh-display-products.stdout.json"
 
-json_status "$STATE_FILE" "frequency_done" "cycle execution completed through display products" \
+json_status "$STATE_FILE" "published" "cycle execution completed through display products" \
   "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID"

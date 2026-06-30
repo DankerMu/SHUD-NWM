@@ -20,10 +20,8 @@ INFRA_SBATCH_TEMPLATES = (
     "produce_forcing_array.sbatch",
     "run_shud_forecast_array.sbatch",
     "parse_output_array.sbatch",
-    "compute_frequency_array.sbatch",
     "publish_tiles.sbatch",
     "convert_canonical.sbatch",
-    "hindcast.sbatch",
 )
 
 

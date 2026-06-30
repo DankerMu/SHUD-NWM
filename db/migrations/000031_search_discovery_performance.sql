@@ -19,8 +19,4 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS met_station_name_trgm_idx
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_product_basin_status_idx
   ON hydro.hydro_run (basin_version_id, status)
-  WHERE status IN ('parsed', 'frequency_done', 'published');
-
--- TimescaleDB hypertables do not support CREATE INDEX CONCURRENTLY.
-CREATE INDEX IF NOT EXISTS return_period_result_run_quality_idx
-  ON flood.return_period_result (run_id, max_over_window, return_period, warning_level);
+  WHERE status IN ('succeeded', 'parsed', 'published');

@@ -26,7 +26,7 @@ FRAMEWORK_ROUTE_PATHS = frozenset(
         "/redoc",
     }
 )
-BUSINESS_MARKERS = ("forecast", "model", "pipeline", "hindcast", "flood", "data-source")
+BUSINESS_MARKERS = ("forecast", "model", "pipeline", "data-source")
 
 
 @dataclass(frozen=True)

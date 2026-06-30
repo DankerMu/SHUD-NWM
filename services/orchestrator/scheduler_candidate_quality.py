@@ -10,7 +10,6 @@ __all__ = (
     "_candidate_artifact_refs",
     "_candidate_display_evidence",
     "_candidate_forcing_evidence",
-    "_candidate_frequency_evidence",
     "_candidate_output_evidence",
     "_candidate_output_key",
     "_candidate_output_river_manifest",
@@ -184,7 +183,6 @@ def _candidate_display_evidence(candidate: Any) -> dict[str, Any]:
 def _candidate_quality_states(candidate: Any, *, outcome: Mapping[str, Any] | None, status: str) -> dict[str, Any]:
     forcing = _candidate_forcing_evidence(candidate)
     display = _candidate_display_evidence(candidate)
-    frequency = _candidate_frequency_evidence(candidate)
     output = _candidate_output_evidence(candidate, output_uri=None, outcome=outcome)
     payload = {
         "candidate": {
@@ -201,31 +199,9 @@ def _candidate_quality_states(candidate: Any, *, outcome: Mapping[str, Any] | No
             "quality_flag": "ok" if (output.get("segment_count") or 0) > 0 else "output_river_unavailable",
             "segment_count": output.get("segment_count"),
         },
-        "frequency": frequency,
         "display": display,
     }
     return _scheduler._evidence_safe(payload)
-
-
-def _candidate_frequency_evidence(candidate: Any) -> dict[str, Any]:
-    return_periods = _nested_bool(candidate.frequency_capabilities, "return_periods", fallback=False)
-    curves_available = _nested_bool(candidate.frequency_capabilities, "curves_available", fallback=return_periods)
-    warning_thresholds_available = _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available")
-    unavailable_products: list[str] = []
-    if curves_available is False:
-        unavailable_products.append("return_period_curves")
-    if warning_thresholds_available is False:
-        unavailable_products.append("warning_thresholds")
-    return _scheduler._evidence_safe(
-        {
-            "state": "ready" if not unavailable_products and return_periods else "unavailable",
-            "return_periods": return_periods,
-            "curves_available": curves_available,
-            "warning_thresholds_available": warning_thresholds_available,
-            "unavailable_products": unavailable_products,
-            "quality_flag": "ok" if not unavailable_products else "frequency_inputs_unavailable",
-        }
-    )
 
 
 def _candidate_residual_blockers(

@@ -45,7 +45,6 @@ export interface ForecastData {
   series: ForecastSeries[]
   sourceAttribution: string
   cycleAttribution: string
-  frequencyThresholds?: components['schemas']['RiverSeriesResponse']['frequency_thresholds']
   pointBudgetStatus?: ForecastPointBudgetStatus
 }
 
@@ -105,7 +104,6 @@ interface SplicedForecastResponse {
   issue_time?: string | null
   unit?: string
   segments?: SplicedForecastSegment[]
-  frequency_thresholds?: components['schemas']['SplicedForecastResponse']['frequency_thresholds']
 }
 
 type RiverSeriesResponse = components['schemas']['RiverSeriesResponse']
@@ -212,7 +210,6 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
     series,
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
-    frequencyThresholds: payload.frequency_thresholds,
     pointBudgetStatus: pointBudgetGuard.status(),
   }
 }
@@ -259,7 +256,6 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
     series,
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
-    frequencyThresholds: payload.frequency_thresholds,
     pointBudgetStatus: pointBudgetGuard.status(),
   }
 }

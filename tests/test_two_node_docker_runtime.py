@@ -3905,7 +3905,6 @@ def test_entrypoint_rejects_display_forbidden_env_even_when_value_is_empty() -> 
         ["uv", "run", "nhms-shud-runtime", "--help"],
         ["uv", "run", "nhms-production", "--help"],
         ["uv", "run", "nhms-state", "--help"],
-        ["uv", "run", "nhms-flood", "--help"],
         ["uv", "run", "nhms-model", "--help"],
         ["uv", "run", "nhms-canonical", "--help"],
         ["uv", "run", "nhms-parse", "--help"],

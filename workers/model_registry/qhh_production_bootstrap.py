@@ -164,7 +164,6 @@ QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS = frozenset(
         "shud_threads",
         "slurm_env",
         "display_capabilities",
-        "frequency_capabilities",
         "resource_profile_id",
     }
 )
@@ -1255,7 +1254,6 @@ def _scheduler_ready_resource_profile(
         "memory_gb": int(os.getenv("NHMS_QHH_MEMORY_GB", "8")),
         "walltime_minutes": int(os.getenv("NHMS_QHH_WALLTIME_MINUTES", "720")),
         "display_capabilities": {"q_down": True, "tiles": True},
-        "frequency_capabilities": {"return_periods": False},
         "model_id": sources.ids["model_id"],
         "basin_id": sources.ids["basin_id"],
         "basin_version_id": sources.ids["basin_version_id"],

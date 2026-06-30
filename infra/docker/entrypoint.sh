@@ -42,7 +42,6 @@ readonly DISPLAY_FORBIDDEN_COMMANDS=(
   nhms-shud-runtime
   nhms-production
   nhms-state
-  nhms-flood
   nhms-model
   nhms-canonical
   nhms-parse

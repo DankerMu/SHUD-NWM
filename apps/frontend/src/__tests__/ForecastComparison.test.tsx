@@ -117,7 +117,6 @@ describe('forecast comparison UI', () => {
         issue_time: '2026-05-03T00:00:00Z',
         unit: 'm3/s',
         series: [],
-        frequency_thresholds: { q2: 1, q5: 2, q10: 3, q20: 4, q50: 5, q100: 6 },
       }) as never
     })
     resetForecastStore({
@@ -140,7 +139,6 @@ describe('forecast comparison UI', () => {
         issue_time: '2026-05-18T00:00:00Z',
         unit: 'm3/s',
         series: [],
-        frequency_thresholds: null,
       }) as never
     })
     resetForecastStore({
@@ -172,7 +170,6 @@ describe('forecast comparison UI', () => {
         issue_time: '2026-05-18T00:00:00Z',
         unit: 'm3/s',
         series: [],
-        frequency_thresholds: null,
       }) as never
     })
     resetForecastStore({
@@ -201,7 +198,6 @@ describe('forecast comparison UI', () => {
         issue_time: '2026-05-18T00:00:00Z',
         unit: 'm3/s',
         series: [],
-        frequency_thresholds: null,
       }) as never,
     )
     resetForecastStore({
@@ -234,7 +230,6 @@ describe('forecast comparison UI', () => {
             points: [['2026-05-12T03:00:00Z', 123]],
           },
         ],
-        frequency_thresholds: null,
       }) as never
     })
     resetForecastStore({
@@ -277,7 +272,6 @@ describe('forecast comparison UI', () => {
         issue_time: '2026-05-18T00:00:00Z',
         unit: 'm3/s',
         series: [],
-        frequency_thresholds: null,
       }) as never
     })
     resetForecastStore({
@@ -305,31 +299,6 @@ describe('forecast comparison UI', () => {
     ])
   })
 
-  it('preserves spliced forecast thresholds from include-analysis responses', async () => {
-    vi.mocked(client.GET).mockResolvedValue(
-      success({
-        river_segment_id: 'seg-1',
-        issue_time: '2026-05-03T00:00:00Z',
-        variable: 'discharge',
-        unit: 'm3/s',
-        frequency_thresholds: { Q2: 1, Q20: 4, Q100: 6 },
-        segments: [],
-      }) as never,
-    )
-    resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
-      selectedScenarios: ['GFS'],
-    })
-
-    await useForecastStore.getState().fetchForecast({ includeAnalysis: true })
-
-    expect(useForecastStore.getState().forecastData?.frequencyThresholds).toEqual({
-      Q2: 1,
-      Q20: 4,
-      Q100: 6,
-    })
-  })
-
   it('caps oversized forecast payloads during normalization', async () => {
     vi.mocked(client.GET).mockResolvedValue(
       success({
@@ -347,7 +316,6 @@ describe('forecast comparison UI', () => {
             ]),
           },
         ],
-        frequency_thresholds: null,
       }) as never,
     )
     resetForecastStore({
@@ -382,7 +350,6 @@ describe('forecast comparison UI', () => {
           segment_role: 'future_7_days',
           points: [[`2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`, index]],
         })),
-        frequency_thresholds: null,
       }) as never,
     )
     resetForecastStore({

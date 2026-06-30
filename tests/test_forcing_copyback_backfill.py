@@ -287,7 +287,7 @@ def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_vers
     _insert_forcing_version(engine, forcing_version_id="forcing-non-qdown", checksum=checksum)
 
     _insert_run(engine, run_id="run-parsed", status="parsed", forcing_version_id="forcing-1")
-    _insert_run(engine, run_id="run-frequency", status="frequency_done", forcing_version_id="forcing-2")
+    _insert_run(engine, run_id="run-qdown", status="parsed", forcing_version_id="forcing-2")
     _insert_run(engine, run_id="run-published", status="published", forcing_version_id="forcing-1")
     _insert_run(engine, run_id="run-missing-met", status="parsed", forcing_version_id="forcing-missing")
     _insert_run(engine, run_id="run-running", status="running", forcing_version_id="forcing-excluded")
@@ -303,7 +303,7 @@ def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_vers
     assert report["failure_count"] == 1
     assert report["failures"][0]["run_id"] == "run-missing-met"
     assert len(report["packages"]) == 1
-    assert report["packages"][0]["run_ids"] == ["run-frequency", "run-parsed", "run-published"]
+    assert set(report["packages"][0]["run_ids"]) == {"run-qdown", "run-parsed", "run-published"}
     assert report["packages"][0]["forcing_version_ids"] == ["forcing-1", "forcing-2"]
 
 

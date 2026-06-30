@@ -120,7 +120,6 @@ _directory_uri = chain_manifests._directory_uri
 _display_contract = chain_manifests._display_contract
 _ensure_segment_utc = chain_manifests._ensure_segment_utc
 _era5_reanalysis_latency_minutes = chain_manifests._era5_reanalysis_latency_minutes
-_frequency_contract = chain_manifests._frequency_contract
 _forecast_state_checkpoint_hours = chain_manifests._forecast_state_checkpoint_hours
 _has_uri_scheme = chain_manifests._has_uri_scheme
 _model_package_manifest_uri = chain_manifests._model_package_manifest_uri
@@ -166,19 +165,10 @@ def build_model_run_assembly(
         preserve_directory_uri=_preserve_directory_uri,
         station_metadata_for_basin=_station_metadata_for_basin,
         output_river_contract=_output_river_contract,
-        frequency_contract=_frequency_contract,
         display_contract=_display_contract,
         assembly_quality_states=_assembly_quality_states,
         project_name_for_basin=_project_name_for_basin,
         model_package_manifest_uri=_model_package_manifest_uri,
-    )
-
-
-def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    return chain_manifests._frequency_quality_state(
-        entry,
-        cycle_id=cycle_id,
-        model_run_stage_evidence=_model_run_stage_evidence,
     )
 
 
@@ -221,7 +211,7 @@ TERMINAL_JOB_STATUSES = {
     "permanently_failed",
 }
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
-COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}

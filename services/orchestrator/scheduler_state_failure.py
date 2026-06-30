@@ -67,7 +67,7 @@ def _durable_shud_output_exists(state: Mapping[str, Any]) -> bool:
     if state.get("durable_shud_output_exists") is not None:
         return bool(state.get("durable_shud_output_exists"))
     hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
-    if hydro_status in {"succeeded", "parsed", "frequency_done", "published", "complete"}:
+    if hydro_status in {"succeeded", "parsed", "published", "complete"}:
         return True
     if _state_output_uri(state):
         for job in _state_jobs(state):

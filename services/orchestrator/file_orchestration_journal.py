@@ -136,14 +136,12 @@ _ARRAY_MANUAL_RETRY_JOB_TYPES = frozenset(
         "produce_forcing_array",
         "run_shud_forecast_array",
         "parse_output_array",
-        "compute_frequency_array",
     }
 )
 _ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES = {
     "produce_forcing_array": "forcing_manifest_index.json",
     "run_shud_forecast_array": "forecast_manifest_index.json",
     "parse_output_array": "parse_manifest_index.json",
-    "compute_frequency_array": "frequency_manifest_index.json",
     "hindcast": "hindcast_manifest_index.json",
 }
 
@@ -167,7 +165,6 @@ _STAGE_STATUS_ORDER = {
     "run_shud_forecast": 4,
     "parse": 5,
     "state_save_qc": 6,
-    "frequency": 7,
     "publish": 8,
     "era5_download": 11,
     "canonical_convert": 12,
@@ -699,7 +696,7 @@ class FileOrchestrationJournalRepository:
             ):
                 if value is not None:
                     row[key] = value
-            if status in {"pending", "created", "succeeded", "complete", "parsed", "frequency_done", "published"}:
+            if status in {"pending", "created", "succeeded", "complete", "parsed", "published"}:
                 row["error_code"] = error_code
                 row["error_message"] = safe_error_message
             else:

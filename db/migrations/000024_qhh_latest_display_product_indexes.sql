@@ -1,7 +1,7 @@
 CREATE INDEX IF NOT EXISTS hydro_run_qhh_latest_candidate_idx
   ON hydro.hydro_run (LOWER(source_id), run_type, basin_version_id, cycle_time DESC, run_id DESC)
   WHERE cycle_time IS NOT NULL
-    AND status IN ('frequency_done', 'published');
+    AND status IN ('succeeded', 'parsed', 'published');
 
 CREATE INDEX IF NOT EXISTS basin_version_qhh_latest_lookup_idx
   ON core.basin_version (basin_id, basin_version_id);

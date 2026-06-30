@@ -676,7 +676,6 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         "package_checksum",
         "resource_profile",
         "display_capabilities",
-        "frequency_capabilities",
         "shud_code_version",
     )
     row = dict(item)
@@ -687,11 +686,6 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
     display_capabilities = _required_mapping(
         row.get("display_capabilities"),
         field=f"models[{index}].display_capabilities",
-        allow_empty=True,
-    )
-    frequency_capabilities = _required_mapping(
-        row.get("frequency_capabilities"),
-        field=f"models[{index}].frequency_capabilities",
         allow_empty=True,
     )
     segment_count = _optional_nonnegative_int(row.get("segment_count"), field=f"models[{index}].segment_count")
@@ -723,7 +717,6 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         "manifest_uri": manifest_uri,
         "package_checksum": package_checksum,
         "display_capabilities": display_capabilities,
-        "frequency_capabilities": frequency_capabilities,
     }
     if output_segment_count is not None:
         resource_profile["output_segment_count"] = output_segment_count
@@ -745,7 +738,6 @@ def _normalize_registry_model(item: Mapping[str, Any], *, index: int, roots: _Pr
         "lifecycle_state": str(row.get("lifecycle_state") or "active"),
         "resource_profile": resource_profile,
         "display_capabilities": display_capabilities,
-        "frequency_capabilities": frequency_capabilities,
         "source_policy": source_policy,
     }
 

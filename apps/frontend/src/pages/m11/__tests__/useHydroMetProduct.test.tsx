@@ -28,7 +28,7 @@ function latestProduct(overrides: Record<string, unknown> = {}) {
     segment_count: 20,
     expected_segment_count: 20,
     status: 'ready',
-    run_status: 'frequency_done',
+    run_status: 'published',
     valid_time_start: '2026-05-21T00:00:00Z',
     valid_time_end: '2026-05-28T00:00:00Z',
     river_valid_time_start: '2026-05-21T00:00:00Z',
@@ -43,8 +43,6 @@ function latestProduct(overrides: Record<string, unknown> = {}) {
       unavailable_reasons: [],
       quality_flags: [],
       quality_notes: [],
-      return_period_status: 'unavailable',
-      return_period_reasons: [],
     },
     quality: {
       station_sample_count: 1,

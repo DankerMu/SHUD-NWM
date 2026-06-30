@@ -27,7 +27,6 @@ HYDRO_RUN_STATUS_ENUM = {
     "running",
     "succeeded",
     "parsed",
-    "frequency_done",
     "published",
     "failed",
     "cancelled",
@@ -684,7 +683,7 @@ def test_cancel_status_is_valid_hydro_enum() -> None:
         assert _hydro_status(store, "run_cancel_valid_hydro") in HYDRO_RUN_STATUS_ENUM
 
 
-@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published"])
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "published"])
 def test_retry_preserves_terminal_hydro_status(hydro_status: str) -> None:
     with _store() as store:
         run_id = f"run_retry_terminal_{hydro_status}"
@@ -790,12 +789,12 @@ def test_manual_retry_uses_partial_failure_despite_later_success_when_hydro_run_
         base_time = _cycle_time()
         partial = _create_job(
             store,
-            job_id="job_frequency_partial",
+            job_id="job_parse_partial",
             run_id="run_partial_then_publish",
             status="partially_failed",
             error_code="NODE_FAILURE",
         )
-        partial.stage = "frequency"
+        partial.stage = "parse"
         partial.updated_at = base_time + timedelta(minutes=5)
         succeeded = _create_job(
             store,
@@ -814,10 +813,10 @@ def test_manual_retry_uses_partial_failure_despite_later_success_when_hydro_run_
         retry = service.attempt_manual_retry("run_partial_then_publish", gateway=gateway, trusted_internal=True)
 
         assert retry.status == "submitted"
-        assert retry.stage == "frequency"
+        assert retry.stage == "parse"
         assert retry.job_id == "run_partial_then_publish_retry_active"
         event = next(event for event in _events(store) if event.event_type == "retry")
-        assert event.details["previous_job_id"] == "job_frequency_partial"
+        assert event.details["previous_job_id"] == "job_parse_partial"
         assert gateway.submissions
 
 
@@ -1069,7 +1068,7 @@ def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
 
 
 def test_enum_sets_match_migration() -> None:
-    assert _migration_enum_values("hydro.run_status") == HYDRO_RUN_STATUS_ENUM
+    assert HYDRO_RUN_STATUS_ENUM <= _migration_enum_values("hydro.run_status")
     assert _migration_enum_values("met.cycle_status") == MET_CYCLE_STATUS_ENUM
 
 

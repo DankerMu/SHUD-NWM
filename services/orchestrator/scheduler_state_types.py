@@ -27,7 +27,7 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
 STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
-DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
@@ -48,8 +48,6 @@ DOWNSTREAM_STAGE_ALIASES = {
     "state_save_qc": "state_save_qc",
     "save_state_snapshot": "state_save_qc",
     "save_state_snapshot_array": "state_save_qc",
-    "frequency": "frequency",
-    "compute_frequency": "frequency",
     "publish": "publish",
     "publish_tiles": "publish",
 }

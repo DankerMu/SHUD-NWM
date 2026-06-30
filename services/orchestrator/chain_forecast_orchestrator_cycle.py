@@ -547,7 +547,6 @@ class ForecastOrchestratorCycleMixin:
             stage,
             context,
             model_run_stage_evidence=_chain._model_run_stage_evidence,
-            frequency_quality_state=_chain._frequency_quality_state,
             publish_quality_state=_chain._publish_quality_state,
             cycle_residual_blockers=_chain._cycle_residual_blockers,
         )

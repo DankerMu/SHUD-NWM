@@ -186,6 +186,7 @@ log "summarizing qhh smoke results"
 uv run python scripts/summarize_qhh_smoke_results.py | tee "$RUN_ROOT/qhh-result-summary.stdout.json"
 
 log "publishing qhh display products for API/frontend consumption"
-uv run python scripts/publish_qhh_display_products.py | tee "$RUN_ROOT/qhh-display-products.stdout.json"
+uv run nhms-orchestrator publish-qdown --cycle-id "gfs_${QHH_CYCLE_TIME}" \
+  | tee "$RUN_ROOT/qhh-display-products.stdout.json"
 
 write_json_status "$RUN_ROOT/runtime-gate.json" "ready" "SHUD runtime and output parse completed."

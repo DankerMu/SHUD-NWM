@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +11,7 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
 
-from packages.common.flood_quality import backfill_run_product_quality
 from packages.common.migrate import (
     MIGRATIONS_DIR,
     apply_migration,
@@ -54,15 +52,6 @@ def sqlalchemy_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
 
 
-def backfill_integration_run_product_quality(database_url: str, run_ids: Sequence[str]) -> None:
-    engine = sqlalchemy_engine(database_url)
-    try:
-        with Session(engine) as session:
-            backfill_run_product_quality(session, run_ids)
-            session.commit()
-    finally:
-        engine.dispose()
-
 
 @contextmanager
 def psycopg_connection(database_url: str) -> Iterator[Any]:
@@ -79,7 +68,6 @@ def psycopg_connection(database_url: str) -> Iterator[Any]:
 
 
 def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -> None:
-    state_uri = "s3://nhms/states/it126_model/2026050300/state.cfg.ic"
     if object_root is not None:
         state_path = object_root / "states" / "it126_model" / "2026050300" / "state.cfg.ic"
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +247,7 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                         CYCLE_TIME,
                         VALID_TIME_1,
                         VALID_TIME_2,
-                        "frequency_done",
+                        "parsed",
                         "s3://nhms/runs/it126/input/manifest.json",
                         "s3://nhms/runs/it126/output/",
                         "s3://nhms/runs/it126/logs/",
@@ -310,238 +298,6 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                      VALID_TIME_2, 2, "q_down", 150.0, "m3/s", "ok"),
                 ],
             )
-            execute_values(
-                cursor,
-                """
-                INSERT INTO flood.flood_frequency_curve (
-                    curve_id,
-                    model_id,
-                    river_network_version_id,
-                    basin_version_id,
-                    river_segment_id,
-                    duration,
-                    method,
-                    sample_period_start,
-                    sample_period_end,
-                    sample_size,
-                    parameters_json,
-                    q2,
-                    q5,
-                    q10,
-                    q20,
-                    q50,
-                    q100,
-                    unit,
-                    quality_flag
-                )
-                VALUES %s
-                """,
-                [
-                    (
-                        f"{ISSUE_126_PREFIX}_curve_inside",
-                        MODEL_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        BASIN_VERSION_ID,
-                        f"{ISSUE_126_PREFIX}_seg_inside",
-                        "1h",
-                        "empirical",
-                        "2001-01-01",
-                        "2025-12-31",
-                        25,
-                        Json({"sample_quality": {"Q20": {"met": True}}}),
-                        100.0,
-                        140.0,
-                        180.0,
-                        220.0,
-                        280.0,
-                        340.0,
-                        "m3/s",
-                        "ok",
-                    ),
-                    (
-                        f"{ISSUE_126_PREFIX}_curve_outside",
-                        MODEL_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        BASIN_VERSION_ID,
-                        f"{ISSUE_126_PREFIX}_seg_outside",
-                        "1h",
-                        "empirical",
-                        "2001-01-01",
-                        "2025-12-31",
-                        25,
-                        Json({"sample_quality": {"Q10": {"met": True}}}),
-                        80.0,
-                        110.0,
-                        140.0,
-                        170.0,
-                        220.0,
-                        260.0,
-                        "m3/s",
-                        "ok",
-                    ),
-                ],
-            )
-            execute_values(
-                cursor,
-                """
-                INSERT INTO flood.return_period_result (
-                    run_id,
-                    scenario_id,
-                    basin_version_id,
-                    river_network_version_id,
-                    model_id,
-                    river_segment_id,
-                    valid_time,
-                    duration,
-                    q_value,
-                    q_unit,
-                    return_period,
-                    warning_level,
-                    source_id,
-                    cycle_time,
-                    max_over_window,
-                    quality_flag
-                )
-                VALUES %s
-                """,
-                [
-                    (
-                        FORECAST_RUN_ID,
-                        "forecast_gfs_deterministic",
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        MODEL_ID,
-                        f"{ISSUE_126_PREFIX}_seg_inside",
-                        VALID_TIME_1,
-                        "1h",
-                        180.0,
-                        "m3/s",
-                        10.0,
-                        "watch",
-                        SOURCE_ID,
-                        CYCLE_TIME,
-                        False,
-                        "ok",
-                    ),
-                    (
-                        FORECAST_RUN_ID,
-                        "forecast_gfs_deterministic",
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        MODEL_ID,
-                        f"{ISSUE_126_PREFIX}_seg_inside",
-                        VALID_TIME_2,
-                        "1h",
-                        250.0,
-                        "m3/s",
-                        31.0,
-                        "high_risk",
-                        SOURCE_ID,
-                        CYCLE_TIME,
-                        False,
-                        "ok",
-                    ),
-                    (
-                        FORECAST_RUN_ID,
-                        "forecast_gfs_deterministic",
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        MODEL_ID,
-                        f"{ISSUE_126_PREFIX}_seg_inside",
-                        VALID_TIME_2,
-                        "2h",
-                        250.0,
-                        "m3/s",
-                        31.0,
-                        "high_risk",
-                        SOURCE_ID,
-                        CYCLE_TIME,
-                        True,
-                        "ok",
-                    ),
-                    (
-                        FORECAST_RUN_ID,
-                        "forecast_gfs_deterministic",
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        MODEL_ID,
-                        f"{ISSUE_126_PREFIX}_seg_outside",
-                        VALID_TIME_2,
-                        "2h",
-                        150.0,
-                        "m3/s",
-                        14.0,
-                        "warning",
-                        SOURCE_ID,
-                        CYCLE_TIME,
-                        True,
-                        "ok",
-                    ),
-                    (
-                        FORECAST_RUN_ID,
-                        "forecast_gfs_deterministic",
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        MODEL_ID,
-                        f"{ISSUE_126_PREFIX}_seg_outside",
-                        VALID_TIME_1,
-                        "1h",
-                        120.0,
-                        "m3/s",
-                        6.0,
-                        "watch",
-                        SOURCE_ID,
-                        CYCLE_TIME,
-                        False,
-                        "ok",
-                    ),
-                ],
-            )
-            cursor.execute(
-                """
-                INSERT INTO hydro.state_snapshot (
-                    state_id, model_id, run_id, valid_time, state_uri, checksum, usable_flag
-                )
-                VALUES (%s, %s, %s, %s, %s, 'state-sha', true)
-                """,
-                (STATE_ID, MODEL_ID, FORECAST_RUN_ID, CYCLE_TIME, state_uri),
-            )
-            execute_values(
-                cursor,
-                """
-                INSERT INTO ops.pipeline_job (
-                    job_id, run_id, cycle_id, job_type, slurm_job_id, array_task_id, model_id, stage, status, log_uri
-                )
-                VALUES %s
-                """,
-                [
-                    (
-                        f"{ISSUE_126_PREFIX}_job_download",
-                        FORECAST_RUN_ID,
-                        CYCLE_ID,
-                        "download_source_cycle",
-                        "8100",
-                        None,
-                        MODEL_ID,
-                        "download",
-                        "succeeded",
-                        "s3://nhms/logs/download.out",
-                    ),
-                    (
-                        f"{ISSUE_126_PREFIX}_job_forecast_0",
-                        FORECAST_RUN_ID,
-                        CYCLE_ID,
-                        "run_shud_forecast_array",
-                        "8101",
-                        0,
-                        MODEL_ID,
-                        "forecast",
-                        "succeeded",
-                        "s3://nhms/logs/forecast-0.out",
-                    ),
-                ],
-            )
-    backfill_integration_run_product_quality(database_url, [FORECAST_RUN_ID])
 
 
 def _clear_issue_126_rows(connection: Any) -> None:
@@ -549,15 +305,6 @@ def _clear_issue_126_rows(connection: Any) -> None:
         cursor.execute("DELETE FROM ops.pipeline_job WHERE job_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM ops.pipeline_event WHERE entity_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM ops.qc_result WHERE target_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
-        cursor.execute(
-            "DELETE FROM flood.run_product_quality WHERE run_id IN (%s, %s)",
-            (FORECAST_RUN_ID, HINDCAST_RUN_ID),
-        )
-        cursor.execute(
-            "DELETE FROM flood.return_period_result WHERE run_id IN (%s, %s)",
-            (FORECAST_RUN_ID, HINDCAST_RUN_ID),
-        )
-        cursor.execute("DELETE FROM flood.flood_frequency_curve WHERE curve_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM hydro.state_snapshot WHERE state_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute(
             "DELETE FROM hydro.river_timeseries WHERE run_id IN (%s, %s)",

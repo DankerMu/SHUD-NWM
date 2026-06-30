@@ -96,7 +96,6 @@ def publish_all_basin_scheduler_registry(
     cpus_per_task: int = 4,
     memory_mb: int = 8192,
     walltime_minutes: int = 720,
-    enable_return_periods: bool = False,
     repair_missing_radiation: bool = True,
     dry_run: bool = False,
     output_path: str | Path | None = None,
@@ -185,7 +184,6 @@ def publish_all_basin_scheduler_registry(
                 cpus_per_task=cpus_per_task,
                 memory_mb=memory_mb,
                 walltime_minutes=walltime_minutes,
-                enable_return_periods=enable_return_periods,
             )
         )
 
@@ -229,14 +227,12 @@ def scheduler_registry_row_from_sources(
     cpus_per_task: int,
     memory_mb: int,
     walltime_minutes: int,
-    enable_return_periods: bool,
 ) -> dict[str, Any]:
     model = sources.model
     manifest = sources.manifest
     ids = sources.ids
     geometry = sources.geometry
     display_capabilities = {"q_down": True, "tiles": True}
-    frequency_capabilities = {"return_periods": bool(enable_return_periods)}
     resource_profile = {
         "runnable": True,
         "scheduler": "slurm",
@@ -279,7 +275,6 @@ def scheduler_registry_row_from_sources(
         "lifecycle_state": "active",
         "resource_profile": resource_profile,
         "display_capabilities": display_capabilities,
-        "frequency_capabilities": frequency_capabilities,
         "source_policy": dict(DEFAULT_SOURCE_POLICY),
     }
 
@@ -676,11 +671,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=int(os.getenv("NHMS_BASINS_DEFAULT_WALLTIME_MINUTES", "720")),
     )
     parser.add_argument(
-        "--enable-return-periods",
-        action="store_true",
-        help="Set frequency_capabilities.return_periods=true for all published models.",
-    )
-    parser.add_argument(
         "--no-repair-missing-radiation",
         action="store_true",
         help="Do not synthesize missing *.tsd.rl files in private scratch copies.",
@@ -711,7 +701,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             cpus_per_task=args.cpus_per_task,
             memory_mb=args.memory_mb,
             walltime_minutes=args.walltime_minutes,
-            enable_return_periods=args.enable_return_periods,
             repair_missing_radiation=not args.no_repair_missing_radiation,
             dry_run=args.dry_run,
             output_path=args.output,

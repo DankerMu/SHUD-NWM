@@ -26,7 +26,6 @@ _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
         "POST",
         "/api/v1/river-segment-crosswalks",
     ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
-    ("POST", "/api/v1/hindcast/submit"): ("pipeline.rerun_cycle", "hindcast", "pre-body"),
 }
 _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
 runtime_router = startup_wiring.create_runtime_router()
@@ -289,8 +288,6 @@ def custom_openapi() -> dict[str, Any]:
 
 def _patch_openapi_schema(schema: dict) -> None:
     _patch_mvt_tile_openapi(schema)
-    _patch_flood_duration_openapi(schema)
-    _patch_flood_product_quality_openapi(schema)
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
     _patch_met_stations_list_openapi(schema)
@@ -306,8 +303,6 @@ def __getattr__(name: str) -> Any:
 
 
 _patch_mvt_tile_openapi = openapi_patching._patch_mvt_tile_openapi
-_patch_flood_duration_openapi = openapi_patching._patch_flood_duration_openapi
-_patch_flood_product_quality_openapi = openapi_patching._patch_flood_product_quality_openapi
 _patch_station_series_openapi = openapi_patching._patch_station_series_openapi
 _patch_qhh_latest_product_openapi = openapi_patching._patch_qhh_latest_product_openapi
 _patch_met_stations_list_openapi = openapi_patching._patch_met_stations_list_openapi

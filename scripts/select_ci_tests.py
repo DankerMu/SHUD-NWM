@@ -237,34 +237,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_output_parser.py",),
     ),
     PathTestRule(
-        "workers/flood_frequency/return_period_cleanup.py",
-        ("tests/test_return_period_cleanup.py",),
-    ),
-    PathTestRule(
-        "workers/flood_frequency/return_period.py",
-        ("tests/test_return_period.py",),
-    ),
-    PathTestRule(
-        "workers/flood_frequency/cli.py",
-        (
-            "tests/test_flood_frequency.py",
-            "tests/test_return_period.py",
-            "tests/test_return_period_cleanup.py",
-        ),
-    ),
-    PathTestRule(
-        "workers/flood_frequency/frequency.py",
-        ("tests/test_flood_frequency.py",),
-    ),
-    PathTestRule(
-        "workers/flood_frequency/hindcast.py",
-        ("tests/test_flood_frequency.py",),
-    ),
-    PathTestRule(
-        "workers/flood_frequency/config.py",
-        ("tests/test_flood_frequency.py",),
-    ),
-    PathTestRule(
         "services/orchestrator/**",
         (
             "tests/test_orchestrator.py",
@@ -294,7 +266,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/tiles/mvt.py",
         (
-            "tests/test_flood_alerts_api.py",
+            "tests/test_api_contract.py",
             "tests/test_migrations.py",
             "tests/test_openapi_drift.py",
         ),
@@ -320,18 +292,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
-            "tests/test_forecast_store_product_quality_sql.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/flood_quality.py",
-        (
-            "tests/test_forecast_api.py",
-            "tests/test_return_period.py",
-            "tests/test_return_period_integration.py",
         ),
     ),
     PathTestRule(
@@ -383,13 +346,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "scripts/validate_two_node_docker_source_trust.py",
         ("tests/test_two_node_docker_source_trust.py",),
-    ),
-    PathTestRule(
-        "scripts/audit_return_period_indexes.py",
-        (
-            "tests/test_return_period_index_audit.py",
-            "tests/test_select_ci_tests.py",
-        ),
     ),
     PathTestRule(
         "scripts/validate_readonly_db_boundary.py",

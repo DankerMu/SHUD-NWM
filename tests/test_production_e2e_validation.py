@@ -40,7 +40,7 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
         "forcing": "ready",
         "slurm": "ready",
         "parse": "ready",
-        "frequency": "ready",
+        "publish": "ready",
         "tile": "ready",
         "api": "ready",
         "frontend": "ready",
@@ -73,9 +73,8 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
     assert {query["contract"] for query in api["contract_queries"]} == {
         "model_detail",
         "forecast_series",
-        "flood_alerts_summary",
-        "flood_alerts_ranking",
-        "flood_alerts_timeline",
+        "run_detail",
+        "layer_catalog",
         "jobs",
         "job_logs",
         "tile_metadata",
@@ -86,12 +85,9 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
         paths["forecast_series"]
         == "/api/v1/basin-versions/basins_qhh_shud_fixture_basin_v1/river-segments/seg_a/forecast-series"
     )
-    assert paths["flood_alerts_summary"] == "/api/v1/flood-alerts/summary"
-    assert paths["flood_alerts_ranking"] == "/api/v1/flood-alerts/ranking"
-    assert paths["flood_alerts_timeline"] == "/api/v1/flood-alerts/timeline"
     assert paths["jobs"] == "/api/v1/jobs"
     assert paths["job_logs"] == "/api/v1/jobs/m10_150-array-0/logs"
-    assert paths["tile_metadata"] == "/api/v1/tiles/flood-return-period"
+    assert paths["tile_metadata"].startswith("/api/v1/tiles/hydro/")
     queries = {query["contract"]: query.get("query", {}) for query in api["contract_queries"]}
     assert queries["forecast_series"] == {
         "issue_time": "2026-05-07T00:00:00Z",
@@ -101,14 +97,6 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
     }
     assert "source" not in queries["forecast_series"]
     assert "cycle_time" not in queries["forecast_series"]
-    assert queries["flood_alerts_ranking"] == {
-        "run_id": "m10_150",
-        "limit": 10,
-        "offset": 0,
-        "valid_time": "2026-05-07T03:00:00Z",
-    }
-    assert "segment_id" not in queries["flood_alerts_ranking"]
-
     stage_manifest = _read_json(lane_dir / "stage_manifest.json")
     for stage in stage_manifest["stages"]:
         assert stage["outputs"], stage["stage"]
@@ -741,9 +729,9 @@ def test_validate_e2e_shud_qc_blockers_stop_downstream_publication(
     assert summary["status"] == "blocked"
     assert qc["error_code"] == error_code
     assert qc["downstream_publication_blocked"] is True
-    assert set(qc["downstream_blocked_stages"]) == {"parse", "frequency", "tile", "api", "frontend"}
+    assert set(qc["downstream_blocked_stages"]) == {"parse", "publish", "tile", "api", "frontend"}
     assert stage_manifest["stage_statuses"]["parse"] == "blocked"
-    assert stage_manifest["stage_statuses"]["frequency"] == "blocked"
+    assert stage_manifest["stage_statuses"]["publish"] == "blocked"
     assert stage_manifest["stage_statuses"]["tile"] == "blocked"
     assert api["status"] == "blocked"
     assert api["execution_mode"] == "not_executed"
@@ -1055,7 +1043,7 @@ def test_validate_e2e_force_qc_blocker_removes_stale_downstream_stage_artifacts(
 
     stage_manifest = _read_json(lane_dir / "stage_manifest.json")
     assert summary["status"] == "blocked"
-    for stage in ("parse", "frequency", "tile", "api", "frontend"):
+    for stage in ("parse", "publish", "tile", "api", "frontend"):
         assert stage_manifest["stage_statuses"][stage] == "blocked"
     for payload in _downstream_stage_artifact_json_payloads(lane_dir):
         assert payload.get("status") != "ready"
@@ -1346,7 +1334,7 @@ def _stage_artifact_json_payloads(lane_dir: Path) -> list[dict]:
 
 
 def _downstream_stage_artifact_json_payloads(lane_dir: Path) -> list[dict]:
-    downstream_dirs = ("parse", "frequency", "tile", "api", "frontend")
+    downstream_dirs = ("parse", "publish", "tile", "api", "frontend")
     return [
         _read_json(path)
         for stage_name in downstream_dirs

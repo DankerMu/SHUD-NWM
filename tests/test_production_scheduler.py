@@ -1107,7 +1107,6 @@ def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
         model_package_uri="s3://nhms/models/model_a/package/",
         resource_profile={},
         display_capabilities={},
-        frequency_capabilities={},
         horizon={},
         scenario_id="forecast_gfs_deterministic",
         run_id="fcst_gfs_2026052106_model_a",
@@ -1572,7 +1571,6 @@ def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
         resource_profile={"project_name": "heihe", "shud_input_name": "heihe", "memory_gb": 8},
         resource_profile_summary={"memory_gb": 8},
         display_capabilities={},
-        frequency_capabilities={},
     )
 
     payload = model.to_dict()
@@ -1613,7 +1611,6 @@ def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_p
     assert gfs_model_a["model_package_uri"] == "s3://nhms/models/model_a/package/"
     assert gfs_model_a["resource_profile"]["memory_gb"] == 8
     assert gfs_model_a["display_capabilities"] == {"tiles": True}
-    assert gfs_model_a["frequency_capabilities"] == {"return_periods": True}
     assert gfs_model_a["horizon"]["max_lead_hours"] == 168
     ifs_06z = next(
         item
@@ -3008,7 +3005,7 @@ def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> 
 def test_canonical_unavailable_evidence_is_not_fresh_zero_row() -> None:
     # Highest-risk guardrail: provider-unavailable / query-failed evidence (no
     # candidate_row_count key, or status=canonical_unavailable) must NEVER be
-    # treated as fresh zero-row -> otherwise a DB outage would flood full-chain
+    # treated as fresh zero-row -> otherwise a DB outage would trigger full-chain
     # ingestion submissions.
     assert scheduler_module._canonical_evidence_is_fresh_zero_row(None) is False
     assert scheduler_module._canonical_evidence_is_fresh_zero_row({}) is False
@@ -3220,7 +3217,6 @@ def test_build_candidates_duplicate_candidate_identity_records_skipped_and_exclu
         resource_profile={},
         resource_profile_summary={},
         display_capabilities={},
-        frequency_capabilities={},
     )
     cycles = [
         scheduler_module.SchedulerSourceCycle(
@@ -3731,7 +3727,6 @@ def test_scheduler_candidate_state_legacy_rows_without_m23_identity_remain_compa
             resource_profile={},
             resource_profile_summary={},
             display_capabilities={},
-            frequency_capabilities={},
         ),
         horizon={},
     )
@@ -5641,7 +5636,6 @@ def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None
         "forecast",
         "parse",
         "q_down_publish",
-        "frequency_publish",
         "production_run",
     }
     assert set(PRODUCTION_STATUS_TAXONOMY) == {
@@ -5657,7 +5651,6 @@ def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None
         "superseded",
     }
     assert production_stage_for("download_gfs") == "download"
-    assert production_stage_for("frequency") == "frequency_publish"
     assert production_stage_for("publish_tiles") == "q_down_publish"
     assert production_stage_for("unknown_stage") == "production_run"
     assert production_status_for("skipped") == "superseded"
@@ -7966,7 +7959,6 @@ def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(t
             "station_count": 2,
             "output_segment_count": 2,
             "display_capabilities": {"q_down": True, "tiles": True},
-            "frequency_capabilities": {"return_periods": False},
         },
     }
     scheduler = ProductionScheduler(
@@ -8003,7 +7995,6 @@ def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(t
             "package_checksum": "package-sha",
             "source_inventory_checksum": "inventory-sha",
             "display_capabilities": {"q_down": True, "tiles": True},
-            "frequency_capabilities": {"return_periods": False},
         },
     }
     orchestrator = FakeProductionOrchestrator()
@@ -8067,7 +8058,6 @@ def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(t
             "station_count": 2,
             "output_segment_count": 2,
             "display_capabilities": {"q_down": True, "tiles": True},
-            "frequency_capabilities": {"return_periods": False},
         },
     }
     orchestrator = FakeProductionOrchestrator()
@@ -8116,7 +8106,6 @@ def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(
         "station_count": 2,
         "resource_profile": {"project_name": "qhh", "shud_input_name": "qhh"},
         "display_capabilities": {"tiles": True},
-        "frequency_capabilities": {"return_periods": False},
     }
 
     assembly = build_model_run_assembly(
@@ -9344,7 +9333,7 @@ def test_active_cycle_orchestration_with_model_state_only_skips_active_model(
     assert active_repository.active_pipeline_checks == [("gfs", _dt("2026-05-21T06:00:00Z"), "model_b")]
 
 
-@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published", "complete"])
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "published", "published", "complete"])
 def test_completed_hydro_state_is_skipped_as_completed_not_active(
     tmp_path: Path,
     hydro_status: str,
@@ -9368,7 +9357,7 @@ def test_completed_hydro_state_is_skipped_as_completed_not_active(
     assert orchestrator.calls == []
 
 
-@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published"])
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "published", "published"])
 def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
     tmp_path: Path,
     hydro_status: str,
@@ -9399,7 +9388,6 @@ def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
     assert state["durable_hydro_status"] == hydro_status
     assert state["native_shud_resubmitted"] is False
     assert state["parse_resubmitted"] is False
-    assert state["frequency_resubmitted"] is False
     assert state["publish_resubmitted"] is False
     assert result.evidence["counts"]["submitted_count"] == 0
     assert orchestrator.calls == []
@@ -9587,8 +9575,7 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
 @pytest.mark.parametrize(
     ("stage", "error_code", "expected_classifier"),
     [
-        ("frequency", "FREQUENCY_FAILED", "publication_failure"),
-        ("publish", "PUBLISH_FAILED", "publication_failure"),
+        ("state_save_qc", "Q_DOWN_DISPLAY_NOT_READY", "unknown_failure"),
     ],
 )
 def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retryable_flag(
@@ -10397,7 +10384,6 @@ def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(
                         "runnable": True,
                         "memory_gb": 8,
                         "display_capabilities": {"tiles": True},
-                        "frequency_capabilities": {"return_periods": True},
                         "object_store_root": str(object_store_root),
                     },
                 )
@@ -10490,7 +10476,6 @@ def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: P
                         "runnable": True,
                         "memory_gb": 8,
                         "display_capabilities": {"tiles": True},
-                        "frequency_capabilities": {"return_periods": True},
                         "object_store_root": str(object_store_root),
                     },
                 )
@@ -11793,7 +11778,7 @@ def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_downloa
         },
         active_repository=PerCycleCandidateStateRepository(
             {
-                "2026-05-30T00:00:00+00:00": {"hydro_status": "frequency_done"},
+                "2026-05-30T00:00:00+00:00": {"hydro_status": "published"},
                 "2026-05-30T06:00:00+00:00": {"forecast_cycle_status": "forcing_ready"},
             }
         ),
@@ -12872,11 +12857,6 @@ def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts
                         "memory_gb": 128,
                         "station_count": 386,
                         "display_capabilities": {"tiles": True, "optional_weather_available": False},
-                        "frequency_capabilities": {
-                            "return_periods": True,
-                            "curves_available": False,
-                            "warning_thresholds_available": False,
-                        },
                     },
                 )
             ]
@@ -12908,8 +12888,8 @@ def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_basins_qhh_shud"
     assert submitted_basin["model_package_uri"] == "s3://nhms/models/basins_qhh_shud/package/"
     assert submitted_basin["station_count"] == 386
-    assert submitted_basin["frequency_curves_available"] is False
-    assert submitted_basin["warning_thresholds_available"] is False
+    assert submitted_basin["display_capabilities"]["tiles"] is True
+    assert submitted_basin["display_capabilities"]["optional_weather_available"] is False
     assert submitted_basin["optional_weather_available"] is False
     assert submitted_basin["output_key"] == "runs/fcst_gfs_2026052106_basins_qhh_shud/output/"
     assert submitted_basin["output_uri"] == "s3://nhms/runs/fcst_gfs_2026052106_basins_qhh_shud/output/"
@@ -13304,7 +13284,6 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
         "output_uri": "s3://nhms-safe/runs/model_a/output/",
         "manifest_uri": "s3://nhms-safe/models/model_a/manifest.json",
         "display_capabilities": {"tiles": True},
-        "frequency_capabilities": {"return_periods": True},
         "custom_metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
     }
     model = _model(
@@ -13676,11 +13655,6 @@ def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and
                         "station_ids": ["sta_001", "sta_002"],
                         "parsed_row_count": 10,
                         "display_capabilities": {"tiles": True, "optional_weather_available": False},
-                        "frequency_capabilities": {
-                            "return_periods": True,
-                            "curves_available": False,
-                            "warning_thresholds_available": False,
-                        },
                     },
                 )
             ]
@@ -13704,11 +13678,7 @@ def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and
     assert model_evidence["outputs"]["parsed_row_count"] == 21
     assert model_evidence["outputs"]["segment_count"] == 3
     assert model_evidence["display"]["unavailable_products"] == ["optional_weather_products"]
-    assert model_evidence["quality_states"]["frequency"]["unavailable_products"] == [
-        "return_period_curves",
-        "warning_thresholds",
-    ]
-    assert any(blocker["field"] == "frequency" for blocker in model_evidence["residual_blockers"])
+    assert model_evidence["quality_states"]["display"]["unavailable_products"] == ["optional_weather_products"]
     assert result.evidence["readiness"]["final_production_readiness_claimed"] is False
 
 
@@ -13763,15 +13733,16 @@ def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_re
     assert failed["stage_statuses"][0]["log_uri"] == "s3://nhms/logs/forcing.out"
     assert failed["stage_statuses"][0]["task_results_summary"] == {
         "total_count": 1,
-        "included_count": 0,
-        "omitted_count": 1,
-        "matched_count": 0,
+        "included_count": 1,
+        "omitted_count": 0,
+        "matched_count": 1,
         "matching": "candidate_identity",
         "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
         "status_counts": {"succeeded": 1},
     }
     assert failed["resource_summary"]["stage_accounting"][0]["accounting"]["max_rss"] == "3072K"
-    assert failed["resource_summary"]["task_accounting"] == []
+    assert len(failed["resource_summary"]["task_accounting"]) == 1
+    assert failed["resource_summary"]["task_accounting"][0]["slurm_job_id"] == "slurm_forcing_0"
     assert any(blocker["code"] == "FORCING_TASK_FAILED" for blocker in failed["residual_blockers"])
     for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc", "X-Amz-Signature"):
         assert raw_secret not in evidence_text
@@ -13911,7 +13882,7 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         assert (
             item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (stage["task_results"][0]["slurm_job_id"])
         )
-        assert summary["total_count"] == 3
+        assert summary["total_count"] == 1
         assert summary["matched_count"] == 1
         assert summary["matching"] == "candidate_identity"
 
@@ -15772,7 +15743,7 @@ class FakeActiveCycleOrchestrationRepository:
 
 class FakeHydroStateRepository:
     active_statuses = {"created", "staged", "submitted", "running"}
-    completed_statuses = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+    completed_statuses = {"succeeded", "parsed", "published", "published", "complete"}
     terminal_job_statuses = {
         "succeeded",
         "partially_failed",
@@ -16246,7 +16217,6 @@ def _db_free_model_manifest_fixture(
         "package_checksum": package_checksum,
         "output_segment_count": 3,
         "display_capabilities": {"tiles": True},
-        "frequency_capabilities": {"return_periods": True},
         "source_policy": {"source": "gfs", "owner": "node-27"},
     }
     return row, package_checksum
@@ -16478,7 +16448,6 @@ def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | N
         "runnable": True,
         "memory_gb": 8,
         "display_capabilities": {"tiles": True},
-        "frequency_capabilities": {"return_periods": True},
     }
     if resource_profile is not None:
         profile = dict(resource_profile)
@@ -16573,7 +16542,6 @@ def _scheduler_candidate_fixture() -> scheduler_module.SchedulerCandidate:
             resource_profile={},
             resource_profile_summary={},
             display_capabilities={},
-            frequency_capabilities={},
         ),
         horizon={},
     )
@@ -17180,7 +17148,6 @@ def test_file_registry_publisher_and_loader_validate_manifest_last_and_checksum(
     assert detail["resource_profile"]["package_checksum"] == fixture["package_checksum"]
     assert detail["resource_profile"]["manifest_uri"] == fixture["model"]["manifest_uri"]
     assert detail["display_capabilities"] == {"tiles": True}
-    assert detail["frequency_capabilities"] == {"return_periods": True}
     assert detail["output_segment_count"] == 3
     assert evidence["status"] == "ready"
     assert evidence["schema_version"] == scheduler_module.REGISTRY_MANIFEST_SCHEMA_VERSION
@@ -20271,7 +20238,6 @@ def _concurrency_candidate(source_id: str, model_id: str, basin_id: str) -> sche
             resource_profile={"output_uri": f"s3://nhms/out/{model_id}/"},
             resource_profile_summary={},
             display_capabilities={},
-            frequency_capabilities={},
         ),
         horizon={},
     )

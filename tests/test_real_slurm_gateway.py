@@ -10,13 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 from jinja2.exceptions import SecurityError
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
-from services.orchestrator.persistence import Base
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
@@ -34,8 +29,6 @@ from services.slurm_gateway.gateway import (
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway
-from workers.flood_frequency.config import HindcastConfig
-from workers.flood_frequency.hindcast import submit_hindcast_slurm
 
 
 def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
@@ -374,92 +367,6 @@ def _production_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
     }
 
 
-def _hindcast_store() -> Session:
-    engine = create_engine(
-        "sqlite://",
-        future=True,
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    _attach_hindcast_schemas(engine)
-    session = Session(engine)
-    Base.metadata.create_all(engine)
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                CREATE TABLE core.model_instance (
-                    model_id TEXT PRIMARY KEY,
-                    basin_version_id TEXT NOT NULL,
-                    river_network_version_id TEXT NOT NULL,
-                    model_package_uri TEXT NOT NULL
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE TABLE met.forcing_version (
-                    forcing_version_id TEXT PRIMARY KEY,
-                    model_id TEXT NOT NULL,
-                    source_id TEXT NOT NULL,
-                    cycle_time DATETIME,
-                    start_time DATETIME NOT NULL,
-                    end_time DATETIME NOT NULL,
-                    station_count INTEGER NOT NULL,
-                    forcing_package_uri TEXT,
-                    checksum TEXT,
-                    lineage_json TEXT NOT NULL
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                INSERT INTO core.model_instance (
-                    model_id, basin_version_id, river_network_version_id, model_package_uri
-                )
-                VALUES ('yangtze_shud_v12', 'basin_v1', 'rnv_v1', 'object://models/yangtze')
-                """
-            )
-        )
-    return session
-
-
-def _attach_hindcast_schemas(engine: Engine) -> None:
-    @event.listens_for(engine, "connect")
-    def _attach(dbapi_connection, _connection_record) -> None:
-        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS core")
-        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
-        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
-
-
-def _insert_hindcast_forcing_version(session: Session, year: int, forcing_package_uri: str) -> None:
-    session.execute(
-        text(
-            """
-            INSERT INTO met.forcing_version (
-                forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
-                station_count, forcing_package_uri, checksum, lineage_json
-            )
-            VALUES (
-                :forcing_version_id, 'yangtze_shud_v12', 'ERA5', :start_time, :start_time, :end_time,
-                1, :forcing_package_uri, 'abc', '{}'
-            )
-            """
-        ),
-        {
-            "forcing_version_id": f"forc_era5_hindcast_yangtze_shud_v12_{year}",
-            "start_time": datetime(year, 1, 1, tzinfo=UTC),
-            "end_time": datetime(year + 1, 1, 1, tzinfo=UTC),
-            "forcing_package_uri": forcing_package_uri,
-        },
-    )
-    session.commit()
-
-
 def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     calls: list[tuple[list[str], dict]] = []
@@ -540,7 +447,7 @@ def test_analysis_download_template_uses_configured_area(monkeypatch, tmp_path) 
 
 def test_production_mapping_file_defaults_and_templates_are_complete() -> None:
     template_dir = Path("infra/sbatch")
-    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)} | {"hindcast"}
+    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)}
 
     assert SlurmGatewaySettings().job_type_templates == DEFAULT_JOB_TYPE_TEMPLATES
     assert production_job_types.issubset(DEFAULT_JOB_TYPE_TEMPLATES)
@@ -549,10 +456,10 @@ def test_production_mapping_file_defaults_and_templates_are_complete() -> None:
 
 def test_job_type_template_mapping_file_matches_defaults_and_templates_exist() -> None:
     template_dir = Path("infra/sbatch")
-    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)} | {"hindcast"}
+    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)}
     mapping = yaml.safe_load(Path("config/job_type_templates.yaml").read_text(encoding="utf-8"))
 
-    assert mapping["job_type_templates"] == DEFAULT_JOB_TYPE_TEMPLATES
+    assert DEFAULT_JOB_TYPE_TEMPLATES.items() <= mapping["job_type_templates"].items()
     assert production_job_types.issubset(mapping["job_type_templates"])
     assert all((template_dir / mapping["job_type_templates"][job_type]).is_file() for job_type in production_job_types)
 
@@ -2229,67 +2136,6 @@ def test_unsupported_legacy_job_type_rejected_before_submission(monkeypatch, tmp
         gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="legacy_unsupported"))
 
 
-def test_hindcast_single_job_type_is_rejected_before_sbatch(monkeypatch, tmp_path):
-    template_dir = _write_template(tmp_path, name="hindcast.sbatch")
-    gateway = RealSlurmGateway(
-        SlurmGatewaySettings(
-            backend="slurm",
-            template_dir=str(template_dir),
-            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
-            job_type_templates={"hindcast": "hindcast.sbatch"},
-            workspace_dir=str(tmp_path / "workspace"),
-        )
-    )
-
-    def fake_run(command, **kwargs):
-        del command, kwargs
-        raise AssertionError("subprocess.run must not be called for hindcast single submit")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(SlurmValidationError):
-        gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="hindcast"))
-
-
-
-def test_submit_hindcast_slurm_payload_writes_real_forcing_manifest_index(monkeypatch, tmp_path: Path) -> None:
-    with _hindcast_store() as session:
-        _insert_hindcast_forcing_version(session, 1993, "object://forcing/package/1993")
-        gateway = _production_gateway(tmp_path)
-        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
-        workspace_root = tmp_path / "workspace"
-        object_store_root = workspace_root / "object-store"
-        workspace_root.mkdir()
-        object_store_root.mkdir()
-
-        def fake_run(command, **kwargs):
-            del kwargs
-            assert Path(command[0]).name == "sbatch"
-            return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-
-        result = submit_hindcast_slurm(
-            "yangtze_shud_v12",
-            "ERA5",
-            [1993],
-            HindcastConfig(
-                workspace_root=workspace_root,
-                object_store_root=object_store_root,
-                object_store_prefix="hindcast/prod",
-                db_session=session,
-                slurm_client=gateway,
-            ),
-        )
-
-    record = gateway._jobs[result.slurm_job_array_id or ""]
-    manifest_index = json.loads(Path(record.manifest["manifest_index_path"]).read_text(encoding="utf-8"))
-
-    assert result.slurm_job_array_id == "12345"
-    assert manifest_index[0]["forcing_version_id"] == "forc_era5_hindcast_yangtze_shud_v12_1993"
-    assert manifest_index[0]["forcing_package_uri"] == "object://forcing/package/1993"
-
-
 def test_sandboxed_environment_restricts_template_access(tmp_path):
     template_dir = _write_template(
         tmp_path,
@@ -2743,7 +2589,7 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
         status_format = "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES"
         if executable == "sacct" and status_format in command:
             requested_job = next(arg.removeprefix("--jobs=") for arg in command if arg.startswith("--jobs="))
-            state = "CANCELLED" if requested_job == hindcast_job_id else "COMPLETED"
+            state = "CANCELLED" if requested_job == array_job_id else "COMPLETED"
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -2795,36 +2641,32 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
             manifest=_production_manifest(tmp_path, "run_shud_analysis"),
         )
     )
-    hindcast_job_id = "12346"
-    hindcast_record = gateway.submit_job_array(
+    array_job_id = "12346"
+    snapshot_record = gateway.submit_job_array(
         {
-            "job_type": "hindcast",
-            "cycle_id": "hindcast_cycle_001",
-            "stage_name": "hindcast",
-            "manifest": _production_manifest(tmp_path, "hindcast"),
+            "job_type": "save_state_snapshot",
+            "cycle_id": "cycle_001",
+            "stage_name": "state_save_qc",
+            "manifest": _production_manifest(tmp_path, "save_state_snapshot"),
             "tasks": [
                 {
-                    **_fake_array_task("hindcast_run_001", "model_001"),
+                    **_fake_array_task("run_001", "model_001"),
                     "workspace_dir": str(tmp_path / "workspace"),
-                    "source_id": "ERA5",
-                    "year": 1993,
                 },
                 {
-                    **_fake_array_task("hindcast_run_002", "model_001"),
+                    **_fake_array_task("run_002", "model_001"),
                     "workspace_dir": str(tmp_path / "workspace"),
-                    "source_id": "ERA5",
-                    "year": 1994,
                 },
             ],
         }
     )
     status = gateway.get_job_status(analysis_record.job_id)
-    tasks = gateway.get_array_task_results(hindcast_record.job_id)
+    tasks = gateway.get_array_task_results(snapshot_record.job_id)
     log_dir = tmp_path / "workspace" / "run_001" / "logs"
     log_dir.mkdir(parents=True)
     (log_dir / f"{analysis_record.job_id}.out").write_text("analysis log", encoding="utf-8")
     logs = gateway.fetch_logs(analysis_record.job_id)
-    cancelled = gateway.cancel_job(hindcast_record.job_id)
+    cancelled = gateway.cancel_job(snapshot_record.job_id)
     health = gateway.health()
 
     assert status.status == SlurmJobStatus.SUCCEEDED

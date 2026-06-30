@@ -35,8 +35,8 @@ from packages.common.forecast_store import (
 # Coverage CTE chain — lifted verbatim from the candidate query's CTEs
 # (candidate_runs .. hydro_coverage). The ONLY deltas vs the request-time query:
 #   * candidate_runs has no source filter / no strict-identity / no LIMIT and no
-#     flood join (coverage is source-agnostic and flood-independent); it is
-#     optionally narrowed to a single run via %(run_id)s.
+#     product-specific join; it is optionally narrowed to a single run via
+#     %(run_id)s.
 #   * horizon / station-variable params are named (%(horizon)s, %(variables)s,
 #     %(variable_count)s) instead of positional.
 #   * the final projection emits the coverage columns keyed by run_id for upsert.
@@ -83,7 +83,7 @@ _COVERAGE_CTES = """
               ON fv.forcing_version_id = h.forcing_version_id
             WHERE (%(basin_id)s IS NULL OR bv.basin_id = %(basin_id)s)
               AND h.run_type = 'forecast'
-              AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+              AND h.status IN ('succeeded', 'parsed', 'published')
               AND h.cycle_time IS NOT NULL
               AND (%(run_id)s IS NULL OR h.run_id = %(run_id)s)
         ),
@@ -512,7 +512,7 @@ def _eligible_run_ids(connection: Any) -> list[str]:
             SELECT h.run_id
             FROM hydro.hydro_run h
             WHERE h.run_type = 'forecast'
-              AND h.status IN ('succeeded', 'parsed', 'frequency_done', 'published')
+              AND h.status IN ('succeeded', 'parsed', 'published')
               AND h.cycle_time IS NOT NULL
             ORDER BY h.cycle_time DESC, h.run_id DESC
             """,
