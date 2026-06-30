@@ -487,7 +487,7 @@ def _repair_calibrated_shud_context(context: PublishContext, *, workspace: Path)
             )
         if not calibration_repair_needed(probe):
             return context
-        repaired_root = workspace / "repaired-basins-calibration" / _slug_id(basin_slug)
+        repaired_root = workspace / "repaired-basins-soil-alpha" / _slug_id(basin_slug)
         if repaired_root.exists():
             shutil.rmtree(repaired_root, ignore_errors=True)
         repaired_target = repaired_root / basin_slug
