@@ -8602,6 +8602,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
     monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", "2026-06-27T00:00:00Z")
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
     monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(lambda: "state-manager-from-env"))
@@ -8640,6 +8641,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
     assert constructed[0]["config"].require_forecast_warm_start is True
     assert constructed[0]["config"].forecast_warm_start_required_from == _dt("2026-06-27T00:00:00Z")
+    assert constructed[0]["config"].terminal_stage == "forecast_state_save_qc"
     assert constructed[0]["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
     assert calls[0]["source"] == "gfs"
