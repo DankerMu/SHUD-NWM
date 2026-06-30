@@ -295,7 +295,7 @@ class FileOrchestrationJournalRepository:
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=None)
         except FileOrchestrationJournalError:
             return True
-        return any(_job_is_active(job) for job in rows.pipeline_jobs.values())
+        return any(_job_is_active(job) for job in _current_terminal_jobs(rows.pipeline_jobs.values()))
 
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         try:
@@ -310,7 +310,7 @@ class FileOrchestrationJournalRepository:
         return any(
             _job_is_active(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
-            for job in rows.pipeline_jobs.values()
+            for job in _current_terminal_jobs(rows.pipeline_jobs.values())
         )
 
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
@@ -320,14 +320,22 @@ class FileOrchestrationJournalRepository:
         except FileOrchestrationJournalError:
             return False
         hydro_run = rows.hydro_run
-        if not _row_matches_candidate(
+        hydro_run_matches = _row_matches_candidate(
             hydro_run,
             source_id=canonical_source_id,
             cycle_time=cycle_time,
             model_id=model_id,
-        ):
+        )
+        if hydro_run is not None and not hydro_run_matches:
             return False
-        return str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES
+        if hydro_run_matches and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
+            return True
+        return any(
+            _job_is_terminal_success(job)
+            and _job_is_current_terminal_completion(job)
+            and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+            for job in _current_terminal_jobs(rows.pipeline_jobs.values())
+        )
 
     def active_slurm_jobs(
         self,
@@ -355,7 +363,7 @@ class FileOrchestrationJournalRepository:
             ]
         jobs = [
             _public_scheduler_row(job)
-            for job in rows.pipeline_jobs.values()
+            for job in _current_terminal_jobs(rows.pipeline_jobs.values())
             if _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
             and _job_is_active(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
@@ -3753,6 +3761,21 @@ def _blocked_query_job(
 def _job_is_active(job: Mapping[str, Any]) -> bool:
     status = str(job.get("status") or "")
     return status not in ("", *TERMINAL_PIPELINE_STATUSES)
+
+
+def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
+    return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+def _job_is_current_terminal_completion(job: Mapping[str, Any]) -> bool:
+    stage = chain_repository_state._normalized_record_stage(job)
+    if chain_repository_state._compute_state_save_qc_terminal_enabled():
+        return stage == "state_save_qc"
+    return stage in {"parse", "state_save_qc", "publish"}
+
+
+def _current_terminal_jobs(jobs: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [job for job in jobs if chain_repository_state._record_allowed_for_compute_state_terminal(job)]
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

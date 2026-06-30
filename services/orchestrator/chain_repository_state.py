@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -11,6 +12,35 @@ DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 _FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc")
+_COMPUTE_STATE_SAVE_QC_TERMINAL_STAGE = "forecast_state_save_qc"
+_COMPUTE_STATE_SAVE_QC_ALLOWED_STAGES = {"download", "convert", "forcing", "forecast", "state_save_qc"}
+_COMPUTE_STATE_SAVE_QC_LEGACY_DOWNSTREAM_STAGES = {"parse", "frequency", "publish"}
+_STAGE_ALIASES = {
+    "download": "download",
+    "download_gfs": "download",
+    "download_source_cycle": "download",
+    "convert": "convert",
+    "convert_canonical": "convert",
+    "canonical": "convert",
+    "forcing": "forcing",
+    "produce_forcing": "forcing",
+    "produce_forcing_array": "forcing",
+    "forecast": "forecast",
+    "run_shud_forecast": "forecast",
+    "run_shud_forecast_array": "forecast",
+    "parse": "parse",
+    "parse_output": "parse",
+    "parse_output_array": "parse",
+    "state_save_qc": "state_save_qc",
+    "save_state_snapshot": "state_save_qc",
+    "save_state_snapshot_array": "state_save_qc",
+    "frequency": "frequency",
+    "compute_frequency": "frequency",
+    "compute_frequency_array": "frequency",
+    "flood_frequency": "frequency",
+    "publish": "publish",
+    "publish_tiles": "publish",
+}
 _bounded_candidate_state_event = chain_source_cycle._bounded_candidate_state_event
 _candidate_failed_task_from_events = chain_source_cycle._candidate_failed_task_from_events
 _datetime_sort_key = chain_source_cycle._datetime_sort_key
@@ -32,6 +62,38 @@ def _stage_after(stage: str | None) -> str | None:
     if index + 1 >= len(_FORECAST_STAGE_ORDER):
         return None
     return _FORECAST_STAGE_ORDER[index + 1]
+
+
+def _compute_state_save_qc_terminal_enabled() -> bool:
+    return os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "").strip() == _COMPUTE_STATE_SAVE_QC_TERMINAL_STAGE
+
+
+def _normalized_record_stage(record: Mapping[str, Any]) -> str | None:
+    candidates: list[Any] = [record.get("stage"), record.get("job_type")]
+    details = record.get("details")
+    if isinstance(details, Mapping):
+        candidates.extend([details.get("stage"), details.get("job_type")])
+    entity_id = str(record.get("entity_id") or record.get("job_id") or "")
+    if "frequency" in entity_id:
+        candidates.append("frequency")
+    for raw in candidates:
+        if raw in (None, ""):
+            continue
+        stage = _STAGE_ALIASES.get(str(raw), str(raw))
+        if stage:
+            return stage
+    return None
+
+
+def _record_allowed_for_compute_state_terminal(record: Mapping[str, Any]) -> bool:
+    if not _compute_state_save_qc_terminal_enabled():
+        return True
+    stage = _normalized_record_stage(record)
+    if stage in _COMPUTE_STATE_SAVE_QC_ALLOWED_STAGES:
+        return True
+    if stage in _COMPUTE_STATE_SAVE_QC_LEGACY_DOWNSTREAM_STAGES:
+        return False
+    return True
 
 
 def _manual_retry_previous_job_ids(events: list[dict[str, Any]]) -> dict[str, tuple[str, dict[str, Any]]]:
@@ -505,8 +567,16 @@ def candidate_state_from_rows(
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     job_limit = max(int(job_limit), 1)
     event_limit = max(int(event_limit), 1)
-    indexed_jobs = [(index, dict(job)) for index, job in enumerate(pipeline_jobs)]
-    indexed_events = [(index, dict(event)) for index, event in enumerate(pipeline_events)]
+    indexed_jobs = [
+        (index, dict(job))
+        for index, job in enumerate(pipeline_jobs)
+        if _record_allowed_for_compute_state_terminal(job)
+    ]
+    indexed_events = [
+        (index, dict(event))
+        for index, event in enumerate(pipeline_events)
+        if _record_allowed_for_compute_state_terminal(event)
+    ]
     jobs_total = len(indexed_jobs)
     jobs_truncated = jobs_total > job_limit
     jobs = [
