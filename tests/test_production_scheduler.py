@@ -4131,6 +4131,37 @@ def test_full_tuple_and_candidate_scoped_m23_proofs_remain_authoritative(
     assert "pipeline_jobs[0]" not in validation["legacy_non_authoritative"]
 
 
+def test_candidate_state_decision_ignores_local_jobs_as_active_slurm() -> None:
+    candidate = _scheduler_candidate_fixture()
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+            "active_slurm_jobs": [
+                {
+                    "job_id": "job_local_publish",
+                    "slurm_job_id": "local",
+                    "status": "running",
+                    "stage": "publish",
+                }
+            ],
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_local_publish",
+                    "slurm_job_id": "local",
+                    "status": "running",
+                    "stage": "publish",
+                }
+            ],
+        },
+    )
+
+    assert decision is None
+
+
 def test_candidate_state_decision_scheduler_monkeypatch_active_jobs_compat(monkeypatch: Any) -> None:
     candidate = _scheduler_candidate_fixture()
     patched_job = {

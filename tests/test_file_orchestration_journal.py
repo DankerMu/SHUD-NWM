@@ -317,6 +317,29 @@ def test_file_orchestration_journal_read_contract_active_completed_and_contexts(
     assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_b") is True
 
 
+def test_file_orchestration_journal_active_slurm_jobs_ignores_local_jobs(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    local_job = _active_job(cycle_time)
+    local_job["job_id"] = "job_local_publish"
+    local_job["job_type"] = "publish_tiles"
+    local_job["stage"] = "publish"
+    local_job["slurm_job_id"] = "local"
+    real_job = _active_job(cycle_time)
+    real_job["job_id"] = "job_forcing"
+    real_job["stage"] = "forcing"
+    real_job["slurm_job_id"] = "3001"
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[local_job, real_job]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    active = repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+
+    assert [job["slurm_job_id"] for job in active] == ["3001"]
+
+
 def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"

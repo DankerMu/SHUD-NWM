@@ -356,7 +356,7 @@ class FileOrchestrationJournalRepository:
         jobs = [
             _public_scheduler_row(job)
             for job in rows.pipeline_jobs.values()
-            if job.get("slurm_job_id") not in (None, "")
+            if _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
             and _job_is_active(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         ]
@@ -3226,6 +3226,11 @@ def _file_retry_job_value(job: Any, field: str) -> Any:
 def _file_retry_job_text(job: Any, field: str) -> str | None:
     value = _file_retry_job_value(job, field)
     return str(value) if value not in (None, "") else None
+
+
+def _file_journal_real_slurm_job_id(value: Any) -> bool:
+    text = str(value or "")
+    return bool(text and text.lower() != "local")
 
 
 def _file_retry_job_int(job: Any, field: str) -> int:

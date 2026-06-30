@@ -149,9 +149,14 @@ def sync_cycle_statuses(self: Any, cycle_id: str) -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
     deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
     for job in self._query_pipeline_jobs_by_cycle(cycle_id):
-        if str(job.get("status")) in _terminal_job_statuses() or not job.get("slurm_job_id"):
+        slurm_job_id = str(job.get("slurm_job_id") or "")
+        if (
+            str(job.get("status")) in _terminal_job_statuses()
+            or not slurm_job_id
+            or slurm_job_id.lower() == "local"
+        ):
             continue
-        gateway_job = _coerce_mapping(self.slurm_client.get_job_status(str(job["slurm_job_id"])))
+        gateway_job = _coerce_mapping(self.slurm_client.get_job_status(slurm_job_id))
         new_status = _status_from_gateway_job(gateway_job)
         if new_status == str(job.get("status")):
             continue
@@ -159,7 +164,7 @@ def sync_cycle_statuses(self: Any, cycle_id: str) -> list[dict[str, Any]]:
             self._display_log_publication_for_pipeline_job(job) if new_status in _terminal_job_statuses() else None
         )
         publication_attempt = (
-            self._try_publish_log_for_advertise(str(job["slurm_job_id"]), publication)
+            self._try_publish_log_for_advertise(slurm_job_id, publication)
             if publication is not None
             else None
         )

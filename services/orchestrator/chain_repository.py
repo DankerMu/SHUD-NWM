@@ -169,6 +169,7 @@ class PsycopgOrchestratorRepository:
             LEFT JOIN hydro.hydro_run h ON h.run_id = pj.run_id
             WHERE pj.cycle_id = %s
               AND pj.slurm_job_id IS NOT NULL
+              AND lower(pj.slurm_job_id) <> 'local'
               AND pj.status NOT IN (
                 'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
               )

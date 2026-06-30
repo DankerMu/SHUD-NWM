@@ -489,13 +489,21 @@ def _state_output_uri(state: Mapping[str, Any]) -> str | None:
 def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     explicit = state.get("active_slurm_jobs")
     if isinstance(explicit, Sequence) and not isinstance(explicit, str | bytes | bytearray):
-        return [_evidence_safe(dict(job)) for job in explicit if isinstance(job, Mapping)]
+        return [
+            _evidence_safe(dict(job))
+            for job in explicit
+            if isinstance(job, Mapping) and _job_has_real_slurm_binding(job)
+        ]
     active: list[dict[str, Any]] = []
     for job in _state_jobs(state):
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
-        if job.get("slurm_job_id") and status in ACTIVE_PIPELINE_STATUSES:
+        if _job_has_real_slurm_binding(job) and status in ACTIVE_PIPELINE_STATUSES:
             active.append(_job_state_evidence(job))
     return active
+
+def _job_has_real_slurm_binding(job: Mapping[str, Any]) -> bool:
+    slurm_job_id = str(job.get("slurm_job_id") or "")
+    return bool(slurm_job_id and slurm_job_id.lower() != "local") or job.get("array_task_id") not in (None, "")
 
 def _job_is_unsubmitted_auto_retry_placeholder(job: Mapping[str, Any]) -> bool:
     status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")

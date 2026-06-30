@@ -4304,6 +4304,37 @@ def test_sync_cycle_statuses_emits_published_log_uri_when_publish_root_configure
     assert status_event["details"]["slurm"]["log_uri"] == expected
 
 
+def test_sync_cycle_statuses_skips_local_jobs(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    repository.jobs["job_cycle_gfs_2026050100_publish"] = {
+        "job_id": "job_cycle_gfs_2026050100_publish",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "publish_tiles",
+        "slurm_job_id": "local",
+        "model_id": "model_0",
+        "status": "running",
+        "stage": "publish",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    updates = orchestrator.sync_cycle_statuses(cycle_id)
+
+    assert updates == []
+    assert client.poll_counts == {}
+    assert repository.jobs["job_cycle_gfs_2026050100_publish"]["status"] == "running"
+    assert repository.events == []
+
+
 def test_sync_cycle_statuses_publish_failure_does_not_advertise_missing_published_log_uri(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
