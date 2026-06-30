@@ -304,14 +304,20 @@ class FileOrchestrationJournalRepository:
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return True
+        candidate_jobs = [
+            job
+            for job in _current_terminal_jobs(rows.pipeline_jobs.values())
+            if _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+        ]
+        has_terminal_completion = any(
+            _job_is_terminal_success(job) and _job_is_current_terminal_completion(job) for job in candidate_jobs
+        )
         hydro_run = rows.hydro_run
         if _row_matches_candidate(hydro_run, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id):
-            if str(hydro_run.get("status") or "") in ACTIVE_HYDRO_STATUSES:
+            if str(hydro_run.get("status") or "") in ACTIVE_HYDRO_STATUSES and not has_terminal_completion:
                 return True
         return any(
-            _job_is_active(job)
-            and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
-            for job in _current_terminal_jobs(rows.pipeline_jobs.values())
+            _job_is_active(job) for job in candidate_jobs
         )
 
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

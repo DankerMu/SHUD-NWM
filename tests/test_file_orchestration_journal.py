@@ -435,6 +435,34 @@ def test_file_orchestration_journal_treats_reservation_lost_as_terminal(tmp_path
     assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
+def test_file_orchestration_journal_terminal_state_save_overrides_hydro_created(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    state_save = _active_job(cycle_time)
+    state_save.update(
+        {
+            "job_id": "job_cycle_gfs_2026062800_model_a_state_save_qc",
+            "job_type": "save_state_snapshot_array",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+            "slurm_job_id": "3002",
+            "finished_at": "2026-06-28T00:04:00Z",
+        }
+    )
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[state_save]),
+    )
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
 def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
