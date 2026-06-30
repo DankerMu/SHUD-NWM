@@ -1675,7 +1675,7 @@ def test_canonical_incomplete_readiness_blocks_forcing_candidate_submission(tmp_
                 forecast_hours=(0, 3),
                 policy_identity=policy,
                 source_object_identity=source_object,
-                canonical_product_id="canon_gfs_2026052106",
+                canonical_product_id=f"canon_gfs_{format_cycle_time(cycle_time)}",
                 model_id="model_a",
                 basin_id="basin_a",
             ).evidence
@@ -1976,9 +1976,9 @@ def _raw_ready_state(cycle_time: datetime, *, source_id: str = "gfs") -> dict[st
 def test_fresh_cycle_with_zero_canonical_blocks_without_node27_raw_manifest(
     tmp_path: Path,
 ) -> None:
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
-    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052112/manifest.json"}
     # A forcing producer that would raise if ever invoked: without node-27 raw,
     # production must block before any in-process or Slurm work.
     forcing_producer = FakeForcingProducer(error=RuntimeError("in-process forcing must be skipped for fresh ingestion"))
@@ -1989,7 +1989,7 @@ def test_fresh_cycle_with_zero_canonical_blocks_without_node27_raw_manifest(
         adapters={
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=policy,
                 source_object_identity=source_object,
             )
@@ -16597,6 +16597,65 @@ def test_db_free_scheduler_config_parses_canonical_env_matrix(monkeypatch: Any, 
     assert set(evidence["db_free_runtime"]["canonical_path_fields"]) == set(_DB_FREE_PATH_ENV_KEYS)
 
 
+def test_db_free_default_cycle_discovery_uses_nfs_raw_manifest_not_network_adapters(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    def _network_adapters_must_not_be_built() -> dict[str, FakeAdapter]:
+        raise AssertionError("DB-free scheduler must not build network source adapters")
+
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        _network_adapters_must_not_be_built,
+    )
+
+    scheduler = _RealProductionScheduler(
+        ProductionSchedulerConfig(now=cycle_time, dry_run=True),
+        registry=FakeRegistry([]),
+    )
+
+    cycles, evidence = scheduler._discover_cycles(cycle_time)
+
+    assert any(
+        cycle.discovery.source_id == "gfs"
+        and cycle.discovery.cycle_time == cycle_time
+        and cycle.discovery.available is True
+        and cycle.discovery.probe_uri is None
+        for cycle in cycles
+    )
+    source_cycle = next(
+        item
+        for item in evidence
+        if item.get("source_id") == "gfs" and item.get("cycle_time_utc") == "2026-05-21T12:00:00Z"
+    )
+    assert source_cycle["discovery_evidence"]["source"] == "node27_nfs_raw_manifest"
+    assert source_cycle["discovery_evidence"]["manifest_path"] == "[local-path]"
+
+
+def test_db_free_raw_manifest_discovery_ignores_stale_06_18_allowed_hours(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    config = ProductionSchedulerConfig(
+        now=_dt("2026-05-21T12:00:00Z"),
+        sources=("gfs",),
+        allowed_cycle_hours_utc=(0, 6, 12, 18),
+    )
+
+    adapter = scheduler_module._db_free_default_adapters(config)["gfs"]
+    discoveries = adapter.discover_cycles("2026-05-21")
+
+    assert {discovery.cycle_hour for discovery in discoveries} == {0, 12}
+
+
 def test_legacy_non_db_free_postgres_config_remains_valid(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
@@ -17295,7 +17354,7 @@ def test_file_canonical_readiness_publisher_and_provider_use_existing_evaluator(
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -17870,7 +17929,7 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -17879,13 +17938,17 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=_dt("2026-05-21T12:00:00Z"),
     )
+    _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "true")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._default_adapters",
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=fixture["policy_identity"],
                 source_object_identity=fixture["source_object_identity"],
             )
@@ -18590,16 +18653,16 @@ def test_db_free_file_providers_refresh_between_scheduler_passes(
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     policy_identity = {"source": "gfs", "forecast_hours": list(_gfs_default_forecast_hours())}
-    source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052112/manifest.json"}
     monkeypatch.setattr(
         "services.orchestrator.scheduler._default_adapters",
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=policy_identity,
                 source_object_identity=source_object_identity,
             )
@@ -18619,6 +18682,9 @@ def test_db_free_file_providers_refresh_between_scheduler_passes(
         policy_identity=policy_identity,
         source_object_identity=source_object_identity,
     )
+    _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     assert fixture["policy_identity"] == policy_identity
     second = scheduler.run_once()
 
@@ -18834,7 +18900,7 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -18853,7 +18919,7 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=fixture["policy_identity"],
                 source_object_identity=fixture["source_object_identity"],
             )
@@ -18861,7 +18927,12 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
     )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
-        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        ProductionSchedulerConfig(
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+        ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -18881,7 +18952,7 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
     assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert submitted_basin["state_evidence"]["restart_stage"] == "convert"
-    assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052106_convert_model_a"
+    assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052112_convert_model_a"
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
     rendered_submission = json.dumps(
         {"evidence": result.evidence},
@@ -18898,7 +18969,7 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -18916,7 +18987,7 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=fixture["policy_identity"],
                 source_object_identity=fixture["source_object_identity"],
             )
@@ -18924,7 +18995,12 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
     )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
-        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        ProductionSchedulerConfig(
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+        ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -18956,7 +19032,7 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     expected_reason: str,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -18990,7 +19066,7 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=fixture["policy_identity"],
                 source_object_identity=fixture["source_object_identity"],
             )
@@ -18998,7 +19074,12 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
-        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        ProductionSchedulerConfig(
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+        ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -19020,7 +19101,7 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
     from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
 
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
     fixture = _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
@@ -19039,7 +19120,7 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T12:00:00Z", True)],
                 policy_identity=fixture["policy_identity"],
                 source_object_identity=fixture["source_object_identity"],
             )
@@ -19091,8 +19172,8 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
         source_id="gfs",
         cycle_time=cycle_time,
         model_id="model_a",
-        run_id="fcst_gfs_2026052106_model_a",
-        forcing_version_id="forc_gfs_2026052106_model_a",
+        run_id="fcst_gfs_2026052112_model_a",
+        forcing_version_id="forc_gfs_2026052112_model_a",
         candidate_id="candidate_a",
     )
 

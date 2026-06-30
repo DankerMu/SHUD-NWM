@@ -49,6 +49,7 @@ from services.orchestrator.scheduler_adapters import (  # noqa: F401
     ProductionOrchestratorFactory,
     _active_repository_from_env,
     _canonical_readiness_provider_from_env,
+    _db_free_default_adapters,
     _default_adapters,
     _forcing_producer_from_env,
     _MetStoreCanonicalReadinessProvider,

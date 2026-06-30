@@ -89,7 +89,7 @@ class ProductionScheduler:
         self._reconcile_sacct_query = reconcile_sacct_query
         if db_free_required:
             self.registry = registry if registry is not None else _db_free_file_registry_from_config(self.config)
-            self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
+            self.adapters = dict(adapters if adapters is not None else _scheduler._db_free_default_adapters(self.config))
         else:
             self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
             self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
