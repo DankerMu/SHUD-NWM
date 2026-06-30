@@ -863,6 +863,17 @@ def test_parser_oversized_payload_is_unavailable_without_rows(
     _assert_parser_handoff_evidence(result, case_root)
 
 
+def test_handoff_payload_read_limit_supports_runtime_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handoff_module, "MAX_HANDOFF_PAYLOAD_BYTES", 64)
+    monkeypatch.setenv(handoff_module.MAX_HANDOFF_PAYLOAD_BYTES_ENV, "2048")
+
+    assert handoff_module._max_handoff_payload_bytes() == 2048
+
+    monkeypatch.setenv(handoff_module.MAX_HANDOFF_PAYLOAD_BYTES_ENV, "not-an-integer")
+
+    assert handoff_module._max_handoff_payload_bytes() == 64
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected_reason"),
     [

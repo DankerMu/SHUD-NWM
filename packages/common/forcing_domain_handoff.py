@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import Counter
 from collections.abc import Mapping
@@ -17,7 +18,9 @@ CONTRACT_ID = "nhms.forcing_domain_handoff.v1"
 PACKAGE_CONTRACT_ID = "nhms.forcing_domain_handoff.package.v1"
 SCHEMA_VERSION = "1.0"
 MAX_HANDOFF_MANIFEST_BYTES = 16 * 1024 * 1024
-MAX_HANDOFF_PAYLOAD_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_HANDOFF_PAYLOAD_BYTES = 512 * 1024 * 1024
+MAX_HANDOFF_PAYLOAD_BYTES = DEFAULT_MAX_HANDOFF_PAYLOAD_BYTES
+MAX_HANDOFF_PAYLOAD_BYTES_ENV = "NHMS_FORCING_HANDOFF_MAX_PAYLOAD_BYTES"
 
 FORCING_DOMAIN_PACKAGE_MANIFEST_URI_FIELD = "forcing_domain_package_manifest_uri"
 FORCING_DOMAIN_PACKAGE_MANIFEST_CHECKSUM_FIELD = "forcing_domain_package_manifest_checksum_sha256"
@@ -95,6 +98,17 @@ PAYLOAD_TABLES = {
     "station_timeseries": "met.forcing_station_timeseries",
     "interpolation_weights": "met.interp_weight",
 }
+
+
+def _max_handoff_payload_bytes() -> int:
+    raw_value = os.environ.get(MAX_HANDOFF_PAYLOAD_BYTES_ENV)
+    if raw_value is None or not raw_value.strip():
+        return int(MAX_HANDOFF_PAYLOAD_BYTES)
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return int(MAX_HANDOFF_PAYLOAD_BYTES)
+    return max(value, 1)
 PARSED_PAYLOAD_TABLE_ROW_FIELDS = {
     "station_inventory": (
         "station_id",
@@ -511,7 +525,7 @@ def _read_parser_payload_rows(
             continue
 
         try:
-            content = store.read_bytes_limited(payload_key, max_bytes=MAX_HANDOFF_PAYLOAD_BYTES)
+            content = store.read_bytes_limited(payload_key, max_bytes=_max_handoff_payload_bytes())
         except Exception as error:
             reasons.append(
                 _reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}.uri", role=role, detail=str(error))
@@ -1550,7 +1564,7 @@ def _validate_payloads(
             continue
 
         try:
-            content = store.read_bytes_limited(payload_key, max_bytes=MAX_HANDOFF_PAYLOAD_BYTES)
+            content = store.read_bytes_limited(payload_key, max_bytes=_max_handoff_payload_bytes())
         except Exception as error:
             reasons.append(
                 _reason(REASON_PAYLOAD_MISSING, field=f"payloads.{role}.uri", role=role, detail=str(error))
