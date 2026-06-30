@@ -80,12 +80,27 @@ def _candidate_state_decision(
 
     hydro_status = _state_status(decision_state, "hydro_status", "hydro_run_status")
     pipeline_status = _state_status(decision_state, "pipeline_status", "job_status", "status")
-    if pipeline_status in ACTIVE_PIPELINE_STATUSES and _state_has_only_unsubmitted_auto_retry_placeholders(
-        decision_state,
-    ):
+    stale_hydro_placeholder_superseded_by_auto_retry = False
+    only_unsubmitted_auto_retry_placeholders = (
+        pipeline_status in ACTIVE_PIPELINE_STATUSES
+        and _state_has_only_unsubmitted_auto_retry_placeholders(
+            decision_state,
+        )
+    )
+    if only_unsubmitted_auto_retry_placeholders:
+        if hydro_status in {"created", "staged", "submitted"}:
+            stale_hydro_placeholder_superseded_by_auto_retry = True
+            hydro_status = None
         pipeline_status = None
     manual_retry_requested = _manual_retry_requested(decision_state)
     active_truth = _latest_manual_retry_blocker(decision_state)
+    if (
+        stale_hydro_placeholder_superseded_by_auto_retry
+        and active_truth is not None
+        and active_truth.get("source") == "hydro_state"
+        and str(active_truth.get("status") or "") in {"created", "staged", "submitted"}
+    ):
+        active_truth = None
     active_truth_status = str(active_truth.get("status") or "") if active_truth is not None else None
     manual_retry_supersedes_stale_hydro_placeholder = (
         manual_retry_requested

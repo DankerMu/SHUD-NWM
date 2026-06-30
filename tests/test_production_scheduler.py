@@ -12793,6 +12793,59 @@ def test_active_cycle_pipeline_job_is_skipped_as_active(tmp_path: Path, job_stat
     assert orchestrator.calls == []
 
 
+def test_unsubmitted_auto_retry_placeholder_does_not_keep_hydro_created_active(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "created",
+            "pipeline_status": "pending",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_1",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": "forecast",
+                    "retry_count": 1,
+                    "slurm_job_id": "1001",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_1_retry_2",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": "forecast",
+                    "retry_count": 2,
+                    "slurm_job_id": "1002",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_model_a_forecast_retry_1_retry_2_retry_3",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "pending",
+                    "stage": "forecast",
+                    "retry_count": 3,
+                    "slurm_job_id": None,
+                },
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert [item["model_id"] for item in result.evidence["candidates"]] == ["model_a"]
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls[0]["basins"][0]["model_id"] == "model_a"
+
+
 @pytest.mark.parametrize(
     "job_status",
     ["succeeded", "partially_failed", "failed", "cancelled", "submission_failed", "permanently_failed", None],
