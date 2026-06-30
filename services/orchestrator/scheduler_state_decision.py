@@ -84,19 +84,38 @@ def _candidate_state_decision(
         decision_state,
     ):
         pipeline_status = None
-    if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
-        return CandidateStateDecision(
-            "skip",
-            "active_duplicate_pipeline",
-            {
-                **evidence,
-                "decision": "skip_active",
-                "active_status": hydro_status or pipeline_status,
-                "replacement_submitted": False,
-            },
-        )
+    manual_retry_requested = _manual_retry_requested(decision_state)
     active_truth = _latest_manual_retry_blocker(decision_state)
-    if active_truth is not None and active_truth.get("active") is True:
+    active_truth_status = str(active_truth.get("status") or "") if active_truth is not None else None
+    manual_retry_supersedes_stale_hydro_placeholder = (
+        manual_retry_requested
+        and hydro_status in {"created", "staged", "submitted"}
+        and (
+            pipeline_status in FAILED_PIPELINE_STATUSES
+            or (
+                active_truth is not None
+                and active_truth.get("active") is not True
+                and active_truth_status in FAILED_PIPELINE_STATUSES
+            )
+        )
+    )
+    if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
+        if not manual_retry_supersedes_stale_hydro_placeholder:
+            return CandidateStateDecision(
+                "skip",
+                "active_duplicate_pipeline",
+                {
+                    **evidence,
+                    "decision": "skip_active",
+                    "active_status": hydro_status or pipeline_status,
+                    "replacement_submitted": False,
+                },
+            )
+    if (
+        active_truth is not None
+        and active_truth.get("active") is True
+        and not manual_retry_supersedes_stale_hydro_placeholder
+    ):
         return CandidateStateDecision(
             "skip",
             "active_duplicate_pipeline",
@@ -147,7 +166,7 @@ def _candidate_state_decision(
             },
         )
 
-    if _manual_retry_requested(decision_state):
+    if manual_retry_requested:
         return CandidateStateDecision(
             "retry",
             "manual_retry_requested",

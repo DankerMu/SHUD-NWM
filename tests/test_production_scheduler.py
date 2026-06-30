@@ -5122,6 +5122,64 @@ def test_parent_event_with_event_level_candidate_proof_remains_authoritative(
     assert "pipeline_events[0]" not in validation["legacy_non_authoritative"]
 
 
+def test_manual_retry_overrides_stale_created_hydro_placeholder_after_permanent_pipeline_failure() -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    failed_job_id = "job_cycle_gfs_2026052106_model_a_forecast_retry_3"
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "created",
+        "pipeline_status": "permanently_failed",
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": failed_job_id,
+                "status": "permanently_failed",
+                "stage": "forecast",
+                "retry_count": 3,
+                "error_code": "NODE_FAILURE",
+                "updated_at": "2026-05-21T06:57:16Z",
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 101,
+                "entity_id": failed_job_id,
+                "event_type": "permanently_failed",
+                "status_from": "failed",
+                "status_to": "permanently_failed",
+                "created_at": "2026-05-21T06:57:16Z",
+                "details": {**identity, "final_retry_count": 3, "last_error": "NODE_FAILURE"},
+            },
+            {
+                "event_id": 102,
+                "entity_id": failed_job_id,
+                "event_type": "retry",
+                "status_from": "permanently_failed",
+                "status_to": "manual_repair_requested",
+                "created_at": "2026-05-21T07:06:07Z",
+                "details": {
+                    **identity,
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "retry_count": 4,
+                    "previous_job_id": failed_job_id,
+                    "prior_failure_reason": "NODE_FAILURE",
+                },
+            },
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "manual_retry_requested"
+    assert decision.evidence["manual_retry"]["new_attempt"] == 4
+
+
 @pytest.mark.parametrize(
     "state",
     [
