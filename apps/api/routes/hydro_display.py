@@ -838,7 +838,7 @@ def _default_layer_catalog(
                     basin_version_id=basin_version_id,
                     river_network_version_id=river_network_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
-                    national=national and layer_id == "discharge",
+                    national=layer_id == "discharge",
                 ),
             )
         )

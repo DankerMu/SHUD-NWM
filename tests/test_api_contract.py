@@ -13,6 +13,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.routes import hydro_display as hydro_display_routes
 from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
@@ -1362,6 +1363,39 @@ def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
         layer_start:layer_metadata_start
     ]
 
+
+def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None:
+    class _ValidTimes:
+        valid_times = ["2026-06-27T12:00:00Z"]
+        limit = 24
+        observed_count = 1
+        truncated = False
+
+    original_valid_times = hydro_display_routes.national_discharge_valid_times
+    original_mvt_enabled = hydro_display_routes._mvt_live_postgis_enabled
+    try:
+        hydro_display_routes.national_discharge_valid_times = lambda _session: _ValidTimes()  # type: ignore[assignment]
+        hydro_display_routes._mvt_live_postgis_enabled = lambda _session: False  # type: ignore[assignment]
+        layers = hydro_display_routes._default_layer_catalog(
+            object(),
+            run_id="run_1",
+            source_version="run-source-v1",
+            basin_version_id="basin_v1",
+            river_network_version_id="river_v1",
+            river_network_source_version="river-source-v1",
+            national=False,
+        )
+    finally:
+        hydro_display_routes.national_discharge_valid_times = original_valid_times  # type: ignore[assignment]
+        hydro_display_routes._mvt_live_postgis_enabled = original_mvt_enabled  # type: ignore[assignment]
+
+    by_id = {layer.layer_id: layer for layer in layers}
+    discharge_metadata = by_id["discharge"].metadata or {}
+    river_metadata = by_id["river-network"].metadata or {}
+    assert discharge_metadata["source_refs"] == {}
+    assert discharge_metadata["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert river_metadata["source_refs"]["basin_version_id"] == "basin_v1"
+    assert river_metadata["source_refs"]["river_network_version_id"] == "river_v1"
 
 
 def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
