@@ -205,11 +205,20 @@ def build_cycle_stage_manifest(
         "scheduler_db_free_required": os.getenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", ""),
         "scheduler_allowed_roots": os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", ""),
         "scheduler_registry_backend": os.getenv("NHMS_SCHEDULER_REGISTRY_BACKEND", ""),
-        "scheduler_registry_manifest": os.getenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", ""),
+        "scheduler_registry_manifest": _slurm_runtime_scheduler_path(
+            "NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST",
+            "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        ),
         "scheduler_canonical_readiness_backend": os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", ""),
-        "scheduler_canonical_readiness_index": os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", ""),
+        "scheduler_canonical_readiness_index": _slurm_runtime_scheduler_path(
+            "NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX",
+            "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        ),
         "scheduler_state_index_backend": os.getenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", ""),
-        "scheduler_state_index": os.getenv("NHMS_SCHEDULER_STATE_INDEX", ""),
+        "scheduler_state_index": _slurm_runtime_scheduler_path(
+            "NHMS_SLURM_SCHEDULER_STATE_INDEX",
+            "NHMS_SCHEDULER_STATE_INDEX",
+        ),
         "total_basins": len(context.all_basins),
         "active_basins": len(context.active_basins),
         "manifest_index": manifest_index_entries,
@@ -247,6 +256,12 @@ def build_cycle_stage_manifest(
         manifest["basins"] = list(context.active_basins)
         manifest["quality_states"] = quality_states
     return manifest
+
+
+def _slurm_runtime_scheduler_path(slurm_env_key: str, control_env_key: str) -> str:
+    """Return the compute-node-visible scheduler path for Slurm stage manifests."""
+
+    return str(os.getenv(slurm_env_key) or os.getenv(control_env_key) or "")
 
 
 def write_cycle_manifest_index(

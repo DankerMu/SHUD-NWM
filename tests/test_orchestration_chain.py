@@ -1419,6 +1419,63 @@ def test_cycle_stage_manifest_forwards_db_free_file_provider_paths(
     assert manifest["scheduler_state_index"] == str(state_index)
 
 
+def test_cycle_stage_manifest_prefers_slurm_runtime_db_free_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import chain_manifests
+
+    control_registry_manifest = tmp_path / "ghdc" / "scheduler" / "registry" / "manifest-last.json"
+    control_readiness_index = tmp_path / "ghdc" / "scheduler" / "canonical-readiness" / "index-last.json"
+    control_state_index = tmp_path / "ghdc" / "scheduler" / "state" / "index-last.json"
+    slurm_registry_manifest = tmp_path / "scratch" / "scheduler" / "registry" / "manifest-last.json"
+    slurm_readiness_index = tmp_path / "scratch" / "scheduler" / "canonical-readiness" / "index-last.json"
+    slurm_state_index = tmp_path / "scratch" / "scheduler" / "state" / "index-last.json"
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", str(control_registry_manifest))
+    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", str(control_readiness_index))
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(control_state_index))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", str(slurm_registry_manifest))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX", str(slurm_readiness_index))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_STATE_INDEX", str(slurm_state_index))
+    orchestrator = types.SimpleNamespace(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="s3://nhms",
+        ),
+        _reindexed_manifest_entries=lambda _basins: [],
+    )
+    context = CycleOrchestrationContext(
+        source_id="IFS",
+        cycle_time=_dt("2026-06-27T00:00:00Z"),
+        cycle_id="ifs_2026062700",
+        run_id="cycle_ifs_2026062700",
+        all_basins=[],
+        active_basins=[],
+    )
+    stage = StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    )
+
+    manifest = chain_manifests.build_cycle_stage_manifest(orchestrator, stage, context)
+
+    assert manifest["scheduler_registry_manifest"] == str(slurm_registry_manifest)
+    assert manifest["scheduler_canonical_readiness_index"] == str(slurm_readiness_index)
+    assert manifest["scheduler_state_index"] == str(slurm_state_index)
+    assert str(control_registry_manifest) not in json.dumps(manifest)
+    assert str(control_readiness_index) not in json.dumps(manifest)
+    assert str(control_state_index) not in json.dumps(manifest)
+
+
 def test_chain_array_accounting_legacy_parse_uses_current_array_task_log_uri_binding(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
