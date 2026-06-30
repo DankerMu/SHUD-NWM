@@ -23,6 +23,16 @@ def test_package_version_for_nested_basin_is_safe_and_content_stable() -> None:
     assert "/" not in first
 
 
+def test_package_version_changes_when_source_identity_moves() -> None:
+    old_model = _inventory_model("kashigeer")
+    new_model = dict(old_model)
+    new_model["source_path"] = "/volume/nwm/Basins/kashigeer"
+    new_model["resolved_source_path"] = "/volume/nwm/Basins/kashigeer"
+    new_model["input_dir"] = "/volume/nwm/Basins/kashigeer/input/kashigeer"
+
+    assert registry_script.package_version_for_model(old_model) != registry_script.package_version_for_model(new_model)
+
+
 def test_package_version_template_rejects_unsafe_path_segment() -> None:
     with pytest.raises(registry_script.SchedulerRegistryPublishError) as exc_info:
         registry_script.package_version_for_model(

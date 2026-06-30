@@ -19,7 +19,7 @@ The MVP SHALL have a verifiable QHH smoke chain covering backend data flow, fron
 #### Scenario: No synthetic data
 - **WHEN** any smoke step lacks required data
 - **THEN** the evidence records an unavailable, restricted, missing, or failed reason
-- **AND** it does not count fabricated station curves, fabricated river curves, fabricated return periods, or padded IFS horizons as success.
+- **AND** it does not count fabricated station curves, fabricated river curves, or padded IFS horizons as success.
 
 ### Requirement: MVP release checklist
 
@@ -31,9 +31,9 @@ The MVP release checklist SHALL distinguish required internal MVP proof from lat
 
 #### Scenario: Scoped exclusions
 - **WHEN** release notes or progress documents describe MVP readiness
-- **THEN** they list nationwide all-basin coverage, water level `stage`, CLDAS, ERA5 near-real-time, real national MVT/PBF, live IdP, live alert sink, live rollback, final production readiness, and QHH real flood-frequency-curve readiness as excluded from the MVP
+- **THEN** they list nationwide all-basin coverage, water level `stage`, CLDAS, ERA5 near-real-time, real national MVT/PBF, live IdP, live alert sink, live rollback, and final production readiness as excluded from the MVP
 - **AND** they do not claim final production readiness without accepted live receipts.
-- **AND** `no_frequency_curve` quality state is acceptable for MVP display only when return periods and warning levels are not fabricated.
+- **AND** retired supplemental quality states are acceptable for MVP display only when they are not fabricated.
 
 #### Scenario: Validation commands
 - **WHEN** implementation PRs for this change are completed

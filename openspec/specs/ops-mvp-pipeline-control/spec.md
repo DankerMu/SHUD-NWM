@@ -24,7 +24,7 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 
 #### Scenario: Stage cards
 - **WHEN** QHH pipeline data exists for a selected cycle
-- **THEN** the page displays persisted `download`, `convert`, `forcing`, `forecast`, `parse`, `frequency`, and `publish` stage states from API responses
+- **THEN** the page displays persisted `download`, `convert`, `forcing`, `forecast`, `parse`, and `publish` stage states from API responses
 - **AND** UI labels may describe the `forecast` stage as SHUD execution where helpful, but persisted stage names remain canonical and consistent with pipeline job/event records.
 
 #### Scenario: Jobs table
@@ -60,4 +60,3 @@ The operations MVP SHALL treat qhh diagnostic scripts as reproduction evidence o
 - **WHEN** MVP readiness is validated
 - **THEN** a controlled failed QHH run or stage is visible as failed in `/ops`
 - **AND** retry creates new job/pipeline evidence and transitions through submitted/running to succeeded or a documented terminal failure.
-

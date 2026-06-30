@@ -8,7 +8,7 @@ The segment detail page SHALL render analysis, GFS forecast, and IFS forecast se
 
 #### Scenario: Threshold overlay
 WHEN Q2/Q5/Q10/Q20/Q50/Q100 values are available
-THEN the chart displays labeled threshold lines and highlights the peak return-period band
+THEN the chart displays the forecast series and highlights the peak q_down value
 
 #### Scenario: Scenario toggle
 WHEN a user toggles Analysis, GFS, or IFS
@@ -17,4 +17,3 @@ THEN the corresponding series visibility changes without mutating URL identity s
 #### Scenario: Insufficient IFS horizon
 WHEN IFS 06/18 cycle has shorter horizon
 THEN the chart truncates the IFS series and labels the available horizon
-

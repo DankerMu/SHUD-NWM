@@ -14,9 +14,9 @@ THEN it skips the candidate and records the terminal-state reason.
 
 #### Scenario: hydro durable terminal skip
 
-WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, `frequency_done`, or `published`
+WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, or `published`
 THEN the candidate is treated as terminal successful
-AND native SHUD, parse, frequency, publish, Slurm submission, and orchestrator execution are not resubmitted by default
+AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are not resubmitted by default
 AND the skip evidence records the durable hydro status that caused the skip.
 
 #### Scenario: active job skip
@@ -73,4 +73,3 @@ WHEN the Slurm cancellation contract is unavailable, returns an error, or does n
 THEN the scheduler records cancellation proof-gap evidence in `ops.pipeline_event.details` or scheduler evidence
 AND preserves local job state instead of fabricating cancellation success
 AND does not submit replacement work in the same scheduler pass.
-

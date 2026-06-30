@@ -52,7 +52,7 @@ Old display page components SHALL NOT be deleted until old URL handoff, Vitest c
 - **THEN** deletion of that old page is blocked
 
 #### Scenario: old URL handoff still targets legacy page paths
-- **WHEN** production single-map code still generates handoff URLs such as `/forecast`, `/segments/...`, `/basins/...`, or `/flood-alerts`
+- **WHEN** production single-map code still generates handoff URLs such as `/forecast`, `/segments/...`, or `/basins/...`
 - **THEN** deletion of the corresponding old page or redirect alias is blocked until node-27 migrates the handoff to `/` query form or explicitly keeps compatibility
 
 #### Scenario: Vitest, Playwright, or M15 visual lane still depends on old pages

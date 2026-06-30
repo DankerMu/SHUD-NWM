@@ -12,7 +12,7 @@ THEN artifacts include route, viewport, fixture mode, real commit SHA, and expec
 
 #### Scenario: Required route matrix
 WHEN visual conformance evidence is generated
-THEN loaded-state screenshots exist for overview, basin detail, flood alerts, and monitoring at 1920x1080, 1440x900, and 1280x900
+THEN loaded-state screenshots exist for overview, basin detail, and monitoring at 1920x1080, 1440x900, and 1280x900
 
 #### Scenario: Extended route matrix
 WHEN deterministic fixtures exist for completed M12-M14 surfaces
@@ -29,4 +29,3 @@ THEN test asserts key panels/buttons/text do not overlap incoherently
 #### Scenario: Bounded artifacts
 WHEN screenshot capture writes local evidence
 THEN it writes only under the documented issue evidence directory and records a manifest entry for each artifact
-

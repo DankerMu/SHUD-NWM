@@ -29,7 +29,7 @@ The API SHALL provide a `GET /api/v1/pipeline/status` endpoint that returns the 
 
 ### Requirement: GET /api/v1/pipeline/stages
 
-The API SHALL provide a `GET /api/v1/pipeline/stages` endpoint that returns the status, duration, and basin progress of all 7 pipeline stages for a given forecast cycle.
+The API SHALL provide a `GET /api/v1/pipeline/stages` endpoint that returns the status, duration, and basin progress of all current pipeline stages for a given forecast cycle.
 
 #### Scenario: Successful stages query
 
@@ -37,7 +37,7 @@ The API SHALL provide a `GET /api/v1/pipeline/stages` endpoint that returns the 
 - **THEN** the API SHALL return HTTP 200 with a response body containing:
   - `request_id` — unique request identifier
   - `status` — `"ok"`
-  - `data` — an ordered array of 7 stage objects (`download`, `canonical`, `forcing`, `shud_forecast`, `parse`, `frequency`, `publish`), each containing:
+  - `data` — an ordered array of stage objects (`download`, `canonical`, `forcing`, `shud_forecast`, `parse`, `publish`), each containing:
     - `stage` — stage name
     - `status` — one of: `pending`, `running`, `succeeded`, `partially_failed`, `failed`, `skipped`
     - `duration_seconds` — total elapsed seconds for the stage (NULL if not started)
@@ -271,4 +271,3 @@ All monitoring API endpoints MUST return responses in a standard wrapper format.
 
 - **WHEN** any monitoring API endpoint returns an error response
 - **THEN** the response body MUST conform to: `{"request_id": "<uuid>", "status": "error", "error": {"code": "<ERROR_CODE>", "message": "<human-readable message>"}}`
-

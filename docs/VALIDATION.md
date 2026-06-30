@@ -35,26 +35,6 @@ deterministic dev/test policy evidence only; production live authorization remai
 IdP proof. Do not run it against production unless it is an intentional migration with backup, approval, and an
 explicit production database URL.
 
-Mutating flood CLI commands use the same explicit CLI evidence contract:
-
-```bash
-uv run nhms-flood hindcast-submit \
-  --model-id yangtze_shud_v12 \
-  --source-id ERA5 \
-  --start-time 1993-01-01T00:00:00Z \
-  --end-time 1993-12-31T23:00:00Z \
-  --auth-actor-id cli-operator \
-  --auth-role operator
-
-uv run nhms-flood fit-curves \
-  --model-id model_v2 \
-  --supersede-model-id model_v1 \
-  --auth-actor-id cli-model-admin \
-  --auth-role model_admin
-```
-
-Missing CLI auth evidence fails with `AUTH_REQUIRED`; supplied roles outside the M17 action matrix fail with `RBAC_FORBIDDEN` before protected mutation. `fit-curves --dry-run` remains non-mutating and does not require CLI auth evidence for `--supersede-model-id`.
-
 Production migration evidence must point at a copied Basins directory. A symlink-only `/volume/data/nwm/Basins` target is rejected because Linux production hosts must copy the actual data, not only migrate the development symlink.
 
 Known source quirks covered by discovery, packaging, import, and docs:
@@ -73,29 +53,22 @@ uv run ruff check .
 uv run pytest -q
 ```
 
-Focused M16 production MVT/performance checks:
+Focused production display contract checks:
 
 ```bash
-openspec validate m16-production-mvt-performance --strict --no-interactive
-uv run pytest -q tests/test_flood_alerts_api.py tests/test_production_scale_validation.py tests/test_openapi_drift.py tests/test_migrations.py
+uv run pytest -q tests/test_api.py tests/test_openapi_drift.py tests/test_migrations.py
 cd apps/frontend && corepack pnpm check:api-types
 cd apps/frontend && corepack pnpm test
 cd apps/frontend && corepack pnpm build
 ```
 
-M16 defines canonical hydrology MVT endpoints for river-network, hydro, and
-flood-return-period tiles using `application/x-protobuf`, but those `.pbf`
-routes are live-PostGIS-only at runtime. If live PostGIS MVT is unavailable,
-the routes return `MVT_LIVE_POSTGIS_UNAVAILABLE` before national row
-materialization. The query endpoint `/api/v1/tiles/flood-return-period`
-remains bounded GeoJSON compatibility for explicitly scoped views only;
-national rendering should use layer metadata from `/api/v1/layers` and
-MapLibre vector sources. Deterministic CI validates the contract artifacts,
-Web Mercator XYZ validation, PostGIS-oriented SQL shape, cache identity,
-frontend metadata selection, and evidence schema. Live PostGIS, national-data,
-and browser proof remains opt-in and must be recorded as `not_executed` or a
-release blocker until target-environment validation passes; deterministic MVT
-evidence alone must not set `production_mvt_readiness_claimed=true`.
+Production display readiness is proven by live target-environment API and
+browser receipts, not by deterministic checks alone. National rendering should
+use layer metadata from `/api/v1/layers` and MapLibre vector sources. Live
+PostGIS, national-data, and browser proof remains opt-in and must be recorded
+as `not_executed` or a release blocker until target-environment validation
+passes; deterministic MVT evidence alone must not set
+`production_mvt_readiness_claimed=true`.
 
 Focused M9 Basins closeout checks:
 

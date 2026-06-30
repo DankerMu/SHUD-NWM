@@ -56,7 +56,7 @@ from workers.model_registry.basins_soil_alpha_repair import (
 )
 
 SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v1"
-DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}"
+DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}-{source_hash}"
 DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
     "allowed_cycle_hours_utc": [0, 12],
@@ -284,12 +284,14 @@ def package_version_for_model(model: Mapping[str, Any], template: str = DEFAULT_
     model_id = _required_model_str(model, "model_id")
     slug_id = _slug_id(basin_slug)
     content_hash = _model_content_hash(model)
+    source_hash = _model_source_hash(model)
     try:
         version = template.format(
             slug=basin_slug.replace("/", "_"),
             slug_id=slug_id,
             model_id=model_id,
             content_hash=content_hash,
+            source_hash=source_hash,
         )
     except KeyError as error:
         raise SchedulerRegistryPublishError(
@@ -593,6 +595,19 @@ def _model_content_hash(model: Mapping[str, Any]) -> str:
     ).hexdigest()[:12]
 
 
+def _model_source_hash(model: Mapping[str, Any]) -> str:
+    material = {
+        "source_path": model.get("source_path"),
+        "resolved_source_path": model.get("resolved_source_path"),
+        "root_relative_path": model.get("root_relative_path"),
+        "root_relative_resolved_path": model.get("root_relative_resolved_path"),
+        "input_dir": model.get("input_dir"),
+    }
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:8]
+
+
 def _slug_id(value: str) -> str:
     normalized = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
     return normalized or "unknown"
@@ -657,7 +672,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--package-version-template",
         default=DEFAULT_PACKAGE_VERSION_TEMPLATE,
-        help="Template using {slug}, {slug_id}, {model_id}, and {content_hash}.",
+        help="Template using {slug}, {slug_id}, {model_id}, {content_hash}, and {source_hash}.",
     )
     parser.add_argument("--basin-slug", action="append", default=[], help="Optional basin slug filter; repeatable.")
     parser.add_argument("--model-id", action="append", default=[], help="Optional model id filter; repeatable.")

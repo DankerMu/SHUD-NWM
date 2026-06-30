@@ -20,17 +20,16 @@ AND it records each pass start, finish, candidate count, and selected/skipped/fa
 
 ### Requirement: Full production chain orchestration
 
-For each selected candidate, the scheduler SHALL orchestrate download, canonical conversion, forcing production, SHUD execution, output parsing, frequency/display publication, and evidence publication using existing service and worker contracts.
+For each selected candidate, the scheduler SHALL orchestrate download, canonical conversion, forcing production, SHUD execution, output parsing, display publication, and evidence publication using existing service and worker contracts.
 
 #### Scenario: complete candidate chain
 
 WHEN a candidate completes successfully
-THEN raw/canonical/forcing artifacts, hydro run output, parsed river timeseries, and display/frequency product state are persisted
+THEN raw/canonical/forcing artifacts, hydro run output, parsed river timeseries, and display product state are persisted
 AND the final run status is queryable by backend APIs.
 
-#### Scenario: missing optional display input
+#### Scenario: retired supplemental products remain absent
 
-WHEN frequency curves or warning thresholds are unavailable for a basin
-THEN publication records an explicit quality or unavailable state
-AND does not fabricate return periods or warning levels.
-
+WHEN retired supplemental products are absent for a basin
+THEN display publication still depends on parsed q_down readiness
+AND does not fabricate retired supplemental products.

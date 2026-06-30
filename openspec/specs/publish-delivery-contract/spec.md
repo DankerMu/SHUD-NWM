@@ -32,6 +32,5 @@ The selected publication behavior SHALL be reflected in docs, OpenAPI, and tests
 #### Scenario: Documentation names real delivery table and format
 
 WHEN docs describe tile publication
-THEN they MUST use the table and endpoint names implemented by migrations and code, including `map.tile_layer`, `map.tile_cache`, and `/api/v1/tiles/flood-return-period` where applicable
+THEN they MUST use the table and endpoint names implemented by migrations and code, including `map.tile_layer`, `map.tile_cache`, and current `/api/v1/tiles/*` routes where applicable
 AND they MUST document whether the release publishes GeoJSON, MVT/PBF, or no publish artifact.
-

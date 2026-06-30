@@ -15,7 +15,7 @@ The system SHALL create a `pipeline_job` record in the `ops.pipeline_job` table 
   - `job_type` set to the upstream stage name (e.g., `run_shud_forecast_array`)
   - `slurm_job_id` populated with the Slurm-assigned job ID returned by `sbatch`
   - `cycle_id` (TEXT) set to the current forecast cycle ID
-  - `stage` set to one of: `convert_canonical`, `produce_forcing_array`, `run_shud_forecast_array`, `parse_output_array`, `compute_frequency_array`, `publish_tiles`
+  - `stage` set to one of: `convert_canonical`, `produce_forcing_array`, `run_shud_forecast_array`, `parse_output_array`, `publish_tiles`
   - `run_id` (TEXT, nullable) set to the basin run identifier
   - `model_id` set to the basin model identifier (M3 addition, not in upstream draft)
   - `status` set to `pending`

@@ -38,7 +38,7 @@ Each accepted cycle SHALL download and canonicalize all required meteorological 
 
 #### Scenario: Zero canonical rows trigger fresh full-chain ingestion
 - **WHEN** an accepted cycle has no canonical rows at all (`candidate_row_count == 0`) for the source/cycle and the source policy yields a non-empty expected lead horizon
-- **THEN** the generic production daemon treats it as a fresh ingestion rather than a hard block, and admits a full-chain cohort with no restart stage so the Slurm chain runs download → convert → forcing → forecast → parse → frequency → publish via the gateway
+- **THEN** the generic production daemon treats it as a fresh ingestion rather than a hard block, and admits a full-chain cohort with no restart stage so the Slurm chain runs download → convert → forcing → forecast → parse → publish via the gateway
 - **AND** a cycle that already has canonical rows but fails identity/variable/lead checks keeps the hard block, and an empty expected horizon or provider-unavailable readiness keeps the hard block (never reclassified as fresh).
 
 #### Scenario: Source-specific horizon policy
@@ -63,4 +63,3 @@ The system SHALL separate transient source/download errors from permanent or pol
 - **WHEN** a source is outside policy, unsupported, or repeatedly unavailable past retry limits
 - **THEN** the pipeline records a permanent or policy-blocked state
 - **AND** automatic retries stop until operator policy or manual retry changes.
-

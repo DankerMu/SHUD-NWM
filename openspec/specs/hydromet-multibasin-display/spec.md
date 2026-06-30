@@ -58,11 +58,11 @@ Pre-M26 `/hydro-met` legacy redirect-era station list/search/variable-filter evi
 
 ### Requirement: 产品状态条诚实展示
 
-当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）顶部 SHALL 展示产品状态条，覆盖 q_down、forcing、return-period 三类产品各自的 ready / degraded / unavailable 状态，来源为 latest-product 响应（return-period 取自独立的 `availability.return_period_status`）。
+当前 `/` 单图展示入口（兼容 `/hydro-met` legacy redirect alias）顶部 SHALL 展示产品状态条，覆盖 q_down 与 forcing 产品各自的 ready / degraded / unavailable 状态，来源为 latest-product 响应。
 
-#### Scenario: 三类产品状态可见（含 return-period unavailable）
-- **WHEN** latest-product 返回 q_down ready、forcing ready、`availability.return_period_status = unavailable`
-- **THEN** 状态条显示流量已发布、forcing 已发布、洪水重现期暂未发布
+#### Scenario: 产品状态可见
+- **WHEN** latest-product 返回 q_down ready、forcing ready
+- **THEN** 状态条显示流量已发布、forcing 已发布
 
 #### Scenario: degraded 状态可见
 - **WHEN** latest-product 的 availability 表明某产品为部分可用（degraded，如站点覆盖不完整）

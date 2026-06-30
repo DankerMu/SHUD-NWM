@@ -3,17 +3,17 @@
 ## Purpose
 TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
 ## Requirements
-### Requirement: Six-stage lazy submit orchestration
+### Requirement: Five-stage lazy submit orchestration
 
 The orchestrator SHALL submit stages one at a time, polling sacct for completion before deciding whether to submit the next stage. Stages are NOT submitted upfront.
 
-#### Scenario: All six stages are submitted lazily in sequence
+#### Scenario: All five stages are submitted lazily in sequence
 
 - **WHEN** the orchestrator triggers a forecast cycle
 - **THEN** stage 1 (`convert_canonical`) MUST be submitted first, using raw source data already produced by node-27 and staged into the compute-visible object store
 - **THEN** the orchestrator MUST poll sacct until stage 1 reaches a terminal state
 - **THEN** if stage 1 succeeds, stage 2 (`produce_forcing_array`) MUST be submitted
-- **THEN** this pattern MUST repeat for all 6 stages in order: `convert_canonical` → `produce_forcing_array` → `run_shud_forecast_array` → `parse_output_array` → `compute_frequency_array` → `publish_tiles`
+- **THEN** this pattern MUST repeat for all 5 stages in order: `convert_canonical` → `produce_forcing_array` → `run_shud_forecast_array` → `parse_output_array` → `publish_tiles`
 - **THEN** each stage's `pipeline_job` record MUST be created at the time of submission, not upfront
 
 #### Scenario: Orchestrator polls sacct for stage completion
@@ -101,8 +101,7 @@ If any stage fails entirely (all tasks fail), the orchestrator SHALL NOT submit 
   - stage 2 (`produce_forcing_array`) fails → `failed_forcing`
   - stage 3 (`run_shud_forecast_array`) fails → `failed_run`
   - stage 4 (`parse_output_array`) fails → `failed_parse`
-  - stage 5 (`compute_frequency_array`) fails → `failed_parse` (frequency is a parse sub-step)
-  - stage 6 (`publish_tiles`) fails → `failed_publish`
+  - stage 5 (`publish_tiles`) fails → `failed_publish`
 
 #### Scenario: Failure event includes diagnostic detail
 

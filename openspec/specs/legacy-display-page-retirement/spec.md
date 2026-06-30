@@ -5,7 +5,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 ## Requirements
 ### Requirement: 删除 HydroMetPage 玩具页并迁移 honest-display 库
 
-`apps/frontend/src/pages/hydroMet/HydroMetPage.tsx`（DOM marker + 拉全量列表 + 搜索/分页/stream_order 过滤/变量·QC 筛选）SHALL 被删除，其专属测试（`__tests__/ListProduction.test.tsx`）一并删除。honest-display 库 `bootstrap.ts`、`lib/hydroMet/stationSeries.ts`、`lib/hydroMet/riverForecast.ts`、`ReturnPeriodSection.tsx` MUST 保留并迁移/复用于单页 popup（迁移时保留导出名以减小测试改动）。
+`apps/frontend/src/pages/hydroMet/HydroMetPage.tsx`（DOM marker + 拉全量列表 + 搜索/分页/stream_order 过滤/变量·QC 筛选）SHALL 被删除，其专属测试（`__tests__/ListProduction.test.tsx`）一并删除。honest-display 库 `bootstrap.ts`、`lib/hydroMet/stationSeries.ts`、`lib/hydroMet/riverForecast.ts` MUST 保留并迁移/复用于单页 popup（迁移时保留导出名以减小测试改动）。
 
 #### Scenario: 玩具页与其测试被删除
 - **WHEN** 检索仓库
@@ -13,7 +13,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 #### Scenario: honest-display 库保留可用
 - **WHEN** 单页 popup 渲染河段/代站曲线
-- **THEN** 复用 `loadHydroMetRiverForecast`/`loadHydroMetStationSeries`/`ReturnPeriodSection` 等保留库，其严格身份与不画假曲线逻辑不变
+- **THEN** 复用 `loadHydroMetRiverForecast`/`loadHydroMetStationSeries` 等保留库，其严格身份与不画假曲线逻辑不变
 
 ### Requirement: 去除拉全量列表/分页/过滤模块
 
@@ -25,7 +25,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: AppRoutes 与受影响测试更新为单页地图模型
 
-`src/__tests__/AppRoutes.test.tsx` SHALL 重写为单页地图模型（旧路由重定向、图层切换、河段/代站点击 popup），其 `react-map-gl/maplibre` mock MUST 补齐 `Popup`、`Marker`、cluster 相关（`getSource`→`getClusterExpansionZoom` stub）导出。`ReturnPeriodSection.test.tsx` 随迁移更新 import；`M11Shell.test.tsx`、`overviewData` 测试按改造同步。
+`src/__tests__/AppRoutes.test.tsx` SHALL 重写为单页地图模型（旧路由重定向、图层切换、河段/代站点击 popup），其 `react-map-gl/maplibre` mock MUST 补齐 `Popup`、`Marker`、cluster 相关（`getSource`→`getClusterExpansionZoom` stub）导出。`M11Shell.test.tsx`、`overviewData` 测试按改造同步。
 
 #### Scenario: AppRoutes 测试覆盖单页模型
 - **WHEN** 运行 `AppRoutes.test.tsx`

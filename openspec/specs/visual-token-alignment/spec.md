@@ -10,9 +10,9 @@ The frontend SHALL align shared tokens for nav, panels, cards, controls, typogra
 WHEN visual conformance begins
 THEN the implementation documents current token mappings and updates shared CSS/components rather than one-off page styles
 
-#### Scenario: Warning colors
-WHEN warning/return-period levels render
-THEN colors match the shared warning palette consistently across overview, basin, and flood pages
+#### Scenario: Status colors
+WHEN status levels render
+THEN colors match the shared status palette consistently across overview, basin, and monitoring pages
 
 #### Scenario: Shared component precedence
 WHEN a route-specific visual issue is fixed
@@ -40,4 +40,3 @@ THEN API calls use deterministic fixtures, known external map tile/style/font re
 #### Scenario: Frozen head metadata
 WHEN M15 visual evidence runs in CI for a PR
 THEN CI checks out the pull request head SHA, `M15_EVIDENCE_SHA` equals the checked-out `HEAD`, the manifest SHA is that same real commit SHA, and PR evidence is regenerated after the final commit/frozen head before closure
-

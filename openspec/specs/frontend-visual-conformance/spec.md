@@ -29,7 +29,7 @@ The system SHALL implement the documented visual tokens and component proportion
 
 #### Scenario: Component styling is consistent
 - **WHEN** panels, cards, buttons, inputs, toggles, tags, tooltips, and popup cards render
-- **THEN** they MUST follow the documented font sizes, 4px spacing scale, 4px/8px radii, shadows, status colors, warning-level colors, and icon sizing
+- **THEN** they MUST follow the documented font sizes, 4px spacing scale, 4px/8px radii, shadows, status colors, and icon sizing
 - **AND** any existing project token substitution MUST be documented in code or developer notes
 
 ### Requirement: Visual states are implemented consistently
@@ -60,4 +60,3 @@ The system SHALL include automated or reviewable evidence that M11 pages remain 
 #### Scenario: Visual drift is blocked
 - **WHEN** screenshot or layout assertions show major drift from the effect-image layout or UI design spec
 - **THEN** the related implementation issue MUST remain incomplete until the drift is fixed or explicitly documented as an approved design deviation
-

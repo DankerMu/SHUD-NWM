@@ -3,13 +3,13 @@
 ## Purpose
 TBD - created by archiving change m26-unified-map-display. Update Purpose after archive.
 ## Requirements
-### Requirement: 点击河段要素弹出 q_down 预报曲线 + 重现期三态
+### Requirement: 点击河段要素弹出 q_down 预报曲线
 
-点击地图河段要素 SHALL 弹出 maplibre `Popup`，按要素 `river_segment_id` 经 `loadHydroMetRiverForecast` + `validateHydroMetRiverForecastForChart` 拉取并校验 `q_down` forecast-series，校验通过则渲染 q_down 曲线（echarts `ForecastChart`）与洪水重现期三态（`ReturnPeriodSection`）。身份/契约校验失败（`ok:false`）时 popup MUST 显示原因空态，MUST NOT 绘制曲线（不画假曲线红线）。
+点击地图河段要素 SHALL 弹出 maplibre `Popup`，按要素 `river_segment_id` 经 `loadHydroMetRiverForecast` + `validateHydroMetRiverForecastForChart` 拉取并校验 `q_down` forecast-series，校验通过则渲染 q_down 曲线（echarts `ForecastChart`）。身份/契约校验失败（`ok:false`）时 popup MUST 显示原因空态，MUST NOT 绘制曲线（不画假曲线红线）。
 
 #### Scenario: 河段曲线正常渲染
 - **WHEN** 点击河段要素且其 forecast-series 通过严格身份与 chart 校验
-- **THEN** popup 渲染 q_down 曲线 + 重现期状态（ready/unavailable 按 `return_period_status`）
+- **THEN** popup 渲染 q_down 曲线
 
 #### Scenario: 身份不符不画曲线
 - **WHEN** 河段 forecast-series 缺任一身份字段或 horizon/point 预算不符（`ok:false`）
@@ -32,7 +32,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: popup 源解析与 honest-display 不变量
 
-popup 拉曲线 MUST 使用解析后的具体源（`best`/`compare` → `sourceSelection.resolvedSource` 落为 GFS/IFS）；未解析时显示"等待 Best Available 解析"空态。`productReady` 门控、`return_period_status` 三态、strict identity 等 honest-display 不变量 MUST 在 popup 中保持。
+popup 拉曲线 MUST 使用解析后的具体源（`best`/`compare` → `sourceSelection.resolvedSource` 落为 GFS/IFS）；未解析时显示"等待 Best Available 解析"空态。`productReady` 门控、strict identity 等 honest-display 不变量 MUST 在 popup 中保持。
 
 #### Scenario: best 未解析时 popup 不打具体源接口
 - **WHEN** 源为 best 尚未解析
@@ -40,4 +40,4 @@ popup 拉曲线 MUST 使用解析后的具体源（`best`/`compare` → `sourceS
 
 #### Scenario: productReady 门控贯穿 popup
 - **WHEN** 产品整体 `availability.ready` 为 false
-- **THEN** popup 内 return-period 维度按 `productReady` 门控判为不可用，与既有红线一致
+- **THEN** popup 显示产品不可用空态，不绘制 q_down 曲线

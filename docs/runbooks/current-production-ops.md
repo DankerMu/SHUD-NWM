@@ -130,7 +130,9 @@ misconfiguration. Slurm submission is through the node-22 Slurm Gateway and
 `cnXX`.
 
 node-22 scheduler 的模型清单来自 DB-free file registry。生产上不要手工只写
-qhh；从 `NHMS_BASINS_ROOT` 重新发布全流域 registry：
+qhh；新增或移动 Basins 后，从 `NHMS_BASINS_ROOT` 重新发布全流域 registry。
+2026-06-30 现场 22 节点的 Basins 根为 `/volume/nwm/Basins`（Linux 路径区分大小写；
+`/volume/NWM/Basins` 当前不是有效挂载点）：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
@@ -138,6 +140,7 @@ cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-dbfree.env
 set +a
+test -d "$NHMS_BASINS_ROOT"
 .venv/bin/python scripts/publish_scheduler_file_registry.py \
   --basins-root "$NHMS_BASINS_ROOT" \
   --registry-manifest "$NHMS_SCHEDULER_REGISTRY_MANIFEST" \
@@ -147,7 +150,10 @@ set +a
   --output "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish/receipt.json"
 ```
 
-期望 summary 中 `selected_model_count` 等于当前 `Basins/` 下可发布 SHUD
+该脚本是后续新增流域的运维入口：先确认新流域已放入 `NHMS_BASINS_ROOT`，
+再运行脚本刷新 DB-free registry，最后让 `nhms-compute-scheduler.timer`
+后续 tick 自动提交 00/12 UTC 业务 cycle。期望 summary 中
+`selected_model_count` 等于当前 `Basins/` 下可发布 SHUD
 模型数。2026-06-30 现场拓扑中，`Basins/` 有 10 个顶层流域，其中
 `zhaochen/` 下还有 4 个可运行子模型，因此 scheduler registry 应发布 13 个
 模型。`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，
@@ -653,26 +659,29 @@ The wrapper uses the same env defaults, log path, and non-overlap lock as cron.
 It is idempotent; rerun manually only after reading the previous failure and
 confirming no cron run is active.
 
-### 8.3 `flood.run_product_quality` 缺表
+### 8.3 Forcing handoff parse failures
 
-Historical symptom:
+Symptoms:
 
 ```text
-RETURN_PERIOD_FAILED
-relation "flood.run_product_quality" does not exist
+FORCING_DOMAIN_HANDOFF_UNAVAILABLE
+checksum mismatch
+mixed native_resolution labels for one valid_time
 ```
 
 Impact:
 
-- basin-level `frequency` 子任务失败；
-- `hydro.hydro_run.status` may remain `parsed`;
-- q_down ingestion and display can still be usable.
+- node-22 has completed run/output trees under the object store.
+- node-27 autopipe skips or fails the affected run before DB ingest.
+- `/api/v1/runs` is missing the basin/cycle even though SHUD output exists.
 
 Boundary:
 
-- Do not manually set run status to `frequency_done` to hide the issue.
-- Judge display readiness with `hydro.river_timeseries`, published tiles/logs,
-  and display coverage, not only frequency status.
+- Do not manually edit DB status to hide the issue.
+- Repair the handoff payload/checksums or regenerate the forcing package, then
+  rerun node-27 autopipe.
+- Judge display readiness with parsed hydro output, layer publication logs, and
+  node-27 API coverage.
 
 ### 8.4 `/ghdc` 与计算节点边界
 

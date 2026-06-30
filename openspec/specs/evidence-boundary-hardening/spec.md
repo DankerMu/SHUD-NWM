@@ -7,7 +7,7 @@ TBD - created by archiving change governance-6-entropy-structural-burndown. Upda
 
 Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
 describe `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
-`/flood-alerts`, `/basins/:id`, and `/segments/:id` only as legacy redirect
+`/basins/:id`, and `/segments/:id` only as legacy redirect
 aliases, compatibility references, or historical evidence.
 
 #### Scenario: two-node E2E plan defines browser proof
@@ -31,7 +31,7 @@ aliases, compatibility references, or historical evidence.
 #### Scenario: route-authority grep runs against current runbooks
 - **WHEN** route-authority validation scans current docs and runbooks
 - **THEN** references to `/overview`, `/hydro-met`, `/forecast`,
-  `/meteorology`, `/flood-alerts`, `/basins/:id`, `/segments/:id`, and
+  `/meteorology`, `/basins/:id`, `/segments/:id`, and
   concrete forms such as `/basins/demo` and `/segments/demo` are each
   classified as historical evidence, redirect alias checks, compatibility
   context, or drift

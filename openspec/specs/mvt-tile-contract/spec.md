@@ -8,7 +8,7 @@ The backend SHALL expose hydrology vector tile endpoints with `application/x-pro
 
 #### Scenario: Canonical endpoint disposition
 WHEN M16 is implemented
-THEN `/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf`, `/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf` (canonical discharge layer URL), `/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf` (direct-deeplink only, NOT exposed via the `/api/v1/layers` `discharge` entry), and true `/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf` have explicit OpenAPI/runtime behavior, while `/api/v1/tiles/flood-return-period` remains bounded GeoJSON compatibility
+THEN `/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf`, `/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf` (canonical discharge layer URL), and `/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf` (direct-deeplink only, NOT exposed via the `/api/v1/layers` `discharge` entry) have explicit OpenAPI/runtime behavior
 
 #### Scenario: Tile success
 WHEN a published layer/run/valid_time has features in a tile
@@ -23,7 +23,7 @@ WHEN the public tile contract changes
 THEN OpenAPI, generated frontend API types, and drift allowlists are updated together or the unchanged legacy path remains explicitly documented
 
 #### Scenario: Stable feature properties
-WHEN a hydrology or flood-return-period MVT feature is encoded
+WHEN a hydrology MVT feature is encoded
 THEN properties include stable segment/network/source/time/value metadata and reject missing or non-finite required values
 
 #### Scenario: Layer metadata discovery
@@ -51,4 +51,3 @@ THEN the resolved metadata MUST have `tile_url_template` containing `/api/v1/til
 AND `required_placeholders` MUST NOT contain `'run_id'`
 AND `source_refs` MUST NOT contain a `run_id` key
 AND `min_zoom` MUST equal the real backend `_NATIONAL_DISCHARGE_METADATA.min_zoom` value (currently `3`)
-

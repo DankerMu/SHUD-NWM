@@ -21,7 +21,7 @@ AND jobs do not write large artifacts to the system disk by default.
 
 ### Requirement: Array-capable model stages
 
-The scheduler SHALL support array-capable model stages for forcing, forecast, parse, and frequency computation across multiple registered models in a source/cycle. Display/tile publication SHALL remain cycle-level unless a separate per-model publish contract is introduced.
+The scheduler SHALL support array-capable model stages for forcing, forecast, and parse across multiple registered models in a source/cycle. Display/tile publication SHALL remain cycle-level unless a separate per-model publish contract is introduced.
 
 #### Scenario: partial array failure
 
@@ -47,4 +47,3 @@ WHEN the scheduler submits through the real or mock Slurm gateway
 THEN the submitted job uses only an allowlisted sbatch template for the requested stage
 AND exported environment/config values are shell-safe, bounded, and redacted from evidence when sensitive
 AND secret leakage, shell metacharacter injection, and unrecognized template names are rejected before submission.
-

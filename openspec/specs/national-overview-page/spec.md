@@ -57,7 +57,7 @@ The system SHALL display the national extent with basin boundaries, basin labels
 - **AND** it MUST render basin labels or an accessible substitute when label geometry is available
 
 #### Scenario: National hydrologic risk layer renders
-- **WHEN** river network, discharge, return-period, or warning-level data is available for the active layer/source/time
+- **WHEN** river network or discharge data is available for the active layer/source/time
 - **THEN** the overview map MUST render the national river or risk layer using the active hydrologic color scale
 - **AND** changing the related layer toggle MUST update or hide the corresponding map layer
 - **AND** unavailable river/risk data MUST show a scoped unavailable state rather than fake geometry or values
@@ -70,17 +70,17 @@ The system SHALL display the national extent with basin boundaries, basin labels
 
 ### Requirement: Right-side summaries provide operational links
 
-The system SHALL provide right-side operational summary cards for forecast run status and flood warning status.
+The system SHALL provide right-side operational summary cards for forecast run status and display coverage status.
 
 #### Scenario: Forecast run summary links to monitoring
 - **WHEN** pipeline or monitoring summary data is available
 - **THEN** the right panel MUST show completed forecast cycles today and currently running work when the data can be derived
 - **AND** clicking the forecast run summary MUST navigate to the existing product monitoring page
 
-#### Scenario: Warning summary links to flood alerts
-- **WHEN** flood alert summary data is available
-- **THEN** the right panel MUST show warning segment count and latest update time
-- **AND** clicking the warning summary MUST navigate to the existing flood alerts page with source/cycle context when available
+#### Scenario: Display coverage summary links to monitoring
+- **WHEN** display coverage summary data is available
+- **THEN** the right panel MUST show basin coverage count and latest update time
+- **AND** clicking the summary MUST navigate to monitoring with source/cycle context when available
 
 ### Requirement: Overview handles degraded data states
 
@@ -105,4 +105,3 @@ The system SHALL render useful degraded states when backend data is missing or p
 - **WHEN** a map source or layer request fails
 - **THEN** the affected layer MUST show an inline map or panel error with retry affordance when possible
 - **AND** other successful layers and controls MUST remain usable
-

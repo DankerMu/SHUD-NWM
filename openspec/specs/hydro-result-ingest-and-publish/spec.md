@@ -22,22 +22,17 @@ The system SHALL parse real SHUD outputs into hydro database tables using stable
 - **AND** no latest display product is marked ready for that run.
 
 ### Requirement: Parsed q_down publication
-The system SHALL publish node-27-readable q_down display manifests and logs after successful parse without requiring flood-frequency products to exist.
+The system SHALL publish node-27-readable q_down display manifests and logs after successful parse.
 
 #### Scenario: Parsed display artifacts written
 - **WHEN** parse and publish complete
 - **THEN** q_down display products, run manifest, station/river metadata, and bounded logs are written under the configured published artifact root
 - **AND** DB records reference supported `published://`, publish-root `file://`, or allowlisted object-store URIs.
 
-#### Scenario: Frequency products unavailable
-- **WHEN** parsed SHUD discharge exists but flood frequency curves, return-period results, or warning thresholds are absent
-- **THEN** the run may publish q_down display artifacts with explicit frequency/warning unavailable quality metadata
-- **AND** it does not fabricate flood return periods, warning levels, or full frequency publication readiness.
-
-#### Scenario: Frequency products ready
-- **WHEN** parsed discharge and required frequency/flood dependencies are both available
-- **THEN** frequency or flood products may be marked ready according to their existing publish contract
-- **AND** their readiness is separate from parsed q_down display readiness.
+#### Scenario: Retired supplemental products are not required
+- **WHEN** parsed SHUD discharge exists
+- **THEN** the run may publish q_down display artifacts without any supplemental retired product
+- **AND** it does not fabricate retired supplemental products or block q_down publication on their absence.
 
 #### Scenario: Private workspace paths rejected
 - **WHEN** a publish candidate references workspace-only, scratch-only, or non-allowlisted local paths
@@ -61,4 +56,3 @@ The production path SHALL persist stage/job/event records for download, convert,
 - **WHEN** any required stage is blocked or failed
 - **THEN** the aggregate run status is blocked, failed, or partial according to policy
 - **AND** no downstream table or published manifest reports a full pass.
-

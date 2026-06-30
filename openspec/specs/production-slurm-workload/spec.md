@@ -29,7 +29,7 @@ The system SHALL prove that multi-model Slurm arrays can continue when one model
 #### Scenario: Malformed SHUD output blocks only the affected task
 
 - **WHEN** a Slurm array task completes but its SHUD output is malformed, contains NaN/Inf values, is missing a required output file, or has count/time mismatches
-- **THEN** downstream frequency, tile, and API publication are blocked for that task with stable error metadata
+- **THEN** downstream parse, tile, and API publication are blocked for that task with stable error metadata
 - **AND** successful sibling task outputs remain intact and publishable
 - **AND** no evidence bundle marks the malformed task as a successful publication
 
@@ -42,4 +42,3 @@ The system SHALL bind SHUD runtime resource settings to model/run manifests inst
 - **WHEN** a real SHUD workload is submitted
 - **THEN** `cpus_per_task`, `SHUD_THREADS`, walltime, partition, memory request, solver binary/module, and working directory are captured in manifest or evidence
 - **AND** secret values and credentials are absent from all captured logs and manifests
-

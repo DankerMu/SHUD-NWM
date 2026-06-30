@@ -21,7 +21,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: 数据 store 的 basinId 来源由路由 param 改为 query
 
-`stores/overviewData.ts` 的流域详情取数 MUST 以 query 内 `basinId` 为输入，snapshot 匹配函数 MUST 按 query 内 basinId 判定"当前数据是否匹配当前查询"。store 内部取数键与既有 honest-display 数据契约（latest published run 解析、`flood_product_ready` 门控、ready 过滤、partialErrors、source=best 解析、river-segment 分页上限）MUST 保持不变。
+`stores/overviewData.ts` 的流域详情取数 MUST 以 query 内 `basinId` 为输入，snapshot 匹配函数 MUST 按 query 内 basinId 判定"当前数据是否匹配当前查询"。store 内部取数键与既有 honest-display 数据契约（latest published run 解析、ready 过滤、partialErrors、source=best 解析、river-segment 分页上限）MUST 保持不变。
 
 #### Scenario: basinId 来自 query 正确取数
 - **WHEN** query `basinId=basins_heihe`
@@ -33,7 +33,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: 移除 BasinDetailPage 独立路由
 
-`/basins/:basinId` 路由与 `BasinDetailPage` 组件 SHALL 被移除，其详情面板能力（河段列表、选中河段详情、趋势、对比、RP 三态）MUST 迁入单页（可抽至 `components/m11/`）且行为不丢失。
+`/basins/:basinId` 路由与 `BasinDetailPage` 组件 SHALL 被移除，其详情面板能力（河段列表、选中河段详情、趋势、对比）MUST 迁入单页（可抽至 `components/m11/`）且行为不丢失。
 
 #### Scenario: 旧 basins 路由不再独立渲染
 - **WHEN** 访问 `/basins/basins_qhh`
@@ -41,17 +41,16 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 #### Scenario: 详情面板能力保留
 - **WHEN** 单页处于某流域详情模式且选中一河段
-- **THEN** 河段详情（RP 三态/quality/lineage）、趋势、GFS/IFS 对比等能力与原 BasinDetailPage 一致
+- **THEN** 河段详情（quality/lineage）、趋势、GFS/IFS 对比等能力与原 BasinDetailPage 一致
 
 ### Requirement: 河网/q_down 瓦片 overlay 诚实展示，不伪造
 
-单页地图的河网/q_down/重现期 MVT overlay MUST 沿用 M11 既有诚实展示行为：当 `/api/v1/layers` 注册了对应图层（且具备 run/valid_time）时自动渲染 overlay；当图层未注册或缺 MVT metadata 时 MUST 显示"Layer is not registered"类提示且 MUST NOT 渲染伪造 overlay。当前规模的河网渲染 MAY 由 M11 既有 GeoJSON primitive 兜底。`display_readonly` 环境 MVT 瓦片不可用（river-network 424 / hydro 409）的根因排查 MUST NOT 在本变更内进行（属解耦平行 issue）。
+单页地图的河网/q_down MVT overlay MUST 沿用 M11 既有诚实展示行为：当 `/api/v1/layers` 注册了对应图层（且具备 run/valid_time）时自动渲染 overlay；当图层未注册或缺 MVT metadata 时 MUST 显示"Layer is not registered"类提示且 MUST NOT 渲染伪造 overlay。当前规模的河网渲染 MAY 由 M11 既有 GeoJSON primitive 兜底。`display_readonly` 环境 MVT 瓦片不可用（river-network 424 / hydro 409）的根因排查 MUST NOT 在本变更内进行（属解耦平行 issue）。
 
 #### Scenario: 图层注册则自动点亮
-- **WHEN** `/api/v1/layers` 返回了 discharge/flood-return-period 图层且具备 run/valid_time
+- **WHEN** `/api/v1/layers` 返回了 discharge 图层且具备 run/valid_time
 - **THEN** 地图渲染对应 MVT overlay
 
 #### Scenario: 图层未注册显示未注册且不伪造
 - **WHEN** `/api/v1/layers` 为空或缺该图层 metadata（如当前 node-27 display_readonly）
 - **THEN** 显示"Layer is not registered"类 honest 提示，不渲染任何伪造 overlay；河网可由 GeoJSON 兜底渲染
-

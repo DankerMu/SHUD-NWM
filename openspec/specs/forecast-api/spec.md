@@ -5,7 +5,7 @@ TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after arc
 ## Requirements
 ### Requirement: Forecast series query
 
-The API SHALL provide `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` to return forecast flow time series for a given river segment within a basin version. The response MUST include the segment identifier, issue time, unit, and one or more scenario series with timestamped data points and frequency thresholds.
+The API SHALL provide `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` to return forecast flow time series for a given river segment within a basin version. The response MUST include the segment identifier, issue time, unit, and one or more scenario series with timestamped data points.
 
 #### Scenario: Query latest forecast for a segment
 
@@ -15,7 +15,6 @@ The API SHALL provide `GET /api/v1/basin-versions/{basin_version_id}/river-segme
   - `issue_time`: the ISO 8601 UTC timestamp of the most recent forecast cycle
   - `unit`: `"m3/s"`
   - `series`: an array with at least one entry containing `scenario_id`, `segment_role`, and `points`
-  - `frequency_thresholds`: an object with frequency threshold data
 - **THEN** the `scenario_id` MUST be `"forecast_gfs_deterministic"` for M1
 - **THEN** the `segment_role` MUST be `"future_7_days"`
 - **THEN** `points` MUST be an array of `[timestamp, value]` tuples (two-element arrays), where `timestamp` is ISO 8601 UTC and `value` is a float in m3/s
@@ -180,4 +179,3 @@ All list endpoints SHALL support cursor-based or offset-based pagination to hand
 - **WHEN** a client requests an offset beyond the total number of results
 - **THEN** the response MUST return HTTP 200 with an empty `items` array
 - **THEN** `total_count` MUST still reflect the total matching records
-

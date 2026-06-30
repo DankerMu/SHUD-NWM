@@ -10,7 +10,7 @@ The system SHALL provide grouped layer controls matching the design while honest
 #### Scenario: Layer groups render
 - **WHEN** the overview page loads
 - **THEN** controls MUST group layers into hydrology, meteorology, and base layers
-- **AND** hydrology controls MUST include river discharge, stage when supported, flood return period, and warning level
+- **AND** hydrology controls MUST include river discharge and stage when supported
 - **AND** base controls MUST include basin boundaries and river network when data is available
 
 #### Scenario: Unimplemented meteorology layers are disabled
@@ -36,7 +36,7 @@ The system SHALL support the GIS design's source/scenario choices for overview a
 - **WHEN** Best Available is selected
 - **THEN** the UI MUST show which source/run/cycle was actually used for the visible map or detail data
 - **AND** fallback to a different source MUST not occur silently
-- **AND** until a backend best-available endpoint supports map/detail surfaces directly, frontend requests to run, pipeline, flood, and forecast APIs MUST use the resolved concrete GFS or IFS source/scenario, or expose Best Available as unavailable when no concrete source can be resolved
+- **AND** until a backend best-available endpoint supports map/detail surfaces directly, frontend requests to run, pipeline, and forecast APIs MUST use the resolved concrete GFS or IFS source/scenario, or expose Best Available as unavailable when no concrete source can be resolved
 
 #### Scenario: GFS and IFS comparison is available
 - **WHEN** GFS + IFS 对比 is selected and both sources have comparable data
@@ -60,10 +60,6 @@ The system SHALL show legends that match the active hydrologic display variable.
 - **WHEN** the river discharge layer is active
 - **THEN** the legend MUST show discharge units and bins suitable for the selected scale or available data
 
-#### Scenario: Return-period legend is active
-- **WHEN** the flood return period or warning layer is active
-- **THEN** the legend MUST show return-period or warning-level colors consistent with the flood alert page
-
 ### Requirement: Timeline is driven by valid times
 
 The system SHALL drive time selection from `/api/v1/layers/{layer_id}/valid-times` as the primary layer-time contract and from payload-derived valid times only for non-layer detail payloads that do not have a layer contract.
@@ -75,7 +71,7 @@ The system SHALL drive time selection from `/api/v1/layers/{layer_id}/valid-time
 - **AND** the current valid time MUST be included in map and adapter requests that support it
 
 #### Scenario: Non-layer detail payload derives valid times
-- **WHEN** a selected segment forecast or flood alert timeline is the active detail source and no layer valid-time contract applies
+- **WHEN** a selected segment forecast is the active detail source and no layer valid-time contract applies
 - **THEN** the bottom timeline MUST use those exact times for ticks, current-time selection, and next/previous actions
 - **AND** the UI MUST mark the timeline source as derived from the selected payload
 
@@ -112,4 +108,3 @@ The system SHALL provide previous, play/pause, next, and speed controls that ope
 #### Scenario: Previous and next respect boundaries
 - **WHEN** the current valid time is first or last in the active list
 - **THEN** unavailable previous or next actions MUST be disabled or handled without selecting an invalid time
-

@@ -68,8 +68,7 @@ The monitoring page SHALL display a vertical pipeline view on the left side show
   3. forcing
   4. shud_forecast
   5. parse
-  6. frequency
-  7. publish
+  6. publish
 
 #### Scenario: Stage card content
 
@@ -227,4 +226,3 @@ The monitoring page SHALL adapt to different screen sizes.
 - **THEN** the stage cards SHALL collapse into a compact horizontal scrollable strip or accordion
 - **THEN** the job table SHALL take full width with horizontal scroll for overflow columns
 - **THEN** the trends panel SHALL be accessible via a dedicated tab or expandable section
-

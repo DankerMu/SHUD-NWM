@@ -27,5 +27,5 @@ WHEN a role lacks access to a restricted page
 THEN navigation and direct-route behavior show the documented denied state without exposing protected page content
 
 #### Scenario: Time and fixture-field compatibility
-WHEN visual state fixtures exercise forecast, flood, overview, or meteorology pages
+WHEN visual state fixtures exercise forecast, overview, or meteorology pages
 THEN existing route query fields, API fixture field names, unit labels, and valid-time controls keep their documented behavior without backend schema changes

@@ -5,7 +5,7 @@ TBD - created by archiving change m24-multibasin-continuous-daemon-live. Update 
 ## Requirements
 ### Requirement: Live receipt proves the m20/m23 chain ran via the generic scheduler
 m24 SHALL produce a node-22 live receipt proving the m20/m23 chain (download → canonical → forcing
-→ SHUD → parse → frequency → publish) was executed by the `services/orchestrator` scheduler/chain
+→ SHUD → parse → publish) was executed by the `services/orchestrator` scheduler/chain
 daemon — not diagnostic scripts — closing m23 Task 5.5/6.6 and m20's 0/33 live gap. (The chain and
 BLOCKED-dependency behavior are defined by m20/m23; m24 adds only the live proof of generic-path
 execution.)
@@ -42,4 +42,3 @@ independent processes.
 - **THEN** the m24 receipt references that contract and additionally records the disable command,
   pass id, `disabled_at`, last submit timestamp, and evidence that no submit occurred after disable
 - **AND** in-flight run evidence remains queryable.
-

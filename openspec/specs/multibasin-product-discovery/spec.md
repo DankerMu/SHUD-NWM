@@ -21,9 +21,8 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 ### Requirement: 流域发现 ready 判定与 latest-product 一致
 
-`has_display_product` 过滤所用的 run ready 判定 MUST 复用与 latest-product 相同的状态集合 `QHH_LATEST_READY_RUN_STATUSES`（`parsed`/`frequency_done`/`published`），不得引入第二套独立口径。
+`has_display_product` 过滤所用的 run ready 判定 MUST 复用与 latest-product 相同的 display-ready 状态集合（`parsed`/`published`），不得引入第二套独立口径。
 
 #### Scenario: 发现口径与可取性一致
 - **WHEN** 某流域仅有状态为 `downloading` 的 run（不在 ready 集合）
 - **THEN** 该流域不出现在 `has_display_product=true` 的发现结果中，且其 latest-product 也返回 unavailable，二者一致
-

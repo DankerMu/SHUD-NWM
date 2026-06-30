@@ -4,7 +4,7 @@
 TBD - created by archiving change m16-production-mvt-performance. Update Purpose after archive.
 ## Requirements
 ### Requirement: Frontend MVT layer consumption
-MapLibre hydrology layers SHALL consume vector tile sources for national rendering when layer metadata advertises MVT. The supported hydrology layer set is `discharge`, `flood-return-period`, `warning-level`, and `river-network`; `water-level` is no longer a supported layer.
+MapLibre hydrology layers SHALL consume vector tile sources for national rendering when layer metadata advertises MVT. The supported hydrology layer set is `discharge` and `river-network`; retired supplemental layers and `water-level` are no longer supported.
 
 #### Scenario: Metadata-driven selection
 WHEN layer metadata exposes `tile_format=mvt`, URL template, source-layer id, zoom/bounds, schema/version, and valid-time/source references
@@ -60,4 +60,3 @@ The frontend SHALL consume `apiLayer.metadata.valid_times` returned by `GET /api
 - **WHEN** `apiLayer.metadata.valid_times` is `undefined` or `null`
 - **THEN** the frontend MAY fetch `/api/v1/layers/<layer_id>/valid-times` as a fallback
 - **AND** unit tests MUST cover both the primary and fallback paths (a dedicated `normalizeLayerStates` unit test pair in `apps/frontend/src/lib/__tests__/m11OverviewDataContracts.test.ts`)
-

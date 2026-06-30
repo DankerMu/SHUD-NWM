@@ -140,7 +140,7 @@ The publish stage SHALL proceed for basins that have successfully completed all 
 #### Scenario: Publish proceeds for successful basins in partial cycle
 
 - **WHEN** the publish stage runs after a partial cycle
-- **THEN** the publish manifest MUST only include basins that succeeded in ALL of: `produce_forcing_array`, `run_shud_forecast_array`, `parse_output_array`, `compute_frequency_array`
+- **THEN** the publish manifest MUST only include basins that succeeded in ALL of: `produce_forcing_array`, `run_shud_forecast_array`, `parse_output_array`
 - **THEN** the published product metadata MUST list which basins are included and which are excluded
 - **THEN** the cycle status MUST remain at `parsed_partial` (NOT transition to `complete` or any published state)
 
@@ -154,8 +154,7 @@ The publish stage SHALL proceed for basins that have successfully completed all 
 
 #### Scenario: No basins survive to publish
 
-- **WHEN** all basins have failed at various stages and no basin completed `compute_frequency_array`
+- **WHEN** all basins have failed at various stages and no basin completed `parse_output_array`
 - **THEN** the publish stage MUST NOT be submitted
 - **THEN** the cycle status MUST be set to a `failed_*` state corresponding to the latest stage with failures
 - **THEN** an `ops.pipeline_event` MUST be recorded with message `"No basins available for publish; cycle failed"`
-

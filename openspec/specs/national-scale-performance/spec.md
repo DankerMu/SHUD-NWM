@@ -9,7 +9,7 @@ The system SHALL measure production-scale river-network query behavior using rea
 
 #### Scenario: PostGIS query plans and latency are captured
 
-- **WHEN** national-scale validation runs for model listing, river bbox, flood alert map, forecast series, pipeline jobs, and tile metadata queries
+- **WHEN** national-scale validation runs for model listing, river bbox, forecast series, pipeline jobs, and tile metadata queries
 - **THEN** query plans, row counts, geometry bounds, p95 latency, and index usage are captured
 - **AND** thresholds and failure behavior are documented for oversized bbox and long time-range requests
 
@@ -29,7 +29,7 @@ The system SHALL either validate true MVT delivery for production map layers or 
 
 #### Scenario: MVT contract is validated or blocked
 
-- **WHEN** production tile validation requests river/flood tiles with production content type expectations
+- **WHEN** production tile validation requests river/hydro tiles with production content type expectations
 - **THEN** responses use `application/x-protobuf` MVT with bounded tile size and correct layer metadata
 - **OR** the validation report fails with an explicit blocker that current GeoJSON compatibility delivery is not production MVT
 
@@ -42,4 +42,3 @@ The system SHALL capture frontend loading and rendering evidence for large river
 - **WHEN** frontend smoke runs against national-scale or large fixture data at desktop and mobile breakpoints
 - **THEN** initial load, map interaction, segment selection, timeline movement, and chart rendering stay within documented time/memory thresholds
 - **AND** oversized or unavailable layers display recoverable error states rather than breaking the page
-

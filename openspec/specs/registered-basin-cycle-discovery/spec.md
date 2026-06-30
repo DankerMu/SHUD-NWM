@@ -5,7 +5,7 @@ TBD - created by archiving change m20-production-multibasin-continuous-automatio
 ## Requirements
 ### Requirement: Active registered basin/model discovery
 
-The scheduler SHALL discover all runnable active SHUD model instances from the model registry by default and include basin id, basin version id, river network version id, model package URI, model resource profile, and display/frequency capability metadata in each candidate.
+The scheduler SHALL discover all runnable active SHUD model instances from the model registry by default and include basin id, basin version id, river network version id, model package URI, model resource profile, and display capability metadata in each candidate.
 
 #### Scenario: discover active models
 
@@ -40,4 +40,3 @@ AND the GFS candidate can still proceed.
 WHEN the same source, cycle, model, and scenario are discovered by two scans
 THEN both scans resolve the same candidate identity, run id, and forcing version id
 AND no duplicate work item is created.
-

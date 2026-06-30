@@ -42,9 +42,8 @@ Station MVT tiles SHALL reuse the canonical MVT resource budgets, cache identity
 - **AND** a cache hit returns the cached `.pbf` bytes only when schema, encoder, source, XYZ, and checksum identity match
 
 ### Requirement: Existing Station And Tile Contracts Remain Compatible
-Adding station MVT SHALL NOT change existing station JSON APIs or existing river/hydro/flood MVT routes.
+Adding station MVT SHALL NOT change existing station JSON APIs or existing river/hydro MVT routes.
 
 #### Scenario: Existing APIs unchanged
-- **WHEN** existing `/api/v1/met/stations`, station series, river-network, hydro, hydro-national, or flood-return-period route tests run
+- **WHEN** existing `/api/v1/met/stations`, station series, river-network, hydro, or hydro-national route tests run
 - **THEN** their existing response envelopes, route paths, error contracts, and MVT source layers remain unchanged
-

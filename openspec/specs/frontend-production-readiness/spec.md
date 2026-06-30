@@ -29,7 +29,7 @@ All frontend backend requests SHALL honor the configured `VITE_API_BASE_URL`.
 #### Scenario: Cross-origin API deployment
 
 - **WHEN** `VITE_API_BASE_URL` is set to an absolute API origin
-- **THEN** forecast, flood alert summary/ranking/timeline, flood return-period tile/GeoJSON, monitoring jobs/stages/trends, and operator action requests MUST target that origin
+- **THEN** forecast, monitoring jobs/stages/trends, and operator action requests MUST target that origin
 - **AND** tests MUST cover at least one request from each page group
 
 ### Requirement: Production RBAC is not user-spoofable
@@ -43,16 +43,6 @@ The frontend SHALL NOT expose a production control that lets users grant themsel
 - **AND** retry/cancel controls MUST be hidden or disabled for a viewer role
 - **AND** retry/cancel controls MUST NOT be shown or actionable solely because `VITE_AUTH_ROLE` is configured as an operator/admin role
 - **AND** operator action headers MUST only be sent by the explicit dev/test role override path until a trusted production backend auth/session mechanism exists
-
-### Requirement: Flood alert types match the API contract
-
-Flood alert frontend state SHALL be normalized from OpenAPI-generated schemas without contradicting API field names or threshold semantics.
-
-#### Scenario: Timeline and threshold payloads normalize correctly
-
-- **WHEN** flood alert timeline and threshold payloads are returned by the API
-- **THEN** the frontend MUST preserve run id, segment id, valid times, return period, warning level, q values, and frequency thresholds
-- **AND** local convenience fields MUST be derived from those API fields with tests
 
 ### Requirement: Monitoring trends respect source and scenario filters
 
@@ -72,5 +62,4 @@ The frontend production build SHALL be deployable without unexplained bundle war
 
 - **WHEN** frontend build and deployment checks run
 - **THEN** large MapLibre/ECharts/vendor chunks MUST be intentionally split or covered by an explicit checked threshold
-- **AND** production preview MUST serve deep links such as `/flood-alerts` and `/monitoring` through the SPA fallback
-
+- **AND** production preview MUST serve deep links such as `/monitoring` through the SPA fallback

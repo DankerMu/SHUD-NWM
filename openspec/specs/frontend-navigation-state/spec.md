@@ -9,11 +9,11 @@ The system SHALL update frontend navigation to expose the product workflow defin
 
 #### Scenario: Navigation contains implemented workflow entries
 - **WHEN** the app shell renders
-- **THEN** navigation MUST include 全国总览, 水文预报, 洪水预警, and 产品监控 entries
+- **THEN** navigation MUST include 全国总览, 水文预报, and 产品监控 entries
 - **AND** entries for unimplemented larger pages such as 气象数据 or 系统管理 MUST be either hidden, disabled, or linked to an explicit placeholder according to the implementation decision
 
 #### Scenario: Existing implemented pages remain accessible
-- **WHEN** an operator navigates to existing forecast, flood alert, or monitoring workflows
+- **WHEN** an operator navigates to existing forecast or monitoring workflows
 - **THEN** those pages MUST remain reachable after the overview route migration
 - **AND** their tests MUST be updated or preserved to assert the new route locations
 
@@ -26,7 +26,7 @@ The system SHALL encode shareable overview and basin detail state in URL query p
 - **THEN** the overview page MUST initialize controls and map data from those parameters
 
 #### Scenario: Basin detail query is restored
-- **WHEN** an operator opens a basin detail URL containing valid `basinVersionId`, `segmentId`, `source`, `cycle`, `validTime`, `layer`, `warningLevel`, or search query
+- **WHEN** an operator opens a basin detail URL containing valid `basinVersionId`, `segmentId`, `source`, `cycle`, `validTime`, `layer`, or search query
 - **THEN** the basin detail page MUST initialize the selected version, segment, filters, and data requests from those parameters
 
 #### Scenario: Invalid query is corrected
@@ -36,11 +36,11 @@ The system SHALL encode shareable overview and basin detail state in URL query p
 
 ### Requirement: Cross-page handoff preserves relevant context
 
-The system SHALL preserve relevant operator context when moving between overview, basin drill-down, flood alerts, monitoring, and future detail pages.
+The system SHALL preserve relevant operator context when moving between overview, basin drill-down, monitoring, and future detail pages.
 
-#### Scenario: Overview links to flood alerts
-- **WHEN** an operator clicks the warning summary from the overview page
-- **THEN** the flood alert route MUST receive available source, cycle, run, valid-time, or warning filter context through URL query where supported
+#### Scenario: Overview links to display coverage
+- **WHEN** an operator clicks the display coverage summary from the overview page
+- **THEN** the monitoring route MUST receive available source, cycle, run, or valid-time context through URL query where supported
 
 #### Scenario: Overview links to monitoring
 - **WHEN** an operator clicks the forecast run summary from the overview page
@@ -61,4 +61,3 @@ The system SHALL include automated tests that prevent route/state regressions.
 #### Scenario: Playwright route smoke tests run
 - **WHEN** frontend end-to-end tests run
 - **THEN** they MUST cover `/`, `/overview`, `/forecast`, `/basins/:basinId` with mocked or fixture data, and existing implemented routes
-

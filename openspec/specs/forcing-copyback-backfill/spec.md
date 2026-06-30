@@ -5,7 +5,7 @@ TBD - created by archiving change issue-494-forcing-backfill. Update Purpose aft
 ## Requirements
 ### Requirement: Historical forcing copyback backfill scans q_down-capable runs
 
-The backfill command MUST scan `hydro.hydro_run` rows with `status IN ('parsed', 'frequency_done', 'published')` that have q_down publish value, join those rows to `met.forcing_version`, and dedupe candidate work by normalized forcing package key.
+The backfill command MUST scan `hydro.hydro_run` rows with display-ready parsed or published status that have q_down publish value, join those rows to `met.forcing_version`, and dedupe candidate work by normalized forcing package key.
 
 #### Scenario: Historical q_down runs are discovered and deduped
 
@@ -71,4 +71,3 @@ The repository MUST document the node-22 backfill command, required environment 
 
 - **WHEN** an operator reads the documentation
 - **THEN** they can identify the dry-run command, the explicit `--apply` command, required env vars, that DB rows are not mutated, and how to rerun or manually roll back packages reported as copied.
-

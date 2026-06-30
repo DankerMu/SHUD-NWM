@@ -53,9 +53,8 @@ A failure in one basin SHALL NOT corrupt sibling basins in the same pass.
 
 #### Scenario: One basin fails, the other publishes (per-stage matrix)
 - **WHEN** basin A fails while basin B succeeds, exercised as five named cases — A fails at
-  forcing, at forecast, at parse, at frequency, and at publish (each a distinct isolation surface:
-  pre-Slurm, array task, parse rows, frequency aggregation, publish manifest)
+  forcing, at forecast, at parse, and at publish (each a distinct isolation surface:
+  pre-Slurm, array task, parse rows, publish manifest)
 - **THEN** in every case A records a typed failure, B proceeds to terminal/publish, the cycle
   aggregate status reflects partial success, and B's downstream manifests/products/DB rows exclude A
 - **AND** no A artifact or row is attributed to B in any of the five cases.
-

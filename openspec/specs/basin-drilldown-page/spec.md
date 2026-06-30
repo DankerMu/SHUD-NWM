@@ -25,10 +25,10 @@ The system SHALL show basin identity, selected basin version, and a searchable/f
 #### Scenario: Segment list loads for basin version
 - **WHEN** a basin version has river segments
 - **THEN** the left panel MUST show basin name and `basin_version_id`
-- **AND** each segment row MUST show segment name or ID, current Q when available, and return-period or warning-level color when available
+- **AND** each segment row MUST show segment name or ID and current Q when available
 
-#### Scenario: Search and warning filter segment list
-- **WHEN** an operator enters a search term or selects a warning-level filter
+#### Scenario: Search and filter segment list
+- **WHEN** an operator enters a search term or selects an available segment filter
 - **THEN** the segment list MUST update without reloading the whole page
 - **AND** the result count or empty state MUST reflect the applied filters
 
@@ -54,7 +54,7 @@ The system SHALL render basin-scoped river segments and support hover/click inte
 #### Scenario: Hover highlights river segment
 - **WHEN** an operator hovers a river segment on the basin map
 - **THEN** the segment MUST be visually highlighted
-- **AND** a tooltip MUST show segment name or ID, current flow when available, and return period or warning level when available
+- **AND** a tooltip MUST show segment name or ID and current flow when available
 
 #### Scenario: Click selects river segment
 - **WHEN** an operator clicks a river segment
@@ -79,7 +79,7 @@ The system SHALL show selected segment metadata, current forecast values, source
 
 #### Scenario: Segment detail renders available fields
 - **WHEN** selected segment detail and forecast data are available
-- **THEN** the detail panel MUST show `river_segment_id`, basin name, model identifier when available, catchment area or length when available, current Q, return-period level, forecast valid time, source, and cycle time
+- **THEN** the detail panel MUST show `river_segment_id`, basin name, model identifier when available, catchment area or length when available, current Q, forecast valid time, source, and cycle time
 
 #### Scenario: Trend sparkline is shown for selected segment
 - **WHEN** recent or forecast trend points are available for the selected segment
@@ -112,4 +112,3 @@ The system SHALL distinguish unavailable forecast, warning, or valid-time data f
 - **WHEN** the selected source, cycle, or valid time has no forecast or warning data for the basin
 - **THEN** the map/list/detail view models MUST expose an unavailable reason
 - **AND** the UI MUST keep basin geometry visible while disabling or clearing data-dependent values
-

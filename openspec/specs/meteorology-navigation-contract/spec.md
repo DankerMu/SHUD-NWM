@@ -16,7 +16,7 @@ THEN navigation remains hidden/disabled or shows an explicit unavailable page
 
 #### Scenario: Existing route compatibility
 WHEN the meteorology route is added
-THEN existing overview, basin, forecast, flood-alert, segment detail, and monitoring routes keep their current navigation behavior and access control
+THEN existing overview, basin, forecast, segment detail, and monitoring routes keep their current navigation behavior and access control
 
 #### Scenario: Tab query correction
 WHEN the user opens `/meteorology` with a missing or unsupported tab query value
@@ -25,4 +25,3 @@ THEN the route selects a supported default tab and updates or renders state with
 #### Scenario: Query repair evidence
 WHEN the route normalizes unsupported tab, source, opacity, validTime, or other query parameters while another public parameter has validation evidence
 THEN URL replacement preserves explicit validation evidence and keeps effective bounded values visible to the user
-
