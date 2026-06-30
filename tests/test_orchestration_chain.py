@@ -2848,6 +2848,32 @@ def test_candidate_scoped_full_cycle_ignores_sibling_cycle_jobs(tmp_path: Path) 
     assert {manifest["model_id"] for manifest in manifests} == {"model_0"}
 
 
+def test_manual_retry_candidate_scoped_ignores_stale_active_pipeline_placeholder(tmp_path: Path) -> None:
+    class StaleActiveManualRetryRepository(FakeCycleRepository):
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(f"manual retry must not fall back to cycle active check: {source_id} {cycle_time}")
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    repository = StaleActiveManualRetryRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["manual_retry_attempt"] = 4
+    basins[0]["state_evidence"] = {
+        "decision": "manual_retry",
+        "manual_retry": {"marker": True, "allowed": True, "new_attempt": 4},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    assert client.submissions
+    assert {submission["stage"] for submission in client.submissions} == {stage.stage for stage in M3_STAGES}
+
+
 def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:
     # M23-7 (#258): re-scans while a cycle is already active must be rejected by
     # the active guard and never produce a duplicate Slurm submission.

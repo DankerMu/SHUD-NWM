@@ -95,6 +95,8 @@ def _active_orchestration_conflicts(
         for job in repository.query_pipeline_jobs_by_run(run_id):
             if _is_active_pipeline_job(job):
                 return True
+        if _manual_retry_scoped_cycle_execution(basins):
+            return False
         if model_ids and callable(active_pipeline_provider):
             return any(
                 bool(active_pipeline_provider(source_id=source_id, cycle_time=cycle_time, model_id=model_id))
@@ -123,7 +125,27 @@ def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bo
     if len(basins) != 1:
         return False
     basin = basins[0]
-    return _restart_stage_from_basins(basins) is not None or basin.get("orchestration_run_id") not in (None, "")
+    return (
+        _restart_stage_from_basins(basins) is not None
+        or basin.get("orchestration_run_id") not in (None, "")
+        or _manual_retry_scoped_cycle_execution(basins)
+    )
+
+
+def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    if len(basins) != 1:
+        return False
+    basin = basins[0]
+    if basin.get("manual_retry_attempt") not in (None, ""):
+        return True
+    state_evidence = basin.get("state_evidence")
+    if not isinstance(state_evidence, Mapping):
+        return False
+    manual_retry = state_evidence.get("manual_retry")
+    return bool(
+        isinstance(manual_retry, Mapping)
+        and (manual_retry.get("marker") or manual_retry.get("requested") or manual_retry.get("allowed"))
+    )
 
 
 def _cycle_basin_model_ids(basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
