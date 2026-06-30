@@ -1,10 +1,10 @@
 #!/bin/bash
 # node-27 bounded source download wrapper.
 #
-# Source infra/env/node27-download.env, then run one explicit GFS/IFS download
-# cycle through scripts/node27_download_cycles.py. Phase 1 intentionally requires
-# NODE27_DOWNLOAD_CYCLE_TIME; automatic production cycle selection is added only
-# after live preflight evidence is collected.
+# Source infra/env/node27-download.env, then run one GFS/IFS download pass
+# through scripts/node27_download_cycles.py. NODE27_DOWNLOAD_CYCLE_TIME may be
+# set for an explicit backfill; when it is empty, the Python runner selects the
+# latest allowed UTC business cycle after NODE27_DOWNLOAD_CYCLE_DELAY_HOURS.
 
 set -u
 
@@ -83,9 +83,6 @@ if [ "$DOWNLOAD_ENV_STRICT_SOURCE" = "1" ]; then
   if [ -z "${WORKSPACE_ROOT:-}" ]; then
     bootstrap_blocked "WORKSPACE_ROOT_MISSING"
   fi
-  if [ -z "${NODE27_DOWNLOAD_CYCLE_TIME:-}" ]; then
-    bootstrap_blocked "NODE27_DOWNLOAD_CYCLE_TIME_MISSING"
-  fi
   if [ -z "${NODE27_DOWNLOAD_LOG_ROOT:-}" ]; then
     bootstrap_blocked "NODE27_DOWNLOAD_LOG_ROOT_MISSING"
   fi
@@ -96,11 +93,10 @@ LOG="${NODE27_DOWNLOAD_LOG_FILE:-$NODE27_DOWNLOAD_LOG_ROOT/download.log}"
 SUMMARY="${NODE27_DOWNLOAD_SUMMARY_PATH:-$NODE27_DOWNLOAD_LOG_ROOT/last-summary.json}"
 
 cd "$REPO" || bootstrap_blocked "REPO_UNAVAILABLE"
-echo "[$(ts)] node27-download: start cycle=${NODE27_DOWNLOAD_CYCLE_TIME:-}" >> "$LOG"
+echo "[$(ts)] node27-download: start cycle=${NODE27_DOWNLOAD_CYCLE_TIME:-auto}" >> "$LOG"
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_download_cycles.py" \
   --cycle-time "${NODE27_DOWNLOAD_CYCLE_TIME:-}" \
   --summary-path "$SUMMARY" >> "$LOG" 2>&1
 RC=$?
 echo "[$(ts)] node27-download: done rc=$RC summary=$SUMMARY" >> "$LOG"
 exit "$RC"
-

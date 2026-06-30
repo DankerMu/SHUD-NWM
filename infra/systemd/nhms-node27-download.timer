@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NHMS node-27 raw GFS/IFS source download every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=false
+Unit=nhms-node27-download.service
+
+[Install]
+WantedBy=timers.target

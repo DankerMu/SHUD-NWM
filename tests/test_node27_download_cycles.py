@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,8 @@ import scripts.node27_download_cycles as downloader
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "scripts" / "node27_download_once.sh"
 ENV_EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-download.example"
+SYSTEMD_DOWNLOAD_SERVICE = REPO_ROOT / "infra" / "systemd" / "nhms-node27-download.service"
+SYSTEMD_DOWNLOAD_TIMER = REPO_ROOT / "infra" / "systemd" / "nhms-node27-download.timer"
 
 
 def _prepare_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -179,6 +182,69 @@ def test_preflight_ready_summary_is_credential_safe(
     assert "writer-secret" not in rendered
 
 
+def test_automatic_cycle_selection_uses_latest_allowed_cycle_after_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "8")
+
+    selected = downloader._select_automatic_cycle_time(
+        dict(os.environ),
+        now=datetime(2026, 6, 30, 0, 40, tzinfo=UTC),
+    )
+
+    assert selected == "2026-06-29T12:00:00Z"
+
+
+def test_missing_cycle_time_defaults_to_automatic_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(downloader, "_select_automatic_cycle_time", lambda _env: "2026-06-29T12:00:00Z")
+
+    def fake_download(source: str, cycle_time: str, _env: dict[str, str]) -> downloader.SourceDownloadResult:
+        return downloader.SourceDownloadResult(
+            source=source,
+            cycle_time=cycle_time,
+            status="downloaded",
+            return_code=0,
+            command=[f"nhms-{source.lower()}", "download"],
+            result={"status": "raw_complete"},
+            stdout_tail='{"status":"raw_complete"}',
+            stderr_tail="",
+        )
+
+    monkeypatch.setattr(downloader, "run_source_download", fake_download)
+
+    rc, summary, rendered = _run_main(
+        capsys,
+        [
+            "--source",
+            "GFS",
+            "--database-url",
+            "postgresql://node27_download_rw:writer-secret@127.0.0.1:55432/nhms",
+            "--object-store-root",
+            str(object_store_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--log-root",
+            str(log_root),
+            "--lock-path",
+            str(tmp_path / "download.lock"),
+        ],
+    )
+
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["cycle_time"] == "2026-06-29T12:00:00Z"
+    assert summary["cycle_time_selection"] == "automatic"
+    assert summary["downloads"]["processed"] == 1
+    assert "writer-secret" not in rendered
+
+
 def test_one_source_failure_isolated_while_other_source_completes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -336,10 +402,16 @@ def test_lock_held_blocks_without_download(
 def test_wrapper_and_env_contract_do_not_source_display_env() -> None:
     wrapper = WRAPPER.read_text(encoding="utf-8")
     env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
+    service = SYSTEMD_DOWNLOAD_SERVICE.read_text(encoding="utf-8")
+    timer = SYSTEMD_DOWNLOAD_TIMER.read_text(encoding="utf-8")
 
     assert "node27-download.env" in wrapper
     assert "DOWNLOAD_ENV_DISPLAY_RUNTIME_FORBIDDEN" in wrapper
+    assert "NODE27_DOWNLOAD_CYCLE_TIME_MISSING" not in wrapper
     assert "infra/env/display.env" not in wrapper
     assert "NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download" in env_example
+    assert "NODE27_DOWNLOAD_CYCLE_DELAY_HOURS=8" in env_example
     assert "127.0.0.1:55432" in env_example
     assert "55433" in env_example
+    assert "scripts/node27_download_once.sh" in service
+    assert "OnUnitActiveSec=30min" in timer

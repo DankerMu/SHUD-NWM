@@ -156,9 +156,25 @@ Node-27 ingest role:
 - `NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS` defaults to
   `127.0.0.1:55432,localhost:55432`; set it only when node-27 ingest must use a
   different local node-27 PostgreSQL endpoint.
-- The archived node-22 rollback mirror is compatibility-only and must stay
-  explicit: use `N22_DSN` from this owner-only env file, or pass an owner-only
-  file through `scripts/node27_autopipeline.py --node22-dsn-file`. Do not pass a
-  raw DSN in argv, do not source `display.env`, and do not set
-  `NHMS_NODE22_DSN_SOURCE`; the wrapper clears stale source labels in strict mode
-  and the parent records the non-secret source label when invoking the mirror.
+- Current node-27 autopipeline does not call the archived node-22 DB rollback
+  mirror. Every run must provide an object-store
+  `runs/<run_id>/input/forcing_domain_handoff.json`; missing handoff is reported
+  as `OBJECT_STORE_FORCING_HANDOFF_REQUIRED`. Historical node-22 rollback tools
+  remain archive-only and are not part of normal ingest automation.
+
+Node-27 download role:
+
+- `infra/env/node27-download.example` is the committed template for
+  `scripts/node27_download_once.sh` and
+  `infra/systemd/nhms-node27-download.{service,timer}`. Copy it to untracked
+  `infra/env/node27-download.env` with mode `0600` and writer-capable
+  `DATABASE_URL` on node-27.
+- Leave `NODE27_DOWNLOAD_CYCLE_TIME` empty for production automation. The runner
+  selects the latest allowed UTC cycle from
+  `NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC` after
+  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). Set
+  `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit backfill.
+- The download env is not display runtime config. It must use
+  `NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download`, local node-27
+  PostgreSQL `:55432`, `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`, and a
+  node-27 local `WORKSPACE_ROOT`.

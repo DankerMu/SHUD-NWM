@@ -16,8 +16,10 @@ OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 OBJECT_STORE_PREFIX=s3://nhms
 WORKSPACE_ROOT=/home/nwm/node27-download-work
 
-# Manual Phase-1 cycle selection. Phase 2 adds production automatic selection.
+# Optional explicit backfill cycle. Leave empty for production automation: the
+# runner selects the latest allowed UTC business cycle older than the delay.
 NODE27_DOWNLOAD_CYCLE_TIME=
+NODE27_DOWNLOAD_CYCLE_DELAY_HOURS=8
 NHMS_NODE27_DOWNLOAD_SOURCES=GFS,IFS
 NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC=0,12
 

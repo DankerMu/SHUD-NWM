@@ -19,7 +19,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -35,6 +35,7 @@ DOWNLOAD_PREFLIGHT_SCHEMA = "nhms.node27_download.preflight.v1"
 PREFLIGHT_BLOCKED_RC = 2
 LOCK_BLOCKED_RC = 2
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
+DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS = 8
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -359,6 +360,48 @@ def _cycle_hours_preflight(env: dict[str, str]) -> tuple[dict[str, Any], list[di
     return evidence, []
 
 
+def _allowed_cycle_hours(env: dict[str, str]) -> tuple[int, ...]:
+    raw = (env.get("NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC") or "").strip()
+    if not raw:
+        raise ValueError("Allowed node-27 download cycle hours are required.")
+    try:
+        hours = tuple(sorted({int(item.strip()) for item in raw.split(",") if item.strip()}))
+    except ValueError as error:
+        raise ValueError("Allowed node-27 download cycle hours must be comma-separated UTC hours.") from error
+    if not hours or any(hour < 0 or hour > 23 for hour in hours):
+        raise ValueError("Allowed node-27 download cycle hours must be UTC hours in 0..23.")
+    return hours
+
+
+def _automatic_cycle_delay(env: dict[str, str]) -> timedelta:
+    raw = (env.get("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS") or "").strip()
+    if not raw:
+        return timedelta(hours=DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS)
+    try:
+        hours = float(raw)
+    except ValueError as error:
+        raise ValueError("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS must be numeric.") from error
+    if hours < 0 or hours > 72:
+        raise ValueError("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS must be in the range 0..72.")
+    return timedelta(hours=hours)
+
+
+def _select_automatic_cycle_time(env: dict[str, str], *, now: datetime | None = None) -> str:
+    allowed_hours = _allowed_cycle_hours(env)
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    reference = reference.astimezone(UTC) - _automatic_cycle_delay(env)
+    candidate_day = reference.date()
+    for day_offset in range(0, 3):
+        day = candidate_day - timedelta(days=day_offset)
+        for hour in sorted(allowed_hours, reverse=True):
+            candidate = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+            if candidate <= reference:
+                return candidate.strftime("%Y-%m-%dT%H:%M:%SZ")
+    raise ValueError("Could not select an automatic node-27 download cycle time.")
+
+
 def _lock_preflight(raw_value: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
     raw = (raw_value or "").strip()
     if not raw:
@@ -655,21 +698,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_json_summary(summary)
         return PREFLIGHT_BLOCKED_RC
 
-    if not args.cycle_time:
+    try:
+        selected_by = "explicit" if args.cycle_time else "automatic"
+        raw_cycle_time = args.cycle_time or _select_automatic_cycle_time(env)
+    except ValueError as error:
         summary = {
             "schema": DOWNLOAD_SUMMARY_SCHEMA,
             "status": "preflight_blocked",
             "return_code": PREFLIGHT_BLOCKED_RC,
             "role": DOWNLOAD_ROLE,
             "cycle_time": None,
+            "cycle_time_selection": "automatic",
             "sources": [],
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
             "blockers": [
                 _preflight_blocker(
-                    "NODE27_DOWNLOAD_CYCLE_TIME_MISSING",
-                    "NODE27_DOWNLOAD_CYCLE_TIME",
-                    "A cycle time is required for this bounded download runner.",
+                    "NODE27_DOWNLOAD_CYCLE_TIME_AUTO_FAILED",
+                    "NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC",
+                    str(error),
                 )
             ],
         }
@@ -678,7 +725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return PREFLIGHT_BLOCKED_RC
 
     try:
-        parsed_cycle = parse_cycle_time(args.cycle_time)
+        parsed_cycle = parse_cycle_time(raw_cycle_time)
         # Keep output canonical even if the caller used a space or offset.
         cycle_time = parsed_cycle.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         sources = _normalize_sources(args.sources, env)
@@ -688,7 +735,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "preflight_blocked",
             "return_code": PREFLIGHT_BLOCKED_RC,
             "role": DOWNLOAD_ROLE,
-            "cycle_time": args.cycle_time,
+            "cycle_time": raw_cycle_time,
+            "cycle_time_selection": selected_by,
             "sources": [],
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -707,6 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "return_code": 0,
             "role": DOWNLOAD_ROLE,
             "cycle_time": cycle_time,
+            "cycle_time_selection": selected_by,
             "sources": list(sources),
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -723,6 +772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "return_code": LOCK_BLOCKED_RC,
                 "role": DOWNLOAD_ROLE,
                 "cycle_time": cycle_time,
+                "cycle_time_selection": selected_by,
                 "sources": list(sources),
                 "preflight": preflight,
                 "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -750,6 +800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "return_code": return_code,
         "role": DOWNLOAD_ROLE,
         "cycle_time": cycle_time,
+        "cycle_time_selection": selected_by,
         "sources": list(sources),
         "preflight": preflight,
         "downloads": {**counts, "details": details},

@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-06-29
+最后更新：2026-06-30
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -15,16 +15,20 @@
 ## 1. 当前结论
 
 - node-27 是当前 active production service host：本机 PostgreSQL `:55432`、
-  cron-driven ingest、display API 和前端公网入口都在 27。
+  source download、ingest、display API 和前端公网入口都在 27。
+- node-27 source download 由用户级 systemd timer
+  `nhms-node27-download.timer` 驱动，调用
+  `scripts/node27_download_once.sh`，自动选择 00/12 UTC 业务 cycle 并把 raw
+  manifest 写入共享 NFS object-store。
 - node-27 每 10 分钟通过 cron 调用
   `/home/nwm/NWM/scripts/node27_autopipe_cron.sh`，再运行
   `scripts/node27_autopipeline.py` 扫描 NFS object-store、注册/解析 run、
   入库并刷新 display coverage。
 - node-27 display API 由 `scripts/ops/start-display-api.sh` 管理，
   当前监听 `127.0.0.1:8080`；公网入口是 `https://test.nwm.ac.cn`。
-- node-22 是计算与 Slurm host：运行 Slurm Gateway、诊断 API、Slurm/SHUD
-  wrapper，并向 NFS 写 object-store/published 产物；node-22 不作为当前 NHMS
-  业务数据库 writer。
+- node-22 是计算与 Slurm host：运行 Slurm Gateway、诊断 API、DB-free
+  production scheduler timer、Slurm/SHUD wrapper，并向 NFS 写
+  object-store/published 产物；node-22 不作为当前 NHMS 业务数据库 writer。
 - 完整 forcing 包和 SHUD run 输出的共享真相源是
   `object-store/forcing/...` 与 `object-store/runs/...`；`published/`
   只放 display products、tiles、logs、manifests。
@@ -36,10 +40,11 @@
 | 面 | 位置 | 当前职责 | 关键入口 |
 | --- | --- | --- | --- |
 | node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | writer `DATABASE_URL` from node-27 ingest env; display uses readonly `display.env` only |
+| node-27 download | node-27 `/home/nwm/NWM` | 自动下载 GFS/IFS 00/12 UTC raw source cycles 到共享 object-store | `infra/env/node27-download.env` -> `nhms-node27-download.timer` -> `scripts/node27_download_once.sh` |
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
-| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、Slurm/SHUD compute wrapper | `python -m services.slurm_gateway`, Slurm jobs |
+| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
 Node-22 historical PostgreSQL `:55433` was archived and stopped on 2026-06-29
@@ -49,10 +54,26 @@ ingest/write checks belong on node-27 against `:55432`.
 
 ## 3. 如何拉起和确认服务
 
-### 3.1 调度器 / ingest
+### 3.1 下载 / 调度器 / ingest
 
-当前生产 ingest 不是常驻 `plan-production` 进程。node-27 使用 cron 周期性启动
-bounded autopipe pass：
+node-27 source download 使用用户级 systemd timer。它不使用 display env，不连
+node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择最近的 00/12 UTC
+业务 cycle：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+systemctl --user status nhms-node27-download.timer nhms-node27-download.service --no-pager
+tail -n 160 /home/nwm/node27-download-logs/download.log
+```
+
+期望：
+
+- `nhms-node27-download.timer` 为 `active (waiting)`。
+- `infra/env/node27-download.env` mode 为 `0600`。
+- 下载 summary 的 `cycle_time_selection` 为 `automatic`，cycle hour 在 `0,12`
+  之内。
+
+node-27 ingest 使用 cron 周期性启动 bounded autopipe pass：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
@@ -82,17 +103,25 @@ tail -n 160 /home/nwm/autopipe.log
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   该步骤非 fatal，不应掩盖 autopipe 主返回码。
 
-确认 node-27 只按 bounded cron 模式运行，并且 node-22 没有残留的 active
-production scheduler/writer：
+确认 node-27 ingest 按 bounded cron 模式运行，并且 node-22 的 production
+scheduler 是 DB-free systemd timer：
 
 ```bash
 pgrep -af 'node27_[a]utopipeline|node27_[a]utopipe' || true
 
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'pgrep -af "services[.]orchestrator|[p]lan-production" || true'
+ssh -p 32099 frd_muziyao@210.77.77.22 '
+systemctl --user status nhms-compute-scheduler.timer nhms-compute-scheduler.service --no-pager
+pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
+if [ "${pid:-0}" != "0" ]; then
+  tr "\0" "\n" < /proc/$pid/environ | grep -E "^(DATABASE_URL|PGHOST|PGPORT|PGDATABASE)=" || true
+fi'
 ```
 
-The node-22 scheduler check is expected to print nothing.
+The scheduler service is oneshot; it is normal for it to be inactive between
+timer ticks. Any `DATABASE_URL`/libpq env in the scheduler process is a
+misconfiguration. Slurm submission is through the node-22 Slurm Gateway and
+`sbatch`; Slurm then runs compute work on allocated compute nodes such as
+`cnXX`.
 
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。
@@ -193,6 +222,7 @@ node-22 compute 侧优先看 Slurm queue、Gateway、shared NFS 输出：
 ssh -p 32099 frd_muziyao@210.77.77.22
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 pgrep -af '[s]ervices.slurm_gateway'
+systemctl --user list-timers 'nhms-compute-scheduler.timer' --no-pager
 find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
   -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort | tail -20
 ```
@@ -202,13 +232,18 @@ find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
 当前物理流程按数据面理解：
 
 ```text
-node-22 / Slurm
+node-27 download timer
+  -> downloads GFS/IFS raw cycles to shared NFS object-store
+node-22 DB-free scheduler timer / Slurm
+  -> consumes node-27 raw manifests from shared NFS
+  -> submits convert/forcing/forecast/parse work through Slurm Gateway/sbatch
+  -> Slurm runs compute jobs on allocated compute nodes
   -> produces forcing and SHUD run artifacts
   -> writes shared NFS object-store/published roots
 node-27 cron autopipe
   -> scans /home/ghdc/nwm/object-store/runs
   -> seeds basin registry when needed
-  -> registers/mirrors/parses runs
+  -> applies object-store forcing-domain handoff, registers/parses runs
   -> writes node-27 PostgreSQL :55432
   -> refreshes display coverage and publish status
 node-27 display
