@@ -152,6 +152,7 @@ TERMINAL_PIPELINE_STATUSES = {
     "failed",
     "cancelled",
     "submission_failed",
+    "reservation_lost",
     "permanently_failed",
 }
 _STAGE_STATUS_ORDER = {
@@ -3760,7 +3761,24 @@ def _blocked_query_job(
 
 def _job_is_active(job: Mapping[str, Any]) -> bool:
     status = str(job.get("status") or "")
+    if _job_is_unsubmitted_retry_placeholder(job, status=status):
+        return False
     return status not in ("", *TERMINAL_PIPELINE_STATUSES)
+
+
+def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str | None = None) -> bool:
+    job_status = str(job.get("status") or "") if status is None else status
+    if job_status not in {"pending", "queued", "submitted"}:
+        return False
+    if job.get("slurm_job_id") not in (None, "") or job.get("array_task_id") not in (None, ""):
+        return False
+    if job.get("submitted_at") not in (None, ""):
+        return False
+    try:
+        retry_count = int(job.get("retry_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return retry_count > 0 and job.get("candidate_id") in (None, "") and job.get("idempotency_key") in (None, "")
 
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:

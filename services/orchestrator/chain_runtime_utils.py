@@ -30,6 +30,7 @@ TERMINAL_JOB_STATUSES = {
     "failed",
     "cancelled",
     "submission_failed",
+    "reservation_lost",
     "permanently_failed",
 }
 CANONICAL_PRECIP_VARIABLE = "prcp_rate_or_amount"

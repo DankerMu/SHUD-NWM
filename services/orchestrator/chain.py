@@ -209,6 +209,7 @@ TERMINAL_JOB_STATUSES = {
     "failed",
     "cancelled",
     "submission_failed",
+    "reservation_lost",
     "permanently_failed",
 }
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}

@@ -385,6 +385,56 @@ def test_file_orchestration_journal_compute_terminal_ignores_legacy_frequency_ta
     assert [job["stage"] for job in state["pipeline_jobs"]] == ["state_save_qc"]
 
 
+def test_file_orchestration_journal_ignores_unsubmitted_retry_placeholder_in_active_gate(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    retry_placeholder = _active_job(cycle_time)
+    retry_placeholder.update(
+        {
+            "job_id": "job_cycle_gfs_2026062800_model_a_forcing_retry_1_retry_2",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "status": "pending",
+            "slurm_job_id": None,
+            "array_task_id": None,
+            "submitted_at": None,
+            "candidate_id": None,
+            "idempotency_key": None,
+            "retry_count": 2,
+        }
+    )
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[retry_placeholder]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_orchestration(source_id="gfs", cycle_time=cycle_time) is False
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+def test_file_orchestration_journal_treats_reservation_lost_as_terminal(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    lost = _active_job(cycle_time)
+    lost.update(
+        {
+            "status": "reservation_lost",
+            "slurm_job_id": None,
+            "submitted_at": None,
+            "error_code": "SLURM_RESERVATION_LOST",
+        }
+    )
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[lost]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_orchestration(source_id="gfs", cycle_time=cycle_time) is False
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
 def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
