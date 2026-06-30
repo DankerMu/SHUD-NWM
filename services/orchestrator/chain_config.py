@@ -129,6 +129,13 @@ class OrchestratorConfig:
             return True
         return parse_cycle_time(cycle_time) >= self.forecast_warm_start_required_from
 
+    def forecast_warm_start_bootstrap_cycle(self, cycle_time: datetime) -> bool:
+        return (
+            self.require_forecast_warm_start
+            and self.forecast_warm_start_required_from is not None
+            and parse_cycle_time(cycle_time) < self.forecast_warm_start_required_from
+        )
+
 
 def _env_flag(name: str, *, default: bool) -> bool:
     value = os.getenv(name)

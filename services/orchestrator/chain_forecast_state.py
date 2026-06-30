@@ -166,6 +166,8 @@ def _select_forecast_initial_state(
     model_package_checksum: str | None = None,
     max_lead_hours: int | None = None,
 ) -> InitialStateSelection:
+    if self.config.forecast_warm_start_bootstrap_cycle(cycle_time):
+        return InitialStateSelection(None, None, None, None, "cold_start_no_state")
     if self.config.strict_forecast_warm_start_required_for(cycle_time):
         return self._select_strict_forecast_initial_state(
             model_id=model_id,

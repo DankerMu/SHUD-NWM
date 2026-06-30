@@ -407,8 +407,16 @@ def test_strict_forecast_missing_exact_blocks_before_side_effects(tmp_path: Path
 
 
 def test_strict_forecast_bootstrap_boundary_allows_prior_cold_start(tmp_path: Path) -> None:
+    stale_lineage = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="IFS",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="old-package-sha",
+        lead_hours=12,
+    )
     repository = FakeOrchestratorRepository()
-    state_manager = FakeStateManager([])
+    state_manager = FakeStateManager([stale_lineage])
     orchestrator = _orchestrator(
         tmp_path,
         repository,
@@ -422,7 +430,54 @@ def test_strict_forecast_bootstrap_boundary_allows_prior_cold_start(tmp_path: Pa
     context, manifest = repository.created_runs[0]
     assert context.init_state_id is None
     assert manifest["initial_state"]["quality"] == "cold_start_no_state"
-    assert state_manager.latest_usable_calls == 1
+    assert state_manager.latest_usable_calls == 0
+
+
+def test_strict_forecast_bootstrap_boundary_cohort_ignores_prefilled_state(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        FakeStateManager([state]),
+        require_forecast_warm_start=True,
+        forecast_warm_start_required_from=_dt("2026-05-01T12:00:00Z"),
+    )
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "yangtze",
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rivnet_v1",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "model_package_checksum": "package-sha",
+        "source_id": "gfs",
+        "init_state_id": state.state_id,
+        "init_state_uri": state.state_uri,
+        "init_state_checksum": state.checksum,
+        "init_state_valid_time": "2026-05-01T00:00:00Z",
+        "init_state_lineage": {
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026050100",
+            "lead_hours": 12,
+            "model_package_checksum": "package-sha",
+        },
+    }
+    basins = [basin]
+
+    orchestrator._apply_cohort_warm_start(basins, "gfs", _dt("2026-05-01T00:00:00Z"))
+
+    assert basins[0]["init_state_id"] is None
+    assert basins[0]["init_state_uri"] is None
+    assert basins[0]["init_state_quality"] == "cold_start_no_state"
+    assert basins[0]["init_state_lineage"] == {}
 
 
 def test_strict_forecast_without_state_manager_blocks_before_side_effects(tmp_path: Path) -> None:

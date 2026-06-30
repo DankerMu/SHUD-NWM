@@ -8658,6 +8658,8 @@ def test_orchestrator_config_parses_strict_forecast_warm_start_env(
     assert config.forecast_warm_start_required_from == _dt("2026-06-27T00:00:00Z")
     assert config.strict_forecast_warm_start_required_for(_dt("2026-06-27T00:00:00Z")) is True
     assert config.strict_forecast_warm_start_required_for(_dt("2026-06-26T12:00:00Z")) is False
+    assert config.forecast_warm_start_bootstrap_cycle(_dt("2026-06-26T12:00:00Z")) is True
+    assert config.forecast_warm_start_bootstrap_cycle(_dt("2026-06-27T00:00:00Z")) is False
 
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
     assert OrchestratorConfig.from_env().require_forecast_warm_start is False
