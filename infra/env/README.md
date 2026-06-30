@@ -149,7 +149,8 @@ must not be used as either production two-node compose file.
 Node-27 ingest role:
 
 - `infra/env/node27-ingest.example` is the committed template for
-  `scripts/node27_autopipe_cron.sh`. Copy it to an untracked
+  `scripts/node27_autopipe_cron.sh` and
+  `infra/systemd/nhms-node27-autopipe.{service,timer}`. Copy it to an untracked
   `infra/env/node27-ingest.env` with mode `0600` and writer-capable
   `DATABASE_URL` on node-27.
 - This env is not a display API env. It uses

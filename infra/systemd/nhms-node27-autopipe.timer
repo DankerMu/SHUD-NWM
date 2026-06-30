@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NHMS node-27 object-store autopipeline ingest every 10 minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=10min
+Persistent=false
+Unit=nhms-node27-autopipe.service
+
+[Install]
+WantedBy=timers.target

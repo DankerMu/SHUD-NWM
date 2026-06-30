@@ -14,6 +14,8 @@ import scripts.node27_autopipeline as autopipe
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "scripts" / "node27_autopipe_cron.sh"
+SYSTEMD_AUTOPIPE_SERVICE = REPO_ROOT / "infra" / "systemd" / "nhms-node27-autopipe.service"
+SYSTEMD_AUTOPIPE_TIMER = REPO_ROOT / "infra" / "systemd" / "nhms-node27-autopipe.timer"
 RUN_QHH = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_QHH_NEXT = "fcst_gfs_2026062112_basins_qhh_shud"
 RUN_HEIHE = "fcst_gfs_2026062112_basins_heihe_shud"
@@ -839,6 +841,18 @@ def test_wrapper_missing_ingest_env_blocks_before_python_and_backstop(tmp_path: 
     assert "INGEST_ENV_MISSING" in proc.stderr
     assert "INGEST_ENV_MISSING" in log.read_text(encoding="utf-8")
     assert not invocations.exists()
+
+
+def test_systemd_autopipe_timer_contract() -> None:
+    service = SYSTEMD_AUTOPIPE_SERVICE.read_text(encoding="utf-8")
+    timer = SYSTEMD_AUTOPIPE_TIMER.read_text(encoding="utf-8")
+
+    assert "scripts/node27_autopipe_cron.sh" in service
+    assert "NODE27_AUTOPIPE_BOOTSTRAP_LOG=/home/nwm/autopipe-logs/bootstrap.log" in service
+    assert "infra/env/display.env" not in service
+    assert "display-readonly" not in service
+    assert "OnUnitActiveSec=10min" in timer
+    assert "Unit=nhms-node27-autopipe.service" in timer
 
 
 def test_wrapper_env_file_missing_database_url_ignores_ambient_without_override(tmp_path: Path) -> None:

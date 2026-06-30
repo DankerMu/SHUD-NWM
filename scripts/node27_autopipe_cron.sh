@@ -1,5 +1,5 @@
 #!/bin/bash
-# node-27 autopipeline cron wrapper.
+# node-27 autopipeline automation wrapper.
 #
 # Periodically scans the object-store for new basins/runs and ingests them via
 # scripts/node27_autopipeline.py (seed registry -> register -> object-store
@@ -11,9 +11,7 @@
 # the next cron tick). All output (timestamped + the JSON summary) is appended
 # to AUTOPIPE_LOG_FILE.
 #
-# Install (every 10 minutes):
-#   crontab -e   # then add:
-#   */10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh
+# Installed on node-27 by infra/systemd/nhms-node27-autopipe.{service,timer}.
 
 set -u
 

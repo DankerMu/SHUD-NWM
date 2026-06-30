@@ -15,12 +15,13 @@
 ## 1. 当前结论
 
 - node-27 是当前 active production service host：本机 PostgreSQL `:55432`、
-  source download、cron-driven ingest、display API 和前端公网入口都在 27。
+  source download、systemd-driven ingest、display API 和前端公网入口都在 27。
 - node-27 source download 由用户级 systemd timer
   `nhms-node27-download.timer` 驱动，调用
   `scripts/node27_download_once.sh`，自动选择 00/12 UTC 业务 cycle 并把 raw
   manifest 写入共享 NFS object-store。
-- node-27 每 10 分钟通过 cron 调用
+- node-27 每 10 分钟通过用户级 systemd timer
+  `nhms-node27-autopipe.timer` 调用
   `/home/nwm/NWM/scripts/node27_autopipe_cron.sh`，再运行
   `scripts/node27_autopipeline.py` 扫描 NFS object-store、注册/解析 run、
   入库并刷新 display coverage。
@@ -41,7 +42,7 @@
 | --- | --- | --- | --- |
 | node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | writer `DATABASE_URL` from node-27 ingest env; display uses readonly `display.env` only |
 | node-27 download | node-27 `/home/nwm/NWM` | 自动下载 GFS/IFS 00/12 UTC raw source cycles 到共享 object-store | `infra/env/node27-download.env` -> `nhms-node27-download.timer` -> `scripts/node27_download_once.sh` |
-| node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
+| node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
 | node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `python -m services.slurm_gateway`, Slurm jobs |
@@ -73,18 +74,17 @@ tail -n 160 /home/nwm/node27-download-logs/download.log
 - 下载 summary 的 `cycle_time_selection` 为 `automatic`，cycle hour 在 `0,12`
   之内。
 
-node-27 ingest 使用 cron 周期性启动 bounded autopipe pass：
+node-27 ingest 使用用户级 systemd timer 周期性启动 bounded autopipe pass：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
-crontab -l | grep -F 'scripts/node27_autopipe_cron.sh'
+systemctl --user status nhms-node27-autopipe.timer nhms-node27-autopipe.service --no-pager
 ```
 
-期望存在类似条目：
+期望：
 
-```text
-*/10 * * * * /home/nwm/NWM/scripts/node27_autopipe_cron.sh >> /home/nwm/autopipe.log 2>&1
-```
+- `nhms-node27-autopipe.timer` 为 `active (waiting)`。
+- `infra/env/node27-ingest.env` mode 为 `0600`。
 
 `N22_DSN`、`NHMS_NODE22_DSN_SOURCE` 和
 `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` 不属于当前生产 ingest
@@ -109,7 +109,7 @@ tail -n 160 /home/nwm/autopipe.log
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   该步骤非 fatal，不应掩盖 autopipe 主返回码。
 
-确认 node-27 ingest 按 bounded cron 模式运行，并且 node-22 的 production
+确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production
 scheduler 是 DB-free systemd timer：
 
 ```bash

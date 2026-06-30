@@ -23,6 +23,7 @@ from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import (
     M3_STAGES,
+    TERMINAL_JOB_STATUSES,
     AnalysisOrchestrator,
     AnalysisRunContext,
     CycleOrchestrationContext,
@@ -297,6 +298,17 @@ class FakeCycleRepository:
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         del source_id, cycle_time
         return self.active
+
+    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        if self.active:
+            return True
+        cycle_id = cycle_id_for(source_id, cycle_time)
+        return any(
+            job.get("cycle_id") == cycle_id
+            and job.get("model_id") == model_id
+            and str(job.get("status") or "") not in TERMINAL_JOB_STATUSES
+            for job in self.jobs.values()
+        )
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
         return {"cycle_id": f"{source_id}_{cycle_time:%Y%m%d%H}", "status": "discovered"}
@@ -2735,6 +2747,33 @@ def test_cycle_orchestration_rejects_db_active_duplicate(tmp_path: Path) -> None
 
     assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
     assert client.submissions == []
+
+
+def test_cycle_orchestration_active_guard_is_model_scoped_for_multi_basin_cycles(tmp_path: Path) -> None:
+    class OtherModelActiveRepository(FakeCycleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cycle_checks: list[tuple[str, datetime]] = []
+            self.model_checks: list[tuple[str, datetime, str]] = []
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            self.cycle_checks.append((source_id, cycle_time))
+            return True
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            self.model_checks.append((source_id, cycle_time, model_id))
+            return model_id == "model_qhh"
+
+    repository = OtherModelActiveRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == [stage.stage for stage in M3_STAGES]
+    assert repository.model_checks == [("gfs", _dt("2026-05-01T00:00:00Z"), "model_0")]
+    assert repository.cycle_checks == []
 
 
 def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:

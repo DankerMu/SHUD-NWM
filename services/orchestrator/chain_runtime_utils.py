@@ -94,6 +94,13 @@ def _active_orchestration_conflicts(
             if _is_active_pipeline_job(job):
                 return True
         return False
+    model_ids = _cycle_basin_model_ids(basins)
+    active_pipeline_provider = getattr(repository, "has_active_pipeline", None)
+    if model_ids and callable(active_pipeline_provider):
+        return any(
+            bool(active_pipeline_provider(source_id=source_id, cycle_time=cycle_time, model_id=model_id))
+            for model_id in model_ids
+        )
     if repository.has_active_orchestration(source_id=source_id, cycle_time=cycle_time):
         return True
     return any(_is_active_pipeline_job(job) for job in repository.query_pipeline_jobs_by_cycle(cycle_id))
@@ -109,6 +116,18 @@ def _in_memory_active_cycle_conflicts(
 
 def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
     return len(basins) == 1 and _restart_stage_from_basins(basins) is not None
+
+
+def _cycle_basin_model_ids(basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    model_ids: list[str] = []
+    seen: set[str] = set()
+    for basin in basins:
+        model_id = str(basin.get("model_id") or "")
+        if not model_id or model_id in seen:
+            continue
+        model_ids.append(model_id)
+        seen.add(model_id)
+    return tuple(model_ids)
 
 
 def _is_active_pipeline_job(job: Mapping[str, Any]) -> bool:

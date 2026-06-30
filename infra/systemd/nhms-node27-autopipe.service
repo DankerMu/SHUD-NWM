@@ -1,0 +1,12 @@
+[Unit]
+Description=NHMS node-27 object-store autopipeline ingest
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+Environment=NODE27_AUTOPIPE_BOOTSTRAP_LOG=/home/nwm/autopipe-logs/bootstrap.log
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/autopipe-logs
+ExecStart=/bin/bash /home/nwm/NWM/scripts/node27_autopipe_cron.sh
+StandardOutput=append:/home/nwm/autopipe-logs/systemd.log
+StandardError=append:/home/nwm/autopipe-logs/systemd.err
+TimeoutStartSec=0
