@@ -459,6 +459,8 @@ class ProductionScheduler:
             candidate_factory=_scheduler._candidate_for,
             candidate_state_provider_caller=_scheduler._call_candidate_state_provider,
             candidate_state_decider=_scheduler._candidate_state_decision,
+            strict_warm_start_for_candidate=self._strict_warm_start_for_candidate,
+            successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
             discover_source_window_provider=self._discover_source_window,
             cycle_completion_status_provider=self._cycle_completion_status,
         )
@@ -662,6 +664,51 @@ class ProductionScheduler:
             return 12
         return max(1, int(round(elapsed_seconds / 3600.0)))
 
+    def _successor_warm_start_state_for_candidate(
+        self,
+        candidate: _scheduler.SchedulerCandidate,
+        cycle: _scheduler.SchedulerSourceCycle,
+    ) -> dict[str, _scheduler.Any] | None:
+        del cycle
+        if not self._db_free_strict_warm_start_required():
+            return None
+        orchestrator_config = _scheduler.OrchestratorConfig.from_env()
+        candidate_time = _scheduler._ensure_utc(candidate.cycle_time_utc)
+        successor_time = self._next_allowed_cycle_time(candidate_time)
+        if successor_time is None or not orchestrator_config.strict_forecast_warm_start_required_for(successor_time):
+            return None
+        lead_hours = max(1, int(round((successor_time - candidate_time).total_seconds() / 3600.0)))
+        model_package_checksum = (
+            candidate.resource_profile.get("package_checksum")
+            or candidate.resource_profile.get("model_package_checksum")
+        )
+        evidence = self._db_free_state_index_provider().strict_warm_start_evidence(
+            model_id=candidate.model_id,
+            source_id=candidate.source_id,
+            valid_time=successor_time,
+            model_package_version=candidate.model_package_uri,
+            model_package_checksum=str(model_package_checksum) if model_package_checksum not in (None, "") else None,
+            required_lead_hours=lead_hours,
+        )
+        evidence["mode"] = "strict_warm_start_successor_checkpoint"
+        evidence["producer_cycle_time"] = _scheduler._format_utc(candidate_time)
+        evidence["successor_cycle_time"] = _scheduler._format_utc(successor_time)
+        evidence["required_lead_hours"] = lead_hours
+        return evidence
+
+    def _next_allowed_cycle_time(self, cycle_time: _scheduler.datetime) -> _scheduler.datetime | None:
+        base = _scheduler._ensure_utc(cycle_time).replace(minute=0, second=0, microsecond=0)
+        allowed_hours = sorted({int(hour) % 24 for hour in self.config.allowed_cycle_hours_utc})
+        if not allowed_hours:
+            return None
+        for day_offset in range(0, 3):
+            day_base = (base + _scheduler.timedelta(days=day_offset)).replace(hour=0)
+            for hour in allowed_hours:
+                candidate = day_base + _scheduler.timedelta(hours=hour)
+                if candidate > cycle_time:
+                    return candidate
+        return None
+
     def _source_readiness_context(self, cycle: _scheduler.SchedulerSourceCycle) -> dict[str, _scheduler.Any]:
         from services.orchestrator import source_cycle_raw_manifest
 
@@ -713,6 +760,7 @@ class ProductionScheduler:
             candidate_state_identity_mismatch_detector=_scheduler._candidate_state_has_identity_mismatch,
             candidate_state_scoped_retry_detector=_scheduler._candidate_state_is_candidate_scoped_retry,
             repaired_state_audit_evidence_builder=_scheduler._candidate_repaired_state_audit_evidence,
+            successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
             max_candidates=_scheduler.MAX_CANDIDATES,
         )
 

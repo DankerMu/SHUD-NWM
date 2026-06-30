@@ -39,6 +39,7 @@ CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES = {
     "submission_failed",
     "permanently_failed",
 }
+_STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_pipeline_success"}
 
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 _source_discovery_evidence_safe = _scheduler_discovery._source_discovery_evidence_safe
@@ -119,6 +120,10 @@ class SchedulerCandidateConstructionContext:
         [SchedulerCandidateLike, Mapping[str, Any] | None],
         dict[str, Any] | None,
     ] = _candidate_repaired_state_audit_evidence
+    successor_state_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycleLike],
+        Mapping[str, Any] | None,
+    ] | None = None
     max_candidates: int = MAX_CANDIDATES
 
 
@@ -222,11 +227,26 @@ def build_candidates(
             ):
                 skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                 continue
+            strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
+            if strict_warm_start is not None and not bool(strict_warm_start.get("ready")):
+                blocked.append(
+                    _blocked_candidate(
+                        candidate,
+                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
+                        state_evidence=strict_warm_start,
+                    )
+                )
+                continue
+            successor_state = (
+                context.successor_state_for_candidate(candidate, cycle)
+                if callable(context.successor_state_for_candidate)
+                else None
+            )
             if callable(completed_provider) and completed_provider(
                 source_id=discovery.source_id,
                 cycle_time=discovery.cycle_time,
                 model_id=model.model_id,
-            ):
+            ) and strict_warm_start is None and _successor_state_terminal_can_skip(successor_state):
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
             raw_candidate_state = (
@@ -271,24 +291,45 @@ def build_candidates(
                 and state_decision.action == "skip"
                 and state_decision.reason != "active_slurm_job"
             ):
-                skipped.append(
-                    {
-                        **candidate.to_dict(),
-                        "reason": state_decision.reason,
-                        "state_evidence": _evidence_safe(state_decision.evidence),
-                    }
-                )
-                continue
-            strict_warm_start = context.strict_warm_start_for_candidate(candidate, cycle)
-            if strict_warm_start is not None and not bool(strict_warm_start.get("ready")):
-                blocked.append(
-                    _blocked_candidate(
-                        candidate,
-                        str(strict_warm_start.get("reason") or "state_snapshot_index_unavailable"),
-                        state_evidence=strict_warm_start,
+                if (
+                    strict_warm_start is not None
+                    and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                ):
+                    if _terminal_decision_matches_strict_warm_start(state_decision.evidence, strict_warm_start):
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": state_decision.reason,
+                                "state_evidence": _evidence_safe(
+                                    _merge_state_evidence(state_decision.evidence, strict_warm_start)
+                                ),
+                            }
+                        )
+                        continue
+                    state_decision = CandidateStateDecision(
+                        "retry",
+                        "strict_warm_start_terminal_init_state_mismatch",
+                        _strict_warm_start_terminal_retry_evidence(state_decision.evidence, strict_warm_start),
                     )
-                )
-                continue
+                elif (
+                    successor_state is not None
+                    and not bool(successor_state.get("ready"))
+                    and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                ):
+                    state_decision = CandidateStateDecision(
+                        "retry",
+                        "strict_warm_start_successor_checkpoint_missing",
+                        _strict_warm_start_successor_retry_evidence(state_decision.evidence, successor_state),
+                    )
+                else:
+                    skipped.append(
+                        {
+                            **candidate.to_dict(),
+                            "reason": state_decision.reason,
+                            "state_evidence": _evidence_safe(state_decision.evidence),
+                        }
+                    )
+                    continue
             if strict_warm_start is not None:
                 candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
@@ -1060,6 +1101,66 @@ def _merge_state_evidence(
         else:
             merged[key] = value
     return _evidence_safe(merged)
+
+
+def _terminal_decision_matches_strict_warm_start(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> bool:
+    selected = strict_evidence.get("candidate_state")
+    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
+    if selected_id in (None, ""):
+        return False
+    hydro_run = terminal_evidence.get("hydro_run")
+    if not isinstance(hydro_run, Mapping):
+        return False
+    terminal_init_state_id = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
+    return str(terminal_init_state_id or "") == str(selected_id)
+
+
+def _strict_warm_start_terminal_retry_evidence(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        **dict(terminal_evidence),
+        "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
+        "reason": "strict_warm_start_terminal_init_state_mismatch",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+    }
+    selected = strict_evidence.get("candidate_state")
+    if isinstance(selected, Mapping):
+        payload["candidate_state"] = _evidence_safe(dict(selected))
+    index = strict_evidence.get("state_snapshot_index")
+    if isinstance(index, Mapping):
+        payload["state_snapshot_index"] = _evidence_safe(dict(index))
+    return _evidence_safe(payload)
+
+
+def _successor_state_terminal_can_skip(successor_state: Mapping[str, Any] | None) -> bool:
+    return successor_state is None or bool(successor_state.get("ready"))
+
+
+def _strict_warm_start_successor_retry_evidence(
+    terminal_evidence: Mapping[str, Any],
+    successor_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _evidence_safe(
+        {
+            **dict(terminal_evidence),
+            "decision": "retry_strict_warm_start_successor_checkpoint_missing",
+            "reason": "strict_warm_start_successor_checkpoint_missing",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "successor_state": _evidence_safe(dict(successor_state)),
+            "native_shud_resubmitted": True,
+            "durable_output_reused": False,
+        }
+    )
 
 
 def _slurm_status_sync_failed_evidence(

@@ -56,7 +56,9 @@ class SchedulerCandidateLike(Protocol):
 
 
 class CandidateStateDecisionLike(Protocol):
+    action: str
     reason: str | None
+    evidence: Mapping[str, Any]
 
 
 class DiscoverSourceWindowProvider(Protocol):
@@ -101,6 +103,14 @@ class SchedulerDiscoveryContext:
         [SchedulerCandidateLike, Mapping[str, Any] | None],
         CandidateStateDecisionLike | None,
     ]
+    strict_warm_start_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycle],
+        Mapping[str, Any] | None,
+    ] | None = None
+    successor_state_for_candidate: Callable[
+        [SchedulerCandidateLike, SchedulerSourceCycle],
+        Mapping[str, Any] | None,
+    ] | None = None
     discover_source_window_provider: DiscoverSourceWindowProvider | None = None
     cycle_completion_status_provider: CycleCompletionStatusProvider | None = None
 
@@ -113,6 +123,58 @@ def cycle_completion_status(
     horizon: Mapping[str, Any] | None = None,
 ) -> str:
     """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
+
+    state_provider = (
+        getattr(context.active_repository, "candidate_state", None)
+        if context.active_repository is not None
+        else None
+    )
+    strict_provider = context.strict_warm_start_for_candidate
+    successor_provider = context.successor_state_for_candidate
+    if (callable(strict_provider) or callable(successor_provider)) and callable(state_provider) and models:
+        cycle_horizon = dict(horizon or {})
+        source_cycle = SchedulerSourceCycle(discovery=discovery, horizon=cycle_horizon)
+        checked = False
+        for model in models:
+            candidate = context.candidate_factory(discovery=discovery, model=model, horizon=cycle_horizon)
+            strict_evidence = strict_provider(candidate, source_cycle) if callable(strict_provider) else None
+            successor_evidence = (
+                successor_provider(candidate, source_cycle) if callable(successor_provider) else None
+            )
+            if strict_evidence is None and successor_evidence is None:
+                continue
+            checked = True
+            if strict_evidence is None:
+                pass
+            elif not bool(strict_evidence.get("ready")):
+                return "gap"
+            if successor_evidence is not None and not bool(successor_evidence.get("ready")):
+                return "gap"
+            state = context.candidate_state_provider_caller(
+                state_provider,
+                source_id=candidate.source_id,
+                cycle_time=candidate.cycle_time_utc,
+                model_id=candidate.model_id,
+                run_id=candidate.run_id,
+                forcing_version_id=candidate.forcing_version_id,
+                candidate_id=candidate.candidate_id,
+                retry_limit=context.config.retry_limit,
+                job_limit=context.config.candidate_state_job_limit,
+                event_limit=context.config.candidate_state_event_limit,
+            )
+            decision = context.candidate_state_decider(candidate, state)
+            if decision is None or decision.reason not in {
+                "terminal_hydro_success",
+                "terminal_pipeline_success",
+            }:
+                return "gap"
+            if strict_evidence is not None and not _terminal_decision_matches_strict_warm_start(
+                decision.evidence,
+                strict_evidence,
+            ):
+                return "gap"
+        if checked:
+            return "complete"
 
     completed_provider = (
         getattr(context.active_repository, "has_completed_pipeline", None)
@@ -130,11 +192,6 @@ def cycle_completion_status(
         ):
             return "complete"
 
-    state_provider = (
-        getattr(context.active_repository, "candidate_state", None)
-        if context.active_repository is not None
-        else None
-    )
     if callable(state_provider) and models:
         cycle_horizon = dict(horizon or {})
         for model in models:
@@ -169,6 +226,21 @@ def cycle_completion_status(
         ):
             return "gap"
     return "complete"
+
+
+def _terminal_decision_matches_strict_warm_start(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> bool:
+    selected = strict_evidence.get("candidate_state")
+    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
+    if selected_id in (None, ""):
+        return False
+    hydro_run = terminal_evidence.get("hydro_run")
+    if not isinstance(hydro_run, Mapping):
+        return False
+    terminal_init_state_id = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
+    return str(terminal_init_state_id or "") == str(selected_id)
 
 
 def discover_cycles(

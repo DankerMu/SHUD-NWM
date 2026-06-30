@@ -18309,6 +18309,252 @@ def test_db_free_strict_warm_start_uses_ready_file_state_index_without_db_state_
     assert state_evidence["state_snapshot_index"]["object_evidence"]["exists"] is True
 
 
+def test_db_free_strict_warm_start_discovery_reopens_completed_cold_start_terminal(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedColdStartRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    repository = CompletedColdStartRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                "init_state_id": None,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+    )
+
+    status = scheduler._cycle_completion_status(
+        CycleDiscovery(
+            cycle_id="gfs_2026052106",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        [scheduler_module._coerce_registered_model(model)],
+        horizon={},
+    )
+
+    assert status == "gap"
+
+
+def test_db_free_strict_warm_start_resubmits_completed_cold_start_terminal(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedColdStartRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    repository = CompletedColdStartRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                "init_state_id": None,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["candidate_state"]["init_state_id"] == state_fixture["entries"][0]["state_id"]
+    assert evidence["strict_warm_start"]["ready"] is True
+
+
+def test_db_free_strict_warm_start_reopens_completed_producer_missing_successor_checkpoint(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-20T12:00:00Z")
+    required_from = _dt("2026-05-21T00:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=required_from,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedProducerRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052012_model_a"
+    repository = CompletedProducerRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                "init_state_id": None,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", _format_iso_z(required_from))
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026052012",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=12,
+        available=True,
+        status="discovered",
+    )
+    status = scheduler._cycle_completion_status(
+        discovery,
+        [scheduler_module._coerce_registered_model(model)],
+        horizon={},
+    )
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon={})],
+    )
+
+    assert status == "gap"
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_successor_checkpoint_missing"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["successor_state"]["successor_cycle_time"] == _format_iso_z(required_from)
+    assert evidence["successor_state"]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+
+
 def test_db_free_strict_warm_start_required_lead_uses_previous_allowed_cycle_f006(
     monkeypatch: Any,
     tmp_path: Path,
