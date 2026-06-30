@@ -129,6 +129,30 @@ misconfiguration. Slurm submission is through the node-22 Slurm Gateway and
 `sbatch`; Slurm then runs compute work on allocated compute nodes such as
 `cnXX`.
 
+node-22 scheduler 的模型清单来自 DB-free file registry。生产上不要手工只写
+qhh；从 `NHMS_BASINS_ROOT` 重新发布全流域 registry：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-dbfree.env
+set +a
+.venv/bin/python scripts/publish_scheduler_file_registry.py \
+  --basins-root "$NHMS_BASINS_ROOT" \
+  --registry-manifest "$NHMS_SCHEDULER_REGISTRY_MANIFEST" \
+  --object-store-root "$OBJECT_STORE_ROOT" \
+  --object-store-prefix "$OBJECT_STORE_PREFIX" \
+  --work-dir "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish" \
+  --output "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish/receipt.json"
+```
+
+期望 summary 中 `selected_model_count` 等于当前 `Basins/` 下可发布 SHUD
+模型数。2026-06-30 现场拓扑中，`Basins/` 有 10 个顶层流域，其中
+`zhaochen/` 下还有 4 个可运行子模型，因此 scheduler registry 应发布 13 个
+模型。`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，
+由 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
+
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。
 

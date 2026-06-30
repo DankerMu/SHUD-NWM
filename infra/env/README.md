@@ -52,6 +52,11 @@ Compute role, node 22:
   the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
   `compute.env` only for `compute-api` or an explicit archived rollback drill;
   node-22 `:55433` is stopped/archived and is not scheduler runtime env.
+- Production scheduler model selection is registry-driven. Keep
+  `NHMS_SCHEDULER_MODEL_IDS` and `NHMS_SCHEDULER_BASIN_IDS` empty for normal
+  operations; publish the full Basins file registry with
+  `scripts/publish_scheduler_file_registry.py` instead of hand-maintaining a
+  qhh-only manifest.
 - Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
   `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
   `NHMS_SCHEDULER_TEMP_ROOT`, non-empty `NHMS_SCHEDULER_ALLOWED_ROOTS`, and
