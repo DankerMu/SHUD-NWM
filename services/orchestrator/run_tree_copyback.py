@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -7,10 +8,12 @@ import stat
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow, rmtree_no_follow
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SAFE_OBJECT_KEY_RE = re.compile(r"^[A-Za-z0-9_.=/+-]+$")
 REQUIRED_RUN_FILES = ("input/manifest.json",)
 
 
@@ -52,6 +55,7 @@ def copyback_run_trees(
         )
 
     copied: list[dict[str, Any]] = []
+    referenced_trees: dict[str, dict[str, Any]] = {}
     total_files = 0
     total_bytes = 0
     for run_id in unique_run_ids:
@@ -60,6 +64,18 @@ def copyback_run_trees(
         copied.append({"run_id": run_id, "object_key": _run_key(run_id), **summary})
         total_files += int(summary["file_count"])
         total_bytes += int(summary["byte_count"])
+        for object_key in _referenced_object_tree_keys(source):
+            if object_key in referenced_trees:
+                continue
+            ref_source = _validate_object_tree(object_root / object_key, object_key=object_key)
+            ref_summary = _replace_tree(
+                source=ref_source,
+                target=target_root / object_key,
+                containment_root=target_root,
+            )
+            referenced_trees[object_key] = {"object_key": object_key, **ref_summary}
+            total_files += int(ref_summary["file_count"])
+            total_bytes += int(ref_summary["byte_count"])
 
     return {
         "status": "copied",
@@ -68,6 +84,7 @@ def copyback_run_trees(
         "file_count": total_files,
         "byte_count": total_bytes,
         "runs": copied,
+        "referenced_trees": list(referenced_trees.values()),
     }
 
 
@@ -112,6 +129,62 @@ def _validate_run_tree(source: Path, *, run_id: str) -> Path:
             {"run_id": run_id, "object_key": _run_key(run_id), "source": str(source), "error": str(error)},
         ) from error
     return source
+
+
+def _validate_object_tree(source: Path, *, object_key: str) -> Path:
+    try:
+        if not source.is_dir():
+            raise FileNotFoundError(str(source))
+        _reject_symlink_ancestors(source)
+    except (OSError, SafeFilesystemError) as error:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_REFERENCED_TREE_MISSING",
+            "A run referenced an object-store tree that is missing or unsafe in the staging root.",
+            {"object_key": object_key, "source": str(source), "error": str(error)},
+        ) from error
+    return source
+
+
+def _referenced_object_tree_keys(run_tree: Path) -> list[str]:
+    keys: set[str] = set()
+    for path in (run_tree / "input" / "manifest.json", run_tree / "input" / "forcing_domain_handoff.json"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        for value in _walk_strings(payload):
+            object_key = _object_tree_key_from_uri(value)
+            if object_key:
+                keys.add(object_key)
+    return sorted(keys)
+
+
+def _walk_strings(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _walk_strings(child)
+    elif isinstance(value, list | tuple):
+        for child in value:
+            yield from _walk_strings(child)
+
+
+def _object_tree_key_from_uri(value: str) -> str | None:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.scheme != "s3":
+        return None
+    key = parsed.path.lstrip("/") if parsed.scheme == "s3" else value.strip("/")
+    if not key or not SAFE_OBJECT_KEY_RE.fullmatch(key):
+        return None
+    parts = [part for part in key.split("/") if part]
+    if len(parts) >= 5 and parts[0] == "forcing":
+        return "/".join(parts[:5])
+    if len(parts) >= 3 and parts[0] == "models":
+        return "/".join(parts[:3])
+    return None
 
 
 def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:

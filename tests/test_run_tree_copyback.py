@@ -12,9 +12,29 @@ def _write_run(root: Path, run_id: str, *, output_text: str = "q\n") -> None:
     (run / "input").mkdir(parents=True)
     (run / "output").mkdir()
     (run / "logs").mkdir()
-    (run / "input" / "manifest.json").write_text('{"run_id":"' + run_id + '"}\n', encoding="utf-8")
+    (run / "input" / "manifest.json").write_text(
+        (
+            '{"run_id":"'
+            + run_id
+            + '","model":{"model_package_uri":"s3://nhms/models/basins_heihe_shud/v1/package/"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    (run / "input" / "forcing_domain_handoff.json").write_text(
+        (
+            '{"forcing_package_uri":'
+            '"s3://nhms/forcing/gfs/2026062700/basins_heihe_vbasins/basins_heihe_shud"}\n'
+        ),
+        encoding="utf-8",
+    )
     (run / "output" / "q.rivqdown.csv").write_text(output_text, encoding="utf-8")
     (run / "logs" / "shud_stdout.log").write_text("ok\n", encoding="utf-8")
+    forcing = root / "forcing" / "gfs" / "2026062700" / "basins_heihe_vbasins" / "basins_heihe_shud"
+    forcing.mkdir(parents=True)
+    (forcing / "forcing_package.json").write_text("{}\n", encoding="utf-8")
+    model = root / "models" / "basins_heihe_shud" / "v1"
+    (model / "package").mkdir(parents=True)
+    (model / "manifest.json").write_text("{}\n", encoding="utf-8")
 
 
 def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
@@ -38,6 +58,20 @@ def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
     assert (target / "input" / "manifest.json").is_file()
     assert (target / "output" / "q.rivqdown.csv").read_text(encoding="utf-8") == "new\n"
     assert not (target / "output" / "old.csv").exists()
+    assert (
+        copyback_root
+        / "forcing"
+        / "gfs"
+        / "2026062700"
+        / "basins_heihe_vbasins"
+        / "basins_heihe_shud"
+        / "forcing_package.json"
+    ).is_file()
+    assert (copyback_root / "models" / "basins_heihe_shud" / "v1" / "manifest.json").is_file()
+    assert {tree["object_key"] for tree in summary["referenced_trees"]} == {
+        "forcing/gfs/2026062700/basins_heihe_vbasins/basins_heihe_shud",
+        "models/basins_heihe_shud/v1",
+    }
 
 
 def test_copyback_run_trees_rejects_unsafe_run_id(tmp_path: Path) -> None:
