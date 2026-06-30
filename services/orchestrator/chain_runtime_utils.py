@@ -92,10 +92,13 @@ def _active_orchestration_conflicts(
     model_ids = _cycle_basin_model_ids(basins)
     active_pipeline_provider = getattr(repository, "has_active_pipeline", None)
     if _candidate_scoped_cycle_execution(basins):
+        replacement_retry = _replacement_retry_scoped_cycle_execution(basins)
         for job in repository.query_pipeline_jobs_by_run(run_id):
             if _is_active_pipeline_job(job):
+                if replacement_retry and _is_unsubmitted_retry_placeholder(job):
+                    continue
                 return True
-        if _manual_retry_scoped_cycle_execution(basins):
+        if replacement_retry:
             return False
         if model_ids and callable(active_pipeline_provider):
             return any(
@@ -148,6 +151,24 @@ def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) ->
     )
 
 
+def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    if _manual_retry_scoped_cycle_execution(basins):
+        return True
+    if len(basins) != 1:
+        return False
+    state_evidence = basins[0].get("state_evidence")
+    if not isinstance(state_evidence, Mapping):
+        return False
+    if state_evidence.get("decision") == "retry_after_model_package_refresh":
+        return True
+    retry_policy = state_evidence.get("retry_policy")
+    return bool(
+        isinstance(retry_policy, Mapping)
+        and retry_policy.get("override_reason") == "model_package_refresh"
+        and retry_policy.get("automatic_retry_allowed") is True
+    )
+
+
 def _cycle_basin_model_ids(basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     model_ids: list[str] = []
     seen: set[str] = set()
@@ -162,6 +183,25 @@ def _cycle_basin_model_ids(basins: Sequence[Mapping[str, Any]]) -> tuple[str, ..
 
 def _is_active_pipeline_job(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") not in TERMINAL_JOB_STATUSES
+
+
+def _is_unsubmitted_retry_placeholder(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or "")
+    if status not in {"pending", "queued", "submitted"}:
+        return False
+    if job.get("slurm_job_id") not in (None, ""):
+        return False
+    if job.get("array_task_id") not in (None, ""):
+        return False
+    if job.get("submitted_at") not in (None, ""):
+        return False
+    try:
+        retry_count = int(job.get("retry_count") or 0)
+    except (TypeError, ValueError):
+        retry_count = 0
+    if retry_count <= 0:
+        return False
+    return job.get("candidate_id") in (None, "") and job.get("idempotency_key") in (None, "")
 
 
 def _restart_stage_from_basins(basins: Sequence[Mapping[str, Any]]) -> str | None:

@@ -2848,6 +2848,62 @@ def test_manual_retry_candidate_scoped_ignores_stale_active_pipeline_placeholder
     assert {submission["stage"] for submission in client.submissions} == {stage.stage for stage in M3_STAGES}
 
 
+def test_model_package_refresh_candidate_scoped_ignores_stale_active_pipeline_placeholder(tmp_path: Path) -> None:
+    run_id = "cycle_gfs_2026050100_convert_model_0"
+    stale_job_id = f"job_{run_id}_forecast_retry_1_retry_2_retry_3"
+
+    class StaleActiveModelRefreshRepository(FakeCycleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.jobs[stale_job_id] = {
+                "job_id": stale_job_id,
+                "run_id": run_id,
+                "cycle_id": "gfs_2026050100",
+                "model_id": "model_0",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "pending",
+                "retry_count": 3,
+                "slurm_job_id": None,
+                "array_task_id": None,
+                "submitted_at": None,
+                "candidate_id": None,
+                "idempotency_key": None,
+            }
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(f"model refresh retry must not fall back to cycle active check: {source_id}")
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    repository = StaleActiveModelRefreshRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+    basins[0]["restart_stage"] = "forecast"
+    basins[0]["state_evidence"] = {
+        "decision": "retry_after_model_package_refresh",
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "override_reason": "model_package_refresh",
+        },
+        "model_package_refresh": {"changed_fields": ["model_package_uri"]},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    assert client.submissions
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "forecast" in submitted_stages
+    assert "convert" not in submitted_stages
+    assert "forcing" not in submitted_stages
+
+
 def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:
     # M23-7 (#258): re-scans while a cycle is already active must be rejected by
     # the active guard and never produce a duplicate Slurm submission.
