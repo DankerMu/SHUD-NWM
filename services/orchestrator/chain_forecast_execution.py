@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 from services.orchestrator import chain as _chain
+from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 
 AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
@@ -379,6 +381,8 @@ def _after_cycle_stage_terminal(
     aggregation: ArrayAggregation | None,
 ) -> None:
     if result_status == "succeeded":
+        if stage.stage == "parse":
+            _copyback_parsed_run_trees(self, context)
         status = self._success_cycle_status(stage, context)
         if not (stage.stage == "publish" and context.had_partial):
             self.repository.update_forecast_cycle_status(
@@ -414,6 +418,52 @@ def _after_cycle_stage_terminal(
         status=stage.failure_cycle_status,
         error_code=error_code,
         error_message=error_message,
+    )
+
+
+def _copyback_parsed_run_trees(self, context: CycleOrchestrationContext) -> None:
+    copyback_root = os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip()
+    if not copyback_root:
+        return
+    run_ids = [str(basin.get("run_id") or "").strip() for basin in context.active_basins]
+    run_ids = [run_id for run_id in run_ids if run_id]
+    if not run_ids:
+        return
+    try:
+        summary = copyback_run_trees(
+            object_store_root=self.config.object_store_root,
+            copyback_root=copyback_root,
+            run_ids=run_ids,
+        )
+    except RunTreeCopybackError as error:
+        self.repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=context.cycle_id,
+            event_type="object_store_copyback",
+            status_from=None,
+            status_to="failed",
+            message="Run-tree object-store copyback failed after parse.",
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": "parse",
+                    "run_ids": run_ids,
+                    "error_code": error.code,
+                    "error_message": error.message,
+                    "details": error.details,
+                }
+            ),
+        )
+        raise _chain.OrchestratorError(error.code, error.message, error.details) from error
+    if summary is None:
+        return
+    self.repository.insert_pipeline_event(
+        entity_type="forecast_cycle",
+        entity_id=context.cycle_id,
+        event_type="object_store_copyback",
+        status_from=None,
+        status_to=str(summary.get("status") or "completed"),
+        message="Run-tree object-store copyback completed after parse.",
+        details=_safe_pipeline_event_details({"stage": "parse", **summary}),
     )
 
 
