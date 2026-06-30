@@ -40,6 +40,7 @@ from services.tiles.mvt import (
     national_discharge_valid_times,
     postgis_tile_sql,
     public_hydro_layer_id,
+    simplification_tolerance_m,
     valid_times_for_layer,
 )
 from services.tiles.mvt import (
@@ -872,6 +873,7 @@ def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> d
         "max_coordinate_dimensions": 3,
         "extent": MVT_EXTENT,
         "buffer": MVT_BUFFER,
+        "simplification_tolerance_m": simplification_tolerance_m(z),
     }
 
 

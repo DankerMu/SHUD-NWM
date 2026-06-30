@@ -1398,6 +1398,17 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
     assert river_metadata["source_refs"]["river_network_version_id"] == "river_v1"
 
 
+def test_postgis_tile_params_include_simplification_tolerance_bind() -> None:
+    params = hydro_display_routes._postgis_tile_params(
+        {"variable": "q_down", "valid_time": datetime(2026, 6, 30, 23, tzinfo=UTC)},
+        z=6,
+        x=48,
+        y=25,
+    )
+
+    assert params["simplification_tolerance_m"] == hydro_display_routes.simplification_tolerance_m(6)
+
+
 def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
     static_spec = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
