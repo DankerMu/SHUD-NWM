@@ -45,15 +45,15 @@ def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
         publisher = TilePublisher.from_env()
         return publisher.publish_cycle(cycle_id).to_dict()
     except PublishError as error:
-        if _compute_control_publish_should_defer(error):
+        if _publish_tiles_should_defer(error):
             return _deferred_compute_control_publish(cycle_id=cycle_id)
         raise
     except (OSError, RuntimeError, ValueError) as error:
         raise PublishError("PUBLISH_TILES_FAILED", f"Tile publication failed: {error}") from error
 
 
-def _compute_control_publish_should_defer(error: PublishError) -> bool:
-    return error.error_code == "DATABASE_URL_MISSING" and os.getenv("NHMS_SERVICE_ROLE") == "compute_control"
+def _publish_tiles_should_defer(error: PublishError) -> bool:
+    return error.error_code == "DATABASE_URL_MISSING"
 
 
 def _deferred_compute_control_publish(*, cycle_id: str) -> dict[str, object]:

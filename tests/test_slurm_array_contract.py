@@ -930,3 +930,22 @@ def test_publish_tiles_compute_control_without_database_url_defers_to_node27(
     assert payload["artifacts"] == []
     assert payload["lineage"]["reason_code"] == "NODE22_DB_FREE_PUBLISH_DEFERRED"
     assert payload["lineage"]["deferred_to"] == "node27_autopipeline"
+
+
+def test_publish_tiles_without_database_url_defers_even_without_service_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.delenv("NHMS_SERVICE_ROLE", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "ifs_2026062712"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    payload = json.loads(captured.out)
+    assert payload["status"] == "deferred_to_node27_ingest"
+    assert payload["lineage"]["reason_code"] == "NODE22_DB_FREE_PUBLISH_DEFERRED"
