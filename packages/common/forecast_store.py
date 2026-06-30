@@ -501,7 +501,7 @@ class PsycopgForecastStore:
             cursor,
             self._fetch_all(
                 cursor,
-                """
+                f"""
             SELECT
                 h.scenario_id,
                 h.model_id,

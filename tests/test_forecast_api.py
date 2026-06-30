@@ -1021,6 +1021,46 @@ def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_
     assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:5])
 
 
+def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> None:
+    issue_time = _dt("2026-05-07T00:00:00Z")
+    row = {
+        "scenario_id": "forecast_gfs_deterministic",
+        "model_id": "model_selected",
+        "source_id": "GFS",
+        "cycle_time": issue_time,
+        "run_end_time": issue_time + timedelta(days=7),
+        "forcing_version_id": None,
+        "river_network_version_id": "rnv_selected",
+        "valid_time": issue_time,
+        "value": 11.0,
+        "unit": "m3/s",
+    }
+    store = SqlCaptureForecastStore(
+        [
+            [{"basin_version_id": "basin_v1"}],
+            [{"river_segment_id": "seg_001", "river_network_version_id": "rnv_selected", "properties_json": {}}],
+            [row],
+        ]
+    )
+
+    response = store.forecast_series(
+        basin_version_id="basin_v1",
+        segment_id="seg_001",
+        river_network_version_id="rnv_selected",
+        issue_time="2026-05-07T00:00:00Z",
+        variables=["q_down"],
+        scenarios=["GFS", "IFS"],
+    )
+
+    statement, parameters = store.cursor.executions[2]
+    assert response["series"][0]["scenario_id"] == "forecast_gfs_deterministic"
+    assert "{scenario_filter.sql}" not in statement
+    assert "LOWER(h.source_id) = ANY(%s)" in statement
+    assert statement.count("%s") == len(parameters)
+    assert parameters[-2] == ["gfs", "ifs"]
+    assert set(parameters[-1]) >= {"forecast_gfs_deterministic", "forecast_ifs_deterministic"}
+
+
 def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_selected_network() -> None:
     end_time = _dt("1993-01-08T00:00:00Z")
     store = SqlCaptureForecastStore(
