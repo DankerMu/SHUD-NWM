@@ -897,6 +897,18 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         "NHMS_JOB_TYPE": context.get("job_type", ""),
         "NHMS_RUN_MANIFEST_URI": context.get("run_manifest_uri", ""),
         "NHMS_MANIFEST_INDEX": context.get("manifest_index_path", ""),
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST": _first_nonempty(
+            os.getenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST"),
+            context.get("scheduler_registry_manifest"),
+        ),
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": _first_nonempty(
+            os.getenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX"),
+            context.get("scheduler_canonical_readiness_index"),
+        ),
+        "NHMS_SCHEDULER_STATE_INDEX": _first_nonempty(
+            os.getenv("NHMS_SLURM_SCHEDULER_STATE_INDEX"),
+            context.get("scheduler_state_index"),
+        ),
         "NHMS_MAX_CONCURRENT": context.get("max_concurrent", ""),
         "SHUD_THREADS": context.get("shud_threads", ""),
         "OMP_NUM_THREADS": context.get("shud_threads", ""),
@@ -913,6 +925,13 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         lines.append(f"export PATH={quoted_root}/bin:$PATH")
         lines.append(f"export LD_LIBRARY_PATH={quoted_root}/lib:${{LD_LIBRARY_PATH:-}}")
     return lines
+
+
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return ""
 
 
 def _python_runtime_export_lines() -> list[str]:

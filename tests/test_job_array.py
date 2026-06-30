@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -248,14 +249,26 @@ def test_db_free_template_exports_file_backends_without_scrubbing_database_urls(
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
     monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55433/nhms")
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    control_registry_manifest = tmp_path / "object-store" / "scheduler" / "registry" / "manifest-last.json"
+    control_readiness_index = (
+        tmp_path / "object-store" / "scheduler" / "canonical-readiness" / "index-last.json"
+    )
+    slurm_registry_manifest = tmp_path / "scratch-object-store" / "scheduler" / "registry" / "manifest-last.json"
+    slurm_readiness_index = (
+        tmp_path / "scratch-object-store" / "scheduler" / "canonical-readiness" / "index-last.json"
+    )
+    slurm_state_index = tmp_path / "scratch-object-store" / "scheduler" / "state-index" / "index-last.json"
     monkeypatch.setenv(
         "NHMS_SCHEDULER_REGISTRY_MANIFEST",
-        str(tmp_path / "object-store" / "scheduler" / "registry" / "manifest-last.json"),
+        str(control_registry_manifest),
     )
     monkeypatch.setenv(
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
-        str(tmp_path / "object-store" / "scheduler" / "canonical-readiness" / "index-last.json"),
+        str(control_readiness_index),
     )
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", str(slurm_registry_manifest))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX", str(slurm_readiness_index))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_STATE_INDEX", str(slurm_state_index))
     gateway = _production_gateway(tmp_path)
 
     rendered = gateway.render_template(
@@ -286,8 +299,14 @@ def test_db_free_template_exports_file_backends_without_scrubbing_database_urls(
     assert "export NHMS_SCHEDULER_REGISTRY_BACKEND=file" in rendered
     assert "export NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file" in rendered
     assert "export NHMS_SCHEDULER_STATE_INDEX_BACKEND=file" in rendered
-    assert "export NHMS_SCHEDULER_REGISTRY_MANIFEST=" in rendered
-    assert "export NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=" in rendered
+    assert f"export NHMS_SCHEDULER_REGISTRY_MANIFEST={shlex.quote(str(slurm_registry_manifest))}" in rendered
+    assert (
+        f"export NHMS_SCHEDULER_CANONICAL_READINESS_INDEX={shlex.quote(str(slurm_readiness_index))}"
+        in rendered
+    )
+    assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(slurm_state_index))}" in rendered
+    assert str(control_registry_manifest) not in rendered
+    assert str(control_readiness_index) not in rendered
     assert "10.0.2.100" not in rendered
     assert "secret" not in rendered
 

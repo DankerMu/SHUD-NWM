@@ -879,7 +879,10 @@ class RealSlurmGateway(SlurmGateway):
             "NHMS_SCHEDULER_DB_FREE_REQUIRED": context.get("scheduler_db_free_required", ""),
             "NHMS_SCHEDULER_ALLOWED_ROOTS": context.get("scheduler_allowed_roots", ""),
             "NHMS_SCHEDULER_STATE_INDEX_BACKEND": context.get("scheduler_state_index_backend", ""),
-            "NHMS_SCHEDULER_STATE_INDEX": context.get("scheduler_state_index", ""),
+            "NHMS_SCHEDULER_STATE_INDEX": _first_nonempty(
+                os.getenv("NHMS_SLURM_SCHEDULER_STATE_INDEX"),
+                context.get("scheduler_state_index"),
+            ),
             "NHMS_MAX_CONCURRENT": context.get("max_concurrent", ""),
             "SHUD_THREADS": context.get("shud_threads", ""),
             "OMP_NUM_THREADS": context.get("shud_threads", ""),
@@ -902,6 +905,7 @@ class RealSlurmGateway(SlurmGateway):
                         "file",
                     ),
                     "NHMS_SCHEDULER_REGISTRY_MANIFEST": _first_nonempty(
+                        os.getenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST"),
                         context.get("scheduler_registry_manifest"),
                         os.getenv("NHMS_SCHEDULER_REGISTRY_MANIFEST"),
                     ),
@@ -910,6 +914,7 @@ class RealSlurmGateway(SlurmGateway):
                         "file",
                     ),
                     "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": _first_nonempty(
+                        os.getenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX"),
                         context.get("scheduler_canonical_readiness_index"),
                         os.getenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"),
                     ),

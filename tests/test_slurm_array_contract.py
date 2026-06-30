@@ -254,6 +254,43 @@ def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Pat
     assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(state_index))}" in rendered
 
 
+def test_state_save_array_template_prefers_slurm_runtime_db_free_path_over_control_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    control_registry_manifest = tmp_path / "control" / "registry-manifest.json"
+    control_readiness_index = tmp_path / "control" / "canonical-readiness-index.json"
+    control_state_index = tmp_path / "control" / "state-index.json"
+    slurm_registry_manifest = tmp_path / "compute" / "registry-manifest.json"
+    slurm_readiness_index = tmp_path / "compute" / "canonical-readiness-index.json"
+    slurm_state_index = tmp_path / "compute" / "state-index.json"
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", str(slurm_registry_manifest))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX", str(slurm_readiness_index))
+    monkeypatch.setenv("NHMS_SLURM_SCHEDULER_STATE_INDEX", str(slurm_state_index))
+
+    rendered = _gateway(tmp_path).render_template(
+        "save_state_snapshot_array",
+        {
+            **_render_manifest(tmp_path, "save_state_snapshot_array"),
+            "scheduler_db_free_required": "true",
+            "scheduler_registry_manifest": str(control_registry_manifest),
+            "scheduler_canonical_readiness_index": str(control_readiness_index),
+            "scheduler_state_index": str(control_state_index),
+        },
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    assert f"export NHMS_SCHEDULER_REGISTRY_MANIFEST={shlex.quote(str(slurm_registry_manifest))}" in rendered
+    assert (
+        f"export NHMS_SCHEDULER_CANONICAL_READINESS_INDEX={shlex.quote(str(slurm_readiness_index))}"
+        in rendered
+    )
+    assert f"export NHMS_SCHEDULER_STATE_INDEX={shlex.quote(str(slurm_state_index))}" in rendered
+    assert str(control_registry_manifest) not in rendered
+    assert str(control_readiness_index) not in rendered
+    assert str(control_state_index) not in rendered
+
+
 def test_state_save_array_template_does_not_fallback_to_secret_state_index_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
