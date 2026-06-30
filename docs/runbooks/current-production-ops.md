@@ -438,6 +438,96 @@ ssh -p 32099 nwm@210.77.77.27 \
    find /home/ghdc/nwm/Basins -maxdepth 2 -type d | sort | head -40'
 ```
 
+### 5.6 新增或恢复流域的运维入口
+
+后续增加新的 `Basins/` 流域时，当前生产入口固定为：
+
+| 目标 | 节点 | 入口 |
+| --- | --- | --- |
+| seed/register/ingest/display coverage | node-27 | `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
+| 刷新可计算模型清单 | node-22 | `scripts/publish_scheduler_file_registry.py` |
+| 重启展示 API | node-27 | `scripts/ops/start-display-api.sh` |
+
+不要把新增流域做成 qhh/heihe/kashigeer 的一次性手工流程。标准流程：
+
+1. 把流域源数据放到共享 Basins 根：
+
+   ```text
+   node-22 view: /ghdc/data/nwm/Basins/<basin>...
+   node-27 view: /home/ghdc/nwm/Basins/<basin>...
+   ```
+
+   目录必须允许 node-27 的 `nwm` 用户读取和进入。跨用户从 node-22 复制
+   Basins 源时，不要保留源端私有权限；复制后至少确认：
+
+   ```bash
+   ssh -p 32099 nwm@210.77.77.27 \
+     'find /home/ghdc/nwm/Basins/<basin> -maxdepth 3 -type d | sort | head -40'
+   ```
+
+2. 在 node-27 走 autopipe wrapper，而不是直接绕过 wrapper 调 Python：
+
+   ```bash
+   ssh -p 32099 nwm@210.77.77.27
+   cd /home/nwm/NWM
+   bash scripts/node27_autopipe_cron.sh
+   tail -n 240 /home/nwm/autopipe-logs/autopipe.log
+   ```
+
+   wrapper 会从 `infra/env/node27-ingest.env` 加载 writer DB、NFS object-store
+   和 `BASINS_ROOT`，并阻断 display env、ambient libpq env、node-22 historical
+   DB env。`scripts/node27_autopipeline.py` 是实现入口：发现 `Basins/` inventory
+   与 `object-store/runs/`，seed 缺失 basin registry，应用 forcing-domain
+   handoff，解析 run，并刷新 display coverage。它是幂等的，后续新增流域也走
+   同一入口。
+
+3. 在 node-22 刷新 DB-free scheduler file registry，让新增流域进入自动计算：
+
+   ```bash
+   ssh -p 32099 frd_muziyao@210.77.77.22
+   cd /scratch/frd_muziyao/NWM
+   set -a
+   . infra/env/compute.scheduler-dbfree.env
+   set +a
+   .venv/bin/python scripts/publish_scheduler_file_registry.py \
+     --basins-root "$NHMS_BASINS_ROOT" \
+     --registry-manifest "$NHMS_SCHEDULER_REGISTRY_MANIFEST" \
+     --object-store-root "$OBJECT_STORE_ROOT" \
+     --object-store-prefix "$OBJECT_STORE_PREFIX" \
+     --work-dir "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish" \
+     --output "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish/receipt.json"
+   ```
+
+   `NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空；
+   不要为了新增流域在生产长期写死单个 basin。刷新后，`nhms-compute-scheduler.timer`
+   的后续 tick 会按 00/12 UTC 业务 cycle 走 Slurm 计算。
+
+4. 展示 API 不负责 seed 新流域。只有代码、env、端口或 display runtime
+   变更后，才用以下入口重启：
+
+   ```bash
+   ssh -p 32099 nwm@210.77.77.27
+   cd /home/nwm/NWM
+   bash scripts/ops/start-display-api.sh
+   ```
+
+5. 新增流域完成后的最低验收：
+
+   ```bash
+   # node-27: API 能枚举新 basin；有 published run 后 has_display_product=true 才会出现
+   curl -fsS 'http://127.0.0.1:8080/api/v1/basins?limit=500'
+   curl -fsS 'http://127.0.0.1:8080/api/v1/basins?has_display_product=true&limit=500'
+
+   # node-22: scheduler registry 包含新增 model
+   ssh -p 32099 frd_muziyao@210.77.77.22
+   cd /scratch/frd_muziyao/NWM
+   .venv/bin/python -c 'import json; from pathlib import Path; p=json.loads(Path("/scratch/frd_muziyao/nhms-prod/object-store/scheduler/registry/manifest-last.json").read_text()); print("\n".join(sorted(item["model_id"] for item in p.get("models", []) if "model_id" in item)))'
+   ```
+
+   `has_display_product=true` 只代表已有发布 run 的流域；新流域完成 registry
+   但尚未跑出 SHUD run 时，应先出现在普通 `/api/v1/basins` 和 scheduler
+   registry 中，等 22 产出 run、27 autopipe ingest 后再进入展示产品列表。
+
 ## 6. 如何判断是否卡住
 
 先分清三种状态：
