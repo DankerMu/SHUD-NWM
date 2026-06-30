@@ -42,6 +42,18 @@ from workers.model_registry.basins_registry_import import (
     ImportSources,
     prepare_basins_import_sources,
 )
+from workers.model_registry.basins_soil_alpha_repair import (
+    repair_blocked as soil_alpha_repair_blocked,
+)
+from workers.model_registry.basins_soil_alpha_repair import (
+    repair_needed as soil_alpha_repair_needed,
+)
+from workers.model_registry.basins_soil_alpha_repair import (
+    repair_performed as soil_alpha_repair_performed,
+)
+from workers.model_registry.basins_soil_alpha_repair import (
+    repair_soil_alpha_calibration_for_basin,
+)
 
 SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v1"
 DEFAULT_PACKAGE_VERSION_TEMPLATE = "vbasins-{slug_id}-{content_hash}"
@@ -115,8 +127,9 @@ def publish_all_basin_scheduler_registry(
         model_ids=model_ids,
     )
     contexts = [PublishContext(model=model, inventory_path=inventory_path) for model in selected_models]
+    contexts = _repair_calibrated_soil_alpha_contexts(contexts, workspace=workspace)
     if repair_missing_radiation:
-        contexts.extend(
+        repaired_radiation_contexts = (
             _repair_missing_radiation_contexts(
                 inventory=inventory,
                 basins_root=root,
@@ -126,6 +139,7 @@ def publish_all_basin_scheduler_registry(
                 already_selected_model_ids={str(model.get("model_id")) for model in selected_models},
             )
         )
+        contexts.extend(_repair_calibrated_soil_alpha_contexts(repaired_radiation_contexts, workspace=workspace))
     if not contexts:
         raise SchedulerRegistryPublishError(
             "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
@@ -440,6 +454,108 @@ def _repairable_missing_radiation_models(inventory: Mapping[str, Any]) -> list[d
         and model.get("default_publish_eligible") is not True
         and _is_missing_tsd_rl_only(model)
     ]
+
+
+def _repair_calibrated_soil_alpha_contexts(
+    contexts: Sequence[PublishContext],
+    *,
+    workspace: Path,
+) -> list[PublishContext]:
+    return [_repair_calibrated_soil_alpha_context(context, workspace=workspace) for context in contexts]
+
+
+def _repair_calibrated_soil_alpha_context(context: PublishContext, *, workspace: Path) -> PublishContext:
+    model = context.model
+    basin_slug = str(model.get("basin_slug") or "")
+    model_id = str(model.get("model_id") or "")
+    source_path = Path(str(model.get("source_path") or ""))
+    if not basin_slug or not model_id or not source_path.is_dir():
+        return context
+
+    if context.repair is None:
+        probe_root = _isolated_root_for_source_path(source_path, basin_slug)
+        probe = repair_soil_alpha_calibration_for_basin(
+            isolated_root=probe_root,
+            basin_slug=basin_slug,
+            dry_run=True,
+        )
+        if soil_alpha_repair_blocked(probe):
+            raise SchedulerRegistryPublishError(
+                "SCHEDULER_REGISTRY_SOIL_ALPHA_REPAIR_BLOCKED",
+                "Basins model has calibrated soil Alpha values that cannot be repaired within SHUD bounds.",
+                details={"model_id": model_id, "basin_slug": basin_slug, "repair": probe},
+            )
+        if not soil_alpha_repair_needed(probe):
+            return context
+        repaired_root = workspace / "repaired-basins-soil-alpha" / _slug_id(basin_slug)
+        if repaired_root.exists():
+            shutil.rmtree(repaired_root, ignore_errors=True)
+        repaired_target = repaired_root / basin_slug
+        repaired_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_path, repaired_target, symlinks=False)
+        _strip_synology_sidecars(repaired_target)
+        repair = repair_soil_alpha_calibration_for_basin(
+            isolated_root=repaired_root,
+            basin_slug=basin_slug,
+        )
+    else:
+        repaired_root = _isolated_root_for_source_path(source_path, basin_slug)
+        repair = repair_soil_alpha_calibration_for_basin(
+            isolated_root=repaired_root,
+            basin_slug=basin_slug,
+        )
+        if not soil_alpha_repair_needed(repair):
+            return context
+
+    if soil_alpha_repair_blocked(repair):
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_SOIL_ALPHA_REPAIR_BLOCKED",
+            "Basins model has calibrated soil Alpha values that cannot be repaired within SHUD bounds.",
+            details={"model_id": model_id, "basin_slug": basin_slug, "repair": repair},
+        )
+    if not soil_alpha_repair_performed(repair):
+        return context
+
+    repaired_inventory = discover_basins_inventory(repaired_root)
+    repaired_model = _find_inventory_model(repaired_inventory, model_id)
+    if repaired_model.get("status") != "valid" or repaired_model.get("default_publish_eligible") is not True:
+        raise SchedulerRegistryPublishError(
+            "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
+            "Repaired Basins model is still not publishable.",
+            details={
+                "model_id": model_id,
+                "basin_slug": basin_slug,
+                "status": repaired_model.get("status"),
+                "missing_required_files": repaired_model.get("missing_required_files") or [],
+                "repair": repair,
+            },
+        )
+    repaired_inventory_dir = workspace / "repaired-inventories"
+    repaired_inventory_dir.mkdir(parents=True, exist_ok=True)
+    repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
+    write_inventory(repaired_inventory, repaired_inventory_path)
+    return PublishContext(
+        model=repaired_model,
+        inventory_path=repaired_inventory_path,
+        repair=_merge_repairs(context.repair, repair, basin_slug=basin_slug),
+    )
+
+
+def _isolated_root_for_source_path(source_path: Path, basin_slug: str) -> Path:
+    root = source_path
+    for _part in Path(basin_slug).parts:
+        root = root.parent
+    return root
+
+
+def _merge_repairs(existing: dict[str, Any] | None, repair: dict[str, Any], *, basin_slug: str) -> dict[str, Any]:
+    if existing is None:
+        return repair
+    return {
+        "schema_version": "basins.scheduler_source_repair.v1",
+        "basin_slug": basin_slug,
+        "repairs": [existing, repair],
+    }
 
 
 def _is_missing_tsd_rl_only(model: Mapping[str, Any]) -> bool:

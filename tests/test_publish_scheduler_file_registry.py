@@ -9,6 +9,7 @@ import pytest
 
 import scripts.publish_scheduler_file_registry as registry_script
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
+from workers.model_registry.basins_soil_alpha_repair import repair_soil_alpha_calibration_for_basin
 
 
 def test_package_version_for_nested_basin_is_safe_and_content_stable() -> None:
@@ -184,6 +185,101 @@ def test_publish_all_basin_scheduler_registry_repairs_missing_radiation_model(
     assert {row["model_id"] for row in payload["models"]} == {"basins_qhh_shud", "basins_tailanhe_shud"}
 
 
+def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:
+    input_dir = _write_soil_alpha_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
+
+    dry_run = repair_soil_alpha_calibration_for_basin(
+        isolated_root=tmp_path / "isolated",
+        basin_slug="hetianhe",
+        dry_run=True,
+    )
+    assert dry_run["repairs"][0]["status"] == "would_repair"
+    assert "SOIL_ALPHA\t8.19327372615961" in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
+
+    report = repair_soil_alpha_calibration_for_basin(
+        isolated_root=tmp_path / "isolated",
+        basin_slug="hetianhe",
+    )
+
+    repair = report["repairs"][0]
+    assert repair["status"] == "repaired"
+    assert repair["soil_alpha_multiplier_before"] == pytest.approx(8.19327372615961)
+    assert repair["soil_alpha_multiplier_after"] == pytest.approx(19.999 / 6.380619)
+    assert repair["calibrated_alpha_max_after"] <= 20.0
+    assert "SOIL_ALPHA\t8.19327372615961" not in (input_dir / "hetian9000-2.cfg.calib").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    basins_root = tmp_path / "Basins"
+    _write_soil_alpha_model_files(basins_root, "hetianhe", "hetian9000-2")
+    initial_model = _inventory_model("hetianhe", shud_input_name="hetian9000-2")
+    initial_model["source_path"] = str(basins_root / "hetianhe")
+    initial_model["resolved_source_path"] = str(basins_root / "hetianhe")
+    initial_model["input_dir"] = str(basins_root / "hetianhe" / "input" / "hetian9000-2")
+    initial_inventory = {
+        "schema_version": "basins.discovery.v1",
+        "root": str(basins_root),
+        "resolved_root": str(basins_root),
+        "model_count": 1,
+        "models": [initial_model],
+        "warnings": [],
+    }
+
+    def fake_discover(root: Path) -> dict[str, Any]:
+        if Path(root) == basins_root:
+            return initial_inventory
+        repaired = _inventory_model("hetianhe", shud_input_name="hetian9000-2")
+        repaired["source_path"] = str(Path(root) / "hetianhe")
+        repaired["resolved_source_path"] = str(Path(root) / "hetianhe")
+        repaired["input_dir"] = str(Path(root) / "hetianhe" / "input" / "hetian9000-2")
+        repaired["checksums"] = {"hetian9000-2.cfg.calib": "repaired-sha"}
+        return {
+            "schema_version": "basins.discovery.v1",
+            "root": str(root),
+            "resolved_root": str(root),
+            "model_count": 1,
+            "models": [repaired],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(registry_script, "discover_basins_inventory", fake_discover)
+    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
+    monkeypatch.setattr(
+        registry_script,
+        "prepare_basins_import_sources",
+        lambda inventory_path, package_manifest_path: _fake_sources(
+            _inventory_from_file(Path(inventory_path)),
+            Path(package_manifest_path),
+        ),
+    )
+
+    object_root = tmp_path / "object-store"
+    registry_manifest = object_root / "scheduler" / "registry" / "manifest-last.json"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work",
+    )
+
+    assert summary["selected_basin_slugs"] == ["hetianhe"]
+    assert len(summary["repairs"]) == 1
+    assert summary["repairs"][0]["schema_version"] == "basins.soil_alpha_calibration_repair.v1"
+    repair = summary["repairs"][0]["repairs"][0]
+    assert repair["soil_alpha_multiplier_after"] == pytest.approx(19.999 / 6.380619)
+    repaired_cfg = Path(repair["cfg_calib"])
+    assert repaired_cfg.is_file()
+    assert "SOIL_ALPHA\t8.19327372615961" not in repaired_cfg.read_text(encoding="utf-8")
+    payload = json.loads(registry_manifest.read_text(encoding="utf-8"))
+    assert {row["model_id"] for row in payload["models"]} == {"basins_hetianhe_shud"}
+
+
 def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> dict[str, Any]:
     slug_id = registry_script._slug_id(basin_slug)
     input_name = shud_input_name or basin_slug.rsplit("/", maxsplit=1)[-1]
@@ -268,3 +364,23 @@ def _fake_sources(inventory: dict[str, Any], package_manifest_path: Path) -> Sim
 
 def _inventory_from_file(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_soil_alpha_model_files(root: Path, basin_slug: str, input_name: str) -> Path:
+    input_dir = root / basin_slug / "input" / input_name
+    input_dir.mkdir(parents=True)
+    (input_dir / f"{input_name}.cfg.calib").write_text(
+        "GEOL_KSATH\t0.00977999747288218\n"
+        "SOIL_ALPHA\t8.19327372615961\n"
+        "RIV_ROUGH\t0.2\n",
+        encoding="utf-8",
+    )
+    (input_dir / f"{input_name}.para.soil").write_text(
+        "3\t9\n"
+        "INDEX\tKsatV(m_d)\tThetaS(m3_m3)\tThetaR(m3_m3)\tInfD(m)\tAlpha(1_m)\tBeta\thAreaF(m2_m2)\tmacKsatV(m_d)\n"
+        "1\t0.3066345\t0.4369851\t0.01\t0.1\t3.141588\t1.228055\t0.01\t30.66345\n"
+        "2\t0.412565\t0.4509599\t0.01\t0.1\t6.380619\t1.220865\t0.01\t41.2565\n"
+        "3\t0.493972\t0.4669714\t0.01\t0.1\t4.640145\t1.217887\t0.01\t49.3972\n",
+        encoding="utf-8",
+    )
+    return input_dir
