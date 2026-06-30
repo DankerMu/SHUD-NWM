@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -427,6 +428,9 @@ class FileOrchestrationJournalRepository:
         )
         if state is None:
             return None
+        run_manifest_identity = _run_manifest_model_package_identity(rows.hydro_run)
+        if run_manifest_identity is not None:
+            state["run_manifest_model_package"] = run_manifest_identity
         return _public_candidate_state(state)
 
     def load_model_context(self, model_id: str) -> ModelContext:
@@ -3492,6 +3496,103 @@ def _blocked_stage_status(
             },
         }
     )
+
+
+def _run_manifest_model_package_identity(hydro_run: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(hydro_run, Mapping):
+        return None
+    manifest_path = _object_store_uri_local_path(str(hydro_run.get("run_manifest_uri") or ""))
+    if manifest_path is None:
+        return None
+    object_root = _object_store_root()
+    if object_root is None:
+        return None
+    try:
+        payload = json.loads(
+            read_bytes_limited_no_follow(
+                manifest_path,
+                max_bytes=MAX_FILE_JOURNAL_JSON_BYTES,
+                containment_root=object_root,
+            ).decode("utf-8")
+        )
+    except (FileNotFoundError, OSError, SafeFilesystemError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    identity: dict[str, Any] = {"source": "run_manifest", "status": "loaded"}
+    package_uri = _first_nested_text(
+        payload,
+        ("model", "model_package_uri"),
+        ("identity", "model_package_uri"),
+        ("model_package_uri",),
+    )
+    if package_uri is not None:
+        identity["model_package_uri_sha256"] = _stable_sha256(package_uri)
+    package_manifest_uri = _first_nested_text(
+        payload,
+        ("model", "model_package_manifest_uri"),
+        ("identity", "model_package_manifest_uri"),
+        ("model_package_manifest_uri",),
+    )
+    if package_manifest_uri is not None:
+        identity["model_package_manifest_uri_sha256"] = _stable_sha256(package_manifest_uri)
+    package_checksum = _first_nested_text(
+        payload,
+        ("model", "model_package_checksum"),
+        ("identity", "model_package_checksum"),
+        ("model", "package_checksum"),
+        ("package_checksum",),
+    )
+    if package_checksum is not None:
+        identity["model_package_checksum"] = package_checksum
+        identity["model_package_checksum_sha256"] = _stable_sha256(package_checksum)
+    if len(identity) == 2:
+        return None
+    return identity
+
+
+def _object_store_uri_local_path(uri: str) -> Path | None:
+    text = uri.strip()
+    if not text:
+        return None
+    root = _object_store_root()
+    if root is None:
+        return None
+    prefix = os.getenv("OBJECT_STORE_PREFIX", "").strip().rstrip("/")
+    key: str | None
+    if prefix and text.startswith(f"{prefix}/"):
+        key = text[len(prefix) + 1 :]
+    elif "://" not in text and not text.startswith("/"):
+        key = text
+    else:
+        return None
+    if not key:
+        return None
+    return root / key
+
+
+def _object_store_root() -> Path | None:
+    root = os.getenv("OBJECT_STORE_ROOT", "").strip()
+    if not root:
+        return None
+    return Path(root).expanduser().resolve()
+
+
+def _first_nested_text(payload: Mapping[str, Any], *paths: tuple[str, ...]) -> str | None:
+    for path in paths:
+        current: Any = payload
+        for part in path:
+            if not isinstance(current, Mapping):
+                current = None
+                break
+            current = current.get(part)
+        if current not in (None, ""):
+            return str(current)
+    return None
+
+
+def _stable_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _public_scheduler_row(row: Mapping[str, Any]) -> dict[str, Any]:

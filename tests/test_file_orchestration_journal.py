@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from multiprocessing import get_context
@@ -27,6 +28,7 @@ from tests.test_production_scheduler import (
     _model,
     _set_db_free_scheduler_env,
     _write_db_free_file_provider_fixtures,
+    _write_db_free_raw_manifest_fixture,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
@@ -146,6 +148,18 @@ def _active_job(cycle_time: datetime, *, model_id: str = "model_a") -> dict[str,
         "created_at": "2026-06-28T00:00:00Z",
         "runtime_roots": {"workspace_root": "/secret/workspace", "object_store_root": "/secret/object-store"},
     }
+
+
+def _enable_db_free_nfs_raw_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    roots: Mapping[str, Path],
+    *,
+    cycle_time: datetime,
+) -> None:
+    _write_db_free_raw_manifest_fixture(roots, cycle_time=cycle_time)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
 
 
 def _source_job(
@@ -3272,6 +3286,46 @@ def test_file_orchestration_journal_new_write_advances_beyond_latest_only_replay
     assert state["pipeline_status"] == "running"
 
 
+def test_file_orchestration_journal_candidate_state_includes_run_manifest_package_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    object_root = tmp_path / "object-store"
+    manifest_key = "runs/fcst_gfs_2026062800_model_a/input/manifest.json"
+    _write_json(
+        object_root / manifest_key,
+        {
+            "model": {
+                "model_package_uri": "s3://nhms/models/model_a/old/package/",
+                "model_package_manifest_uri": "s3://nhms/models/model_a/old/manifest.json",
+                "model_package_checksum": "old-package-sha",
+            }
+        },
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created")
+    assert latest["hydro_run"] is not None
+    latest["hydro_run"]["run_manifest_uri"] = f"s3://nhms/{manifest_key}"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    package = state["run_manifest_model_package"]
+    assert package["status"] == "loaded"
+    assert package["source"] == "run_manifest"
+    assert package["model_package_uri_sha256"] == hashlib.sha256(
+        b"s3://nhms/models/model_a/old/package/"
+    ).hexdigest()
+    assert package["model_package_manifest_uri_sha256"] == hashlib.sha256(
+        b"s3://nhms/models/model_a/old/manifest.json"
+    ).hexdigest()
+    assert package["model_package_checksum"] == "old-package-sha"
+
+
 @pytest.mark.parametrize(
     ("field_name", "envelope_value", "expected_reason"),
     [
@@ -4356,6 +4410,7 @@ def test_db_free_scheduler_from_env_uses_file_journal_without_database_url(
         forecast_hours=(0, 3),
         model=_model("model_a", "basin_a"),
     )
+    _enable_db_free_nfs_raw_manifest(monkeypatch, roots, cycle_time=cycle_time)
     _write_json(
         paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, hydro_status="complete"),
@@ -4401,6 +4456,7 @@ def test_db_free_scheduler_from_env_run_once_uses_file_journal_active_slurm_evid
         forecast_hours=(0, 3),
         model=_model("model_a", "basin_a"),
     )
+    _enable_db_free_nfs_raw_manifest(monkeypatch, roots, cycle_time=cycle_time)
     _write_json(
         paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
@@ -4448,6 +4504,7 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
         forecast_hours=(0, 3),
         model=_model("model_a", "basin_a"),
     )
+    _enable_db_free_nfs_raw_manifest(monkeypatch, roots, cycle_time=cycle_time)
     _write_json(
         paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
@@ -4507,6 +4564,7 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
         forecast_hours=(0, 3),
         model=_model("model_a", "basin_a"),
     )
+    _enable_db_free_nfs_raw_manifest(monkeypatch, roots, cycle_time=cycle_time)
     _write_json(
         paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),

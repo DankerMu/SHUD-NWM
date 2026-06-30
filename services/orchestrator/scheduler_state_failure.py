@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -537,6 +538,105 @@ def _permanent_failure_evidence(
             "run_id": candidate.run_id,
         },
     }
+
+
+def _model_package_refresh_retry_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _state_has_failure_signal(state):
+        return None
+    failure = _failure_policy_payload(state)
+    if not failure["permanent"]:
+        return None
+    prior = state.get("run_manifest_model_package")
+    if not isinstance(prior, Mapping):
+        return None
+    changed_fields = _model_package_changed_fields(candidate, prior)
+    if not changed_fields:
+        return None
+    restart_stage = "forecast" if _failed_stage(state) in NATIVE_SHUD_STAGE_ALIASES else _failed_stage(state)
+    return {
+        **base_evidence,
+        "decision": "retry_after_model_package_refresh",
+        "reason": "retry_after_model_package_refresh",
+        "stage": restart_stage,
+        "restart_stage": restart_stage,
+        "failure": {
+            **failure,
+            "manual_retry_required": False,
+            "model_package_refresh": True,
+        },
+        "model_package_refresh": {
+            "source": prior.get("source") or "run_manifest",
+            "changed_fields": changed_fields,
+            "previous_status": prior.get("status"),
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+            "override_reason": "model_package_refresh",
+        },
+        "manual_retry_required": False,
+        "prior_failure_reason": failure["reason_code"],
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _model_package_changed_fields(candidate: SchedulerCandidateLike, prior: Mapping[str, Any]) -> list[str]:
+    changed: list[str] = []
+    previous_package_uri_sha = str(prior.get("model_package_uri_sha256") or "")
+    if previous_package_uri_sha:
+        current_package_uri = str(getattr(candidate, "model_package_uri", "") or "")
+        if current_package_uri and _stable_sha256(current_package_uri) != previous_package_uri_sha:
+            changed.append("model_package_uri")
+    previous_manifest_uri_sha = str(prior.get("model_package_manifest_uri_sha256") or "")
+    if previous_manifest_uri_sha:
+        current_manifest_uri = _candidate_model_package_manifest_uri(candidate)
+        if current_manifest_uri and _stable_sha256(current_manifest_uri) != previous_manifest_uri_sha:
+            changed.append("model_package_manifest_uri")
+    previous_checksum = str(prior.get("model_package_checksum") or "")
+    current_checksum = _candidate_model_package_checksum(candidate)
+    if previous_checksum and current_checksum and current_checksum != previous_checksum:
+        changed.append("model_package_checksum")
+    previous_checksum_sha = str(prior.get("model_package_checksum_sha256") or "")
+    if previous_checksum_sha and current_checksum and _stable_sha256(current_checksum) != previous_checksum_sha:
+        changed.append("model_package_checksum")
+    return sorted(set(changed))
+
+
+def _candidate_model_package_manifest_uri(candidate: SchedulerCandidateLike) -> str | None:
+    resource_profile = getattr(candidate, "resource_profile", None)
+    if isinstance(resource_profile, Mapping):
+        explicit = resource_profile.get("manifest_uri") or resource_profile.get("model_package_manifest_uri")
+        if explicit not in (None, ""):
+            return str(explicit)
+    package_uri = str(getattr(candidate, "model_package_uri", "") or "").rstrip("/")
+    if not package_uri:
+        return None
+    if package_uri.endswith("/package"):
+        return f"{package_uri.removesuffix('/package')}/manifest.json"
+    return f"{package_uri}/manifest.json"
+
+
+def _candidate_model_package_checksum(candidate: SchedulerCandidateLike) -> str | None:
+    resource_profile = getattr(candidate, "resource_profile", None)
+    if isinstance(resource_profile, Mapping):
+        checksum = resource_profile.get("package_checksum") or resource_profile.get("model_package_checksum")
+        if checksum not in (None, ""):
+            return str(checksum)
+    return None
+
+
+def _stable_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 
 def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
     if _state_has_only_repaired_pipeline_failure_signal(state):

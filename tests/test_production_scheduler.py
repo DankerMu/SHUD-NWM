@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import shutil
@@ -10326,6 +10327,105 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     assert state["retry_policy"]["automatic_retry_allowed"] is False
     assert state["manual_retry_required"] is True
     assert state["failure"]["permanent"] is True
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhausted(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    model = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "memory_gb": 8,
+            "display_capabilities": {"tiles": True},
+            "package_checksum": "new-package-sha",
+        },
+    )
+    model["model_package_uri"] = "s3://nhms/models/model_a/new-package/package/"
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "SLURM_TIMEOUT",
+            "retry_count": 3,
+            "retry_limit": 3,
+            "run_manifest_model_package": {
+                "source": "run_manifest",
+                "status": "loaded",
+                "model_package_uri_sha256": hashlib.sha256(
+                    b"s3://nhms/models/model_a/old-package/package/"
+                ).hexdigest(),
+                "model_package_checksum": "old-package-sha",
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_after_model_package_refresh"
+    assert state["retry_policy"]["automatic_retry_allowed"] is True
+    assert state["retry_policy"]["manual_retry_required"] is False
+    assert state["model_package_refresh"]["changed_fields"] == ["model_package_checksum", "model_package_uri"]
+    assert orchestrator.calls[0]["basins"][0]["model_package_uri"] == "s3://nhms/models/model_a/new-package/package/"
+
+
+def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    package_uri = "s3://nhms/models/model_a/package/"
+    package_checksum = "same-package-sha"
+    model = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "memory_gb": 8,
+            "display_capabilities": {"tiles": True},
+            "package_checksum": package_checksum,
+        },
+    )
+    model["model_package_uri"] = package_uri
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "SLURM_TIMEOUT",
+            "retry_count": 3,
+            "retry_limit": 3,
+            "run_manifest_model_package": {
+                "source": "run_manifest",
+                "status": "loaded",
+                "model_package_uri_sha256": hashlib.sha256(package_uri.encode("utf-8")).hexdigest(),
+                "model_package_checksum": package_checksum,
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "retry_limit_exhausted"
+    assert blocked["state_evidence"]["decision"] == "permanent_failure"
     assert result.evidence["counts"]["submitted_count"] == 0
     assert orchestrator.calls == []
 

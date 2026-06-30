@@ -13,6 +13,7 @@ from services.orchestrator.scheduler_state_failure import (
     _downstream_retry_evidence,
     _manual_retry_state_evidence,
     _missing_raw_manifest_repair_evidence,
+    _model_package_refresh_retry_evidence,
     _permanent_failure_evidence,
     _repaired_raw_manifest_downstream_retry_evidence,
     _retry_failure_evidence,
@@ -202,6 +203,10 @@ def _candidate_state_decision(
     )
     if downstream_after_raw_repair is not None:
         return CandidateStateDecision("retry", "retry_downstream_after_raw_repair", downstream_after_raw_repair)
+
+    package_refresh = _model_package_refresh_retry_evidence(candidate, decision_state, evidence)
+    if package_refresh is not None:
+        return CandidateStateDecision("retry", "retry_after_model_package_refresh", package_refresh)
 
     permanent = _permanent_failure_evidence(candidate, decision_state, evidence)
     if permanent is not None:
