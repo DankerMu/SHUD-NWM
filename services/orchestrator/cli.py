@@ -9,6 +9,7 @@ from typing import Sequence
 
 from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
+from workers.data_adapters.base import parse_cycle_time
 
 from .chain import AnalysisOrchestrator, OrchestratorError
 from .file_orchestration_migration import export_scheduler_state_from_postgres, write_migration_receipt
@@ -143,6 +144,8 @@ def _plan_production(
     workspace_root: str | None,
     lock_path: str | None,
     evidence_dir: str | None,
+    cycle_time: str | None = None,
+    disable_backfill: bool = False,
 ) -> dict[str, object]:
     workspace_root = _non_blank_path(workspace_root, "--workspace-root")
     lock_path = _non_blank_path(lock_path, "--lock-path")
@@ -194,6 +197,18 @@ def _plan_production(
         if cycle_lag_hours is not None
         else _env_int("NHMS_SCHEDULER_CYCLE_LAG_HOURS", 0)
     )
+    explicit_now: datetime | None = None
+    if cycle_time not in (None, ""):
+        if lookback_hours is not None or cycle_lag_hours is not None or max_cycles_per_source is not None:
+            raise ValueError(
+                "plan-production --cycle-time cannot be combined with "
+                "--lookback-hours, --cycle-lag-hours, or --max-cycles-per-source"
+            )
+        explicit_now = parse_cycle_time(str(cycle_time))
+        resolved_lookback = 0
+        resolved_cycle_lag = 0
+        resolved_max_cycles = 1
+        disable_backfill = True
     config_kwargs: dict[str, object] = {
         "workspace_root": resolved_workspace_root,
         "sources": resolved_sources,
@@ -209,6 +224,10 @@ def _plan_production(
         "evidence_dir": evidence_dir,
         "require_runtime_roots": require_runtime_roots,
     }
+    if disable_backfill:
+        config_kwargs["backfill_enabled"] = False
+    if explicit_now is not None:
+        config_kwargs["now"] = explicit_now
     if workspace_root is not None and lock_path is None:
         config_kwargs["scheduler_lock_root"] = None
     if workspace_root is not None and evidence_dir is None:
@@ -307,6 +326,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--lookback-hours", default=None, type=int)
     @click.option("--cycle-lag-hours", default=None, type=int)
     @click.option("--max-cycles-per-source", default=None, type=int)
+    @click.option("--cycle-time", default=None, help="Run exactly one UTC source cycle.")
+    @click.option("--disable-backfill", is_flag=True, help="Select latest window cycles instead of oldest gaps.")
     @click.option(
         "--model-id",
         "model_ids",
@@ -333,6 +354,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         lookback_hours: int,
         cycle_lag_hours: int | None,
         max_cycles_per_source: int | None,
+        cycle_time: str | None,
+        disable_backfill: bool,
         model_ids: Sequence[str],
         basin_ids: Sequence[str],
         dry_run: bool,
@@ -351,6 +374,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                         lookback_hours=lookback_hours,
                         cycle_lag_hours=cycle_lag_hours,
                         max_cycles_per_source=max_cycles_per_source,
+                        cycle_time=cycle_time,
+                        disable_backfill=disable_backfill,
                         model_ids=_split_csv(model_ids),
                         basin_ids=_split_csv(basin_ids),
                         dry_run=dry_run,
@@ -399,6 +424,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
     plan_parser.add_argument("--cycle-lag-hours", type=int, default=None)
     plan_parser.add_argument("--max-cycles-per-source", type=int, default=None)
+    plan_parser.add_argument("--cycle-time", default=None)
+    plan_parser.add_argument("--disable-backfill", action="store_true")
     plan_parser.add_argument("--model-id", action="append", default=[])
     plan_parser.add_argument("--basin-id", action="append", default=[])
     plan_parser.add_argument("--dry-run", action="store_true", default=True)
@@ -463,6 +490,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                         lookback_hours=args.lookback_hours,
                         cycle_lag_hours=args.cycle_lag_hours,
                         max_cycles_per_source=args.max_cycles_per_source,
+                        cycle_time=args.cycle_time,
+                        disable_backfill=args.disable_backfill,
                         model_ids=_split_csv(args.model_id),
                         basin_ids=_split_csv(args.basin_id),
                         dry_run=args.dry_run,

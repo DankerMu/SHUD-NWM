@@ -29,6 +29,7 @@ ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 DOWNSTREAM_RESTART_STAGES = ("convert", "forcing", "forecast", "parse", "state_save_qc")
 DOWNSTREAM_STAGE_ALIASES = {
@@ -43,6 +44,7 @@ DOWNSTREAM_STAGE_ALIASES = {
     "run_shud_forecast_array": "forecast",
     "parse": "parse",
     "parse_output": "parse",
+    "parse_output_array": "parse",
     "state_save_qc": "state_save_qc",
     "save_state_snapshot": "state_save_qc",
     "save_state_snapshot_array": "state_save_qc",

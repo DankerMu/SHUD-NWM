@@ -31,7 +31,9 @@ from services.orchestrator.scheduler_state_rows import (
 )
 from services.orchestrator.scheduler_state_types import (
     CANDIDATE_STATE_TASK_RESULT_LIMIT,
+    DOWNSTREAM_STAGE_ALIASES,
     FAILED_PIPELINE_STATUSES,
+    TERMINAL_PIPELINE_COMPLETION_STAGES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     SchedulerCandidateLike,
 )
@@ -587,6 +589,7 @@ def _pipeline_terminal_success_is_candidate_scoped(
 ) -> bool:
     if state.get("shared_cycle_aggregate") is True:
         return False
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     matching_jobs = [
         job
         for job in _state_jobs(state)
@@ -594,8 +597,10 @@ def _pipeline_terminal_success_is_candidate_scoped(
         in TERMINAL_PIPELINE_SUCCESS_STATUSES
     ]
     if not matching_jobs:
-        return not _has_candidate_task_failure(state)
+        return pipeline_status in {"complete", "published"} and not _has_candidate_task_failure(state)
     for job in reversed(matching_jobs):
+        if not _pipeline_success_job_is_completion_stage(job):
+            continue
         run_id = str(job.get("run_id") or "")
         model_id = job.get("model_id")
         if run_id == candidate.run_id:
@@ -604,6 +609,15 @@ def _pipeline_terminal_success_is_candidate_scoped(
             return True
         if run_id.startswith("cycle_") and model_id in (None, ""):
             return False
+    return False
+
+def _pipeline_success_job_is_completion_stage(job: Mapping[str, Any]) -> bool:
+    for raw_stage in (job.get("stage"), job.get("job_type")):
+        if raw_stage in (None, ""):
+            continue
+        stage = str(raw_stage)
+        if DOWNSTREAM_STAGE_ALIASES.get(stage, stage) in TERMINAL_PIPELINE_COMPLETION_STAGES:
+            return True
     return False
 
 def _terminal_hydro_truth_supersedes_failure(state: Mapping[str, Any]) -> bool:

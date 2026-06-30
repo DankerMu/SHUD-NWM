@@ -9616,6 +9616,39 @@ def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
     assert orchestrator.calls == []
 
 
+def test_intermediate_pipeline_success_does_not_skip_terminal_candidate(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "succeeded",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_forcing_success",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "status": "succeeded",
+                    "stage": "forcing",
+                    "updated_at": "2026-05-21T06:30:00Z",
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+
+
 def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
@@ -14984,6 +15017,41 @@ def test_plan_production_cli_explicit_cycle_lag_overrides_scheduler_env(
 
     assert rc == 0
     assert captured["config"].cycle_lag_hours == 6
+
+
+def test_plan_production_cli_cycle_time_pins_single_cycle_and_disables_backfill(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_LOOKBACK_HOURS", "48")
+    monkeypatch.setenv("NHMS_SCHEDULER_CYCLE_LAG_HOURS", "16")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--cycle-time", "2026-06-27T00:00:00Z"])
+
+    assert rc == 0
+    assert captured["config"].now == _dt("2026-06-27T00:00:00Z")
+    assert captured["config"].lookback_hours == 0
+    assert captured["config"].cycle_lag_hours == 0
+    assert captured["config"].max_cycles_per_source == 1
+    assert captured["config"].backfill_enabled is False
 
 
 def test_plan_production_cli_rejects_non_positive_explicit_max_cycles(

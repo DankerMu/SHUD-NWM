@@ -155,6 +155,32 @@ set +a
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
+显式补跑某个 00/12 UTC 周期时，使用 node-22 的 DB-free 入口脚本，不要手工
+拼 `lookback/cycle-lag`，也不要改 scheduler systemd env：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+
+# 先 plan，确认 source_cycles/candidates/blocked_candidates。
+scripts/ops/node22-run-cycle-once.sh \
+  --cycle-time 2026-06-27T00:00:00Z \
+  --source gfs \
+  --plan
+
+# 确认后提交。省略 --basin-id 会使用 file registry 中的全部 active basin。
+scripts/ops/node22-run-cycle-once.sh \
+  --cycle-time 2026-06-27T00:00:00Z \
+  --source gfs \
+  --submit
+```
+
+该脚本 source `infra/env/compute.scheduler-dbfree.env`，调用
+`plan-production --cycle-time ... --disable-backfill`。`--cycle-time` 固定单一
+source cycle，避免恢复运行被更早的历史 backfill 缺口劫持；`--disable-backfill`
+只影响本次显式补跑，不改变 timer 的常规 backfill 策略。需要定向少数流域时可重复
+传 `--basin-id basins_xxx`。
+
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。
 
