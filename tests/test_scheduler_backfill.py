@@ -20,6 +20,7 @@ from tests.test_production_scheduler import (
     _config,
     _dt,
     _model,
+    _write_db_free_raw_manifest_fixture,
 )
 
 
@@ -248,6 +249,11 @@ class _LegacyTypeErrorFallbackAdapter:
         ]
 
 
+class _ExplodingDiscoveryAdapter:
+    def discover_cycles(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("NFS raw manifest discovery must not call the source adapter")
+
+
 # ---------------------------------------------------------------------------
 # Requirement: extracted discovery still honors old private-method monkeypatches.
 # ---------------------------------------------------------------------------
@@ -334,6 +340,45 @@ def test_discover_cycles_honors_instance_monkeypatch_cycle_completion_status(
     assert audit["complete_count"] == 1
     assert audit["gap_count"] == 0
     assert audit["selected_count"] == 0
+
+
+def test_nfs_raw_manifest_required_discovery_does_not_probe_source_adapter(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    roots = {"object_store_root": object_store_root}
+    ready_cycle = _dt("2026-06-27T00:00:00Z")
+    missing_cycle = _dt("2026-06-27T12:00:00Z")
+    _write_db_free_raw_manifest_fixture(roots, source_id="IFS", cycle_time=ready_cycle)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-27T18:00:00Z"),
+        sources=("IFS",),
+        allowed_cycle_hours_utc=(0, 12),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"IFS": _ExplodingDiscoveryAdapter()},
+    )
+
+    discoveries = scheduler._discover_source_window(
+        _ExplodingDiscoveryAdapter(),
+        source_id="IFS",
+        start_time=ready_cycle,
+        end_time=missing_cycle,
+    )
+
+    assert [(item.cycle_hour, item.available, item.status, item.reason) for item in discoveries] == [
+        (0, True, "discovered", None),
+        (12, False, "missing", "nfs_raw_manifest_manifest_not_found"),
+    ]
+    assert discoveries[0].evidence["source"] == "node27_nfs_raw_manifest"
+    assert discoveries[0].evidence["manifest_key"] == "raw/IFS/2026062700/manifest.json"
 
 
 def test_legacy_adapter_typeerror_fallback_selects_row_and_source_cycle_evidence(

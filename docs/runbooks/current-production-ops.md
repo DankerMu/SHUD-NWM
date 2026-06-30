@@ -179,13 +179,11 @@ cd /scratch/frd_muziyao/NWM
 # 先 plan，确认 source_cycles/candidates/blocked_candidates。
 scripts/ops/node22-run-cycle-once.sh \
   --cycle-time 2026-06-27T00:00:00Z \
-  --source gfs \
   --plan
 
 # 确认后提交。省略 --basin-id 会使用 file registry 中的全部 active basin。
 scripts/ops/node22-run-cycle-once.sh \
   --cycle-time 2026-06-27T00:00:00Z \
-  --source gfs \
   --submit
 ```
 
@@ -193,7 +191,8 @@ scripts/ops/node22-run-cycle-once.sh \
 `plan-production --cycle-time ... --disable-backfill`。`--cycle-time` 固定单一
 source cycle，避免恢复运行被更早的历史 backfill 缺口劫持；`--disable-backfill`
 只影响本次显式补跑，不改变 timer 的常规 backfill 策略。需要定向少数流域时可重复
-传 `--basin-id basins_xxx`。
+传 `--basin-id basins_xxx`；需要只补某个 source 时传 `--source gfs` 或
+`--source IFS`，不传则按 scheduler env 跑全部生产 source。
 
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。

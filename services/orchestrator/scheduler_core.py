@@ -483,9 +483,74 @@ class ProductionScheduler:
         start_time: _scheduler.datetime,
         end_time: _scheduler.datetime,
     ) -> list[_scheduler.CycleDiscovery]:
+        nfs_raw_discoveries = self._discover_source_window_from_nfs_raw_manifest(
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if nfs_raw_discoveries is not None:
+            return nfs_raw_discoveries
         return _scheduler._scheduler_discovery.discover_source_window(
             adapter, source_id=source_id, start_time=start_time, end_time=end_time
         )
+
+    def _discover_source_window_from_nfs_raw_manifest(
+        self,
+        *,
+        source_id: str,
+        start_time: _scheduler.datetime,
+        end_time: _scheduler.datetime,
+    ) -> list[_scheduler.CycleDiscovery] | None:
+        from services.orchestrator import source_cycle_raw_manifest
+
+        enabled = _scheduler._env_flag(source_cycle_raw_manifest.NFS_RAW_MANIFEST_ENABLED_ENV)
+        required = _scheduler._env_flag(source_cycle_raw_manifest.NFS_RAW_MANIFEST_REQUIRED_ENV)
+        if not enabled and not required:
+            return None
+
+        start = _scheduler._ensure_utc(start_time)
+        end = _scheduler._ensure_utc(end_time)
+        if start > end:
+            return []
+
+        allowed_hours = sorted({int(hour) for hour in self.config.allowed_cycle_hours_utc})
+        discoveries: list[_scheduler.CycleDiscovery] = []
+        current_date = start.date()
+        while current_date <= end.date():
+            for cycle_hour in allowed_hours:
+                cycle_time = _scheduler.datetime(
+                    current_date.year,
+                    current_date.month,
+                    current_date.day,
+                    cycle_hour,
+                    tzinfo=_scheduler.UTC,
+                )
+                if cycle_time < start or cycle_time > end:
+                    continue
+                readiness = source_cycle_raw_manifest.nfs_raw_manifest_readiness_from_env(source_id, cycle_time)
+                if readiness is None:
+                    return None
+                status = str(readiness.get("status") or "missing")
+                ready = status == "ready"
+                raw_reason = readiness.get("reason")
+                reason = None if ready else f"nfs_raw_manifest_{raw_reason or 'not_ready'}"
+                discoveries.append(
+                    _scheduler.CycleDiscovery(
+                        cycle_id=_scheduler.cycle_id_for(source_id, cycle_time),
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        cycle_hour=cycle_hour,
+                        available=ready,
+                        status="discovered" if ready else status,
+                        reason=reason,
+                        classifier=source_cycle_raw_manifest.NFS_RAW_MANIFEST_READY_SOURCE,
+                        retryable=False if ready else True,
+                        probe_uri=None,
+                        evidence=_scheduler._evidence_safe(readiness),
+                    )
+                )
+            current_date += _scheduler.timedelta(days=1)
+        return discoveries
 
     def _canonical_readiness_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
