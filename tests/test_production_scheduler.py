@@ -8651,8 +8651,13 @@ def test_orchestrator_config_parses_strict_forecast_warm_start_env(
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", "2026-06-27T00:00:00Z")
 
-    assert OrchestratorConfig.from_env().require_forecast_warm_start is True
+    config = OrchestratorConfig.from_env()
+    assert config.require_forecast_warm_start is True
+    assert config.forecast_warm_start_required_from == _dt("2026-06-27T00:00:00Z")
+    assert config.strict_forecast_warm_start_required_for(_dt("2026-06-27T00:00:00Z")) is True
+    assert config.strict_forecast_warm_start_required_for(_dt("2026-06-26T12:00:00Z")) is False
 
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
     assert OrchestratorConfig.from_env().require_forecast_warm_start is False
@@ -18518,6 +18523,68 @@ def test_db_free_strict_warm_start_blocks_missing_file_state_index_without_lates
     assert state_evidence["state_snapshot_index"]["entry_count"] == 0
     assert "candidate_state" not in state_evidence
     assert "latest" not in json.dumps(state_evidence, sort_keys=True).lower()
+
+
+def test_db_free_strict_warm_start_bootstrap_boundary_skips_prior_state_index_gate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", "2026-05-21T12:00:00Z")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
 
 
 def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_before_mutation(

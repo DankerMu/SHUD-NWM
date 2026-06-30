@@ -57,7 +57,10 @@ Compute role, node 22:
   `NHMS_REQUIRE_FORECAST_WARM_START=true`. That makes the scheduler run SHUD and
   DB-free `state_save_qc` so forecast warm-start state continues to advance, then
   stop before parse/publish. Node-27 data-plane ingest owns parse, QC, DB writes,
-  and display publication from those forecast outputs.
+  and display publication from those forecast outputs. For an all-basin
+  backfill bootstrap, set `NHMS_FORECAST_WARM_START_REQUIRED_FROM` to the first
+  cycle that must be warm-started; earlier cycles may cold-start only to seed
+  DB-free state for that boundary.
 - Production scheduler model selection is registry-driven. Keep
   `NHMS_SCHEDULER_MODEL_IDS` and `NHMS_SCHEDULER_BASIN_IDS` empty for normal
   operations; publish the full Basins file registry with

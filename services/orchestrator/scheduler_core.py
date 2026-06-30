@@ -602,6 +602,16 @@ class ProductionScheduler:
             and _scheduler.OrchestratorConfig.from_env().require_forecast_warm_start
         )
 
+    def _db_free_strict_warm_start_required_for(
+        self,
+        candidate: _scheduler.SchedulerCandidate,
+    ) -> bool:
+        if not self.config.db_free_required:
+            return False
+        return _scheduler.OrchestratorConfig.from_env().strict_forecast_warm_start_required_for(
+            candidate.cycle_time_utc
+        )
+
     def _db_free_state_index_provider(self) -> _scheduler.FileStateSnapshotIndexRepository:
         if self._db_free_state_index_repository is None:
             self._db_free_state_index_repository = _scheduler.FileStateSnapshotIndexRepository(
@@ -616,7 +626,7 @@ class ProductionScheduler:
     def _strict_warm_start_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
-        if not self._db_free_strict_warm_start_required():
+        if not self._db_free_strict_warm_start_required_for(candidate):
             return None
         required_lead_hours = self._required_warm_start_lead_hours(candidate, cycle)
         model_package_checksum = (

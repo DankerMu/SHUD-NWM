@@ -12,8 +12,10 @@ NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
 # Strict production forecast warm-start: forbid cold starts and latest-state
-# fallback; require the exact +12h successor checkpoint for each business cycle.
+# fallback at or after the optional bootstrap boundary; require the exact +12h
+# successor checkpoint for each business cycle after that boundary.
 NHMS_REQUIRE_FORECAST_WARM_START=true
+# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
 UV_CACHE_DIR=/tmp/nhms-uv-cache
 
 # Compute API / archived rollback DB placeholder. The scheduler-once compose
@@ -101,6 +103,10 @@ NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
 # shared object-store output.
 NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc
 NHMS_REQUIRE_FORECAST_WARM_START=true
+# Optional bootstrap boundary for newly activated all-basin backfill. Cycles
+# before this timestamp may cold-start to seed DB-free state; cycles at/after it
+# still require exact warm-start.
+# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

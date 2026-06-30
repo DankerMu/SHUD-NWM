@@ -10,7 +10,7 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
 from services.orchestrator.chain_stages import STAGES, terminal_stage_names
 from services.orchestrator.chain_types import OrchestratorError
-from workers.data_adapters.base import format_cycle_time
+from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 
 def scenario_for_source(source_id: str) -> str:
@@ -70,6 +70,7 @@ class OrchestratorConfig:
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
     require_forecast_warm_start: bool = False
+    forecast_warm_start_required_from: datetime | None = None
     terminal_stage: str | None = None
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
@@ -78,6 +79,12 @@ class OrchestratorConfig:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
         object.__setattr__(self, "source_id", normalize_source_id(self.source_id))
+        if self.forecast_warm_start_required_from is not None:
+            object.__setattr__(
+                self,
+                "forecast_warm_start_required_from",
+                parse_cycle_time(self.forecast_warm_start_required_from),
+            )
         object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
         object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
@@ -111,8 +118,16 @@ class OrchestratorConfig:
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
             state_hard_stale_threshold_days=int(os.getenv("STATE_HARD_STALE_THRESHOLD_DAYS", "30")),
             require_forecast_warm_start=_env_flag("NHMS_REQUIRE_FORECAST_WARM_START", default=False),
+            forecast_warm_start_required_from=_env_cycle_time("NHMS_FORECAST_WARM_START_REQUIRED_FROM"),
             terminal_stage=os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE") or None,
         )
+
+    def strict_forecast_warm_start_required_for(self, cycle_time: datetime) -> bool:
+        if not self.require_forecast_warm_start:
+            return False
+        if self.forecast_warm_start_required_from is None:
+            return True
+        return parse_cycle_time(cycle_time) >= self.forecast_warm_start_required_from
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -125,6 +140,13 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value.")
+
+
+def _env_cycle_time(name: str) -> datetime | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return parse_cycle_time(value)
 
 
 def _normalize_terminal_stage(value: str | None) -> str | None:

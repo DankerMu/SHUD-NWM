@@ -406,6 +406,25 @@ def test_strict_forecast_missing_exact_blocks_before_side_effects(tmp_path: Path
     _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
+def test_strict_forecast_bootstrap_boundary_allows_prior_cold_start(tmp_path: Path) -> None:
+    repository = FakeOrchestratorRepository()
+    state_manager = FakeStateManager([])
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        state_manager,
+        require_forecast_warm_start=True,
+        forecast_warm_start_required_from=_dt("2026-05-01T12:00:00Z"),
+    )
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    context, manifest = repository.created_runs[0]
+    assert context.init_state_id is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert state_manager.latest_usable_calls == 1
+
+
 def test_strict_forecast_without_state_manager_blocks_before_side_effects(tmp_path: Path) -> None:
     repository = FakeOrchestratorRepository()
     orchestrator = _orchestrator(tmp_path, repository, None, require_forecast_warm_start=True)
@@ -665,6 +684,7 @@ def _orchestrator(
     state_manager: FakeStateManager | None,
     *,
     require_forecast_warm_start: bool = False,
+    forecast_warm_start_required_from: datetime | None = None,
 ) -> ForecastOrchestrator:
     object_root = tmp_path / "object-store"
     config = OrchestratorConfig(
@@ -674,6 +694,7 @@ def _orchestrator(
         poll_interval_seconds=0,
         job_timeout_seconds=5,
         require_forecast_warm_start=require_forecast_warm_start,
+        forecast_warm_start_required_from=forecast_warm_start_required_from,
     )
     return ForecastOrchestrator(
         config=config,
