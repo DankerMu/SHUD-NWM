@@ -211,6 +211,31 @@ def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp
     )
 
 
+def test_geol_dmac_repair_reduces_calibrated_depth_inside_private_root(tmp_path: Path) -> None:
+    input_dir = _write_geol_dmac_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
+
+    dry_run = repair_soil_alpha_calibration_for_basin(
+        isolated_root=tmp_path / "isolated",
+        basin_slug="hetianhe",
+        dry_run=True,
+    )
+    assert dry_run["repairs"][0]["status"] == "would_repair"
+    assert "GEOL_DMAC\t5" in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
+
+    report = repair_soil_alpha_calibration_for_basin(
+        isolated_root=tmp_path / "isolated",
+        basin_slug="hetianhe",
+    )
+
+    repair = report["repairs"][0]
+    assert repair["status"] == "repaired"
+    assert repair["parameter"] == "GEOL_DMAC"
+    assert repair["geol_dmac_multiplier_before"] == pytest.approx(5)
+    assert repair["geol_dmac_multiplier_after"] == pytest.approx(4)
+    assert repair["calibrated_dmac_max_after"] <= 4.0
+    assert "GEOL_DMAC\t5" not in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
+
+
 def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -270,7 +295,7 @@ def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_mode
 
     assert summary["selected_basin_slugs"] == ["hetianhe"]
     assert len(summary["repairs"]) == 1
-    assert summary["repairs"][0]["schema_version"] == "basins.soil_alpha_calibration_repair.v1"
+    assert summary["repairs"][0]["schema_version"] == "basins.calibration_repair.v1"
     repair = summary["repairs"][0]["repairs"][0]
     assert repair["soil_alpha_multiplier_after"] == pytest.approx(19.999 / 6.380619)
     repaired_cfg = Path(repair["cfg_calib"])
@@ -381,6 +406,26 @@ def _write_soil_alpha_model_files(root: Path, basin_slug: str, input_name: str) 
         "1\t0.3066345\t0.4369851\t0.01\t0.1\t3.141588\t1.228055\t0.01\t30.66345\n"
         "2\t0.412565\t0.4509599\t0.01\t0.1\t6.380619\t1.220865\t0.01\t41.2565\n"
         "3\t0.493972\t0.4669714\t0.01\t0.1\t4.640145\t1.217887\t0.01\t49.3972\n",
+        encoding="utf-8",
+    )
+    return input_dir
+
+
+def _write_geol_dmac_model_files(root: Path, basin_slug: str, input_name: str) -> Path:
+    input_dir = root / basin_slug / "input" / input_name
+    input_dir.mkdir(parents=True)
+    (input_dir / f"{input_name}.cfg.calib").write_text(
+        "GEOL_KSATH\t0.00977999747288218\n"
+        "GEOL_DMAC\t5\n"
+        "SOIL_ALPHA\t1\n",
+        encoding="utf-8",
+    )
+    (input_dir / f"{input_name}.para.geol").write_text(
+        "3\t8\n"
+        "INDEX\tKsatH(m_d)\tKsatV(m_d)\tThetaS(m3_m3)\tThetaR(m3_m3)\tvAreaF(m2_m2)\tmacKsatH(m_d)\tDmac(m)\n"
+        "1\t0.9441873\t0.09441873\t0.3889031\t0.01\t0.01\t94.41873\t1\n"
+        "2\t3.049162\t0.3049162\t0.4479848\t0.01\t0.01\t304.9162\t1\n"
+        "3\t3.568563\t0.3568563\t0.4556972\t0.01\t0.01\t356.8563\t1\n",
         encoding="utf-8",
     )
     return input_dir

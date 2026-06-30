@@ -43,16 +43,16 @@ from workers.model_registry.basins_registry_import import (
     prepare_basins_import_sources,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
-    repair_blocked as soil_alpha_repair_blocked,
+    repair_blocked as calibration_repair_blocked,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
-    repair_needed as soil_alpha_repair_needed,
+    repair_needed as calibration_repair_needed,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
-    repair_performed as soil_alpha_repair_performed,
+    repair_performed as calibration_repair_performed,
 )
 from workers.model_registry.basins_soil_alpha_repair import (
-    repair_soil_alpha_calibration_for_basin,
+    repair_soil_alpha_calibration_for_basin as repair_shud_calibration_for_basin,
 )
 
 SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v1"
@@ -127,7 +127,7 @@ def publish_all_basin_scheduler_registry(
         model_ids=model_ids,
     )
     contexts = [PublishContext(model=model, inventory_path=inventory_path) for model in selected_models]
-    contexts = _repair_calibrated_soil_alpha_contexts(contexts, workspace=workspace)
+    contexts = _repair_calibrated_shud_contexts(contexts, workspace=workspace)
     if repair_missing_radiation:
         repaired_radiation_contexts = (
             _repair_missing_radiation_contexts(
@@ -139,7 +139,7 @@ def publish_all_basin_scheduler_registry(
                 already_selected_model_ids={str(model.get("model_id")) for model in selected_models},
             )
         )
-        contexts.extend(_repair_calibrated_soil_alpha_contexts(repaired_radiation_contexts, workspace=workspace))
+        contexts.extend(_repair_calibrated_shud_contexts(repaired_radiation_contexts, workspace=workspace))
     if not contexts:
         raise SchedulerRegistryPublishError(
             "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
@@ -456,15 +456,15 @@ def _repairable_missing_radiation_models(inventory: Mapping[str, Any]) -> list[d
     ]
 
 
-def _repair_calibrated_soil_alpha_contexts(
+def _repair_calibrated_shud_contexts(
     contexts: Sequence[PublishContext],
     *,
     workspace: Path,
 ) -> list[PublishContext]:
-    return [_repair_calibrated_soil_alpha_context(context, workspace=workspace) for context in contexts]
+    return [_repair_calibrated_shud_context(context, workspace=workspace) for context in contexts]
 
 
-def _repair_calibrated_soil_alpha_context(context: PublishContext, *, workspace: Path) -> PublishContext:
+def _repair_calibrated_shud_context(context: PublishContext, *, workspace: Path) -> PublishContext:
     model = context.model
     basin_slug = str(model.get("basin_slug") or "")
     model_id = str(model.get("model_id") or "")
@@ -474,46 +474,46 @@ def _repair_calibrated_soil_alpha_context(context: PublishContext, *, workspace:
 
     if context.repair is None:
         probe_root = _isolated_root_for_source_path(source_path, basin_slug)
-        probe = repair_soil_alpha_calibration_for_basin(
+        probe = repair_shud_calibration_for_basin(
             isolated_root=probe_root,
             basin_slug=basin_slug,
             dry_run=True,
         )
-        if soil_alpha_repair_blocked(probe):
+        if calibration_repair_blocked(probe):
             raise SchedulerRegistryPublishError(
-                "SCHEDULER_REGISTRY_SOIL_ALPHA_REPAIR_BLOCKED",
-                "Basins model has calibrated soil Alpha values that cannot be repaired within SHUD bounds.",
+                "SCHEDULER_REGISTRY_CALIBRATION_REPAIR_BLOCKED",
+                "Basins model has calibrated SHUD values that cannot be repaired within operational bounds.",
                 details={"model_id": model_id, "basin_slug": basin_slug, "repair": probe},
             )
-        if not soil_alpha_repair_needed(probe):
+        if not calibration_repair_needed(probe):
             return context
-        repaired_root = workspace / "repaired-basins-soil-alpha" / _slug_id(basin_slug)
+        repaired_root = workspace / "repaired-basins-calibration" / _slug_id(basin_slug)
         if repaired_root.exists():
             shutil.rmtree(repaired_root, ignore_errors=True)
         repaired_target = repaired_root / basin_slug
         repaired_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_path, repaired_target, symlinks=False)
         _strip_synology_sidecars(repaired_target)
-        repair = repair_soil_alpha_calibration_for_basin(
+        repair = repair_shud_calibration_for_basin(
             isolated_root=repaired_root,
             basin_slug=basin_slug,
         )
     else:
         repaired_root = _isolated_root_for_source_path(source_path, basin_slug)
-        repair = repair_soil_alpha_calibration_for_basin(
+        repair = repair_shud_calibration_for_basin(
             isolated_root=repaired_root,
             basin_slug=basin_slug,
         )
-        if not soil_alpha_repair_needed(repair):
+        if not calibration_repair_needed(repair):
             return context
 
-    if soil_alpha_repair_blocked(repair):
+    if calibration_repair_blocked(repair):
         raise SchedulerRegistryPublishError(
-            "SCHEDULER_REGISTRY_SOIL_ALPHA_REPAIR_BLOCKED",
-            "Basins model has calibrated soil Alpha values that cannot be repaired within SHUD bounds.",
+            "SCHEDULER_REGISTRY_CALIBRATION_REPAIR_BLOCKED",
+            "Basins model has calibrated SHUD values that cannot be repaired within operational bounds.",
             details={"model_id": model_id, "basin_slug": basin_slug, "repair": repair},
         )
-    if not soil_alpha_repair_performed(repair):
+    if not calibration_repair_performed(repair):
         return context
 
     repaired_inventory = discover_basins_inventory(repaired_root)
