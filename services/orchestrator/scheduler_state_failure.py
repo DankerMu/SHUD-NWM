@@ -485,10 +485,19 @@ def _retry_failure_evidence(
     base_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     failure = _failure_policy_payload(state)
+    cold_start_quarantined = _cold_start_quarantined_failure(failure)
+    if cold_start_quarantined:
+        failure = {
+            **failure,
+            "classifier": "cold_start_quarantine_recompute",
+            "retryable": True,
+            "permanent": False,
+            "limit_exhausted": False,
+        }
     failed_stage = _failed_stage(state)
     restart_stage = (
         "forecast"
-        if failed_stage in NATIVE_SHUD_STAGE_ALIASES or _cold_start_quarantined_failure(failure)
+        if failed_stage in NATIVE_SHUD_STAGE_ALIASES or cold_start_quarantined
         else _canonical_downstream_stage(failed_stage)
     )
     return {
@@ -525,6 +534,8 @@ def _permanent_failure_evidence(
         return None
     failure = _failure_policy_payload(state)
     if not failure["permanent"]:
+        return None
+    if _cold_start_quarantined_failure(failure):
         return None
     return {
         **base_evidence,

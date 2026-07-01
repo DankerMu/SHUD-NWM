@@ -10321,6 +10321,45 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
+def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "failed",
+            "pipeline_status": "failed",
+            "failed_stage": "state_save_qc",
+            "error_code": "COLD_START_QUARANTINED",
+            "error_message": "Cold-start products were quarantined after warm-start policy enforcement.",
+            "retry_count": 3,
+            "retry_limit": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_failed"
+    assert state["restart_stage"] == "forecast"
+    assert state["failure"]["reason_code"] == "COLD_START_QUARANTINED"
+    assert state["failure"]["classifier"] == "cold_start_quarantine_recompute"
+    assert state["failure"]["retryable"] is True
+    assert state["failure"]["permanent"] is False
+    assert state["retry_policy"]["automatic_retry_allowed"] is True
+    assert state["retry_policy"]["manual_retry_required"] is False
+
+
 def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
