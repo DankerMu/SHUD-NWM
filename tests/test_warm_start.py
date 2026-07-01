@@ -152,8 +152,8 @@ def test_forecast_manifest_keeps_product_horizon_and_enables_state_checkpoints(t
     assert context.forecast_horizon_hours == 168
     assert manifest["forecast_horizon_hours"] == 168
     assert manifest["end_time"] == "2026-05-08T00:00:00Z"
-    assert manifest["runtime"]["state_checkpoint_hours"] == [6, 12]
-    assert manifest["runtime"]["update_ic_step_minutes"] == 360
+    assert manifest["runtime"]["state_checkpoint_hours"] == [12]
+    assert manifest["runtime"]["update_ic_step_minutes"] == 720
     assert manifest["runtime"]["update_ic_step_minutes"] * 60 < (
         _dt(manifest["end_time"]) - _dt(manifest["start_time"])
     ).total_seconds()
@@ -161,7 +161,21 @@ def test_forecast_manifest_keeps_product_horizon_and_enables_state_checkpoints(t
     written = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert written["end_time"] == "2026-05-08T00:00:00Z"
     assert written["forecast_horizon_hours"] == 168
-    assert written["runtime"]["state_checkpoint_hours"] == [6, 12]
+    assert written["runtime"]["state_checkpoint_hours"] == [12]
+
+
+def test_forecast_manifest_uses_six_hour_checkpoints_when_scheduler_allows_six_hour_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,6,12,18")
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager())
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    _context, manifest = repository.created_runs[0]
+    assert manifest["runtime"]["state_checkpoint_hours"] == [6]
+    assert manifest["runtime"]["update_ic_step_minutes"] == 360
 
 
 def test_forecast_marks_soft_stale_state_as_degraded(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping, Sequence
@@ -419,7 +420,26 @@ def _forecast_state_checkpoint_hours(forecast_horizon_hours: Any) -> list[int]:
         horizon = int(forecast_horizon_hours)
     except (TypeError, ValueError):
         return []
-    return [hour for hour in (6, 12) if hour <= horizon]
+    return [hour for hour in _required_checkpoint_lead_hours_from_allowed_cycles() if hour <= horizon]
+
+
+def _required_checkpoint_lead_hours_from_allowed_cycles() -> list[int]:
+    raw = os.getenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,12")
+    try:
+        allowed_hours = sorted({int(part.strip()) for part in raw.split(",") if part.strip() != ""})
+    except ValueError:
+        allowed_hours = [0, 12]
+    allowed_hours = [hour for hour in allowed_hours if 0 <= hour < 24]
+    if not allowed_hours:
+        allowed_hours = [0, 12]
+    if len(allowed_hours) == 1:
+        gaps = [24]
+    else:
+        gaps = []
+        for index, hour in enumerate(allowed_hours):
+            previous = allowed_hours[index - 1] if index > 0 else allowed_hours[-1] - 24
+            gaps.append(hour - previous)
+    return sorted({gap for gap in gaps if gap > 0})
 
 
 def _optional_int(value: Any) -> int | None:
