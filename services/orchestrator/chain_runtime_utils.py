@@ -183,7 +183,35 @@ def _cycle_basin_model_ids(basins: Sequence[Mapping[str, Any]]) -> tuple[str, ..
 
 
 def _is_active_pipeline_job(job: Mapping[str, Any]) -> bool:
+    if _is_unsubmitted_retry_placeholder(job):
+        return False
+    if _compute_terminal_legacy_downstream_job(job):
+        return False
     return str(job.get("status") or "") not in TERMINAL_JOB_STATUSES
+
+
+def _compute_terminal_legacy_downstream_job(job: Mapping[str, Any]) -> bool:
+    if os.getenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "").strip() != "forecast_state_save_qc":
+        return False
+    candidates = [job.get("stage"), job.get("job_type")]
+    entity_id = str(job.get("entity_id") or job.get("job_id") or "")
+    if "frequency" in entity_id:
+        candidates.append("frequency")
+    aliases = {
+        "parse_output": "parse",
+        "parse_output_array": "parse",
+        "compute_frequency": "frequency",
+        "compute_frequency_array": "frequency",
+        "flood_frequency": "frequency",
+        "publish_tiles": "publish",
+    }
+    for raw in candidates:
+        if raw in (None, ""):
+            continue
+        stage = aliases.get(str(raw), str(raw))
+        if stage in {"parse", "frequency", "publish"}:
+            return True
+    return False
 
 
 def _is_unsubmitted_retry_placeholder(job: Mapping[str, Any]) -> bool:

@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
+from services.orchestrator import chain_runtime_utils
 from services.orchestrator.chain import (
     M3_STAGES,
     TERMINAL_JOB_STATUSES,
@@ -3073,6 +3074,42 @@ def test_model_package_refresh_candidate_scoped_ignores_stale_active_pipeline_pl
     assert "forecast" in submitted_stages
     assert "convert" not in submitted_stages
     assert "forcing" not in submitted_stages
+
+
+def test_cycle_active_fallback_ignores_db_free_retry_placeholders_and_legacy_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    retry_placeholder = {
+        "job_id": "job_cycle_ifs_2026062700_model_a_forcing_retry_1_retry_2",
+        "stage": "forcing",
+        "job_type": "produce_forcing_array",
+        "status": "pending",
+        "retry_count": 2,
+        "slurm_job_id": None,
+        "array_task_id": None,
+        "submitted_at": None,
+        "candidate_id": None,
+        "idempotency_key": None,
+    }
+    legacy_frequency = {
+        "job_id": "job_cycle_ifs_2026062700_model_a_frequency_retry_2",
+        "stage": "frequency",
+        "job_type": "compute_frequency_array",
+        "status": "pending",
+        "slurm_job_id": None,
+    }
+    active_forecast = {
+        "job_id": "job_cycle_ifs_2026062700_model_a_forecast",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "running",
+        "slurm_job_id": "3001",
+    }
+
+    assert chain_runtime_utils._is_active_pipeline_job(retry_placeholder) is False
+    assert chain_runtime_utils._is_active_pipeline_job(legacy_frequency) is False
+    assert chain_runtime_utils._is_active_pipeline_job(active_forecast) is True
 
 
 def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:
