@@ -17,7 +17,7 @@ NHMS_AUTH_MODE=production
 # prefer a compatible warm state when one is available; they do not force cold
 # starts just because they are before the strict boundary.
 NHMS_REQUIRE_FORECAST_WARM_START=true
-# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
+# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-26T12:00:00Z
 UV_CACHE_DIR=/tmp/nhms-uv-cache
 
 # Compute API / archived rollback DB placeholder. The scheduler-once compose
@@ -112,7 +112,7 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # Optional strict boundary for newly activated all-basin backfill. Cycles before
 # this timestamp may fall back to cold-start only when no compatible warm state
 # is available; cycles at/after it require exact warm-start.
-# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
+# NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-26T12:00:00Z
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

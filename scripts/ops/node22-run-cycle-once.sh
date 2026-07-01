@@ -81,5 +81,4 @@ exec "$REPO/.venv/bin/python" -m services.orchestrator.cli plan-production \
   "${BASIN_ARGS[@]}" \
   --cycle-time "$CYCLE_TIME" \
   --disable-backfill \
-  --workspace-root "${WORKSPACE_ROOT:?WORKSPACE_ROOT is required by $ENV_FILE}" \
   "$MODE"
