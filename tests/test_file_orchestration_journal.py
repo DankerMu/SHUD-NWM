@@ -1117,8 +1117,12 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     record = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_reserved")
+    pending_bound = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_pending_bound", status="pending")
+    pending_bound["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_pending_bound"
+    pending_bound["slurm_job_id"] = "3002"
 
     created = repository.reserve_pipeline_job(record)
+    repository.upsert_pipeline_job(pending_bound)
     reserved = repository.query_reserved_unbound_jobs()
     bound = repository.bind_reservation(record["idempotency_key"], slurm_job_id="3001")
     inflight = repository.query_inflight_jobs()
@@ -1130,7 +1134,7 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     assert bound is not None
     assert bound.status == "submitted"
     assert bound.slurm_job_id == "3001"
-    assert [job.job_id for job in inflight] == ["job_reconcile_reserved"]
+    assert {job.job_id for job in inflight} == {"job_reconcile_reserved", "job_reconcile_pending_bound"}
     assert updated.status == "running"
     assert repository.get_pipeline_job(record["job_id"])["status"] == "running"
     assert repository.query_reserved_unbound_jobs() == []

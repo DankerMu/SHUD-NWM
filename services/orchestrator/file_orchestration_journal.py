@@ -562,7 +562,7 @@ class FileOrchestrationJournalRepository:
         jobs = [
             _file_reconcile_namespace(job)
             for job in self._iter_pipeline_job_records()
-            if str(job.get("status") or "") in {"submitted", "running"}
+            if str(job.get("status") or "") in {"pending", "queued", "submitted", "running"}
             and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
         ]
         jobs.sort(
