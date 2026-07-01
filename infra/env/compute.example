@@ -12,8 +12,10 @@ NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
 # Strict production forecast warm-start: forbid cold starts and latest-state
-# fallback at or after the optional bootstrap boundary; require the exact +12h
-# successor checkpoint for each business cycle after that boundary.
+# fallback at or after the optional strict boundary; require a successor
+# checkpoint for each business cycle after that boundary. Earlier cycles still
+# prefer a compatible warm state when one is available; they do not force cold
+# starts just because they are before the strict boundary.
 NHMS_REQUIRE_FORECAST_WARM_START=true
 # NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
 UV_CACHE_DIR=/tmp/nhms-uv-cache
@@ -73,6 +75,10 @@ NHMS_SCHEDULER_MODEL_IDS=
 NHMS_SCHEDULER_BASIN_IDS=
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
 NHMS_SCHEDULER_MAX_PASSES=1
+# Submit up to the current active Basins model count per scheduler pass. Slurm
+# remains the resource arbiter: extra jobs wait in the queue until whole-node
+# capacity is available. Lower only for an intentional cluster throttle.
+NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND=13
 # Discovery time is floored by this lag to the prior allowed-cycle boundary
 # (for example, with allowed hours 0,12, a lagged 18:01 UTC target floors to 12).
 # Adapter cycle-hour env only reduces provider probes; the scheduler hard gate
@@ -103,9 +109,9 @@ NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
 # shared object-store output.
 NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc
 NHMS_REQUIRE_FORECAST_WARM_START=true
-# Optional bootstrap boundary for newly activated all-basin backfill. Cycles
-# before this timestamp may cold-start to seed DB-free state; cycles at/after it
-# still require exact warm-start.
+# Optional strict boundary for newly activated all-basin backfill. Cycles before
+# this timestamp may fall back to cold-start only when no compatible warm state
+# is available; cycles at/after it require exact warm-start.
 # NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-27T00:00:00Z
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins

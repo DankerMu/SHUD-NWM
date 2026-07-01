@@ -166,6 +166,8 @@ test -d "$NHMS_BASINS_ROOT"
 `zhaochen/` 下还有 4 个可运行子模型，因此 scheduler registry 应发布 13 个
 模型。`NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，
 由 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
+`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 应按当前 active 模型数设置，2026-07-01
+现场为 13；Slurm 仍负责资源仲裁，空闲整节点会并行运行，资源不足的任务排队。
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 

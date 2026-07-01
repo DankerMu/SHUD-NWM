@@ -9,7 +9,6 @@ from packages.common.state_lineage import WARM_START_SUCCESSOR_CHECKPOINT_MISSIN
 from services.orchestrator import chain as _chain
 from services.orchestrator.chain_types import (
     CycleOrchestrationContext,
-    InitialStateSelection,
     ModelContext,
     OrchestratorError,
     StageDefinition,
@@ -184,12 +183,6 @@ def apply_cohort_warm_start(
     """Select each basin's warm-start state so all three manifest faces agree."""
 
     strict_required = self.config.strict_forecast_warm_start_required_for(cycle_time)
-    if self.config.forecast_warm_start_bootstrap_cycle(cycle_time):
-        cold_start = InitialStateSelection(None, None, None, None, "cold_start_no_state")
-        for basin in basins:
-            _apply_initial_state_selection_to_basin(basin, cold_start)
-            basin.pop("init_state_rejection_code", None)
-        return
     if self.state_manager is None:
         if strict_required:
             raise OrchestratorError(
