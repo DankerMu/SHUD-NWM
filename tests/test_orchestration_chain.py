@@ -3076,6 +3076,57 @@ def test_model_package_refresh_candidate_scoped_ignores_stale_active_pipeline_pl
     assert "forcing" not in submitted_stages
 
 
+def test_completed_stage_resume_ignores_stale_active_hydro_placeholder(tmp_path: Path) -> None:
+    run_id = "cycle_gfs_2026050100_full_model_0"
+
+    class StaleActiveCompletedStageRepository(FakeCycleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.jobs["job_completed_forecast"] = {
+                "job_id": "job_completed_forecast",
+                "run_id": run_id,
+                "cycle_id": "gfs_2026050100",
+                "model_id": "model_0",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "status": "succeeded",
+                "slurm_job_id": "3001",
+                "submitted_at": "2026-05-01T00:00:00Z",
+            }
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            raise AssertionError(f"completed-stage resume must not fall back to cycle active check: {source_id}")
+
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    repository = StaleActiveCompletedStageRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+    basins[0]["restart_stage"] = "parse"
+    basins[0]["state_evidence"] = {
+        "decision": "retry_after_completed_stage",
+        "restart_stage": "parse",
+        "completed_stage_evidence": {
+            "stage": "forecast",
+            "status": "succeeded",
+            "restart_stage": "parse",
+        },
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert result.status == "complete"
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "parse" in submitted_stages
+    assert "forecast" not in submitted_stages
+    assert "forcing" not in submitted_stages
+    assert "convert" not in submitted_stages
+
+
 def test_cycle_active_fallback_ignores_db_free_retry_placeholders_and_legacy_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

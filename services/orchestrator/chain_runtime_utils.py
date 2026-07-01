@@ -33,6 +33,7 @@ TERMINAL_JOB_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 CANONICAL_PRECIP_VARIABLE = "prcp_rate_or_amount"
 CANONICAL_PRECIP_UNIT = "mm/day"
 
@@ -160,6 +161,19 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
     state_evidence = basins[0].get("state_evidence")
     if not isinstance(state_evidence, Mapping):
         return False
+    if state_evidence.get("decision") == "retry_after_completed_stage":
+        completed_stage = state_evidence.get("completed_stage_evidence")
+        restart_stage = _canonical_restart_stage(
+            state_evidence.get("restart_stage")
+            or state_evidence.get("restart_from_stage")
+            or (completed_stage.get("restart_stage") if isinstance(completed_stage, Mapping) else None)
+            or (completed_stage.get("restart_from_stage") if isinstance(completed_stage, Mapping) else None)
+        )
+        return (
+            isinstance(completed_stage, Mapping)
+            and str(completed_stage.get("status") or "") in TERMINAL_PIPELINE_SUCCESS_STATUSES
+            and restart_stage is not None
+        )
     if state_evidence.get("decision") == "retry_after_model_package_refresh":
         return True
     retry_policy = state_evidence.get("retry_policy")
