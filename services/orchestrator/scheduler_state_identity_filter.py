@@ -505,6 +505,10 @@ def _candidate_state_decision_event(
             if f"{source}.details.task_results[{task_index}]" not in legacy_sources
         ]
         if task_results:
+            for key in ("event_type", "status_from", "status_to"):
+                value = event.get(key)
+                if value not in (None, ""):
+                    sanitized[key] = value
             details_payload["task_results"] = task_results
             details_payload["task_results_total"] = len(task_results)
             details_payload["task_results_included"] = len(task_results)
@@ -589,6 +593,8 @@ def _pipeline_terminal_success_is_candidate_scoped(
 ) -> bool:
     if state.get("shared_cycle_aggregate") is True:
         return False
+    if _pipeline_terminal_success_event_is_candidate_scoped(candidate, state):
+        return True
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     matching_jobs = [
         job
@@ -610,6 +616,59 @@ def _pipeline_terminal_success_is_candidate_scoped(
         if run_id.startswith("cycle_") and model_id in (None, ""):
             return False
     return False
+
+def _pipeline_terminal_success_event_is_candidate_scoped(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+) -> bool:
+    expected = _candidate_identity_from_candidate(candidate)
+    for event in reversed(_state_events(state)):
+        details = event.get("details")
+        details_mapping = details if isinstance(details, Mapping) else {}
+        status = str(
+            event.get("status_to")
+            or details_mapping.get("status_to")
+            or details_mapping.get("status")
+            or details_mapping.get("state")
+            or ""
+        )
+        if status not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            continue
+        stage = str(event.get("stage") or details_mapping.get("stage") or details_mapping.get("job_type") or "")
+        if DOWNSTREAM_STAGE_ALIASES.get(stage, stage) not in TERMINAL_PIPELINE_COMPLETION_STAGES:
+            continue
+        task_results = _bounded_task_result_rows(details_mapping)
+        if task_results:
+            for task in task_results:
+                task_status = str(task.get("status") or task.get("state") or "")
+                if (
+                    task_status in TERMINAL_PIPELINE_SUCCESS_STATUSES
+                    and task.get("error_code") in (None, "")
+                    and _task_result_is_candidate_scoped(expected, task)
+                ):
+                    return True
+            continue
+        if _shared_cycle_row_is_candidate_scoped(expected, event) or _shared_cycle_row_is_candidate_scoped(
+            expected,
+            details_mapping,
+        ):
+            return True
+    return False
+
+def _candidate_identity_from_candidate(candidate: SchedulerCandidateLike) -> dict[str, Any]:
+    return {
+        "run_id": candidate.run_id,
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "source": candidate.source_id,
+        "source_id": candidate.source_id,
+        "cycle_time": format_cycle_time(candidate.cycle_time_utc),
+        "cycle_time_utc": format_cycle_time(candidate.cycle_time_utc),
+        "basin_version_id": candidate.basin_version_id,
+        "river_network_version_id": candidate.river_network_version_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run_id": candidate.run_id,
+    }
 
 def _pipeline_success_job_is_completion_stage(job: Mapping[str, Any]) -> bool:
     for raw_stage in (job.get("stage"), job.get("job_type")):

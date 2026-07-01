@@ -5313,6 +5313,61 @@ def test_terminal_pipeline_success_overrides_stale_created_hydro_placeholder() -
     assert decision.evidence["terminal_status"] == "succeeded"
 
 
+def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "forecast",
+        "error_code": "COLD_START_QUARANTINED",
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "permanently_failed",
+                "stage": "forecast",
+                "error_code": "COLD_START_QUARANTINED",
+                "updated_at": "2026-05-21T06:50:00Z",
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 42,
+                "event_type": "status_change",
+                "entity_type": "pipeline_job",
+                "entity_id": "job_cycle_gfs_2026052106_forecast_model_a_state_save_qc",
+                "status_from": "pending",
+                "status_to": "succeeded",
+                "created_at": "2026-05-21T06:45:00Z",
+                "details": {
+                    "stage": "state_save_qc",
+                    "task_results": [
+                        {
+                            **identity,
+                            "candidate_id": candidate.candidate_id,
+                            "status": "succeeded",
+                            "state": "succeeded",
+                            "error_code": None,
+                            "task_id": 0,
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "skip"
+    assert decision.reason == "terminal_pipeline_success"
+    assert decision.evidence["terminal_source"] == "pipeline_job"
+    assert decision.evidence["terminal_status"] == "succeeded"
+
+
 @pytest.mark.parametrize(
     "state",
     [

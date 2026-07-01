@@ -81,6 +81,10 @@ def _candidate_state_decision(
 
     hydro_status = _state_status(decision_state, "hydro_status", "hydro_run_status")
     pipeline_status = _state_status(decision_state, "pipeline_status", "job_status", "status")
+    terminal_pipeline_success_is_candidate_scoped = _pipeline_terminal_success_is_candidate_scoped(
+        candidate,
+        decision_state,
+    )
     stale_hydro_placeholder_superseded_by_auto_retry = False
     only_unsubmitted_auto_retry_placeholders = (
         pipeline_status in ACTIVE_PIPELINE_STATUSES
@@ -96,7 +100,7 @@ def _candidate_state_decision(
     terminal_pipeline_success_supersedes_hydro_placeholder = (
         hydro_status in {"created", "staged", "submitted"}
         and pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES
-        and _pipeline_terminal_success_is_candidate_scoped(candidate, decision_state)
+        and terminal_pipeline_success_is_candidate_scoped
     )
     if terminal_pipeline_success_supersedes_hydro_placeholder:
         hydro_status = None
@@ -172,10 +176,7 @@ def _candidate_state_decision(
     if completed_stage_retry is not None:
         return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 
-    if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
-        candidate,
-        decision_state,
-    ):
+    if terminal_pipeline_success_is_candidate_scoped:
         return CandidateStateDecision(
             "skip",
             "terminal_pipeline_success",
@@ -183,7 +184,9 @@ def _candidate_state_decision(
                 **evidence,
                 "decision": "skip_terminal",
                 "terminal_source": "pipeline_job",
-                "terminal_status": pipeline_status,
+                "terminal_status": (
+                    pipeline_status if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES else "succeeded"
+                ),
                 "native_shud_resubmitted": False,
             },
         )
