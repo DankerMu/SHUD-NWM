@@ -74,6 +74,30 @@ def test_copyback_run_trees_replaces_stale_target_tree(tmp_path: Path) -> None:
     }
 
 
+def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud", output_text="new\n")
+    state_index = object_root / "scheduler" / "state-index" / "index-last.json"
+    state_index.parent.mkdir(parents=True)
+    state_index.write_text('{"entries":[]}\n', encoding="utf-8")
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    assert summary["extra_objects"] == [
+        {"object_key": "scheduler/state-index/index-last.json", "file_count": 1, "byte_count": 15}
+    ]
+    assert (
+        copyback_root / "scheduler" / "state-index" / "index-last.json"
+    ).read_text(encoding="utf-8") == '{"entries":[]}\n'
+
+
 def test_copyback_run_trees_rejects_unsafe_run_id(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     object_root.mkdir()

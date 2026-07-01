@@ -30,6 +30,7 @@ def copyback_run_trees(
     object_store_root: str | Path,
     copyback_root: str | Path | None,
     run_ids: Iterable[str],
+    extra_object_keys: Iterable[str] | None = None,
 ) -> dict[str, Any] | None:
     if copyback_root is None or not str(copyback_root).strip():
         return None
@@ -56,6 +57,7 @@ def copyback_run_trees(
 
     copied: list[dict[str, Any]] = []
     referenced_trees: dict[str, dict[str, Any]] = {}
+    extra_objects: list[dict[str, Any]] = []
     total_files = 0
     total_bytes = 0
     for run_id in unique_run_ids:
@@ -76,6 +78,12 @@ def copyback_run_trees(
             referenced_trees[object_key] = {"object_key": object_key, **ref_summary}
             total_files += int(ref_summary["file_count"])
             total_bytes += int(ref_summary["byte_count"])
+    for object_key in sorted({_safe_object_file_key(key) for key in extra_object_keys or [] if str(key).strip()}):
+        source = _validate_object_file(object_root / object_key, object_key=object_key)
+        summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
+        extra_objects.append({"object_key": object_key, **summary})
+        total_files += 1
+        total_bytes += int(summary["byte_count"])
 
     return {
         "status": "copied",
@@ -85,6 +93,7 @@ def copyback_run_trees(
         "byte_count": total_bytes,
         "runs": copied,
         "referenced_trees": list(referenced_trees.values()),
+        "extra_objects": extra_objects,
     }
 
 
@@ -140,6 +149,35 @@ def _validate_object_tree(source: Path, *, object_key: str) -> Path:
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_REFERENCED_TREE_MISSING",
             "A run referenced an object-store tree that is missing or unsafe in the staging root.",
+            {"object_key": object_key, "source": str(source), "error": str(error)},
+        ) from error
+    return source
+
+
+def _safe_object_file_key(value: str) -> str:
+    key = str(value).strip().strip("/")
+    parts = [part for part in key.split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts) or not SAFE_OBJECT_KEY_RE.fullmatch(key):
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_UNSAFE_OBJECT_KEY",
+            "Object key is unsafe for object-store copyback.",
+            {"object_key": value},
+        )
+    return "/".join(parts)
+
+
+def _validate_object_file(source: Path, *, object_key: str) -> Path:
+    try:
+        if not source.is_file() or source.is_symlink():
+            raise FileNotFoundError(str(source))
+        _reject_symlink_ancestors(source)
+        info = source.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise FileNotFoundError(str(source))
+    except (OSError, SafeFilesystemError) as error:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_OBJECT_MISSING",
+            "An extra object-store file is missing or unsafe in the staging root.",
             {"object_key": object_key, "source": str(source), "error": str(error)},
         ) from error
     return source
@@ -206,6 +244,30 @@ def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict
         raise
     finally:
         rmtree_no_follow(backup, containment_root=containment_root, missing_ok=True)
+
+
+def _replace_file(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
+    parent = ensure_directory_no_follow(target.parent, containment_root=containment_root)
+    temp = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.tmp"
+    backup = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.backup"
+    info = source.stat()
+    try:
+        shutil.copy2(source, temp)
+        if target.exists():
+            os.replace(target, backup)
+        os.replace(temp, target)
+        if backup.exists():
+            backup.unlink()
+        return {"file_count": 1, "byte_count": int(info.st_size)}
+    except Exception:
+        if temp.exists():
+            temp.unlink()
+        if backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    finally:
+        if backup.exists():
+            backup.unlink()
 
 
 def _copy_tree_no_symlinks(source: Path, target: Path) -> dict[str, Any]:

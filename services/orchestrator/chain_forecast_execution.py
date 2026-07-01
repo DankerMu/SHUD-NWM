@@ -440,6 +440,7 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
             object_store_root=self.config.object_store_root,
             copyback_root=copyback_root,
             run_ids=run_ids,
+            extra_object_keys=_copyback_extra_object_keys(self.config.object_store_root, stage=stage),
         )
     except RunTreeCopybackError as error:
         self.repository.insert_pipeline_event(
@@ -471,6 +472,18 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
         message=f"Run-tree object-store copyback completed after {stage}.",
         details=_safe_pipeline_event_details({"stage": stage, **summary}),
     )
+
+
+def _copyback_extra_object_keys(object_store_root: str | Path, *, stage: str) -> tuple[str, ...]:
+    if stage != "state_save_qc":
+        return ()
+    state_index_key = "scheduler/state-index/index-last.json"
+    try:
+        if (Path(object_store_root) / state_index_key).is_file():
+            return (state_index_key,)
+    except OSError:
+        return ()
+    return ()
 
 
 def _submit_and_wait(
