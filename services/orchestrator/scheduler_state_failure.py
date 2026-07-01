@@ -81,6 +81,10 @@ def _durable_shud_output_exists(state: Mapping[str, Any]) -> bool:
 def _force_native_shud_rerun(state: Mapping[str, Any]) -> bool:
     return bool(state.get("force_native_shud_rerun") or state.get("force_rerun") or state.get("force_shud_rerun"))
 
+def _cold_start_quarantined_failure(failure: Mapping[str, Any], prior_failure: str | None = None) -> bool:
+    reason = prior_failure or failure.get("prior_failure_reason") or failure.get("reason_code")
+    return str(reason or "").upper() == "COLD_START_QUARANTINED"
+
 def _failure_policy_payload(
     state: Mapping[str, Any],
     *,
@@ -232,6 +236,8 @@ def _downstream_retry_evidence(
     if _force_native_shud_rerun(state):
         return None
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
+    if _cold_start_quarantined_failure(failure):
+        return None
     if _downstream_failure_restartable(failure):
         failure = {
             **failure,
@@ -481,7 +487,9 @@ def _retry_failure_evidence(
     failure = _failure_policy_payload(state)
     failed_stage = _failed_stage(state)
     restart_stage = (
-        "forecast" if failed_stage in NATIVE_SHUD_STAGE_ALIASES else _canonical_downstream_stage(failed_stage)
+        "forecast"
+        if failed_stage in NATIVE_SHUD_STAGE_ALIASES or _cold_start_quarantined_failure(failure)
+        else _canonical_downstream_stage(failed_stage)
     )
     return {
         **base_evidence,
@@ -734,7 +742,7 @@ def _manual_retry_state_evidence(
     prior_failure = _prior_failure_reason(state) or failure["reason_code"]
     previous_attempt = _state_retry_attempt(state)
     new_attempt = _manual_retry_new_attempt(state, previous_attempt=previous_attempt)
-    return {
+    evidence = {
         **base_evidence,
         "decision": "manual_retry",
         "reason": "manual_retry_requested",
@@ -766,3 +774,9 @@ def _manual_retry_state_evidence(
             "run_id": candidate.run_id,
         },
     }
+    if _cold_start_quarantined_failure(failure, prior_failure):
+        evidence["restart_stage"] = "forecast"
+        evidence["restart_from_stage"] = "forecast"
+        evidence["native_shud_resubmitted"] = True
+        evidence["force_native_shud_rerun"] = True
+    return evidence

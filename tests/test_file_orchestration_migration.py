@@ -19,6 +19,11 @@ from services.orchestrator.file_orchestration_migration import (
     write_migration_receipt,
 )
 from services.orchestrator.retry import RetryConfig
+from services.orchestrator.scheduler_state_failure import (
+    _downstream_retry_evidence,
+    _manual_retry_state_evidence,
+    _retry_failure_evidence,
+)
 from tests.test_production_scheduler import _dt
 from workers.data_adapters.base import cycle_id_for
 
@@ -516,6 +521,78 @@ def test_succeeded_job_row_clears_stale_active_pipeline_event_for_retry_blocker(
     }
 
     assert scheduler_module._latest_manual_retry_blocker(state) is None
+
+
+def test_cold_start_manual_repair_restarts_from_forecast() -> None:
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026062700_model_a")
+    state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_model_a_state_save_qc",
+                "status": "failed",
+                "stage": "state_save_qc",
+                "error_code": "COLD_START_QUARANTINED",
+                "retry_count": 0,
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_type": "retry",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "previous_error": "COLD_START_QUARANTINED",
+                    "previous_job_id": "job_model_a_state_save_qc",
+                    "retry_count": 1,
+                },
+            }
+        ],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["force_native_shud_rerun"] is True
+
+
+def test_cold_start_retry_failure_restarts_from_forecast() -> None:
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026062700_model_a")
+    state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_model_a_state_save_qc",
+                "status": "failed",
+                "stage": "state_save_qc",
+                "error_code": "COLD_START_QUARANTINED",
+                "retry_count": 0,
+            }
+        ]
+    }
+
+    evidence = _retry_failure_evidence(candidate, state, {})
+
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+
+
+def test_cold_start_failure_does_not_reuse_durable_downstream_output() -> None:
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026062700_model_a")
+    state = {
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026062700_model_a/output/",
+        "pipeline_jobs": [
+            {
+                "job_id": "job_model_a_parse",
+                "status": "failed",
+                "stage": "parse",
+                "error_code": "COLD_START_QUARANTINED",
+                "retry_count": 0,
+            }
+        ],
+    }
+
+    assert _downstream_retry_evidence(candidate, state, {}) is None
 
 
 def test_historical_event_ids_do_not_collide_across_models(tmp_path: Path) -> None:
