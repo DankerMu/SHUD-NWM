@@ -461,6 +461,63 @@ def test_historical_event_ids_do_not_collide_with_new_file_events(tmp_path: Path
     assert scheduler_module._manual_retry_requested(state) is True
 
 
+def test_terminal_job_row_shadows_stale_active_pipeline_event_for_retry_blocker() -> None:
+    state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_model_a_forecast",
+                "status": "failed",
+                "retry_count": 0,
+                "updated_at": "2026-07-01T00:00:00Z",
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 7,
+                "entity_type": "pipeline_job",
+                "entity_id": "job_model_a_forecast",
+                "event_type": "submission",
+                "status_to": "pending",
+                "created_at": "2026-07-01T00:01:00Z",
+                "details": {"stage": "forecast", "created_at": "2026-07-01T00:01:00Z"},
+            }
+        ],
+    }
+
+    blocker = scheduler_module._latest_manual_retry_blocker(state)
+
+    assert blocker is not None
+    assert blocker["source"] == "pipeline_job"
+    assert blocker["status"] == "failed"
+    assert blocker["active"] is False
+
+
+def test_succeeded_job_row_clears_stale_active_pipeline_event_for_retry_blocker() -> None:
+    state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_model_a_forecast",
+                "status": "succeeded",
+                "retry_count": 0,
+                "updated_at": "2026-07-01T00:00:00Z",
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 7,
+                "entity_type": "pipeline_job",
+                "entity_id": "job_model_a_forecast",
+                "event_type": "submission",
+                "status_to": "pending",
+                "created_at": "2026-07-01T00:01:00Z",
+                "details": {"stage": "forecast", "created_at": "2026-07-01T00:01:00Z"},
+            }
+        ],
+    }
+
+    assert scheduler_module._latest_manual_retry_blocker(state) is None
+
+
 def test_historical_event_ids_do_not_collide_across_models(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     rows = _historical_rows(cycle_time)

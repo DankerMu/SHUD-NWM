@@ -148,6 +148,7 @@ def _manual_retry_marker_repairs_historical_failure(
 
 def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | None:
     blockers: list[dict[str, Any]] = []
+    job_status_by_id = _pipeline_job_statuses_by_id(state)
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     if (
         _manual_retry_blocking_pipeline_status(pipeline_status)
@@ -207,6 +208,12 @@ def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | N
         )
         if not _manual_retry_blocking_pipeline_status(status):
             continue
+        if status in ACTIVE_PIPELINE_STATUSES and _pipeline_event_active_status_shadowed_by_job(
+            event,
+            details_mapping,
+            job_status_by_id=job_status_by_id,
+        ):
+            continue
         blockers.append(
             _manual_retry_blocker_record(
                 {**dict(details_mapping), **dict(event)},
@@ -220,6 +227,37 @@ def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | N
     if not blockers:
         return None
     return max(blockers, key=_state_truth_sort_key)
+
+def _pipeline_job_statuses_by_id(state: Mapping[str, Any]) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for job in _state_jobs(state):
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if not status:
+            continue
+        for key in ("job_id", "pipeline_job_id"):
+            job_id = job.get(key)
+            if job_id not in (None, ""):
+                statuses[str(job_id)] = status
+    return statuses
+
+def _pipeline_event_active_status_shadowed_by_job(
+    event: Mapping[str, Any],
+    details: Mapping[str, Any],
+    *,
+    job_status_by_id: Mapping[str, str],
+) -> bool:
+    for key in ("entity_id", "job_id", "pipeline_job_id"):
+        value = event.get(key)
+        if value not in (None, ""):
+            status = job_status_by_id.get(str(value))
+            if status not in (None, ""):
+                return status not in ACTIVE_PIPELINE_STATUSES
+        detail_value = details.get(key)
+        if detail_value not in (None, ""):
+            status = job_status_by_id.get(str(detail_value))
+            if status not in (None, ""):
+                return status not in ACTIVE_PIPELINE_STATUSES
+    return False
 
 def _manual_retry_blocker_record(
     payload: Mapping[str, Any],
