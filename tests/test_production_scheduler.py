@@ -21158,6 +21158,47 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
         assert entry["submit_finished_at"] >= entry["submit_started_at"]
 
 
+def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path: Path) -> None:
+    import threading
+
+    barrier = threading.Barrier(2)
+    orchestrator = _BarrierOrchestrator(barrier)
+    config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("gfs", "model_b", "basin_b"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert len(evidence) == 2
+    assert _evidence_identity_order(evidence) == [
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_a",
+            "fcst_gfs_2026052106_model_a",
+        ),
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+            "model_b",
+            "fcst_gfs_2026052106_model_b",
+        ),
+    ]
+    assert orchestrator.calls == ["gfs", "gfs"]
+    receipt = scheduler._last_submit_overlap_receipt
+    assert receipt.overlapping is True
+    assert receipt.to_dict()["concurrent_submit_count"] == 2
+
+
 def test_concurrent_submit_bound_one_keeps_sequential_evidence_order(tmp_path: Path) -> None:
     import threading
     import time as _time
@@ -21410,6 +21451,78 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
     assert no_mutation["pipeline_status_writes"] is True
     assert no_mutation["pipeline_event_writes"] is False
     assert no_mutation["restart_reconcile_writes"] is True
+
+
+def test_db_free_restart_reconcile_uses_file_journal_repository(tmp_path: Path) -> None:
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    key = "gfs:gfs_2026052106:basin_a:forecast"
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.reserve_pipeline_job(
+        {
+            "job_id": "job_db_free_reserved",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "status": "reserved",
+            "stage": "forecast",
+            "idempotency_key": key,
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+        }
+    )
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="3001",
+                raw_state="RUNNING",
+                job_name="nhms_forecast",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    def _sacct_query(slurm_job_id: str) -> SacctRecord | None:
+        if slurm_job_id == "3001":
+            return SacctRecord(
+                slurm_job_id="3001",
+                raw_state="RUNNING",
+                job_name="nhms_forecast",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path,
+            dry_run=False,
+            scheduler_db_free_required=True,
+            scheduler_journal_backend="file",
+            scheduler_journal_root=tmp_path / "journal",
+            database_url=None,
+            database_url_configured=False,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=_sacct_query,
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+    job = repository.get_pipeline_job("job_db_free_reserved")
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    assert evidence["reserved_unbound"]["outcomes"][0]["action"] == "bound"
+    assert evidence["reserved_unbound"]["outcomes"][0]["slurm_job_id"] == "3001"
+    assert evidence["inflight"]["outcomes"][0]["action"] == "still_running"
+    assert job is not None
+    assert job["slurm_job_id"] == "3001"
+    assert job["status"] == "running"
 
 
 def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path) -> None:

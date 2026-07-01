@@ -928,6 +928,33 @@ def test_file_orchestration_journal_ensure_forecast_cycle_preserves_existing_sta
     assert state["forecast_cycle"]["status"] == "failed"
 
 
+def test_file_orchestration_journal_candidate_state_ignores_global_terminal_cycle_success(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_id = cycle_id_for("gfs", cycle_time)
+    journal_root = tmp_path / "journal"
+    terminal_event = {
+        "event_id": "cycle-complete",
+        "entity_type": "forecast_cycle",
+        "entity_id": cycle_id,
+        "event_type": "status_change",
+        "status_from": "forecast_running",
+        "status_to": "complete",
+        "created_at": "2026-06-28T00:30:00Z",
+    }
+    latest = _latest_view(cycle_time=cycle_time, events=[terminal_event])
+    latest["forecast_cycle"]["status"] = "complete"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["forecast_cycle"] is None
+    assert [event["entity_type"] for event in state["pipeline_events"]] == []
+
+
 def test_file_orchestration_journal_status_error_messages_are_redacted_at_write_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -1082,6 +1109,31 @@ def test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal
     assert state["pipeline_status"] == "succeeded"
     assert state["pipeline_jobs"][0]["status"] == "succeeded"
     assert state["pipeline_events"][0]["status_to"] == "succeeded"
+
+
+def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_reserved")
+
+    created = repository.reserve_pipeline_job(record)
+    reserved = repository.query_reserved_unbound_jobs()
+    bound = repository.bind_reservation(record["idempotency_key"], slurm_job_id="3001")
+    inflight = repository.query_inflight_jobs()
+    updated = repository.update_job_status(record["job_id"], "running")
+
+    assert created is not None
+    assert [job.job_id for job in reserved] == ["job_reconcile_reserved"]
+    assert isinstance(reserved[0].updated_at, datetime)
+    assert bound is not None
+    assert bound.status == "submitted"
+    assert bound.slurm_job_id == "3001"
+    assert [job.job_id for job in inflight] == ["job_reconcile_reserved"]
+    assert updated.status == "running"
+    assert repository.get_pipeline_job(record["job_id"])["status"] == "running"
+    assert repository.query_reserved_unbound_jobs() == []
 
 
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:

@@ -155,6 +155,7 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES = {"complete", "succeeded", "parsed", "published"}
 _STAGE_STATUS_ORDER = {
     "download": 1,
     "download_gfs": 1,
@@ -545,6 +546,65 @@ class FileOrchestrationJournalRepository:
         except FileOrchestrationJournalError as error:
             return _blocked_query_job(error, slurm_job_id=slurm_job_id)
         return None
+
+    def query_reserved_unbound_jobs(self) -> list[SimpleNamespace]:
+        jobs = [
+            _file_reconcile_namespace(job)
+            for job in self._iter_pipeline_job_records()
+            if str(job.get("status") or "") == "reserved"
+            and job.get("slurm_job_id") in (None, "")
+            and job.get("idempotency_key") not in (None, "")
+        ]
+        jobs.sort(key=lambda job: (_datetime_sort_key(job.created_at), str(job.job_id)))
+        return jobs
+
+    def query_inflight_jobs(self) -> list[SimpleNamespace]:
+        jobs = [
+            _file_reconcile_namespace(job)
+            for job in self._iter_pipeline_job_records()
+            if str(job.get("status") or "") in {"submitted", "running"}
+            and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
+        ]
+        jobs.sort(
+            key=lambda job: (
+                _datetime_sort_key(job.submitted_at),
+                _datetime_sort_key(job.created_at),
+                str(job.job_id),
+            )
+        )
+        return jobs
+
+    def bind_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> SimpleNamespace | None:
+        bound = self.bind_pipeline_job_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            status=status,
+            array_task_id=array_task_id,
+        )
+        return _file_reconcile_namespace(bound) if bound is not None else None
+
+    def update_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> SimpleNamespace:
+        _previous_status, updated = self.update_pipeline_job_status(
+            job_id,
+            status,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        return _file_reconcile_namespace(updated)
 
     @property
     def supports_writes(self) -> bool:
@@ -1235,6 +1295,7 @@ class FileOrchestrationJournalRepository:
         ):
             _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
         if model_id is not None:
+            rows.forecast_cycle = _candidate_scoped_forecast_cycle(rows.forecast_cycle)
             rows.hydro_run = (
                 rows.hydro_run
                 if _row_matches_candidate(rows.hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
@@ -3243,6 +3304,19 @@ def _file_retry_job_text(job: Any, field: str) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _file_reconcile_namespace(row: Mapping[str, Any]) -> SimpleNamespace:
+    payload = dict(row)
+    for dt_field in ("created_at", "updated_at", "submitted_at", "started_at", "finished_at", "cycle_time"):
+        value = payload.get(dt_field)
+        if value in (None, ""):
+            continue
+        try:
+            payload[dt_field] = _coerce_datetime(value, field=dt_field)
+        except FileOrchestrationJournalError:
+            pass
+    return SimpleNamespace(**payload)
+
+
 def _file_journal_real_slurm_job_id(value: Any) -> bool:
     text = str(value or "")
     return bool(text and text.lower() != "local")
@@ -3772,6 +3846,15 @@ def _job_is_active(job: Mapping[str, Any]) -> bool:
     return status not in ("", *TERMINAL_PIPELINE_STATUSES)
 
 
+def _candidate_scoped_forecast_cycle(forecast_cycle: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if not isinstance(forecast_cycle, Mapping):
+        return None
+    status = str(forecast_cycle.get("status") or "")
+    if status in _TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES:
+        return None
+    return forecast_cycle
+
+
 def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str | None = None) -> bool:
     job_status = str(job.get("status") or "") if status is None else status
     if job_status not in {"pending", "queued", "submitted"}:
@@ -3845,7 +3928,7 @@ def _event_matches_candidate_rows(
         expected_cycle_id = _cycle_id_for_file_source(source_id, cycle_time)
         if entity_id != expected_cycle_id:
             return False
-        return forecast_cycle is None or str(forecast_cycle.get("cycle_id") or "") == expected_cycle_id
+        return forecast_cycle is not None and str(forecast_cycle.get("cycle_id") or "") == expected_cycle_id
     return False
 
 

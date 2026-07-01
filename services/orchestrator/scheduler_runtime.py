@@ -1140,6 +1140,17 @@ def _reset_reconcile_store_after_error(self) -> None:
 def _restart_reconcile_store(self) -> Any | None:
     if self._reconcile_store is not None:
         return self._reconcile_store
+    if getattr(self.config, "db_free_required", False):
+        repository = getattr(self, "active_repository", None)
+        required_methods = (
+            "query_reserved_unbound_jobs",
+            "query_inflight_jobs",
+            "bind_reservation",
+            "update_job_status",
+        )
+        if repository is not None and all(hasattr(repository, method) for method in required_methods):
+            return repository
+        return None
     database_url = (self.config.database_url or "").strip()
     if not database_url:
         return None
