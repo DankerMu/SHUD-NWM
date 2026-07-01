@@ -174,8 +174,9 @@ def upsert_hydro_run(cursor: Any, manifest: dict[str, Any], source_id: str) -> d
 
     # Seed at 'succeeded' (object-store already holds SHUD output) so the output
     # parser's mark_run_parsed (WHERE status IN succeeded/parsed/failed) can
-    # advance it to 'parsed'. ON CONFLICT intentionally leaves status untouched
-    # so re-running this registrar never regresses a run that is already parsed.
+    # advance it to 'parsed'. Re-running this registrar never regresses parsed
+    # or published runs, but it may revive a superseded cold-start placeholder
+    # when a warm-start object-store run with the same run_id has landed.
     cursor.execute(
         """
         INSERT INTO hydro.hydro_run (
@@ -194,6 +195,10 @@ def upsert_hydro_run(cursor: Any, manifest: dict[str, Any], source_id: str) -> d
             cycle_time = EXCLUDED.cycle_time,
             start_time = EXCLUDED.start_time,
             end_time = EXCLUDED.end_time,
+            status = CASE
+                WHEN hydro.hydro_run.status = 'superseded' THEN EXCLUDED.status
+                ELSE hydro.hydro_run.status
+            END,
             run_manifest_uri = EXCLUDED.run_manifest_uri,
             output_uri = EXCLUDED.output_uri,
             log_uri = EXCLUDED.log_uri,
