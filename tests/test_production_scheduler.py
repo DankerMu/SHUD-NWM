@@ -5368,6 +5368,26 @@ def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() 
     assert decision.evidence["terminal_status"] == "succeeded"
 
 
+def test_strict_warm_start_match_uses_pipeline_candidate_state_before_stale_hydro_run() -> None:
+    selected = {"init_state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006"}
+    terminal_evidence = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "candidate_state": dict(selected),
+        "hydro_run": {
+            "status": "failed",
+            "init_state_id": None,
+            "error_code": "COLD_START_QUARANTINED",
+        },
+    }
+    strict_evidence = {"candidate_state": dict(selected), "ready": True}
+
+    assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal_evidence,
+        strict_evidence,
+    )
+
+
 @pytest.mark.parametrize(
     "state",
     [

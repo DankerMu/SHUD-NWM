@@ -1111,6 +1111,13 @@ def _terminal_decision_matches_strict_warm_start(
     selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
     if selected_id in (None, ""):
         return False
+    terminal_candidate_state = terminal_evidence.get("candidate_state")
+    if (
+        terminal_evidence.get("terminal_source") == "pipeline_job"
+        and isinstance(terminal_candidate_state, Mapping)
+        and str(terminal_candidate_state.get("init_state_id") or "") == str(selected_id)
+    ):
+        return True
     hydro_run = terminal_evidence.get("hydro_run")
     if not isinstance(hydro_run, Mapping):
         return False
