@@ -213,7 +213,7 @@ def test_declared_handoff_success_records_run_details_without_mirror(
     assert summary["runs"]["published"] == 7
 
 
-def test_missing_handoff_requires_object_store_handoff_without_node22_db_fallback(
+def test_missing_handoff_degrades_forcing_stage_without_blocking_qdown_publish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -223,11 +223,11 @@ def test_missing_handoff_requires_object_store_handoff_without_node22_db_fallbac
     rc, summary = _run_main(capsys, object_store_root)
 
     assert rc == 0
-    assert _command_kinds(calls) == ["register"]
-    assert published_calls == []
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
     detail = summary["runs"]["details"][0]
-    assert detail["outcome"] == "skipped"
-    assert detail["stage"] == "forcing_handoff"
+    assert detail["outcome"] == "ingested"
+    assert detail["stage"] == "coverage"
     assert detail["forcing_stage"] == {
         "mode": autopipe.NO_FORCING_HANDOFF_MODE,
         "status": "skipped",
@@ -235,8 +235,9 @@ def test_missing_handoff_requires_object_store_handoff_without_node22_db_fallbac
         "row_counts": {},
         "reason_codes": [autopipe.NO_FORCING_HANDOFF_REASON],
     }
-    assert "parse_status" not in detail
-    assert "coverage_refresh" not in detail
+    assert detail["parse_status"] == "parsed"
+    assert detail["coverage_refresh"] == "refreshed"
+    assert summary["runs"]["published"] == 7
     rendered = json.dumps(summary)
     assert "n22-secret" not in rendered
 

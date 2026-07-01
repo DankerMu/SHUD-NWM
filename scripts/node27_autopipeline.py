@@ -1118,7 +1118,7 @@ def _process_forcing_stage(
 
     reason = NO_FORCING_HANDOFF_REASON
     return {
-        "outcome": "skipped",
+        "outcome": "degraded",
         "stage": FORCING_STAGE,
         "forcing_stage": _forcing_stage_missing_handoff(reason=reason),
         "reason": reason,
@@ -1277,14 +1277,6 @@ def _process_run(
         object_store_prefix=object_store_prefix,
     )
     forcing_stage = forcing.get("forcing_stage")
-    if forcing["outcome"] == "skipped":
-        return {
-            "run_id": run_id,
-            "outcome": "skipped",
-            "stage": forcing.get("stage", FORCING_STAGE),
-            "reason": forcing.get("reason"),
-            "forcing_stage": forcing_stage,
-        }
     if forcing["outcome"] == "failed":
         return {
             "run_id": run_id,
