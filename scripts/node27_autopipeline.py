@@ -839,11 +839,21 @@ def _basin_seeded(database_url: str, basin_id: str) -> bool:
         conn.close()
 
 
-def _already_ingested_runs(database_url: str, run_ids: list[str]) -> set[str]:
+def _already_ingested_runs(
+    database_url: str,
+    run_ids: list[str],
+    *,
+    object_store_root: Path | None = None,
+) -> set[str]:
     """Return the subset of run_ids already fully ingested: hydro_run at a
     parser-advanced status AND carrying river_timeseries rows. Lets the cron
     re-scan cheaply -- finished runs are skipped instead of re-applying their
-    per-cycle forcing handoff every tick."""
+    per-cycle forcing handoff every tick.
+
+    If the object-store run was rewritten after DB parse, do not skip it. That
+    is the normal recovery path after a cold-start run is replaced by a
+    warm-start recompute with the same run_id.
+    """
     if not run_ids:
         return set()
     conn = psycopg2.connect(database_url)
@@ -851,19 +861,91 @@ def _already_ingested_runs(database_url: str, run_ids: list[str]) -> set[str]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT h.run_id
+                SELECT h.run_id,
+                       h.init_state_id,
+                       MAX(rt.created_at) AS parsed_at
                 FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries rt
+                  ON rt.run_id = h.run_id
                 WHERE h.run_id = ANY(%s)
                   AND h.status IN ('parsed', 'published')
-                  AND EXISTS (
-                      SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id
-                  )
+                GROUP BY h.run_id, h.init_state_id
                 """,
                 (run_ids,),
             )
-            return {row[0] for row in cur.fetchall()}
+            return {
+                str(row[0])
+                for row in cur.fetchall()
+                if _ingested_run_is_current(
+                    run_id=str(row[0]),
+                    db_init_state_id=row[1],
+                    parsed_at=row[2],
+                    object_store_root=object_store_root,
+                )
+            }
     finally:
         conn.close()
+
+
+def _ingested_run_is_current(
+    *,
+    run_id: str,
+    db_init_state_id: str | None,
+    parsed_at: Any,
+    object_store_root: Path | None,
+) -> bool:
+    if object_store_root is None:
+        return True
+    manifest = _load_run_manifest_or_none(object_store_root, run_id)
+    if manifest is None:
+        return True
+    manifest_init_state_id = _manifest_initial_state_id(manifest)
+    if manifest_init_state_id and str(db_init_state_id or "") != manifest_init_state_id:
+        return False
+    product_mtime = _run_product_mtime(object_store_root, run_id)
+    if product_mtime is None or parsed_at is None or not hasattr(parsed_at, "timestamp"):
+        return True
+    return product_mtime <= parsed_at.timestamp() + 1.0
+
+
+def _load_run_manifest_or_none(object_store_root: Path, run_id: str) -> dict[str, Any] | None:
+    path = object_store_root / "runs" / run_id / "input" / "manifest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _manifest_initial_state_id(manifest: Mapping[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state")
+    if not isinstance(initial_state, Mapping):
+        return None
+    state_id = initial_state.get("state_id")
+    return str(state_id) if state_id else None
+
+
+def _run_product_mtime(object_store_root: Path, run_id: str) -> float | None:
+    root = object_store_root / "runs" / run_id
+    paths = [root / "input" / "manifest.json"]
+    output_dir = root / "output"
+    if output_dir.is_dir():
+        paths.extend(
+            path
+            for path in output_dir.iterdir()
+            if path.is_file()
+            and (
+                path.name in {"rivqdown.csv", "rivqdown.dat"}
+                or path.name.endswith((".rivqdown", ".rivqdown.csv", ".rivqdown.dat"))
+            )
+        )
+    mtimes: list[float] = []
+    for path in paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(mtimes) if mtimes else None
 
 
 def _activate_model(database_url: str, model_id: str) -> int:
@@ -1557,7 +1639,15 @@ def main(argv: list[str] | None = None) -> int:
     already_count = 0
     if not args.seed_only:
         runnable = [r for r in runs if r["basin"] in seeded_basins]
-        done = set() if args.force else _already_ingested_runs(database_url, [r["run_id"] for r in runnable])
+        done = (
+            set()
+            if args.force
+            else _already_ingested_runs(
+                database_url,
+                [r["run_id"] for r in runnable],
+                object_store_root=object_store_root,
+            )
+        )
         already_count = len([r for r in runnable if r["run_id"] in done])
         pending = [r for r in runnable if r["run_id"] not in done]
         if args.limit is not None:

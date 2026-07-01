@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -691,6 +692,74 @@ def test_ready_summary_exposes_ingest_role_and_already_ingested_skip(
     assert summary["runs"]["published"] == 5
     assert published_calls == [NODE27_DATABASE_URL]
     assert "writer-secret" not in rendered
+
+
+def test_already_ingested_skip_rejects_stale_db_parse_after_object_store_rewrite(tmp_path: Path) -> None:
+    object_store_root = tmp_path / "object-store"
+    run_id = RUN_QHH
+    _write_run(object_store_root, run_id, basin="qhh")
+    output_dir = object_store_root / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    product = output_dir / "qhh.rivqdown.csv"
+    product.write_text("Time_min X1\n0 1\n", encoding="utf-8")
+    manifest = json.loads((object_store_root / "runs" / run_id / "input" / "manifest.json").read_text())
+    manifest["initial_state"] = {"state_id": "state_warm_001"}
+    (object_store_root / "runs" / run_id / "input" / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    os.utime(product, (200.0, 200.0))
+
+    assert (
+        autopipe._ingested_run_is_current(
+            run_id=run_id,
+            db_init_state_id="state_warm_001",
+            parsed_at=datetime.fromtimestamp(100.0, tz=UTC),
+            object_store_root=object_store_root,
+        )
+        is False
+    )
+
+
+def test_already_ingested_skip_accepts_current_db_parse_and_init_state(tmp_path: Path) -> None:
+    object_store_root = tmp_path / "object-store"
+    run_id = RUN_QHH
+    _write_run(object_store_root, run_id, basin="qhh")
+    manifest = json.loads((object_store_root / "runs" / run_id / "input" / "manifest.json").read_text())
+    manifest["initial_state"] = {"state_id": "state_warm_001"}
+    (object_store_root / "runs" / run_id / "input" / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    assert (
+        autopipe._ingested_run_is_current(
+            run_id=run_id,
+            db_init_state_id="state_warm_001",
+            parsed_at=datetime.now(tz=UTC),
+            object_store_root=object_store_root,
+        )
+        is True
+    )
+
+
+def test_already_ingested_skip_rejects_init_state_mismatch(tmp_path: Path) -> None:
+    object_store_root = tmp_path / "object-store"
+    run_id = RUN_QHH
+    _write_run(object_store_root, run_id, basin="qhh")
+    manifest = json.loads((object_store_root / "runs" / run_id / "input" / "manifest.json").read_text())
+    manifest["initial_state"] = {"state_id": "state_warm_002"}
+    (object_store_root / "runs" / run_id / "input" / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    assert (
+        autopipe._ingested_run_is_current(
+            run_id=run_id,
+            db_init_state_id="state_warm_001",
+            parsed_at=datetime.now(tz=UTC),
+            object_store_root=object_store_root,
+        )
+        is False
+    )
 
 
 def test_already_seeded_registry_is_reactivated_for_display(
