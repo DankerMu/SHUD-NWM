@@ -233,6 +233,33 @@ def _manual_stage_repaired_evidence(
     return payload
 
 
+def _completed_stage_success_evidence(
+    job: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any] | None:
+    if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+        return None
+    stage = _normalized_record_stage(job)
+    restart_stage = _stage_after(stage)
+    if stage is None or restart_stage is None:
+        return None
+    return {
+        "status": "succeeded",
+        "stage": stage,
+        "job_type": str(job.get("job_type") or ""),
+        "job_id": job.get("job_id"),
+        "slurm_job_id": job.get("slurm_job_id"),
+        "source_id": source_id,
+        "cycle_id": cycle_id,
+        "cycle_time": cycle_time.isoformat().replace("+00:00", "Z"),
+        "restart_stage": restart_stage,
+        "restart_from_stage": restart_stage,
+    }
+
+
 def _candidate_manual_stage_repair_state(
     jobs: list[dict[str, Any]],
     events: list[dict[str, Any]],
@@ -762,6 +789,15 @@ def candidate_state_from_rows(
             state["failed_stage"] = None
             state["error_code"] = None
             state["error_message"] = None
+    elif completed_stage_evidence := _completed_stage_success_evidence(
+        exposed_latest_job,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        cycle_id=cycle_id,
+    ):
+        state["completed_stage_evidence"] = completed_stage_evidence
+        state["restart_stage"] = str(completed_stage_evidence["restart_stage"])
+        state["restart_from_stage"] = str(completed_stage_evidence["restart_from_stage"])
     source_cycle_repair_evidence = _source_cycle_repair_evidence(source_cycle_download_state)
     if source_cycle_repair_evidence:
         state["source_cycle_repair_evidence"] = source_cycle_repair_evidence

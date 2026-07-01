@@ -16,6 +16,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import publish_state_snapshot_index
+from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
@@ -4281,6 +4282,49 @@ def test_completed_stage_retry_supersedes_stale_hydro_created_placeholder() -> N
     assert decision.action == "retry"
     assert decision.reason == "resume_after_completed_stage"
     assert decision.evidence["restart_stage"] == "forcing"
+
+
+def test_candidate_state_rows_mark_completed_upstream_success_for_resume() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_full_model_a_forecast",
+                "run_id": "cycle_gfs_2026052106_full_model_a",
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": "cycle_gfs_2026052106_full_model_a",
+                "status": "succeeded",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "3001",
+                "updated_at": "2026-05-21T06:45:00Z",
+            }
+        ],
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+    )
+
+    assert state is not None
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["completed_stage_evidence"]["restart_stage"] == "parse"
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_after_completed_stage"
+    assert decision.evidence["restart_stage"] == "parse"
 
 
 def test_candidate_state_decision_owner_module_matches_scheduler_facade() -> None:
