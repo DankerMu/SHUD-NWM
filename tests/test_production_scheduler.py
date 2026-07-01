@@ -5388,6 +5388,25 @@ def test_strict_warm_start_match_uses_pipeline_candidate_state_before_stale_hydr
     )
 
 
+def test_strict_warm_start_match_ignores_stale_cold_start_hydro_failure_after_pipeline_success() -> None:
+    selected = {"init_state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006"}
+    terminal_evidence = {
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "status": "failed",
+            "init_state_id": None,
+            "error_code": "COLD_START_QUARANTINED",
+        },
+    }
+    strict_evidence = {"candidate_state": dict(selected), "ready": True}
+
+    assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal_evidence,
+        strict_evidence,
+    )
+
+
 @pytest.mark.parametrize(
     "state",
     [

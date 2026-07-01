@@ -1122,6 +1122,14 @@ def _terminal_decision_matches_strict_warm_start(
     if not isinstance(hydro_run, Mapping):
         return False
     terminal_init_state_id = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
+    if (
+        terminal_evidence.get("terminal_source") == "pipeline_job"
+        and terminal_evidence.get("terminal_status") == "succeeded"
+        and terminal_init_state_id in (None, "")
+        and hydro_run.get("status") == "failed"
+        and hydro_run.get("error_code") == "COLD_START_QUARANTINED"
+    ):
+        return True
     return str(terminal_init_state_id or "") == str(selected_id)
 
 
