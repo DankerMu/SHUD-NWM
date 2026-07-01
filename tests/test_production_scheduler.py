@@ -17952,7 +17952,7 @@ def test_file_canonical_readiness_evidence_redacts_identity_paths(
     assert "private-bucket" not in rendered
     assert "/home/ghdc" not in rendered
 
-    unavailable = provider.canonical_readiness(
+    stale_cache = provider.canonical_readiness(
         source_id="gfs",
         cycle_time=cycle_time,
         forecast_hours=(0,),
@@ -17962,15 +17962,18 @@ def test_file_canonical_readiness_evidence_redacts_identity_paths(
         model_id="model_a",
         basin_id="basin_a",
     )
-    unavailable_rendered = json.dumps(unavailable, sort_keys=True)
+    stale_cache_rendered = json.dumps(stale_cache, sort_keys=True)
 
-    assert unavailable["ready"] is False
-    assert unavailable["reason"] == "canonical_readiness_index_identity_mismatch"
-    assert unavailable["policy_identity"]["policy_uri"] == "[object-uri]"
-    assert unavailable["source_object_identity"]["manifest_uri"] == "[object-uri]"
-    assert unavailable["source_object_identity"]["manifest_path"] == "[local-path]"
-    assert "private-bucket" not in unavailable_rendered
-    assert "/home/ghdc" not in unavailable_rendered
+    assert stale_cache["ready"] is False
+    assert stale_cache["reason"] == "canonical_identity_mismatch_cache_miss"
+    assert stale_cache["candidate_row_count"] == 0
+    assert stale_cache["readiness_index"]["entry_status"] == "identity_mismatch_stale_products"
+    assert stale_cache["readiness_index"]["stale_product_row_count"] > 0
+    assert stale_cache["policy_identity"]["policy_uri"] == "[object-uri]"
+    assert stale_cache["source_object_identity"]["manifest_uri"] == "[object-uri]"
+    assert stale_cache["source_object_identity"]["manifest_path"] == "[local-path]"
+    assert "private-bucket" not in stale_cache_rendered
+    assert "/home/ghdc" not in stale_cache_rendered
 
 
 def test_file_canonical_readiness_publisher_failure_keeps_previous_index(

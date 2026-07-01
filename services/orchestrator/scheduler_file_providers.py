@@ -333,46 +333,36 @@ class FileCanonicalReadinessProvider:
                     },
                     retryable=True,
                 )
-            if not products:
-                result = evaluate_canonical_readiness(
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    products=[],
-                    forecast_hours=requested_hours,
-                    policy_identity=policy_identity,
-                    source_object_identity=source_object_identity,
-                    canonical_product_id=canonical_product_id,
-                    model_id=model_id,
-                    basin_id=basin_id,
-                ).evidence
-                result = _sanitize_file_provider_evidence(result)
-                result["readiness_index"] = _evidence_safe(
-                    {
-                        **index_evidence,
-                        "entry_status": "identity_mismatch_empty_entry",
-                        "entry_product_row_count": 0,
-                        "entry_product_source": product_source_evidence.get("source"),
-                        "entry_forecast_hours": entry_hours[:200],
-                        "entry_forecast_hour_count": len(entry_hours),
-                        "requested_forecast_hours": requested_hours[:200],
-                        "requested_forecast_hour_count": len(requested_hours),
-                        "canonical_product_catalog": product_source_evidence,
-                    }
-                )
-                return _evidence_safe(result)
-            return _file_readiness_unavailable(
+            result = evaluate_canonical_readiness(
                 source_id=source_id,
                 cycle_time=cycle_time,
-                forecast_hours=forecast_hours,
+                products=[],
+                forecast_hours=requested_hours,
                 policy_identity=policy_identity,
                 source_object_identity=source_object_identity,
                 canonical_product_id=canonical_product_id,
                 model_id=model_id,
                 basin_id=basin_id,
-                reason="canonical_readiness_index_identity_mismatch",
-                index_evidence={**index_evidence, "entry_status": "identity_mismatch"},
-                retryable=True,
+            ).evidence
+            result = _sanitize_file_provider_evidence(result)
+            result["reason"] = "canonical_identity_mismatch_cache_miss"
+            result["readiness_index"] = _evidence_safe(
+                {
+                    **index_evidence,
+                    "entry_status": "identity_mismatch_empty_entry"
+                    if not products
+                    else "identity_mismatch_stale_products",
+                    "entry_product_row_count": len(products),
+                    "entry_product_source": product_source_evidence.get("source"),
+                    "entry_forecast_hours": entry_hours[:200],
+                    "entry_forecast_hour_count": len(entry_hours),
+                    "requested_forecast_hours": requested_hours[:200],
+                    "requested_forecast_hour_count": len(requested_hours),
+                    "canonical_product_catalog": product_source_evidence,
+                    "stale_product_row_count": len(products),
+                }
             )
+            return _evidence_safe(result)
 
         if not set(requested_hours).issubset(set(entry_hours)):
             return _file_readiness_unavailable(
