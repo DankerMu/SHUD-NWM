@@ -340,7 +340,7 @@ def test_file_orchestration_journal_active_slurm_jobs_ignores_local_jobs(tmp_pat
     assert [job["slurm_job_id"] for job in active] == ["3001"]
 
 
-def test_file_orchestration_journal_compute_terminal_ignores_legacy_frequency_tail(
+def test_file_orchestration_journal_compute_terminal_ignores_legacy_publish_tail(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -357,12 +357,12 @@ def test_file_orchestration_journal_compute_terminal_ignores_legacy_frequency_ta
             "finished_at": "2026-06-28T00:04:00Z",
         }
     )
-    legacy_frequency = _active_job(cycle_time)
-    legacy_frequency.update(
+    legacy_publish = _active_job(cycle_time)
+    legacy_publish.update(
         {
-            "job_id": "job_cycle_gfs_2026062800_model_a_frequency",
-            "job_type": "compute_frequency_array",
-            "stage": "frequency",
+            "job_id": "job_cycle_gfs_2026062800_model_a_publish",
+            "job_type": "publish_tiles",
+            "stage": "publish",
             "status": "pending",
             "slurm_job_id": None,
             "created_at": "2026-06-28T00:05:00Z",
@@ -370,7 +370,7 @@ def test_file_orchestration_journal_compute_terminal_ignores_legacy_frequency_ta
     )
     _write_json(
         journal_root / "latest/gfs/2026062800/model_a.json",
-        _latest_view(cycle_time=cycle_time, jobs=[state_save, legacy_frequency]),
+        _latest_view(cycle_time=cycle_time, jobs=[state_save, legacy_publish]),
     )
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
     repository = FileOrchestrationJournalRepository(journal_root)

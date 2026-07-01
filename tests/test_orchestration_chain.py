@@ -3092,10 +3092,10 @@ def test_cycle_active_fallback_ignores_db_free_retry_placeholders_and_legacy_tai
         "candidate_id": None,
         "idempotency_key": None,
     }
-    legacy_frequency = {
-        "job_id": "job_cycle_ifs_2026062700_model_a_frequency_retry_2",
-        "stage": "frequency",
-        "job_type": "compute_frequency_array",
+    legacy_publish = {
+        "job_id": "job_cycle_ifs_2026062700_model_a_publish_retry_2",
+        "stage": "publish",
+        "job_type": "publish_tiles",
         "status": "pending",
         "slurm_job_id": None,
     }
@@ -3108,7 +3108,7 @@ def test_cycle_active_fallback_ignores_db_free_retry_placeholders_and_legacy_tai
     }
 
     assert chain_runtime_utils._is_active_pipeline_job(retry_placeholder) is False
-    assert chain_runtime_utils._is_active_pipeline_job(legacy_frequency) is False
+    assert chain_runtime_utils._is_active_pipeline_job(legacy_publish) is False
     assert chain_runtime_utils._is_active_pipeline_job(active_forecast) is True
 
 

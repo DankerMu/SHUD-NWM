@@ -14,7 +14,7 @@ TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 _FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc")
 _COMPUTE_STATE_SAVE_QC_TERMINAL_STAGE = "forecast_state_save_qc"
 _COMPUTE_STATE_SAVE_QC_ALLOWED_STAGES = {"download", "convert", "forcing", "forecast", "state_save_qc"}
-_COMPUTE_STATE_SAVE_QC_LEGACY_DOWNSTREAM_STAGES = {"parse", "frequency", "publish"}
+_COMPUTE_STATE_SAVE_QC_LEGACY_DOWNSTREAM_STAGES = {"parse", "publish"}
 _STAGE_ALIASES = {
     "download": "download",
     "download_gfs": "download",
@@ -34,10 +34,6 @@ _STAGE_ALIASES = {
     "state_save_qc": "state_save_qc",
     "save_state_snapshot": "state_save_qc",
     "save_state_snapshot_array": "state_save_qc",
-    "frequency": "frequency",
-    "compute_frequency": "frequency",
-    "compute_frequency_array": "frequency",
-    "flood_frequency": "frequency",
     "publish": "publish",
     "publish_tiles": "publish",
 }
@@ -73,9 +69,6 @@ def _normalized_record_stage(record: Mapping[str, Any]) -> str | None:
     details = record.get("details")
     if isinstance(details, Mapping):
         candidates.extend([details.get("stage"), details.get("job_type")])
-    entity_id = str(record.get("entity_id") or record.get("job_id") or "")
-    if "frequency" in entity_id:
-        candidates.append("frequency")
     for raw in candidates:
         if raw in (None, ""):
             continue
