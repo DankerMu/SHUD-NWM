@@ -52,6 +52,8 @@ _coerce_int = chain_source_cycle._coerce_int
 
 
 def _stage_after(stage: str | None) -> str | None:
+    if _compute_state_save_qc_terminal_enabled() and stage == "forecast":
+        return "state_save_qc"
     if stage not in _FORECAST_STAGE_ORDER:
         return None
     index = _FORECAST_STAGE_ORDER.index(stage)
@@ -258,6 +260,31 @@ def _completed_stage_success_evidence(
         "restart_stage": restart_stage,
         "restart_from_stage": restart_stage,
     }
+
+
+def _best_completed_stage_success_evidence(
+    jobs: list[dict[str, Any]],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any] | None:
+    completed: list[tuple[int, tuple[Any, ...], dict[str, Any]]] = []
+    stage_order = {stage: index for index, stage in enumerate(_FORECAST_STAGE_ORDER)}
+    for job in jobs:
+        evidence = _completed_stage_success_evidence(
+            job,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        )
+        if evidence is None:
+            continue
+        stage = str(evidence.get("stage") or "")
+        completed.append((stage_order.get(stage, -1), _pipeline_job_truth_sort_key(job), evidence))
+    if not completed:
+        return None
+    return max(completed, key=lambda item: (item[0], item[1]))[2]
 
 
 def _candidate_manual_stage_repair_state(
@@ -789,8 +816,8 @@ def candidate_state_from_rows(
             state["failed_stage"] = None
             state["error_code"] = None
             state["error_message"] = None
-    elif completed_stage_evidence := _completed_stage_success_evidence(
-        exposed_latest_job,
+    elif completed_stage_evidence := _best_completed_stage_success_evidence(
+        jobs,
         source_id=source_id,
         cycle_time=cycle_time,
         cycle_id=cycle_id,

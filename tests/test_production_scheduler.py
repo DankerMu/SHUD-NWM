@@ -4327,6 +4327,64 @@ def test_candidate_state_rows_mark_completed_upstream_success_for_resume() -> No
     assert decision.evidence["restart_stage"] == "parse"
 
 
+def test_compute_terminal_completed_stage_resume_prefers_forecast_over_newer_convert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    candidate = _scheduler_candidate_fixture()
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_full_model_a_forecast",
+                "run_id": "cycle_gfs_2026052106_full_model_a",
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": "cycle_gfs_2026052106_full_model_a",
+                "status": "succeeded",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "3001",
+                "updated_at": "2026-05-21T06:45:00Z",
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_state_save_qc_model_a_convert",
+                "run_id": "cycle_gfs_2026052106_state_save_qc_model_a",
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": "cycle_gfs_2026052106_state_save_qc_model_a",
+                "status": "succeeded",
+                "stage": "convert",
+                "job_type": "convert_canonical",
+                "slurm_job_id": "3002",
+                "updated_at": "2026-05-21T07:15:00Z",
+            },
+        ],
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+    )
+
+    assert state is not None
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["completed_stage_evidence"]["restart_stage"] == "state_save_qc"
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_after_completed_stage"
+    assert decision.evidence["restart_stage"] == "state_save_qc"
+
+
 def test_candidate_state_decision_owner_module_matches_scheduler_facade() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
