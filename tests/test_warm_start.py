@@ -18,7 +18,7 @@ from packages.common.state_lineage import (
     WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
     WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
 )
-from packages.common.state_manager import StateSnapshot
+from packages.common.state_manager import StateManagerError, StateSnapshot
 from services.orchestrator.chain import (
     ForecastOrchestrator,
     ModelContext,
@@ -87,6 +87,12 @@ class FakeStateManager:
         snapshot = self.snapshots[state_id]
         self.snapshots[state_id] = replace(snapshot, usable_flag=False)
         self.corrupted.append(state_id)
+
+
+class ExactOnlyStateManager(FakeStateManager):
+    def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
+        del model_id, before_time
+        raise StateManagerError("Latest usable state fallback is not supported by the file state snapshot index.")
 
 
 class FakeRuntimeRepository:
@@ -448,6 +454,26 @@ def test_strict_forecast_boundary_prior_cycle_uses_optional_warm_state(tmp_path:
     assert manifest["initial_state"]["quality"] == "fresh"
     assert manifest["runtime"]["init_mode"] == 3
     assert state_manager.latest_usable_calls == 1
+
+
+def test_optional_warm_state_file_index_without_exact_state_cold_starts(tmp_path: Path) -> None:
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        ExactOnlyStateManager(),
+        require_forecast_warm_start=True,
+        forecast_warm_start_required_from=_dt("2026-05-01T12:00:00Z"),
+    )
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        source_id="gfs",
+    )
+
+    assert selection.state_id is None
+    assert selection.quality == "cold_start_no_state"
 
 
 def test_strict_forecast_boundary_prior_cycle_keeps_prefilled_state(tmp_path: Path) -> None:

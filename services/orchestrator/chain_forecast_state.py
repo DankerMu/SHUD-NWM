@@ -11,7 +11,7 @@ from packages.common.state_lineage import (
     WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
     WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
 )
-from packages.common.state_manager import StateSnapshot, assess_freshness
+from packages.common.state_manager import StateManagerError, StateSnapshot, assess_freshness
 from services.orchestrator import chain as _chain
 from services.orchestrator import chain_manifests
 from services.orchestrator.chain_types import (
@@ -657,4 +657,9 @@ def _exact_or_latest_usable_state(
         exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=source_id)
         if exact is not None and exact.usable_flag:
             return exact
-    return self.state_manager.get_latest_usable_state(model_id=model_id, before_time=before_time)
+    try:
+        return self.state_manager.get_latest_usable_state(model_id=model_id, before_time=before_time)
+    except StateManagerError as error:
+        if "Latest usable state fallback is not supported" in str(error):
+            return None
+        raise
