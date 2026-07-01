@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the national static basin-domain outline GeoJSON from SHUD mesh shapefiles.
 
-Source : <basins-root>/<basin>/input/<basin>/gis/domain.shp  (production layout)
+Source : <basins-root>/**/input/*/gis/domain.shp  (production layout)
          or legacy <repo-root>/SHUD/input/<basin>/gis/domain.shp when --basins-root
          is unset; per-basin .prj carries the CRS (projected or geographic).
 Output : apps/frontend/public/geo/national-basin-domain.geojson (WGS84 / EPSG:4326)
@@ -29,7 +29,7 @@ from pathlib import Path
 import shapefile  # pyshp
 from pyproj import CRS, Transformer
 
-DEFAULT_BASINS = ("qhh", "heihe")
+DEFAULT_BASINS = ()
 # Quantize shared triangle vertices to one node. Snap unit follows the source CRS:
 # projected -> metres; geographic (lon/lat degrees) -> ~1.1 m at 1e-5 deg.
 NODE_SNAP_M = 1.0
@@ -38,7 +38,36 @@ CHAIKIN_ITERATIONS = 2
 
 
 def _basin_id(name: str) -> str:
-    return f"basins_{name}"
+    return f"basins_{name.lower()}"
+
+
+def _discover_basin_gis_dirs(basins_root: Path) -> list[tuple[str, Path]]:
+    discovered: list[tuple[str, Path]] = []
+    for shp in sorted(basins_root.glob("**/input/*/gis/domain.shp")):
+        try:
+            relative = shp.relative_to(basins_root)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) < 5 or parts[-4] != "input" or parts[-2] != "gis":
+            continue
+        basin_name = parts[0]
+        if basin_name == "zhaochen" and len(parts) >= 6:
+            basin_name = f"{parts[0]}_{parts[1].lower()}"
+        discovered.append((basin_name, shp.parent))
+    return discovered
+
+
+def _named_basin_gis_dir(basins_root: Path, name: str) -> Path:
+    candidates = sorted((basins_root / name).glob("input/*/gis/domain.shp"))
+    if candidates:
+        return candidates[0].parent
+    if "_" in name:
+        group, child = name.split("_", 1)
+        candidates = sorted((basins_root / group).glob(f"{child.upper()}/input/*/gis/domain.shp"))
+        if candidates:
+            return candidates[0].parent
+    return basins_root / name / "input" / name / "gis"
 
 
 def _load_transformer(prj_path: Path) -> tuple[Transformer, float]:
@@ -192,7 +221,11 @@ def build_basin_feature(gis: Path, name: str, decimals: int) -> dict | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--basins", default=",".join(DEFAULT_BASINS), help="comma-separated basin names")
+    parser.add_argument(
+        "--basins",
+        default=",".join(DEFAULT_BASINS),
+        help="comma-separated basin names; defaults to auto-discovery when --basins-root is set",
+    )
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
     parser.add_argument(
         "--basins-root",
@@ -214,15 +247,22 @@ def main() -> int:
     basins_root = Path(args.basins_root).resolve() if args.basins_root else None
     out_path = Path(args.out) if args.out else repo_root / "apps/frontend/public/geo/national-basin-domain.geojson"
 
-    def gis_dir(name: str) -> Path:
+    def legacy_gis_dir(name: str) -> Path:
         if basins_root is not None:
-            return basins_root / name / "input" / name / "gis"
+            return _named_basin_gis_dir(basins_root, name)
         return repo_root / "SHUD" / "input" / name / "gis"
 
+    requested_names = [b.strip() for b in args.basins.split(",") if b.strip()]
+    if requested_names:
+        basin_inputs = [(name, legacy_gis_dir(name)) for name in requested_names]
+    elif basins_root is not None:
+        basin_inputs = _discover_basin_gis_dirs(basins_root)
+    else:
+        basin_inputs = [(name, legacy_gis_dir(name)) for name in ("qhh", "heihe")]
     features = [
         feature
-        for name in [b.strip() for b in args.basins.split(",") if b.strip()]
-        if (feature := build_basin_feature(gis_dir(name), name, args.decimals)) is not None
+        for name, gis in basin_inputs
+        if (feature := build_basin_feature(gis, name, args.decimals)) is not None
     ]
     if not features:
         print("[fail] no domain features generated", file=sys.stderr)

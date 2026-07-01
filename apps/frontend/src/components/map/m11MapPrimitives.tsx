@@ -147,10 +147,7 @@ export function M11OverlayPrimitive({
 }
 
 export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  const fadeAt = (zoomFade: number) => (dimmed ? zoomFade : 1)
-  const fade5 = fadeAt(0.85)
-  const fade7 = fadeAt(0.45)
-  const fade9 = fadeAt(0.35)
+  const opacityScale = dimmed ? 0.42 : 1
   return {
     'line-color': [
       'interpolate',
@@ -168,24 +165,26 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.3, 5, 1.4],
-      7,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.8, 5, 2.6],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.45, 5, 1.5],
+      6,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.9, 5, 2.6],
+      9,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.5, 5, 3.6],
       12,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.6, 5, 4.5],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 2.2, 5, 5.2],
     ],
     'line-opacity': [
       'interpolate',
       ['linear'],
       ['zoom'],
       3,
-      ['match', ['get', 'Type'], 5, 0.9, 4, 0.55, 0],
+      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.82, 4, 0.45, 0]],
       5,
-      ['match', ['get', 'Type'], 5, 0.95 * fade5, 4, 0.85 * fade5, 3, 0.55 * fade5, 0],
+      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.9, 4, 0.76, 3, 0.42, 0]],
       7,
-      ['match', ['get', 'Type'], 5, 1 * fade7, 4, 0.95 * fade7, 3, 0.85 * fade7, 2, 0.6 * fade7, 0],
+      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.94, 4, 0.9, 3, 0.72, 2, 0.5, 0]],
       9,
-      0.9 * fade9,
+      0.88 * opacityScale,
     ],
   }
 }
@@ -221,7 +220,7 @@ export function M11BasinPrimitive({ collection }: { collection: BasinFeatureColl
         source={M11_BASIN_BOUNDARIES_SOURCE_ID}
         paint={{
           'fill-color': '#1E88E5',
-          'fill-opacity': 0.14,
+          'fill-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.1, 7, 0.14, 11, 0.08],
         }}
       />
       <Layer
@@ -230,8 +229,8 @@ export function M11BasinPrimitive({ collection }: { collection: BasinFeatureColl
         source={M11_BASIN_BOUNDARIES_SOURCE_ID}
         paint={{
           'line-color': '#0F3460',
-          'line-width': 1.4,
-          'line-opacity': 0.72,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.9, 7, 1.4, 11, 2.2],
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.56, 7, 0.72, 11, 0.86],
         }}
       />
     </Source>

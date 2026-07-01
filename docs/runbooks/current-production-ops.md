@@ -169,6 +169,31 @@ test -d "$NHMS_BASINS_ROOT"
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
+前端全国总览的静态边界/河网也必须从同一个 Basins 真相源刷新；这是新增流域后
+让公网地图立刻显示边界和基础河网的运维入口。脚本会在 `--basins-root` 下自动发现
+所有 `**/input/*/gis/domain.shp` / `river.shp`，包括 `zhaochen/` 下的子流域，
+不要再手工维护 qhh/heihe 列表：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+/home/nwm/.local/bin/uv run python scripts/geo/build_national_domain_geo.py \
+  --basins-root /home/ghdc/nwm/Basins
+/home/nwm/.local/bin/uv run python scripts/geo/build_national_river_geo.py \
+  --basins-root /home/ghdc/nwm/Basins
+
+jq -r '.features | length' apps/frontend/public/geo/national-basin-domain.geojson
+jq -r '.features[].properties.basin_id' apps/frontend/public/geo/national-basin-river.geojson \
+  | sort | uniq -c
+```
+
+2026-07-01 现场期望：domain 输出 13 个 basin；river 输出 20,100 条 feature，
+覆盖 `basins_heihe`、`basins_hetianhe`、`basins_kashigeer`、`basins_keliya`、
+`basins_qhh`、`basins_qinyijiang`、`basins_tailanhe`、`basins_weiganhe`、
+`basins_xinanjiang_upstream`、`basins_zhaochen_bst`、`basins_zhaochen_hhy`、
+`basins_zhaochen_mc`、`basins_zhaochen_wem`。刷新后重新部署前端，公网
+`https://test.nwm.ac.cn` 才会看到新增流域边界和一致的缩放河网底图。
+
 显式补跑某个 00/12 UTC 周期时，使用 node-22 的 DB-free 入口脚本，不要手工
 拼 `lookback/cycle-lag`，也不要改 scheduler systemd env：
 

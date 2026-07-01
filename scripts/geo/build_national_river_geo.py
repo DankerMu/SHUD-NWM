@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the national static river-network GeoJSON from each basin's SHUD shapefile.
 
-Source : <basins-root>/<basin>/input/<basin>/gis/river.shp  (production layout)
+Source : <basins-root>/**/input/*/gis/river.shp  (production layout)
          or legacy <repo-root>/SHUD/input/<basin>/gis/river.shp when --basins-root
          is unset; per-basin .prj carries the CRS (projected or geographic).
 Output : apps/frontend/public/geo/national-basin-river.geojson (WGS84 / EPSG:4326)
@@ -30,7 +30,7 @@ from pathlib import Path
 import shapefile  # pyshp
 from pyproj import CRS, Transformer
 
-DEFAULT_BASINS = ("qhh", "heihe")
+DEFAULT_BASINS = ()
 MAX_TYPE = 5
 # Quantize shared river endpoints to one node. Snap unit follows the source CRS:
 # projected -> metres; geographic (lon/lat degrees) -> ~1.1 m at 1e-5 deg.
@@ -39,7 +39,36 @@ GEOGRAPHIC_SNAP_DEG = 1e-5
 
 
 def _basin_id(name: str) -> str:
-    return f"basins_{name}"
+    return f"basins_{name.lower()}"
+
+
+def _discover_basin_gis_dirs(basins_root: Path) -> list[tuple[str, Path]]:
+    discovered: list[tuple[str, Path]] = []
+    for shp in sorted(basins_root.glob("**/input/*/gis/river.shp")):
+        try:
+            relative = shp.relative_to(basins_root)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) < 5 or parts[-4] != "input" or parts[-2] != "gis":
+            continue
+        basin_name = parts[0]
+        if basin_name == "zhaochen" and len(parts) >= 6:
+            basin_name = f"{parts[0]}_{parts[1].lower()}"
+        discovered.append((basin_name, shp.parent))
+    return discovered
+
+
+def _named_basin_gis_dir(basins_root: Path, name: str) -> Path:
+    candidates = sorted((basins_root / name).glob("input/*/gis/river.shp"))
+    if candidates:
+        return candidates[0].parent
+    if "_" in name:
+        group, child = name.split("_", 1)
+        candidates = sorted((basins_root / group).glob(f"{child.upper()}/input/*/gis/river.shp"))
+        if candidates:
+            return candidates[0].parent
+    return basins_root / name / "input" / name / "gis"
 
 
 def _load_transformer(prj_path: Path) -> tuple[Transformer, float]:
@@ -154,7 +183,11 @@ def build_basin_features(gis: Path, name: str, decimals: int) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--basins", default=",".join(DEFAULT_BASINS), help="comma-separated basin names")
+    parser.add_argument(
+        "--basins",
+        default=",".join(DEFAULT_BASINS),
+        help="comma-separated basin names; defaults to auto-discovery when --basins-root is set",
+    )
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
     parser.add_argument(
         "--basins-root",
@@ -176,14 +209,21 @@ def main() -> int:
     basins_root = Path(args.basins_root).resolve() if args.basins_root else None
     out_path = Path(args.out) if args.out else repo_root / "apps/frontend/public/geo/national-basin-river.geojson"
 
-    def gis_dir(name: str) -> Path:
+    def legacy_gis_dir(name: str) -> Path:
         if basins_root is not None:
-            return basins_root / name / "input" / name / "gis"
+            return _named_basin_gis_dir(basins_root, name)
         return repo_root / "SHUD" / "input" / name / "gis"
 
+    requested_names = [b.strip() for b in args.basins.split(",") if b.strip()]
+    if requested_names:
+        basin_inputs = [(name, legacy_gis_dir(name)) for name in requested_names]
+    elif basins_root is not None:
+        basin_inputs = _discover_basin_gis_dirs(basins_root)
+    else:
+        basin_inputs = [(name, legacy_gis_dir(name)) for name in ("qhh", "heihe")]
     features: list[dict] = []
-    for name in [b.strip() for b in args.basins.split(",") if b.strip()]:
-        features.extend(build_basin_features(gis_dir(name), name, args.decimals))
+    for name, gis in basin_inputs:
+        features.extend(build_basin_features(gis, name, args.decimals))
 
     if not features:
         print("[fail] no river features generated", file=sys.stderr)
