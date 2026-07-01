@@ -303,9 +303,60 @@ class FileCanonicalReadinessProvider:
 
         entry_policy = dict(entry.get("policy_identity") or {})
         entry_object = dict(entry.get("source_object_identity") or {})
+        entry_hours = sorted({int(hour) for hour in entry.get("forecast_hours") or []})
         if _stable_json(entry_policy) != _stable_json(policy_identity) or _stable_json(entry_object) != _stable_json(
             source_object_identity
         ):
+            try:
+                products, product_source_evidence = _readiness_entry_products(
+                    entry,
+                    roots=self._roots,
+                )
+            except SchedulerFileProviderError as error:
+                return _file_readiness_unavailable(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    forecast_hours=forecast_hours,
+                    policy_identity=policy_identity,
+                    source_object_identity=source_object_identity,
+                    canonical_product_id=canonical_product_id,
+                    model_id=model_id,
+                    basin_id=basin_id,
+                    reason="canonical_readiness_index_identity_mismatch",
+                    index_evidence={
+                        **index_evidence,
+                        "entry_status": "identity_mismatch",
+                        "catalog": _provider_blocker(error.reason, error.field, evidence=error.evidence),
+                    },
+                    retryable=True,
+                )
+            if not products:
+                result = evaluate_canonical_readiness(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    products=[],
+                    forecast_hours=requested_hours,
+                    policy_identity=policy_identity,
+                    source_object_identity=source_object_identity,
+                    canonical_product_id=canonical_product_id,
+                    model_id=model_id,
+                    basin_id=basin_id,
+                ).evidence
+                result = _sanitize_file_provider_evidence(result)
+                result["readiness_index"] = _evidence_safe(
+                    {
+                        **index_evidence,
+                        "entry_status": "identity_mismatch_empty_entry",
+                        "entry_product_row_count": 0,
+                        "entry_product_source": product_source_evidence.get("source"),
+                        "entry_forecast_hours": entry_hours[:200],
+                        "entry_forecast_hour_count": len(entry_hours),
+                        "requested_forecast_hours": requested_hours[:200],
+                        "requested_forecast_hour_count": len(requested_hours),
+                        "canonical_product_catalog": product_source_evidence,
+                    }
+                )
+                return _evidence_safe(result)
             return _file_readiness_unavailable(
                 source_id=source_id,
                 cycle_time=cycle_time,
@@ -320,7 +371,6 @@ class FileCanonicalReadinessProvider:
                 retryable=True,
             )
 
-        entry_hours = sorted({int(hour) for hour in entry.get("forecast_hours") or []})
         if not set(requested_hours).issubset(set(entry_hours)):
             return _file_readiness_unavailable(
                 source_id=source_id,
