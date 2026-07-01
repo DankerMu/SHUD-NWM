@@ -259,6 +259,22 @@ class StateManager:
             ):
                 existing = same_checksum_existing
         if existing is not None and _checksum_matches(existing.checksum, checksum):
+            if not self._snapshot_object_matches(existing, checksum):
+                repaired = self._rewrite_missing_same_checksum_snapshot(
+                    existing,
+                    content=content,
+                    checksum=checksum,
+                    run_id=run_id,
+                    model_id=model_id,
+                    valid_time=parsed_valid_time,
+                    source_id=source_id,
+                    cycle_id=cycle_id,
+                    lead_hours=lead_hours,
+                    model_package_version=model_package_version,
+                    model_package_checksum=model_package_checksum,
+                    original_shud_filename=original_shud_filename,
+                )
+                return StateSnapshotSaveResult(status="superseded", state_id=repaired.state_id, snapshot=repaired)
             if _state_snapshot_metadata_matches(
                 existing,
                 run_id=run_id,
@@ -319,6 +335,61 @@ class StateManager:
         saved = self.repository.upsert_state_snapshot(snapshot)
         status = "superseded" if existing is not None else "created"
         return StateSnapshotSaveResult(status=status, state_id=saved.state_id, snapshot=saved)
+
+    def _snapshot_object_matches(self, snapshot: StateSnapshot, checksum: str) -> bool:
+        try:
+            _size, actual_checksum = self.object_store.size_and_checksum_limited(
+                snapshot.state_uri,
+                max_bytes=MAX_STATE_IC_BYTES,
+            )
+        except (ObjectStoreError, OSError, ValueError):
+            return False
+        return _checksum_matches(snapshot.checksum, actual_checksum) and _checksum_matches(checksum, actual_checksum)
+
+    def _rewrite_missing_same_checksum_snapshot(
+        self,
+        existing: StateSnapshot,
+        *,
+        content: bytes,
+        checksum: str,
+        run_id: str,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None,
+        cycle_id: str | None,
+        lead_hours: int | None,
+        model_package_version: str | None,
+        model_package_checksum: str | None,
+        original_shud_filename: str | None,
+    ) -> StateSnapshot:
+        state_key = _state_object_key(
+            model_id,
+            valid_time,
+            source_id=source_id,
+            cycle_id=cycle_id,
+            lead_hours=lead_hours,
+        )
+        try:
+            state_uri = self.object_store.write_bytes_atomic(state_key, content)
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise StateManagerError(f"Failed to repair missing state snapshot {existing.state_id}: {error}") from error
+        return self.repository.upsert_state_snapshot(
+            StateSnapshot(
+                state_id=existing.state_id,
+                model_id=model_id,
+                run_id=run_id,
+                valid_time=valid_time,
+                state_uri=state_uri,
+                checksum=checksum,
+                usable_flag=False,
+                source_id=source_id,
+                cycle_id=cycle_id,
+                lead_hours=lead_hours,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+                original_shud_filename=original_shud_filename,
+            )
+        )
 
     def _find_same_checksum_base_snapshot(
         self,
@@ -811,7 +882,7 @@ class FileStateSnapshotIndexRepository:
         )
         for entry in index_snapshot.entries.values():
             if str(entry.get("state_id") or "") == state_id:
-                return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
+                return self._snapshot_from_lookup_entry(entry)
         return None
 
     def get_state_snapshot_by_model_time(
@@ -849,7 +920,7 @@ class FileStateSnapshotIndexRepository:
             )
         if entry is None:
             return None
-        return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
+        return self._snapshot_from_lookup_entry(entry)
 
     def find_state_snapshot_by_model_time_checksum(
         self,
@@ -876,7 +947,7 @@ class FileStateSnapshotIndexRepository:
             key=lambda item: str(item.get("state_id") or ""),
         ):
             if _checksum_matches(entry.get("checksum"), checksum):
-                return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
+                return self._snapshot_from_lookup_entry(entry)
         return None
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -951,6 +1022,11 @@ class FileStateSnapshotIndexRepository:
 
     def insert_qc_result(self, record: Mapping[str, Any]) -> dict[str, Any]:
         return {"status": "recorded_in_state_index", **dict(record)}
+
+    def _snapshot_from_lookup_entry(self, entry: Mapping[str, Any]) -> StateSnapshot:
+        if self.create_missing:
+            return _state_snapshot_from_index_entry(entry)
+        return _state_snapshot_from_index_entry(self._entry_with_verified_object(entry))
 
     def strict_warm_start_evidence(
         self,

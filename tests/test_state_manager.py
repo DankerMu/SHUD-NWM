@@ -1387,6 +1387,61 @@ def test_file_state_snapshot_index_destination_upsert_and_usable_update_do_not_r
     assert listed["total_count"] == 3
 
 
+def test_same_checksum_save_rewrites_missing_existing_state_object(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    state_file = tmp_path / "model_a.cfg.ic.update"
+    content = _valid_ic_bytes(b"same-checksum-missing-object-repair")
+    state_file.write_bytes(content)
+    missing_uri = "s3://nhms/states/gfs/model_a/2026052118/gfs_2026052106/f012/state.cfg.ic"
+    existing = _state_index_test_entry(
+        missing_uri,
+        content,
+        state_id="state_gfs_model_a_2026052118_gfs_2026052106_f012",
+    )
+    existing.update(
+        {
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "valid_time": "2026-05-21T18:00:00Z",
+            "cycle_id": "gfs_2026052106",
+            "lead_hours": 12,
+            "model_package_version": "s3://nhms/models/model_a/package/",
+            "model_package_checksum": "package-sha",
+            "original_shud_filename": "model_a.cfg.ic.update",
+            "usable_flag": True,
+        }
+    )
+    _write_state_index_payload(index_path, [existing], generated_at="2026-05-21T18:00:00Z")
+    repository = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-05-21T18:00:00Z"),
+        create_missing=True,
+    )
+    manager = StateManager(repository=repository, object_store=LocalObjectStore(object_root, "s3://nhms"))
+
+    repaired = manager.save_state_snapshot(
+        model_id="model_a",
+        run_id="fcst_gfs_2026052106_model_a",
+        valid_time=_dt("2026-05-21T18:00:00Z"),
+        ic_file_path=state_file,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        lead_hours=12,
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum="package-sha",
+        original_shud_filename="model_a.cfg.ic.update",
+    )
+
+    assert repaired.status == "superseded"
+    assert repaired.state_id == existing["state_id"]
+    assert repaired.snapshot.state_uri == missing_uri
+    assert (object_root / "states/gfs/model_a/2026052118/gfs_2026052106/f012/state.cfg.ic").is_file()
+    assert manager.run_qc(repaired.state_id) is True
+
+
 def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
