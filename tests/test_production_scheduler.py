@@ -5284,6 +5284,35 @@ def test_manual_retry_candidate_bypasses_repository_active_placeholder(
     assert orchestrator.calls[0]["basins"][0]["manual_retry_attempt"] == 4
 
 
+def test_terminal_pipeline_success_overrides_stale_created_hydro_placeholder() -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_state_save_qc",
+                "status": "succeeded",
+                "stage": "state_save_qc",
+                "error_code": None,
+                "updated_at": "2026-05-21T06:45:00Z",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "skip"
+    assert decision.reason == "terminal_pipeline_success"
+    assert decision.evidence["terminal_source"] == "pipeline_job"
+    assert decision.evidence["terminal_status"] == "succeeded"
+
+
 @pytest.mark.parametrize(
     "state",
     [
