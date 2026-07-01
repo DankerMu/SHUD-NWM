@@ -104,10 +104,22 @@ def _candidate_state_decision(
     )
     if terminal_pipeline_success_supersedes_hydro_placeholder:
         hydro_status = None
+    completed_stage_retry = _completed_upstream_stage_retry_evidence(candidate, decision_state, evidence)
+    completed_stage_retry_supersedes_hydro_placeholder = (
+        completed_stage_retry is not None
+        and hydro_status in {"created", "staged", "submitted"}
+        and pipeline_status not in ACTIVE_PIPELINE_STATUSES
+    )
+    if completed_stage_retry_supersedes_hydro_placeholder:
+        hydro_status = None
     manual_retry_requested = _manual_retry_requested(decision_state)
     active_truth = _latest_manual_retry_blocker(decision_state)
     if (
-        (stale_hydro_placeholder_superseded_by_auto_retry or terminal_pipeline_success_supersedes_hydro_placeholder)
+        (
+            stale_hydro_placeholder_superseded_by_auto_retry
+            or terminal_pipeline_success_supersedes_hydro_placeholder
+            or completed_stage_retry_supersedes_hydro_placeholder
+        )
         and active_truth is not None
         and active_truth.get("source") == "hydro_state"
         and str(active_truth.get("status") or "") in {"created", "staged", "submitted"}
@@ -172,7 +184,6 @@ def _candidate_state_decision(
             },
         )
 
-    completed_stage_retry = _completed_upstream_stage_retry_evidence(candidate, decision_state, evidence)
     if completed_stage_retry is not None:
         return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 

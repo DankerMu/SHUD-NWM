@@ -4255,6 +4255,34 @@ def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_comp
     assert calls == [(candidate.candidate_id, manifest_uri)]
 
 
+def test_completed_stage_retry_supersedes_stale_hydro_created_placeholder() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run": {
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "stage": "convert",
+        "completed_stage_evidence": {
+            "stage": "convert",
+            "status": "succeeded",
+            "restart_stage": "forcing",
+        },
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_after_completed_stage"
+    assert decision.evidence["restart_stage"] == "forcing"
+
+
 def test_candidate_state_decision_owner_module_matches_scheduler_facade() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
