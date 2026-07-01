@@ -189,8 +189,11 @@ class FileCanonicalReadinessProvider:
         max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS,
     ) -> None:
         self.index_uri = str(index_uri)
+        resolved_object_store_root = object_store_root or _infer_object_store_root_from_scheduler_file_uri(
+            self.index_uri
+        )
         self._roots = _ProviderRoots(
-            object_store_root=object_store_root,
+            object_store_root=resolved_object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             now=now,
@@ -473,6 +476,19 @@ class FileCanonicalReadinessProvider:
             "schema_version": CANONICAL_READINESS_INDEX_SCHEMA_VERSION,
             "index": _uri_evidence(self.index_uri),
         }
+
+
+def _infer_object_store_root_from_scheduler_file_uri(uri: str | Path) -> Path | None:
+    parsed = urlparse(str(uri))
+    if parsed.scheme:
+        return None
+    path = Path(uri).expanduser()
+    if path.parent.name != "canonical-readiness":
+        return None
+    scheduler_dir = path.parent.parent
+    if scheduler_dir.name != "scheduler":
+        return None
+    return scheduler_dir.parent
 
 
 class FileRawHandoffCandidateRepository:
