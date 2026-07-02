@@ -638,7 +638,11 @@ class SHUDRuntime:
         if not rows:
             raise SHUDRuntimeError("SHUD_FORCING_STATIONS_EMPTY", f"No stations found in {source_tsd}.")
         first_csv = shud_dir / str(rows[0]["filename"])
-        first_time = _first_shud_forcing_time(first_csv, is_direct_grid=is_direct_grid)
+        first_time = _first_shud_forcing_time(
+            first_csv,
+            is_direct_grid=is_direct_grid,
+            relative_start_time=_parse_time_or_none(manifest.get("start_time")),
+        )
         _shift_project_time_inputs(model_input_dir, _project_name(manifest), first_time)
         start_date = first_time.strftime("%Y%m%d")
         target_tsd = model_input_dir / f"{_project_name(manifest)}.tsd.forc"
@@ -2271,7 +2275,12 @@ def _read_sp_att_forcing_ids(path: Path) -> set[int]:
     return forcing_ids
 
 
-def _first_shud_forcing_time(path: Path, *, is_direct_grid: bool) -> datetime:
+def _first_shud_forcing_time(
+    path: Path,
+    *,
+    is_direct_grid: bool,
+    relative_start_time: datetime | None = None,
+) -> datetime:
     if is_direct_grid:
         text = _read_limited_text_no_follow(
             path,
@@ -2305,11 +2314,14 @@ def _first_shud_forcing_time(path: Path, *, is_direct_grid: bool) -> datetime:
         time_day = float(first_value)
     except ValueError as error:
         raise SHUDRuntimeError("SHUD_FORCING_CSV_TIME_INVALID", f"Invalid SHUD forcing time in {path}") from error
-    # SHUD/rSHUD forcing files may use either absolute Unix-day-like Time_Day values
-    # or days relative to the header date. The generated operational forcing uses
-    # absolute values so SHUD output can be mapped back to real valid_time.
+    # SHUD/rSHUD forcing files may use either absolute Unix-day-like Time_Day values,
+    # days relative to the forecast/package start, or older files relative to the
+    # header date. Standard operational packages store Time_Day relative to the run
+    # start, which matters for 12Z cycles because the CSV header carries only a date.
     if time_day > 10_000:
         return datetime.fromtimestamp(time_day * 86_400.0, tz=UTC)
+    if relative_start_time is not None:
+        return _ensure_utc(relative_start_time) + timedelta(days=time_day)
     return start_date + timedelta(days=time_day)
 
 

@@ -1938,6 +1938,31 @@ def test_runtime_staging_keeps_standard_shud_forcing_time_axis_relative_to_cfg_s
     assert first_time_day <= last_time_day < float(cfg_values["END"])
 
 
+def test_runtime_staging_interprets_standard_shud_time_day_relative_to_12z_start(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "alias-a.cfg.ic").write_text("2\t6\t0.000000\n1\t2\n", encoding="utf-8")
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["cycle_time"] = "2026-05-01T12:00:00Z"
+    manifest["start_time"] = "2026-05-01T12:00:00Z"
+    manifest["end_time"] = "2026-05-04T12:00:00Z"
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    cfg_ic_header = (input_dir / "alias-a" / "alias-a.cfg.ic").read_text(encoding="utf-8").splitlines()[0]
+    observed_minute = float(cfg_ic_header.split()[2])
+    expected_minute = datetime(2026, 5, 1, 12, tzinfo=UTC).timestamp() / 60.0
+    assert observed_minute == pytest.approx(expected_minute)
+
+
 _MMDAY_UNITS = {
     "PRCP": "mm/day",
     "TEMP": "degC",
