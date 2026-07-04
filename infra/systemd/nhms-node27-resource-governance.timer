@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 resource governance audit daily
+
+[Timer]
+OnCalendar=*-*-* 04:10:00 UTC
+Persistent=true
+Unit=nhms-node27-resource-governance.service
+
+[Install]
+WantedBy=timers.target

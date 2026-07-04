@@ -1,0 +1,10 @@
+[Unit]
+Description=NHMS node-27 resource governance audit
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+ExecStart=/home/nwm/NWM/scripts/node27_resource_governance_once.sh
+StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log
+StandardError=append:/home/nwm/node27-resource-governance-logs/systemd.err
+TimeoutStartSec=0

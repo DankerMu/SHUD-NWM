@@ -1,0 +1,15 @@
+# Node-27 resource governance audit.
+#
+# Copy to /home/nwm/NWM/infra/env/node27-resource-governance.env on node-27,
+# set mode 0600, and install
+# infra/systemd/nhms-node27-resource-governance.{service,timer} as user units
+# for nwm.
+
+NODE27_RESOURCE_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
+NODE27_GOVERNANCE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-pgdata
+NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
+
+# Use a node-27-local DB account. Read-only display credentials are enough for
+# the audit path; do not use this env for ingest or cleanup writes.
+DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
