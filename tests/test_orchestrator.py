@@ -293,12 +293,11 @@ def test_sbatch_templates_cover_production_stage_mappings() -> None:
     names = sorted(path.name for path in template_dir.glob("*.sbatch"))
 
     production_stages = (*M3_STAGES, *ANALYSIS_STAGES)
-    production_templates = {stage.template_name for stage in production_stages} | {
-        DEFAULT_JOB_TYPE_TEMPLATES["hindcast"]
-    }
-    production_job_types = {stage.job_type for stage in production_stages} | {"hindcast"}
+    production_templates = {stage.template_name for stage in production_stages}
+    production_job_types = {stage.job_type for stage in production_stages}
     assert production_templates.issubset(set(names))
     assert all(job_type in DEFAULT_JOB_TYPE_TEMPLATES for job_type in production_job_types)
+    assert set(DEFAULT_JOB_TYPE_TEMPLATES.values()).issubset(set(names))
     assert SlurmGatewaySettings().job_type_templates == DEFAULT_JOB_TYPE_TEMPLATES
     assert OrchestratorConfig(workspace_root=".", object_store_root=".").templates_dir == template_dir.resolve()
     for path in (template_dir / name for name in production_templates):
