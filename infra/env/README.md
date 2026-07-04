@@ -186,11 +186,26 @@ Node-27 download role:
   `infra/env/node27-download.env` with mode `0600` and writer-capable
   `DATABASE_URL` on node-27.
 - Leave `NODE27_DOWNLOAD_CYCLE_TIME` empty for production automation. The runner
-  selects the latest allowed UTC cycle from
+  selects the first missing raw cycle after the existing contiguous raw chain,
+  bounded by the latest allowed UTC cycle from
   `NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC` after
-  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). Set
-  `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit backfill.
+  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). When no raw
+  seed exists in the continuity lookback window, it selects the latest allowed
+  cycle as the first seed. Set `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit
+  operator-directed runs.
 - The download env is not display runtime config. It must use
   `NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download`, local node-27
   PostgreSQL `:55432`, `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`, and a
   node-27 local `WORKSPACE_ROOT`.
+
+Node-27 resource governance role:
+
+- `infra/env/node27-resource-governance.example` is the committed template for
+  `scripts/node27_resource_governance_once.sh` and
+  `infra/systemd/nhms-node27-resource-governance.{service,timer}`. Copy it to
+  untracked `infra/env/node27-resource-governance.env` with mode `0600`.
+- The audit is read-only. A display/readonly DB account is enough; do not use
+  this env for ingest, cleanup writes, chunk drops, or compression execution.
+- The daily receipt reports filesystem pressure, node-27 service states,
+  PostgreSQL/TimescaleDB size risks, missing retention/compression policies,
+  index ratio hotspots, and temp-spill logging state.

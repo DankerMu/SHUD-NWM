@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Sequence
 
@@ -144,6 +145,13 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a float") from error
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _non_blank_path(value: str | None, option_name: str) -> str | None:
     if value is not None and value.strip() == "":
         raise ValueError(f"plan-production {option_name} must not be blank")
@@ -263,6 +271,73 @@ def _plan_production(
         }
     result = scheduler.run_once()
     return result.to_dict()
+
+
+_SCHEDULER_STDOUT_SUMMARY_SCALAR_KEYS = (
+    "pass_id",
+    "status",
+    "artifact_path",
+    "started_at",
+    "finished_at",
+    "dry_run",
+    "continuous",
+    "readiness_interpretation",
+    "execution_boundary",
+    "scheduler_state_backend",
+    "scheduler_registry_backend",
+    "scheduler_state_index_backend",
+    "scheduler_journal_backend",
+)
+
+
+def _scheduler_stdout_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    if not _env_bool("NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY"):
+        return dict(payload)
+    return _scheduler_stdout_summary(payload)
+
+
+def _scheduler_stdout_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    passes = payload.get("passes")
+    if isinstance(passes, list):
+        return {
+            "status": payload.get("status", "unknown"),
+            "passes": [
+                _scheduler_pass_stdout_summary(item)
+                for item in passes
+                if isinstance(item, Mapping)
+            ],
+        }
+    return _scheduler_pass_stdout_summary(payload)
+
+
+def _scheduler_pass_stdout_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    summary: dict[str, object] = {
+        key: payload[key]
+        for key in _SCHEDULER_STDOUT_SUMMARY_SCALAR_KEYS
+        if key in payload and _is_json_scalar(payload[key])
+    }
+    for key, value in payload.items():
+        if key.endswith("_count") and _is_json_scalar(value):
+            summary[key] = value
+    for key in ("sources", "model_ids", "basin_ids", "selected_cycle_ids"):
+        value = payload.get(key)
+        if _is_small_scalar_list(value):
+            summary[key] = value
+    if "status" not in summary:
+        summary["status"] = "unknown"
+    return summary
+
+
+def _is_json_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _is_small_scalar_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= 32
+        and all(_is_json_scalar(item) for item in value)
+    )
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
@@ -388,25 +463,26 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         evidence_dir: str | None,
     ) -> None:
         try:
+            payload = _plan_production(
+                sources=_split_csv(sources),
+                lookback_hours=lookback_hours,
+                cycle_lag_hours=cycle_lag_hours,
+                max_cycles_per_source=max_cycles_per_source,
+                cycle_time=cycle_time,
+                disable_backfill=disable_backfill,
+                model_ids=_split_csv(model_ids),
+                basin_ids=_split_csv(basin_ids),
+                dry_run=dry_run,
+                continuous=continuous,
+                interval_seconds=interval_seconds,
+                max_passes=max_passes,
+                workspace_root=workspace_root,
+                lock_path=lock_path,
+                evidence_dir=evidence_dir,
+            )
             click.echo(
                 json.dumps(
-                    _plan_production(
-                        sources=_split_csv(sources),
-                        lookback_hours=lookback_hours,
-                        cycle_lag_hours=cycle_lag_hours,
-                        max_cycles_per_source=max_cycles_per_source,
-                        cycle_time=cycle_time,
-                        disable_backfill=disable_backfill,
-                        model_ids=_split_csv(model_ids),
-                        basin_ids=_split_csv(basin_ids),
-                        dry_run=dry_run,
-                        continuous=continuous,
-                        interval_seconds=interval_seconds,
-                        max_passes=max_passes,
-                        workspace_root=workspace_root,
-                        lock_path=lock_path,
-                        evidence_dir=evidence_dir,
-                    ),
+                    _scheduler_stdout_payload(payload),
                     sort_keys=True,
                 )
             )
@@ -504,25 +580,26 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "plan-production":
         try:
+            payload = _plan_production(
+                sources=_split_csv(args.source),
+                lookback_hours=args.lookback_hours,
+                cycle_lag_hours=args.cycle_lag_hours,
+                max_cycles_per_source=args.max_cycles_per_source,
+                cycle_time=args.cycle_time,
+                disable_backfill=args.disable_backfill,
+                model_ids=_split_csv(args.model_id),
+                basin_ids=_split_csv(args.basin_id),
+                dry_run=args.dry_run,
+                continuous=args.continuous,
+                interval_seconds=args.interval_seconds,
+                max_passes=args.max_passes,
+                workspace_root=args.workspace_root,
+                lock_path=args.lock_path,
+                evidence_dir=args.evidence_dir,
+            )
             print(
                 json.dumps(
-                    _plan_production(
-                        sources=_split_csv(args.source),
-                        lookback_hours=args.lookback_hours,
-                        cycle_lag_hours=args.cycle_lag_hours,
-                        max_cycles_per_source=args.max_cycles_per_source,
-                        cycle_time=args.cycle_time,
-                        disable_backfill=args.disable_backfill,
-                        model_ids=_split_csv(args.model_id),
-                        basin_ids=_split_csv(args.basin_id),
-                        dry_run=args.dry_run,
-                        continuous=args.continuous,
-                        interval_seconds=args.interval_seconds,
-                        max_passes=args.max_passes,
-                        workspace_root=args.workspace_root,
-                        lock_path=args.lock_path,
-                        evidence_dir=args.evidence_dir,
-                    ),
+                    _scheduler_stdout_payload(payload),
                     sort_keys=True,
                 )
             )

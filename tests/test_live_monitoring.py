@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import builtins
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from services.orchestrator.monitoring import MonitorConfig, _alerts, run_monitor
+from services.orchestrator.monitoring import MonitorConfig, _alerts, _scheduler_summary, run_monitor
 
 
 def test_live_monitoring_alerts_on_failed_cycle_and_stale_scheduler(tmp_path: Path) -> None:
@@ -62,6 +64,36 @@ def test_run_monitor_writes_status_files(monkeypatch, tmp_path: Path) -> None:
     alerts_path = config.output_dir / "monitoring_alerts.json"
     assert json.loads(status_path.read_text(encoding="utf-8"))["schema"] == "nhms.live_monitoring.v1"
     assert json.loads(alerts_path.read_text(encoding="utf-8"))["alerts"] == []
+
+
+def test_scheduler_summary_selects_latest_without_sorting(monkeypatch, tmp_path: Path) -> None:
+    config = MonitorConfig(
+        workspace_root=tmp_path,
+        database_url="postgresql://example.invalid/nhms",
+        lookback_hours=168,
+        max_active_slurm_jobs=32,
+        max_failed_cycles=0,
+        max_stale_minutes=20,
+        output_dir=tmp_path / "monitoring",
+    )
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    old = evidence_dir / "scheduler_2026060700_old.json"
+    latest = evidence_dir / "scheduler_2026060700_latest.json"
+    old.write_text('{"status":"old"}', encoding="utf-8")
+    latest.write_text('{"status":"submitted"}', encoding="utf-8")
+    os.utime(old, (1, 1))
+    os.utime(latest, (2, 2))
+
+    def fail_sorted(*_args, **_kwargs):
+        raise AssertionError("scheduler summary must not sort every evidence file")
+
+    monkeypatch.setattr(builtins, "sorted", fail_sorted)
+
+    summary = _scheduler_summary(config, datetime(2026, 6, 7, tzinfo=UTC))
+
+    assert summary["latest_artifact"] == str(latest)
+    assert summary["latest_status"] == "submitted"
 
 
 class _FixedDatetime(datetime):

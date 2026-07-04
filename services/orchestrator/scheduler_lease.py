@@ -21,6 +21,7 @@ MAX_LOCK_PAYLOAD_BYTES = 16_384
 # Bound production scheduler DB lock connects so a misconfigured/unreachable
 # database_url fails fast instead of hanging the scheduler pass.
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
+FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 
 
 class UnsafeSchedulerLockError(OSError):
@@ -332,6 +333,12 @@ class FileSchedulerLease:
             _open_regular_guard_file,
         )
         parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
+        if _file_lock_guard_mode() == "atomic":
+            try:
+                yield parent_fd
+            finally:
+                os.close(parent_fd)
+            return
         try:
             guard_fd = open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
         except Exception:
@@ -529,6 +536,15 @@ def _postgres_advisory_lock_key(value: str) -> int:
     digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
     unsigned = int.from_bytes(digest, byteorder="big", signed=False)
     return unsigned - (1 << 64) if unsigned >= (1 << 63) else unsigned
+
+
+def _file_lock_guard_mode() -> str:
+    value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
+    if value in {"", "flock", "fcntl"}:
+        return "flock"
+    if value in {"atomic", "none", "off", "disabled"}:
+        return "atomic"
+    raise UnsafeSchedulerLockError("unsafe_lock_guard_mode")
 
 
 def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) -> int:

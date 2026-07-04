@@ -360,7 +360,7 @@ class ProductionScheduler:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
         if self.config.db_free_required:
-            state_manager = _db_free_state_manager_from_config(self.config) if self._db_free_strict_warm_start_required() else None
+            state_manager = _db_free_state_manager_from_config(self.config)
             return self._default_orchestrator_for(source_id, state_manager=state_manager)
         return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
 
@@ -508,6 +508,7 @@ class ProductionScheduler:
         end_time: _scheduler.datetime,
     ) -> list[_scheduler.CycleDiscovery] | None:
         from services.orchestrator import source_cycle_raw_manifest
+        from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 
         enabled = _scheduler._env_flag(source_cycle_raw_manifest.NFS_RAW_MANIFEST_ENABLED_ENV)
         required = _scheduler._env_flag(source_cycle_raw_manifest.NFS_RAW_MANIFEST_REQUIRED_ENV)
@@ -519,7 +520,7 @@ class ProductionScheduler:
         if start > end:
             return []
 
-        allowed_hours = sorted({int(hour) for hour in self.config.allowed_cycle_hours_utc})
+        allowed_hours = sorted({int(hour) for hour in self.config.allowed_cycle_hours_utc if int(hour) in {0, 12}})
         discoveries: list[_scheduler.CycleDiscovery] = []
         current_date = start.date()
         while current_date <= end.date():
@@ -552,7 +553,7 @@ class ProductionScheduler:
                         classifier=source_cycle_raw_manifest.NFS_RAW_MANIFEST_READY_SOURCE,
                         retryable=False if ready else True,
                         probe_uri=None,
-                        evidence=_scheduler._evidence_safe(readiness),
+                        evidence=_public_raw_manifest_evidence(readiness),
                     )
                 )
             current_date += _scheduler.timedelta(days=1)
@@ -632,20 +633,67 @@ class ProductionScheduler:
     def _strict_warm_start_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
-        if not self._db_free_strict_warm_start_required_for(candidate):
+        if not self.config.db_free_required:
             return None
         required_lead_hours = self._required_warm_start_lead_hours(candidate, cycle)
         model_package_checksum = (
             candidate.resource_profile.get("package_checksum")
             or candidate.resource_profile.get("model_package_checksum")
         )
-        return self._db_free_state_index_provider().strict_warm_start_evidence(
+        evidence = self._db_free_state_index_provider().strict_warm_start_evidence(
             model_id=candidate.model_id,
             source_id=candidate.source_id,
             valid_time=candidate.cycle_time_utc,
             model_package_version=candidate.model_package_uri,
             model_package_checksum=str(model_package_checksum) if model_package_checksum not in (None, "") else None,
             required_lead_hours=required_lead_hours,
+        )
+        if self._db_free_strict_warm_start_required_for(candidate):
+            return evidence
+        if bool(evidence.get("ready")):
+            evidence["mode"] = "db_free_exact_warm_start"
+            return evidence
+        if str(evidence.get("reason") or "") != "state_snapshot_index_exact_checkpoint_missing":
+            evidence["mode"] = "db_free_state_continuity"
+            return evidence
+
+        history = self._db_free_state_index_provider().usable_state_history_evidence(
+            model_id=candidate.model_id,
+            source_id=candidate.source_id,
+            before_time=candidate.cycle_time_utc,
+        )
+        if not bool(history.get("ready")):
+            history["mode"] = "db_free_state_continuity"
+            return history
+        if not bool(history.get("history_exists")):
+            return None
+        producer_cycle_time = _scheduler._ensure_utc(candidate.cycle_time_utc) - _scheduler.timedelta(
+            hours=required_lead_hours
+        )
+        return _scheduler._evidence_safe(
+            {
+                **dict(evidence),
+                "status": "blocked",
+                "ready": False,
+                "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+                "mode": "db_free_state_continuity",
+                "required_lead_hours": required_lead_hours,
+                "required_prior_cycle_time": _scheduler._format_utc(producer_cycle_time),
+                "required_prior_cycle_id": _scheduler.cycle_id_for(candidate.source_id, producer_cycle_time),
+                "continuity_policy": {
+                    "decision": "block_or_backfill_prior_cycle",
+                    "first_cold_seed_allowed": False,
+                    "history_required_exact_successor": True,
+                },
+                "state_history": history,
+                "failure": {
+                    "classifier": "file_state_snapshot_index_unavailable",
+                    "reason_code": "STATE_SNAPSHOT_INDEX_PRIOR_CHECKPOINT_MISSING_AFTER_HISTORY",
+                    "dependency": "file_state_snapshot_index",
+                    "retryable": True,
+                    "permanent": False,
+                },
+            }
         )
 
     def _required_warm_start_lead_hours(
@@ -670,18 +718,37 @@ class ProductionScheduler:
         cycle: _scheduler.SchedulerSourceCycle,
     ) -> dict[str, _scheduler.Any] | None:
         del cycle
-        if not self._db_free_strict_warm_start_required():
+        if not self.config.db_free_required:
             return None
         orchestrator_config = _scheduler.OrchestratorConfig.from_env()
         candidate_time = _scheduler._ensure_utc(candidate.cycle_time_utc)
         successor_time = self._next_allowed_cycle_time(candidate_time)
-        if successor_time is None or not orchestrator_config.strict_forecast_warm_start_required_for(successor_time):
+        if successor_time is None:
             return None
         lead_hours = max(1, int(round((successor_time - candidate_time).total_seconds() / 3600.0)))
         model_package_checksum = (
             candidate.resource_profile.get("package_checksum")
             or candidate.resource_profile.get("model_package_checksum")
         )
+        state_index = self._db_free_state_index_provider()
+        strict_required = (
+            orchestrator_config.require_forecast_warm_start
+            and orchestrator_config.strict_forecast_warm_start_required_for(successor_time)
+        )
+        if not strict_required:
+            history = state_index.usable_state_history_evidence(
+                model_id=candidate.model_id,
+                source_id=candidate.source_id,
+                before_time=successor_time,
+            )
+            if not bool(history.get("ready")):
+                history["mode"] = "db_free_successor_state_continuity"
+                history["producer_cycle_time"] = _scheduler._format_utc(candidate_time)
+                history["successor_cycle_time"] = _scheduler._format_utc(successor_time)
+                history["required_lead_hours"] = lead_hours
+                return _scheduler._evidence_safe(history)
+            if not bool(history.get("history_exists")):
+                return None
         evidence = self._db_free_state_index_provider().strict_warm_start_evidence(
             model_id=candidate.model_id,
             source_id=candidate.source_id,

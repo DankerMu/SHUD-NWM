@@ -18,11 +18,13 @@ from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import cli
+from services.orchestrator import file_orchestration_journal as file_orchestration_journal_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_evidence as scheduler_evidence_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
+from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator.chain import (
@@ -4385,6 +4387,87 @@ def test_compute_terminal_completed_stage_resume_prefers_forecast_over_newer_con
     assert decision.evidence["restart_stage"] == "state_save_qc"
 
 
+def test_candidate_state_terminal_state_save_qc_suppresses_upstream_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    object_store_root = tmp_path / "object-store"
+    run_manifest = object_store_root / "runs" / candidate.run_id / "input" / "manifest.json"
+    run_manifest.parent.mkdir(parents=True)
+    run_manifest.write_text(
+        json.dumps(
+            {
+                "initial_state": {
+                    "quality": "fresh",
+                    "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run={
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        pipeline_jobs=[
+            {
+                "job_id": "job_cycle_gfs_2026052106_full_model_a_forecast",
+                "run_id": "cycle_gfs_2026052106_full_model_a",
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": "cycle_gfs_2026052106_full_model_a",
+                "status": "succeeded",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+                "slurm_job_id": "3001",
+                "updated_at": "2026-05-21T06:45:00Z",
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_full_model_a_state_save_qc",
+                "run_id": "cycle_gfs_2026052106_full_model_a",
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "candidate_id": "cycle_gfs_2026052106_full_model_a",
+                "status": "succeeded",
+                "stage": "state_save_qc",
+                "job_type": "save_state_snapshot_array",
+                "slurm_job_id": "3002",
+                "updated_at": "2026-05-21T07:15:00Z",
+            },
+        ],
+        pipeline_events=[],
+        forcing_version=None,
+        forecast_cycle=None,
+    )
+
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
+    assert state["stage"] == "state_save_qc"
+    assert "completed_stage_evidence" not in state
+    assert state["hydro_run"]["init_state_id"] == "state_gfs_model_a_2026052106_gfs_2026052100_f006"
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "skip"
+    assert decision.reason == "terminal_pipeline_success"
+    assert decision.evidence["run_manifest_initial_state"]["state_id"] == (
+        "state_gfs_model_a_2026052106_gfs_2026052100_f006"
+    )
+    assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        decision.evidence,
+        {"candidate_state": {"init_state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006"}},
+    )
+
+
 def test_candidate_state_decision_owner_module_matches_scheduler_facade() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
@@ -7728,6 +7811,169 @@ def test_lock_guard_open_failure_closes_parent_fd(monkeypatch: Any, tmp_path: Pa
     assert len(closed) == 1
 
 
+def test_atomic_lock_guard_mode_does_not_open_guard_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+
+    assert acquired["acquired"] is True
+    assert lock_path.exists()
+    assert not lock_path.with_name(f"{lock_path.name}.guard").exists()
+    assert lease.renew(pass_id="p1") is True
+    lease.release(pass_id="p1")
+    assert not lock_path.exists()
+
+
+def test_file_journal_atomic_lock_mode_does_not_call_flock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    monkeypatch.setattr(fcntl, "flock", lambda *_args: pytest.fail("atomic mode must not call flock"))
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+
+    with repository._cycle_file_lock_unlocked(source_id="gfs", cycle_time=_dt("2026-05-21T12:00:00Z")):
+        pass
+
+    lock_path = tmp_path / "journal" / ".locks" / "gfs" / "2026052112.lock"
+    assert lock_path.is_file()
+
+
+def test_file_journal_cycle_rows_reuse_cycle_scan_across_models(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    calls = 0
+
+    def fake_direct_jobs(*, source_id: str, cycle_time: datetime, model_id: str | None):
+        nonlocal calls
+        calls += 1
+        for model in ("model_a", "model_b"):
+            yield {
+                "job_id": f"job_{model}",
+                "source_id": source_id,
+                "cycle_id": "gfs_2026052112",
+                "cycle_time": _format_iso_z(cycle_time),
+                "model_id": model,
+                "run_id": f"fcst_gfs_2026052112_{model}",
+                "forcing_version_id": f"forcing_gfs_2026052112_{model}",
+                "candidate_id": f"gfs:2026-05-21T12:00:00Z:{model}:forecast_gfs_deterministic",
+                "status": "succeeded",
+                "stage": "state_save_qc",
+                "job_type": "save_state_snapshot_array",
+            }
+
+    monkeypatch.setattr(repository, "_iter_direct_pipeline_job_records_for_cycle", fake_direct_jobs)
+
+    rows_a = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    rows_b = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_b")
+    rows_a.pipeline_jobs["job_model_a"]["model_id"] = "mutated"
+    rows_a_again = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+
+    assert calls == 1
+    assert set(rows_a.pipeline_jobs) == {"job_model_a"}
+    assert set(rows_b.pipeline_jobs) == {"job_model_b"}
+    assert rows_a_again.pipeline_jobs["job_model_a"]["model_id"] == "model_a"
+
+
+def test_file_journal_cycle_rows_cache_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(file_orchestration_journal_module, "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES", 2)
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    monkeypatch.setattr(
+        repository,
+        "_iter_direct_pipeline_job_records_for_cycle",
+        lambda *, source_id, cycle_time, model_id: iter(()),
+    )
+
+    for offset in range(3):
+        repository._cycle_rows(
+            source_id="gfs",
+            cycle_time=_dt("2026-05-21T00:00:00Z") + timedelta(hours=12 * offset),
+            model_id=None,
+        )
+
+    assert len(repository._cycle_rows_cache) == 2
+    assert all(key[1] in {"2026052112", "2026052200"} for key in repository._cycle_rows_cache)
+
+
+def test_scheduler_file_provider_reuses_object_store_for_uri_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = LocalObjectStore(tmp_path, object_store_prefix="s3://nhms")
+    uri = store.write_bytes_atomic("canonical/gfs/2026052112/tmp/product.json", b'{"ok": true}')
+    roots = scheduler_file_providers_module._ProviderRoots(
+        object_store_root=tmp_path,
+        object_store_prefix="s3://nhms",
+    )
+    init_calls = 0
+    real_store = scheduler_file_providers_module.LocalObjectStore
+
+    class CountingLocalObjectStore(real_store):
+        def __post_init__(self) -> None:
+            nonlocal init_calls
+            init_calls += 1
+            super().__post_init__()
+
+    monkeypatch.setattr(scheduler_file_providers_module, "LocalObjectStore", CountingLocalObjectStore)
+
+    assert scheduler_file_providers_module._uri_exists(uri, roots=roots) is True
+    assert scheduler_file_providers_module._read_bytes(uri, roots=roots, max_bytes=1024) == b'{"ok": true}'
+    assert init_calls == 1
+
+
+def test_scheduler_file_provider_object_store_cache_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(scheduler_file_providers_module, "MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES", 1)
+    object_store_root = tmp_path / "object-store"
+    published_root = tmp_path / "published"
+    s3_path = object_store_root / "canonical" / "gfs" / "2026052112" / "tmp" / "product.json"
+    published_path = published_root / "tiles" / "hydro" / "run-a" / "manifest.json"
+    s3_path.parent.mkdir(parents=True)
+    published_path.parent.mkdir(parents=True)
+    s3_path.write_text('{"ok": true}\n', encoding="utf-8")
+    published_path.write_text('{"ok": true}\n', encoding="utf-8")
+    roots = scheduler_file_providers_module._ProviderRoots(
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        published_artifact_root=published_root,
+    )
+
+    assert (
+            scheduler_file_providers_module._uri_exists(
+            "s3://nhms/canonical/gfs/2026052112/tmp/product.json",
+            roots=roots,
+        )
+        is True
+    )
+    assert len(roots.object_store_cache) == 1
+    assert (
+            scheduler_file_providers_module._uri_exists(
+            "published://tiles/hydro/run-a/manifest.json",
+            roots=roots,
+        )
+        is True
+    )
+
+    assert len(roots.object_store_cache) == 1
+    assert next(iter(roots.object_store_cache))[0] == "published"
+
+
 def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_path: Path) -> None:
     outside_locks = tmp_path.parent / f"{tmp_path.name}-outside-locks"
     outside_locks.mkdir()
@@ -8776,7 +9022,7 @@ def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrat
     }
 
 
-def test_slurm_preflight_passes_download_source_env_to_compute_jobs(
+def test_slurm_preflight_passes_compute_runtime_env_without_download_adapter_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8788,6 +9034,8 @@ def test_slurm_preflight_passes_download_source_env_to_compute_jobs(
     monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_NORTH", "64")
     monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", "63")
     monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "145")
+    monkeypatch.setenv("GFS_FORECAST_END_HOUR", "168")
+    monkeypatch.setenv("IFS_FORECAST_END_HOUR", "168")
     monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", str(tmp_path / "nhms-grib"))
     (tmp_path / "nhms-grib" / "bin").mkdir(parents=True)
     (tmp_path / "nhms-grib" / "lib").mkdir(parents=True)
@@ -8814,22 +9062,30 @@ def test_slurm_preflight_passes_download_source_env_to_compute_jobs(
     result = scheduler.run_once()
 
     expected = {
-        "GFS_NOMADS_BASE_URL": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod",
-        "IFS_OPEN_DATA_SOURCE": "aws",
-        "IFS_OPEN_DATA_FALLBACK_SOURCES": "azure,google,ecmwf",
-        "NHMS_DOWNLOAD_BBOX_SOUTH": "8",
-        "NHMS_DOWNLOAD_BBOX_NORTH": "64",
-        "NHMS_DOWNLOAD_BBOX_WEST": "63",
-        "NHMS_DOWNLOAD_BBOX_EAST": "145",
+        "GFS_FORECAST_END_HOUR": "168",
+        "IFS_FORECAST_END_HOUR": "168",
         "NHMS_GRIB_ENV_ROOT": str(tmp_path / "nhms-grib"),
+    }
+    blocked_download_env = {
+        "GFS_NOMADS_BASE_URL",
+        "IFS_OPEN_DATA_SOURCE",
+        "IFS_OPEN_DATA_FALLBACK_SOURCES",
+        "NHMS_DOWNLOAD_BBOX_SOUTH",
+        "NHMS_DOWNLOAD_BBOX_NORTH",
+        "NHMS_DOWNLOAD_BBOX_WEST",
+        "NHMS_DOWNLOAD_BBOX_EAST",
     }
     assert result.status == "submitted"
     sanitized = result.evidence["slurm_preflight"]["checks"]["environment"]["sanitized"]
     for key, value in expected.items():
         assert sanitized[key] == value
+    for key in blocked_download_env:
+        assert key not in sanitized
     submitted_basin = orchestrator.calls[0]["basins"][0]
     for key, value in expected.items():
         assert submitted_basin["slurm_env"][key] == value
+    for key in blocked_download_env:
+        assert key not in submitted_basin["slurm_env"]
 
 
 def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
@@ -15420,6 +15676,66 @@ def test_plan_production_cli_smoke_with_injected_scheduler(monkeypatch: Any, tmp
     assert rc == 0
 
 
+def test_plan_production_stdout_summary_mode_omits_full_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_continuous(self, *, max_passes: int | None = None) -> list[SimpleResult]:
+            result = SimpleResult(
+                {
+                    "status": "submitted",
+                    "pass_id": "scheduler_pass_1",
+                    "artifact_path": "/workspace/scheduler/evidence/pass_1.json",
+                    "candidate_count": 13,
+                    "submitted_count": 13,
+                    "blocked_candidate_count": 0,
+                    "sources": ["gfs", "IFS"],
+                    "candidates": [{"run_id": "run_1", "state_evidence": "x" * 10_000}],
+                    "state_evidence": {"raw": "x" * 10_000},
+                }
+            )
+            result.status = "submitted"
+            return [result]
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY", "true")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--continuous", "--max-passes", "1"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert rc == 0
+    assert payload == {
+        "passes": [
+            {
+                "artifact_path": "/workspace/scheduler/evidence/pass_1.json",
+                "blocked_candidate_count": 0,
+                "candidate_count": 13,
+                "pass_id": "scheduler_pass_1",
+                "sources": ["gfs", "IFS"],
+                "status": "submitted",
+                "submitted_count": 13,
+            }
+        ],
+        "status": "submitted",
+    }
+    assert "candidates" not in captured.out
+    assert "state_evidence" not in captured.out
+    assert len(captured.out) < 500
+
+
 def test_run_continuous_unbounded_keeps_only_latest_result(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
     scheduler = CountingScheduler(config, stop_after=3)
@@ -18706,6 +19022,251 @@ def test_db_free_strict_warm_start_uses_ready_file_state_index_without_db_state_
     assert state_evidence["state_snapshot_index"]["object_evidence"]["exists"] is True
 
 
+def test_db_free_non_strict_orchestrator_uses_file_state_index_for_exact_warm_start(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setattr(
+        "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
+        staticmethod(lambda: pytest.fail("DB-free warm start must not construct PostgreSQL state repository")),
+    )
+    monkeypatch.setattr(
+        scheduler_module.StateManager,
+        "from_env",
+        staticmethod(lambda: pytest.fail("DB-free warm start must not construct DB-backed StateManager")),
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([fixture["model"]]),
+        adapters={},
+    )
+
+    orchestrator = scheduler._orchestrator_for("gfs")
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="model_a",
+        cycle_time=cycle_time,
+        source_id="gfs",
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum=fixture["package_checksum"],
+    )
+
+    state_entry = state_fixture["entries"][0]
+    assert selection.quality == "fresh"
+    assert selection.state_id == state_entry["state_id"]
+    assert selection.state_uri == state_entry["state_uri"]
+    assert selection.cycle_id == state_entry["cycle_id"]
+    assert selection.lead_hours == state_entry["lead_hours"]
+    assert selection.model_package_checksum == fixture["package_checksum"]
+
+
+def test_db_free_non_strict_orchestrator_allows_first_cold_seed_when_file_state_missing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([fixture["model"]]),
+        adapters={},
+    )
+
+    orchestrator = scheduler._orchestrator_for("gfs")
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="model_a",
+        cycle_time=cycle_time,
+        source_id="gfs",
+        model_package_version="s3://nhms/models/model_a/package/",
+        model_package_checksum=fixture["package_checksum"],
+    )
+
+    assert selection.quality == "cold_start_no_state"
+    assert selection.state_id is None
+    assert selection.state_uri is None
+
+
+def test_db_free_non_strict_candidate_allows_first_cold_seed_when_no_state_history(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    generated_at = _dt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[],
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([fixture["model"]]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(fixture["model"])],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    assert "candidate_state" not in candidates[0].state_evidence
+
+
+def test_db_free_non_strict_candidate_blocks_later_cold_seed_after_state_history(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    history_time = _dt("2026-05-21T00:00:00Z")
+    generated_at = _dt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    state_content = b"db-free-continuity-history-state\n"
+    state_uri = store.write_bytes_atomic(
+        "states/gfs/model_a/2026052100/gfs_2026052012/f012/state.cfg.ic",
+        state_content,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[
+            {
+                "state_id": "state_gfs_model_a_2026052100_gfs_2026052012_f012",
+                "model_id": "model_a",
+                "run_id": "fcst_gfs_2026052012_model_a",
+                "source_id": "gfs",
+                "valid_time": _format_iso_z(history_time),
+                "state_uri": state_uri,
+                "checksum": f"sha256:{sha256_bytes(state_content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052012",
+                "lead_hours": 12,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": fixture["package_checksum"],
+            }
+        ],
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([fixture["model"]]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("blocked candidate must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(fixture["model"])],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    blocked_candidate = blocked[0]
+    assert blocked_candidate.reason == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    state_evidence = blocked_candidate.state_evidence
+    assert state_evidence["ready"] is False
+    assert state_evidence["mode"] == "db_free_state_continuity"
+    assert state_evidence["required_prior_cycle_id"] == "gfs_2026052100"
+    assert state_evidence["state_history"]["history_exists"] is True
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["init_state_id"]
+        == "state_gfs_model_a_2026052100_gfs_2026052012_f012"
+    )
+    assert "candidate_state" not in state_evidence
+
+
 def test_db_free_strict_warm_start_discovery_reopens_completed_cold_start_terminal(
     monkeypatch: Any,
     tmp_path: Path,
@@ -18860,6 +19421,241 @@ def test_db_free_strict_warm_start_resubmits_completed_cold_start_terminal(
     assert evidence["restart_stage"] == "forecast"
     assert evidence["candidate_state"]["init_state_id"] == state_fixture["entries"][0]["state_id"]
     assert evidence["strict_warm_start"]["ready"] is True
+
+
+def test_db_free_terminal_success_reopens_when_successor_checkpoint_missing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    successor_time = _dt("2026-05-21T12:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    identity = _production_identity_fixture()
+    repository = FakeCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "candidate_state": {
+                "init_state_id": state_fixture["entries"][0]["state_id"],
+                "state_id": state_fixture["entries"][0]["state_id"],
+                "init_state_quality": "fresh",
+            },
+            "hydro_status": "created",
+            "hydro_run": {
+                **identity,
+                "status": "created",
+                "init_state_id": state_fixture["entries"][0]["state_id"],
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            },
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": state_fixture["entries"][0]["state_id"],
+            },
+            "pipeline_status": "succeeded",
+            "pipeline_jobs": [
+                {
+                    **identity,
+                    "job_id": "job_cycle_gfs_2026052106_full_model_a_state_save_qc",
+                    "job_type": "save_state_snapshot_array",
+                    "run_id": "cycle_gfs_2026052106_full_model_a",
+                    "stage": "state_save_qc",
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "updated_at": _format_iso_z(generated_at),
+                }
+            ],
+        }
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_successor_checkpoint_missing"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["candidate_state"]["init_state_id"] == state_fixture["entries"][0]["state_id"]
+    assert evidence["successor_state"]["successor_cycle_time"] == _format_iso_z(successor_time)
+    assert evidence["successor_state"]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+    assert evidence["terminal_source"] == "pipeline_job"
+
+
+def test_db_free_terminal_success_reopens_when_active_run_manifest_missing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    successor_time = _dt("2026-05-21T12:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    current_state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
+    successor_content = b"db-free-strict-warm-start-successor-state\n"
+    successor_uri = store.write_bytes_atomic(
+        f"states/gfs/model_a/{format_cycle_time(successor_time)}/state.cfg.ic",
+        successor_content,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+        entries=[
+            current_state_fixture["entries"][0],
+            {
+                "state_id": "state_gfs_model_a_2026052112_gfs_2026052106_f006",
+                "model_id": "model_a",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "source_id": "gfs",
+                "valid_time": _format_iso_z(successor_time),
+                "state_uri": successor_uri,
+                "checksum": f"sha256:{sha256_bytes(successor_content)}",
+                "usable_flag": True,
+                "cycle_id": "gfs_2026052106",
+                "lead_hours": 6,
+                "model_package_version": "s3://nhms/models/model_a/package/",
+                "model_package_checksum": fixture["package_checksum"],
+            },
+        ],
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    identity = _production_identity_fixture()
+    repository = FakeCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "candidate_state": {
+                "init_state_id": current_state_fixture["entries"][0]["state_id"],
+                "state_id": current_state_fixture["entries"][0]["state_id"],
+                "init_state_quality": "fresh",
+            },
+            "hydro_status": "created",
+            "hydro_run": {
+                **identity,
+                "status": "created",
+                "init_state_id": current_state_fixture["entries"][0]["state_id"],
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            },
+            "pipeline_status": "succeeded",
+            "pipeline_jobs": [
+                {
+                    **identity,
+                    "job_id": "job_cycle_gfs_2026052106_full_model_a_state_save_qc",
+                    "job_type": "save_state_snapshot_array",
+                    "run_id": "cycle_gfs_2026052106_full_model_a",
+                    "stage": "state_save_qc",
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "updated_at": _format_iso_z(generated_at),
+                }
+            ],
+        }
+    )
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert blocked == []
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["candidate_state"]["init_state_id"] == current_state_fixture["entries"][0]["state_id"]
+    assert evidence["strict_warm_start"]["ready"] is True
+    assert "run_manifest_initial_state" not in evidence
 
 
 def test_db_free_strict_warm_start_reopens_completed_producer_missing_successor_checkpoint(

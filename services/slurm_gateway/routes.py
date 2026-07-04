@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError, create_gateway
@@ -39,17 +41,21 @@ SLURM_ROUTE_JOB_ID_PATTERN = r"^(?:\d+(?:_\d+)?|mock_\d+)$"
 class LazySlurmGateway:
     def __init__(self) -> None:
         self._instance: SlurmGateway | None = None
+        self._lock = threading.Lock()
 
     def _get(self) -> SlurmGateway:
         if self._instance is None:
-            self._instance = create_gateway()
+            with self._lock:
+                if self._instance is None:
+                    self._instance = create_gateway()
         return self._instance
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._get(), name)
 
     def reset_instance(self) -> None:
-        self._instance = None
+        with self._lock:
+            self._instance = None
 
 
 slurm_gateway = LazySlurmGateway()
@@ -63,21 +69,31 @@ def _gateway_error_response(exc: SlurmGatewayError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=response.model_dump(mode="json"))
 
 
+async def _run_gateway_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
+    def call() -> Any:
+        method = getattr(slurm_gateway, method_name)
+        return method(*args, **kwargs)
+
+    return await run_in_threadpool(call)
+
+
 async def health_check():
-    return slurm_gateway.health()
+    try:
+        return await _run_gateway_call("health")
+    except SlurmGatewayError as exc:
+        return _gateway_error_response(exc)
 
 
 async def submit_job(request: SubmitJobRequest):
     try:
-        return slurm_gateway.submit_job(request)
+        return await _run_gateway_call("submit_job", request)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
 
 async def submit_job_array(request: Annotated[ArraySubmitJobRequest, Body()]):
     try:
-        submit_array = getattr(slurm_gateway, "submit_job_array")
-        return submit_array(request)
+        return await _run_gateway_call("submit_job_array", request)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
@@ -87,35 +103,35 @@ async def list_jobs(
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
     try:
-        return slurm_gateway.list_jobs(limit=limit, offset=offset)
+        return await _run_gateway_call("list_jobs", limit=limit, offset=offset)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
 
 async def get_job_status(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
-        return slurm_gateway.get_job_status(job_id)
+        return await _run_gateway_call("get_job_status", job_id)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
 
 async def get_array_task_results(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
-        return slurm_gateway.get_array_task_results(job_id)
+        return await _run_gateway_call("get_array_task_results", job_id)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
 
 async def cancel_job(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
-        return slurm_gateway.cancel_job(job_id)
+        return await _run_gateway_call("cancel_job", job_id)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
 
 async def fetch_logs(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
-        return slurm_gateway.fetch_logs(job_id)
+        return await _run_gateway_call("fetch_logs", job_id)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
@@ -132,7 +148,10 @@ async def reset_registry(
             {"setting": "SLURM_GATEWAY_ALLOW_INTERNAL_RESET"},
         )
         return _gateway_error_response(exc)
-    return slurm_gateway.reset(request)
+    try:
+        return await _run_gateway_call("reset", request)
+    except SlurmGatewayError as exc:
+        return _gateway_error_response(exc)
 
 
 def create_slurm_router(*, include_internal_reset: bool = True) -> APIRouter:

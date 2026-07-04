@@ -62,6 +62,12 @@ def _fail_if_called(*_args: object, **_kwargs: object) -> downloader.SourceDownl
     raise AssertionError("download command must not run before preflight passes")
 
 
+def _write_raw_manifest(object_store_root: Path, source: str, compact_cycle: str) -> None:
+    manifest = object_store_root / "raw" / source / compact_cycle / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+
+
 def test_preflight_rejects_node22_historical_database_before_download_and_redacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -182,7 +188,7 @@ def test_preflight_ready_summary_is_credential_safe(
     assert "writer-secret" not in rendered
 
 
-def test_automatic_cycle_selection_uses_latest_allowed_cycle_after_delay(
+def test_automatic_cycle_selection_without_raw_seed_uses_latest_allowed_cycle_after_delay(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -197,13 +203,82 @@ def test_automatic_cycle_selection_uses_latest_allowed_cycle_after_delay(
     assert selected == "2026-06-29T12:00:00Z"
 
 
+def test_automatic_cycle_selection_uses_first_raw_continuity_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "8")
+
+    _write_raw_manifest(object_store_root, "GFS", "2026062118")
+    _write_raw_manifest(object_store_root, "IFS", "2026062118")
+    for compact_cycle in ("2026062600", "2026062612", "2026062700", "2026062712"):
+        _write_raw_manifest(object_store_root, "GFS", compact_cycle)
+        _write_raw_manifest(object_store_root, "IFS", compact_cycle)
+    for compact_cycle in ("2026070200", "2026070212"):
+        _write_raw_manifest(object_store_root, "GFS", compact_cycle)
+        _write_raw_manifest(object_store_root, "IFS", compact_cycle)
+
+    selected = downloader._select_automatic_cycle_time(
+        dict(os.environ),
+        now=datetime(2026, 7, 3, 0, 40, tzinfo=UTC),
+    )
+
+    assert selected == "2026-06-28T00:00:00Z"
+
+
+def test_automatic_cycle_selection_treats_any_selected_source_gap_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "0")
+    _write_raw_manifest(object_store_root, "GFS", "2026062600")
+    _write_raw_manifest(object_store_root, "IFS", "2026062600")
+    _write_raw_manifest(object_store_root, "GFS", "2026062612")
+
+    selected = downloader._select_automatic_cycle_time(
+        dict(os.environ),
+        now=datetime(2026, 6, 26, 12, 40, tzinfo=UTC),
+    )
+
+    assert selected == "2026-06-26T12:00:00Z"
+
+
+def test_automatic_cycle_selection_probes_window_without_raw_directory_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "0")
+    _write_raw_manifest(object_store_root, "GFS", "2026062600")
+    _write_raw_manifest(object_store_root, "IFS", "2026062600")
+    _write_raw_manifest(object_store_root, "GFS", "2026062612")
+    raw_source_dirs = {object_store_root / "raw" / "GFS", object_store_root / "raw" / "IFS"}
+    real_iterdir = Path.iterdir
+
+    def fail_raw_source_iterdir(path: Path) -> Iterator[Path]:
+        if path in raw_source_dirs:
+            pytest.fail(f"automatic continuity selection must not scan {path}")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_raw_source_iterdir)
+
+    selected = downloader._select_automatic_cycle_time(
+        dict(os.environ),
+        now=datetime(2026, 6, 26, 12, 40, tzinfo=UTC),
+    )
+
+    assert selected == "2026-06-26T12:00:00Z"
+
+
 def test_missing_cycle_time_defaults_to_automatic_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(downloader, "_select_automatic_cycle_time", lambda _env: "2026-06-29T12:00:00Z")
+    monkeypatch.setattr(downloader, "_select_automatic_cycle_time", lambda _env, **_kwargs: "2026-06-29T12:00:00Z")
 
     def fake_download(source: str, cycle_time: str, _env: dict[str, str]) -> downloader.SourceDownloadResult:
         return downloader.SourceDownloadResult(

@@ -63,11 +63,6 @@ NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scr
 NHMS_SCHEDULER_SOURCES=gfs,IFS
 # Scheduler hard gate for business candidate/backfill selection.
 NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12
-# Adapter cycle hours only narrow provider discovery/probe breadth; they do not
-# decide executable business cycles. Keep them aligned with the scheduler hard
-# gate in production so downloads converge on UTC 00/12 by default.
-GFS_CYCLE_HOURS_UTC=0,12
-IFS_CYCLE_HOURS_UTC=0,12
 # Leave empty in production so the DB-free file registry drives every active
 # Basins model published from NHMS_BASINS_ROOT. Narrow these only for a targeted
 # rollback/drill.
@@ -75,6 +70,11 @@ NHMS_SCHEDULER_MODEL_IDS=
 NHMS_SCHEDULER_BASIN_IDS=
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
 NHMS_SCHEDULER_MAX_PASSES=1
+# Keep systemd stdout operationally small; full pass evidence is still written
+# under NHMS_SCHEDULER_EVIDENCE_ROOT for audits and debugging.
+NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY=true
+# Use atomic O_EXCL lock files on NFS mounts where flock can block on RPC.
+NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic
 # Submit up to the current active Basins model count per scheduler pass. Slurm
 # remains the resource arbiter: extra jobs wait in the queue until whole-node
 # capacity is available. Lower only for an intentional cluster throttle.
@@ -103,6 +103,9 @@ NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
 NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true
 NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
 NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
+# Node-22 compute must not probe or download external GFS/IFS sources. External
+# download adapter env belongs in infra/env/node27-download.env; this scheduler
+# consumes only node-27 raw manifests and staged object-store files.
 # Node-22 is compute-only in the two-node production topology. It runs SHUD and
 # DB-free state_save_qc so forecast warm-start state continues to advance, then
 # stops before parse/publish; node-27 owns parse/QC/ingest/display from the
@@ -129,16 +132,6 @@ SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
 # Optional comma-separated unhealthy compute nodes to avoid at submit time.
 # Example: SLURM_GATEWAY_EXCLUDE_NODES=cn24
 SLURM_GATEWAY_EXCLUDE_NODES=
-
-GFS_NOMADS_BASE_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
-IFS_OPEN_DATA_SOURCE=ecmwf
-
-# Download spatial clip bbox: China mainland (18-54N / 73-135E) + 10 degree buffer.
-# GFS clips server-side via NOMADS subregion; IFS clips locally via cdo (requires cdo).
-NHMS_DOWNLOAD_BBOX_SOUTH=8
-NHMS_DOWNLOAD_BBOX_NORTH=64
-NHMS_DOWNLOAD_BBOX_WEST=63
-NHMS_DOWNLOAD_BBOX_EAST=145
 
 # Shared conda env (cdo + libeccodes) for GRIB clip/read on compute nodes that
 # lack system cdo/libeccodes. Injected into each sbatch's PATH/LD_LIBRARY_PATH.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
@@ -11,6 +13,7 @@ DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 _FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc")
 _COMPUTE_STATE_SAVE_QC_TERMINAL_STAGE = "forecast_state_save_qc"
 _COMPUTE_STATE_SAVE_QC_ALLOWED_STAGES = {"download", "convert", "forcing", "forecast", "state_save_qc"}
@@ -285,6 +288,40 @@ def _best_completed_stage_success_evidence(
     if not completed:
         return None
     return max(completed, key=lambda item: (item[0], item[1]))[2]
+
+
+def _has_terminal_completion_stage_success(jobs: list[dict[str, Any]]) -> bool:
+    for job in jobs:
+        if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            continue
+        stage = _normalized_record_stage(job)
+        if stage not in TERMINAL_PIPELINE_COMPLETION_STAGES:
+            continue
+        if _stage_after(stage) is None:
+            return True
+    return False
+
+
+def _run_manifest_initial_state_for_run(run_id: str) -> dict[str, Any] | None:
+    if not run_id or "/" in run_id or "\\" in run_id:
+        return None
+    root_value = os.getenv("OBJECT_STORE_ROOT") or os.getenv("NHMS_OBJECT_STORE_ROOT")
+    if root_value in (None, ""):
+        return None
+    root = Path(str(root_value)).expanduser()
+    try:
+        root_resolved = root.resolve()
+        manifest_path = (root_resolved / "runs" / run_id / "input" / "manifest.json").resolve()
+        manifest_path.relative_to(root_resolved)
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    initial_state = payload.get("initial_state")
+    if not isinstance(initial_state, Mapping):
+        return None
+    return dict(initial_state)
 
 
 def _candidate_manual_stage_repair_state(
@@ -710,6 +747,16 @@ def candidate_state_from_rows(
     )
     if manual_stage_repair_state.get("annotated_jobs"):
         jobs = list(manual_stage_repair_state["annotated_jobs"])
+    run_manifest_initial_state = _run_manifest_initial_state_for_run(run_id)
+    if isinstance(hydro_run, Mapping) and isinstance(run_manifest_initial_state, Mapping):
+        manifest_state_id = run_manifest_initial_state.get("state_id")
+        if manifest_state_id not in (None, "") and hydro_run.get("init_state_id") in (None, ""):
+            hydro_run = {
+                **dict(hydro_run),
+                "init_state_id": str(manifest_state_id),
+                "initial_state_id": str(manifest_state_id),
+                "initial_state_quality": run_manifest_initial_state.get("quality"),
+            }
     candidate_jobs = [job for job in jobs if _job_belongs_to_candidate(job, run_id=run_id, model_id=model_id)]
     failed_task = _candidate_failed_task_from_events(
         events,
@@ -804,6 +851,8 @@ def candidate_state_from_rows(
         "shared_cycle_aggregate": latest_shared_cycle_aggregate,
         "shared_cycle_ambiguous_failure": latest_shared_cycle_failure,
     }
+    if isinstance(run_manifest_initial_state, Mapping):
+        state["run_manifest_initial_state"] = dict(run_manifest_initial_state)
     if isinstance(repaired_stage_evidence, Mapping):
         state["repaired_stage_evidence"] = dict(repaired_stage_evidence)
         restart_stage = repaired_stage_evidence.get("restart_stage")
@@ -816,11 +865,13 @@ def candidate_state_from_rows(
             state["failed_stage"] = None
             state["error_code"] = None
             state["error_message"] = None
-    elif completed_stage_evidence := _best_completed_stage_success_evidence(
-        jobs,
-        source_id=source_id,
-        cycle_time=cycle_time,
-        cycle_id=cycle_id,
+    elif not _has_terminal_completion_stage_success(candidate_jobs) and (
+        completed_stage_evidence := _best_completed_stage_success_evidence(
+            jobs,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        )
     ):
         state["completed_stage_evidence"] = completed_stage_evidence
         state["restart_stage"] = str(completed_stage_evidence["restart_stage"])

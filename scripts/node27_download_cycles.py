@@ -36,6 +36,7 @@ PREFLIGHT_BLOCKED_RC = 2
 LOCK_BLOCKED_RC = 2
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS = 8
+DEFAULT_AUTOMATIC_CONTINUITY_LOOKBACK_DAYS = 14
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -386,7 +387,20 @@ def _automatic_cycle_delay(env: dict[str, str]) -> timedelta:
     return timedelta(hours=hours)
 
 
-def _select_automatic_cycle_time(env: dict[str, str], *, now: datetime | None = None) -> str:
+def _automatic_continuity_lookback(env: dict[str, str]) -> timedelta:
+    raw = (env.get("NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS") or "").strip()
+    if not raw:
+        return timedelta(days=DEFAULT_AUTOMATIC_CONTINUITY_LOOKBACK_DAYS)
+    try:
+        days = float(raw)
+    except ValueError as error:
+        raise ValueError("NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS must be numeric.") from error
+    if days <= 0 or days > 90:
+        raise ValueError("NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS must be greater than 0 and at most 90.")
+    return timedelta(days=days)
+
+
+def _latest_allowed_cycle(env: dict[str, str], *, now: datetime | None = None) -> datetime:
     allowed_hours = _allowed_cycle_hours(env)
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
@@ -398,8 +412,114 @@ def _select_automatic_cycle_time(env: dict[str, str], *, now: datetime | None = 
         for hour in sorted(allowed_hours, reverse=True):
             candidate = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
             if candidate <= reference:
-                return candidate.strftime("%Y-%m-%dT%H:%M:%SZ")
+                return candidate
     raise ValueError("Could not select an automatic node-27 download cycle time.")
+
+
+def _compact_cycle_time(cycle_time: datetime) -> str:
+    return cycle_time.astimezone(UTC).strftime("%Y%m%d%H")
+
+
+def _format_cycle_time(cycle_time: datetime) -> str:
+    return cycle_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _raw_manifest_source_dirs(source: str) -> tuple[str, ...]:
+    names: list[str] = []
+    for value in (source, source.lower(), source.upper()):
+        if value not in names:
+            names.append(value)
+    return tuple(names)
+
+
+def _raw_manifest_exists(object_store_root: Path, source: str, cycle_time: datetime) -> bool:
+    compact_cycle = _compact_cycle_time(cycle_time)
+    for source_dir in _raw_manifest_source_dirs(source):
+        if (object_store_root / "raw" / source_dir / compact_cycle / "manifest.json").is_file():
+            return True
+    return False
+
+
+def _existing_raw_manifest_cycles(
+    object_store_root: Path,
+    sources: Sequence[str],
+    *,
+    allowed_hours: Sequence[int],
+    start: datetime,
+    end: datetime,
+) -> set[datetime]:
+    cycles: set[datetime] = set()
+    selected_sources = tuple(sources)
+    for cycle_time in _iter_allowed_cycles(start, end, allowed_hours):
+        if any(_raw_manifest_exists(object_store_root, source, cycle_time) for source in selected_sources):
+            cycles.add(cycle_time)
+    return cycles
+
+
+def _iter_allowed_cycles(start: datetime, end: datetime, allowed_hours: Sequence[int]) -> Iterator[datetime]:
+    day = start.astimezone(UTC).date()
+    end_day = end.astimezone(UTC).date()
+    while day <= end_day:
+        for hour in sorted(allowed_hours):
+            cycle_time = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+            if start <= cycle_time <= end:
+                yield cycle_time
+        day += timedelta(days=1)
+
+
+def _automatic_continuity_start(
+    env: dict[str, str],
+    object_store_root: Path,
+    sources: Sequence[str],
+    *,
+    allowed_hours: Sequence[int],
+    latest_allowed: datetime,
+) -> datetime | None:
+    raw_start = (env.get("NODE27_DOWNLOAD_CONTINUITY_START_TIME") or "").strip()
+    if raw_start:
+        return parse_cycle_time(raw_start).astimezone(UTC)
+
+    lookback_start = latest_allowed - _automatic_continuity_lookback(env)
+    existing_cycles = _existing_raw_manifest_cycles(
+        object_store_root,
+        sources,
+        allowed_hours=allowed_hours,
+        start=lookback_start,
+        end=latest_allowed,
+    )
+    if not existing_cycles:
+        return None
+    return min(existing_cycles)
+
+
+def _select_automatic_cycle_time(
+    env: dict[str, str],
+    *,
+    now: datetime | None = None,
+    sources: Sequence[str] | None = None,
+) -> str:
+    allowed_hours = _allowed_cycle_hours(env)
+    latest_allowed = _latest_allowed_cycle(env, now=now)
+    selected_sources = tuple(sources or _normalize_sources(None, env))
+    object_store_root_value = (env.get("OBJECT_STORE_ROOT") or "").strip()
+    if not object_store_root_value:
+        return _format_cycle_time(latest_allowed)
+
+    object_store_root = Path(object_store_root_value)
+    continuity_start = _automatic_continuity_start(
+        env,
+        object_store_root,
+        selected_sources,
+        allowed_hours=allowed_hours,
+        latest_allowed=latest_allowed,
+    )
+    if continuity_start is None:
+        return _format_cycle_time(latest_allowed)
+
+    for cycle_time in _iter_allowed_cycles(continuity_start, latest_allowed, allowed_hours):
+        if any(not _raw_manifest_exists(object_store_root, source, cycle_time) for source in selected_sources):
+            return _format_cycle_time(cycle_time)
+    return _format_cycle_time(latest_allowed)
 
 
 def _lock_preflight(raw_value: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -673,6 +793,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     env = dict(os.environ)
+    for env_key, value in (
+        ("DATABASE_URL", args.database_url),
+        ("OBJECT_STORE_ROOT", args.object_store_root),
+        ("WORKSPACE_ROOT", args.workspace_root),
+        ("NODE27_DOWNLOAD_LOG_ROOT", args.log_root),
+        ("NODE27_DOWNLOAD_LOCK_PATH", args.lock_path),
+    ):
+        if value:
+            env[env_key] = value
+
     preflight = preflight_download_config(
         database_url=args.database_url,
         object_store_root=args.object_store_root,
@@ -699,8 +829,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return PREFLIGHT_BLOCKED_RC
 
     try:
+        sources = _normalize_sources(args.sources, env)
+    except ValueError as error:
+        summary = {
+            "schema": DOWNLOAD_SUMMARY_SCHEMA,
+            "status": "preflight_blocked",
+            "return_code": PREFLIGHT_BLOCKED_RC,
+            "role": DOWNLOAD_ROLE,
+            "cycle_time": args.cycle_time,
+            "cycle_time_selection": "explicit" if args.cycle_time else "automatic",
+            "sources": [],
+            "preflight": preflight,
+            "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
+            "blockers": [
+                _preflight_blocker("NODE27_DOWNLOAD_ARGUMENT_INVALID", "NHMS_NODE27_DOWNLOAD_SOURCES", str(error)),
+            ],
+        }
+        _write_summary_if_requested(summary, summary_file)
+        _emit_json_summary(summary)
+        return PREFLIGHT_BLOCKED_RC
+
+    try:
         selected_by = "explicit" if args.cycle_time else "automatic"
-        raw_cycle_time = args.cycle_time or _select_automatic_cycle_time(env)
+        raw_cycle_time = args.cycle_time or _select_automatic_cycle_time(env, sources=sources)
     except ValueError as error:
         summary = {
             "schema": DOWNLOAD_SUMMARY_SCHEMA,
@@ -709,7 +860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "role": DOWNLOAD_ROLE,
             "cycle_time": None,
             "cycle_time_selection": "automatic",
-            "sources": [],
+            "sources": list(sources),
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
             "blockers": [
@@ -728,7 +879,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parsed_cycle = parse_cycle_time(raw_cycle_time)
         # Keep output canonical even if the caller used a space or offset.
         cycle_time = parsed_cycle.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        sources = _normalize_sources(args.sources, env)
     except ValueError as error:
         summary = {
             "schema": DOWNLOAD_SUMMARY_SCHEMA,

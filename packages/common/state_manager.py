@@ -1137,6 +1137,83 @@ class FileStateSnapshotIndexRepository:
             }
         )
 
+    def usable_state_history_evidence(
+        self,
+        *,
+        model_id: str,
+        source_id: str,
+        before_time: datetime,
+    ) -> dict[str, Any]:
+        try:
+            index_snapshot = self._load_index_snapshot(allow_empty=False)
+        except StateManagerError as error:
+            index_evidence = self._blocked_index_evidence(error)
+            reason = _first_state_index_blocker_reason(index_evidence) or "state_snapshot_index_unavailable"
+            return _state_index_evidence_safe(
+                {
+                    "status": "blocked",
+                    "ready": False,
+                    "reason": reason,
+                    "model_id": model_id,
+                    "source_id": source_id,
+                    "before_time": _format_time(before_time),
+                    "history_exists": None,
+                    "state_snapshot_index": index_evidence,
+                    "dependency": {
+                        "name": "file_state_snapshot_index",
+                        "status": "unavailable",
+                        "retryable": True,
+                    },
+                    "failure": {
+                        "classifier": "file_state_snapshot_index_unavailable",
+                        "reason_code": reason.upper(),
+                        "dependency": "file_state_snapshot_index",
+                        "retryable": True,
+                        "permanent": False,
+                    },
+                }
+            )
+        source = _normalize_state_index_source_id(source_id, field="identity.source_id")
+        cutoff = _ensure_utc(before_time)
+        history_entries = [
+            entry
+            for key, entry in index_snapshot.entries.items()
+            if key[0] == str(model_id)
+            and key[1] == source
+            and _ensure_utc(_parse_state_index_time(entry["valid_time"], field="valid_time")) < cutoff
+            and _require_state_index_bool(entry.get("usable_flag"), field="usable_flag")
+        ]
+        latest_entry = None
+        if history_entries:
+            latest_entry = sorted(
+                history_entries,
+                key=lambda entry: (
+                    _ensure_utc(_parse_state_index_time(entry["valid_time"], field="valid_time")),
+                    str(entry.get("state_id") or ""),
+                ),
+                reverse=True,
+            )[0]
+        latest_state = None
+        if latest_entry is not None:
+            latest_state = _candidate_state_from_snapshot(_state_snapshot_from_index_entry(latest_entry))
+        return _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "ready": True,
+                "reason": None,
+                "model_id": model_id,
+                "source_id": source,
+                "before_time": _format_time(cutoff),
+                "history_exists": latest_entry is not None,
+                "history_entry_count": len(history_entries),
+                "latest_usable_state": latest_state,
+                "state_snapshot_index": {
+                    **index_snapshot.evidence,
+                    "history_entry_count": len(history_entries),
+                },
+            }
+        )
+
     def state_index_evidence(self) -> dict[str, Any]:
         try:
             return dict(self._load_index_snapshot(allow_empty=False).evidence)

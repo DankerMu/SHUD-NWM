@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ MAX_CANONICAL_PRODUCT_CATALOG_BYTES = 16 * 1024 * 1024
 MAX_REGISTRY_MODELS = 500
 MAX_READINESS_ENTRIES = 5000
 MAX_READINESS_PRODUCT_ROWS = 250000
+MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES = 16
 DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
@@ -63,6 +65,11 @@ class _ProviderRoots:
     published_artifact_root: str | Path | None = None
     now: datetime | None = None
     max_age_hours: int = DEFAULT_MAX_MANIFEST_AGE_HOURS
+    object_store_cache: dict[tuple[str, str, str], LocalObjectStore] = dataclass_field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
 
 
 class FileSchedulerModelRegistry:
@@ -1111,7 +1118,15 @@ def _object_store_for(uri: str, roots: _ProviderRoots) -> LocalObjectStore:
         prefix = roots.object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", "")
     if root in (None, ""):
         raise ObjectStoreError("object store root is required for file provider object URI reads")
-    return LocalObjectStore(root, object_store_prefix=prefix or "")
+    cache_key = (parsed.scheme, str(root), prefix or "")
+    store = roots.object_store_cache.get(cache_key)
+    if store is None:
+        cache_limit = max(int(MAX_FILE_PROVIDER_OBJECT_STORE_CACHE_ENTRIES), 1)
+        if len(roots.object_store_cache) >= cache_limit:
+            roots.object_store_cache.pop(next(iter(roots.object_store_cache)), None)
+        store = LocalObjectStore(root, object_store_prefix=prefix or "")
+        roots.object_store_cache[cache_key] = store
+    return store
 
 
 def _require_supported_internal_reference(

@@ -190,6 +190,9 @@ def test_publish_all_basin_scheduler_registry_repairs_missing_radiation_model(
     assert summary["selected_basin_slugs"] == ["qhh", "tailanhe"]
     assert len(summary["repairs"]) == 1
     assert summary["repairs"][0]["basin_slug"] == "tailanhe"
+    assert summary["repair_staging_cleanup"]["status"] == "cleaned"
+    assert summary["repair_staging_cleanup"]["removed"][0]["name"] == "repaired-basins"
+    assert not (tmp_path / "work" / "repaired-basins").exists()
     payload = json.loads(registry_manifest.read_text(encoding="utf-8"))
     assert {row["model_id"] for row in payload["models"]} == {"basins_qhh_shud", "basins_tailanhe_shud"}
 
@@ -300,9 +303,11 @@ def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_mode
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
         work_dir=tmp_path / "work",
+        retain_repair_staging=True,
     )
 
     assert summary["selected_basin_slugs"] == ["hetianhe"]
+    assert summary["repair_staging_cleanup"] == {"status": "retained", "reason": "retain_repair_staging"}
     assert len(summary["repairs"]) == 1
     assert summary["repairs"][0]["schema_version"] == "basins.calibration_repair.v1"
     repair = summary["repairs"][0]["repairs"][0]

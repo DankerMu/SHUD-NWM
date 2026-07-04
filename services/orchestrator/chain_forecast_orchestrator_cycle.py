@@ -2,6 +2,20 @@ from __future__ import annotations
 
 from services.orchestrator import chain as _chain
 
+_FORCE_TERMINAL_RESUBMIT_DECISIONS = {
+    "retry_strict_warm_start_terminal_init_state_mismatch",
+    "retry_strict_warm_start_terminal_run_manifest_missing",
+    "retry_terminal_run_manifest_missing",
+}
+_STAGE_ORDER = {
+    "convert": 0,
+    "forcing": 1,
+    "forecast": 2,
+    "state_save_qc": 3,
+    "parse": 4,
+    "publish": 5,
+}
+
 
 class ForecastOrchestratorCycleMixin:
     def __init__(
@@ -125,6 +139,8 @@ class ForecastOrchestratorCycleMixin:
     def _terminal_stage_needs_manual_retry(
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
+        if _terminal_stage_needs_forced_resubmit(context, job):
+            return True
         if context.retry_attempt is None:
             return False
         status = str(job.get("status") or "")
@@ -660,3 +676,42 @@ class ForecastOrchestratorCycleMixin:
     @staticmethod
     def _job_needs_submission(job: _chain.Mapping[str, _chain.Any]) -> bool:
         return _chain.chain_forecast_cycle.job_needs_submission(job)
+
+
+def _terminal_stage_needs_forced_resubmit(
+    context: _chain.CycleOrchestrationContext,
+    job: _chain.Mapping[str, _chain.Any],
+) -> bool:
+    status = str(job.get("status") or "")
+    if status not in _chain.TERMINAL_JOB_STATUSES:
+        return False
+    if len(context.active_basins) != 1:
+        return False
+    state_evidence = context.active_basins[0].get("state_evidence")
+    if not isinstance(state_evidence, _chain.Mapping):
+        return False
+    if state_evidence.get("decision") not in _FORCE_TERMINAL_RESUBMIT_DECISIONS:
+        return False
+    restart_stage = _canonical_stage(
+        state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or context.restart_stage
+    )
+    job_stage = _canonical_stage(job.get("stage") or job.get("job_type"))
+    if restart_stage is None or job_stage is None:
+        return False
+    return _STAGE_ORDER[job_stage] >= _STAGE_ORDER[restart_stage]
+
+
+def _canonical_stage(value: _chain.Any) -> str | None:
+    if value in (None, ""):
+        return None
+    stage = str(value)
+    aliases = {
+        "convert_canonical": "convert",
+        "produce_forcing_array": "forcing",
+        "run_shud_forecast_array": "forecast",
+        "save_state_snapshot_array": "state_save_qc",
+        "parse_output_array": "parse",
+        "publish_tiles": "publish",
+    }
+    stage = aliases.get(stage, stage)
+    return stage if stage in _STAGE_ORDER else None

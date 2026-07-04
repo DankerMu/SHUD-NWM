@@ -61,6 +61,11 @@ DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
     "allowed_cycle_hours_utc": [0, 12],
 }
+REPAIR_STAGING_DIR_NAMES = (
+    "repaired-basins",
+    "repaired-basins-calibration",
+    "repaired-basins-soil-alpha",
+)
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -97,6 +102,7 @@ def publish_all_basin_scheduler_registry(
     memory_mb: int = 8192,
     walltime_minutes: int = 720,
     repair_missing_radiation: bool = True,
+    retain_repair_staging: bool = False,
     dry_run: bool = False,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -214,6 +220,11 @@ def publish_all_basin_scheduler_registry(
         "package_status_counts": package_status_counts,
         "packages": package_results,
     }
+    summary["repair_staging_cleanup"] = (
+        {"status": "retained", "reason": "retain_repair_staging"}
+        if retain_repair_staging
+        else _cleanup_repair_staging(workspace)
+    )
     if output_path is not None:
         _write_json(output_path, summary)
     return summary
@@ -581,6 +592,36 @@ def _strip_synology_sidecars(root: Path) -> None:
         shutil.rmtree(sidecar, ignore_errors=True)
 
 
+def _cleanup_repair_staging(workspace: Path) -> dict[str, Any]:
+    removed: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for name in REPAIR_STAGING_DIR_NAMES:
+        path = workspace / name
+        if not path.exists():
+            continue
+        try:
+            size_bytes = _dir_size(path)
+            shutil.rmtree(path)
+        except OSError as error:
+            failures.append({"name": name, "path": str(path), "error": str(error)})
+            continue
+        removed.append({"name": name, "path": str(path), "size_bytes": size_bytes})
+    if failures:
+        return {"status": "failed", "removed": removed, "failures": failures}
+    return {"status": "cleaned", "removed": removed}
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file() and not child.is_symlink():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def _model_content_hash(model: Mapping[str, Any]) -> str:
     material = {
         "model_id": model.get("model_id"),
@@ -691,6 +732,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Do not synthesize missing *.tsd.rl files in private scratch copies.",
     )
     parser.add_argument(
+        "--retain-repair-staging",
+        action="store_true",
+        help="Keep repaired basin staging directories after publishing for manual debugging.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Discover/select only; do not publish packages/registry.",
@@ -717,6 +763,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             memory_mb=args.memory_mb,
             walltime_minutes=args.walltime_minutes,
             repair_missing_radiation=not args.no_repair_missing_radiation,
+            retain_repair_staging=args.retain_repair_staging,
             dry_run=args.dry_run,
             output_path=args.output,
         )

@@ -246,7 +246,9 @@ def build_candidates(
                 source_id=discovery.source_id,
                 cycle_time=discovery.cycle_time,
                 model_id=model.model_id,
-            ) and strict_warm_start is None and _successor_state_terminal_can_skip(successor_state):
+            ) and strict_warm_start is None and not callable(state_provider) and _successor_state_terminal_can_skip(
+                successor_state
+            ):
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
             raw_candidate_state = (
@@ -296,21 +298,44 @@ def build_candidates(
                     and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
                 ):
                     if _terminal_decision_matches_strict_warm_start(state_decision.evidence, strict_warm_start):
-                        skipped.append(
-                            {
-                                **candidate.to_dict(),
-                                "reason": state_decision.reason,
-                                "state_evidence": _evidence_safe(
-                                    _merge_state_evidence(state_decision.evidence, strict_warm_start)
+                        if not _terminal_decision_run_manifest_matches_strict_warm_start(
+                            state_decision.evidence,
+                            strict_warm_start,
+                        ):
+                            state_decision = CandidateStateDecision(
+                                "retry",
+                                "strict_warm_start_terminal_run_manifest_missing",
+                                _strict_warm_start_run_manifest_retry_evidence(
+                                    state_decision.evidence,
+                                    strict_warm_start,
                                 ),
-                            }
+                            )
+                        elif successor_state is not None and not bool(successor_state.get("ready")):
+                            state_decision = CandidateStateDecision(
+                                "retry",
+                                "strict_warm_start_successor_checkpoint_missing",
+                                _strict_warm_start_successor_retry_evidence(
+                                    state_decision.evidence,
+                                    successor_state,
+                                ),
+                            )
+                        else:
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": state_decision.reason,
+                                    "state_evidence": _evidence_safe(
+                                        _merge_state_evidence(state_decision.evidence, strict_warm_start)
+                                    ),
+                                }
+                            )
+                            continue
+                    else:
+                        state_decision = CandidateStateDecision(
+                            "retry",
+                            "strict_warm_start_terminal_init_state_mismatch",
+                            _strict_warm_start_terminal_retry_evidence(state_decision.evidence, strict_warm_start),
                         )
-                        continue
-                    state_decision = CandidateStateDecision(
-                        "retry",
-                        "strict_warm_start_terminal_init_state_mismatch",
-                        _strict_warm_start_terminal_retry_evidence(state_decision.evidence, strict_warm_start),
-                    )
                 elif (
                     successor_state is not None
                     and not bool(successor_state.get("ready"))
@@ -320,6 +345,15 @@ def build_candidates(
                         "retry",
                         "strict_warm_start_successor_checkpoint_missing",
                         _strict_warm_start_successor_retry_evidence(state_decision.evidence, successor_state),
+                    )
+                elif (
+                    state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                    and not _terminal_decision_has_run_manifest(state_decision.evidence)
+                ):
+                    state_decision = CandidateStateDecision(
+                        "retry",
+                        "terminal_run_manifest_missing",
+                        _terminal_run_manifest_retry_evidence(state_decision.evidence),
                     )
                 else:
                     skipped.append(
@@ -1133,6 +1167,44 @@ def _terminal_decision_matches_strict_warm_start(
     return str(terminal_init_state_id or "") == str(selected_id)
 
 
+def _terminal_decision_has_run_manifest(terminal_evidence: Mapping[str, Any]) -> bool:
+    run_manifest_initial_state = terminal_evidence.get("run_manifest_initial_state")
+    return isinstance(run_manifest_initial_state, Mapping)
+
+
+def _terminal_decision_run_manifest_matches_strict_warm_start(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> bool:
+    selected = strict_evidence.get("candidate_state")
+    selected_id = selected.get("init_state_id") if isinstance(selected, Mapping) else None
+    if selected_id in (None, ""):
+        return False
+    run_manifest_initial_state = terminal_evidence.get("run_manifest_initial_state")
+    if not isinstance(run_manifest_initial_state, Mapping):
+        return False
+    manifest_state_id = run_manifest_initial_state.get("state_id") or run_manifest_initial_state.get(
+        "init_state_id"
+    )
+    return str(manifest_state_id or "") == str(selected_id)
+
+
+def _terminal_run_manifest_retry_evidence(
+    terminal_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _evidence_safe(
+        {
+            **dict(terminal_evidence),
+            "decision": "retry_terminal_run_manifest_missing",
+            "reason": "terminal_run_manifest_missing",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "native_shud_resubmitted": True,
+            "durable_output_reused": False,
+        }
+    )
+
+
 def _strict_warm_start_terminal_retry_evidence(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
@@ -1153,6 +1225,26 @@ def _strict_warm_start_terminal_retry_evidence(
     index = strict_evidence.get("state_snapshot_index")
     if isinstance(index, Mapping):
         payload["state_snapshot_index"] = _evidence_safe(dict(index))
+    return _evidence_safe(payload)
+
+
+def _strict_warm_start_run_manifest_retry_evidence(
+    terminal_evidence: Mapping[str, Any],
+    strict_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        **dict(terminal_evidence),
+        "decision": "retry_strict_warm_start_terminal_run_manifest_missing",
+        "reason": "strict_warm_start_terminal_run_manifest_missing",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+    }
+    selected = strict_evidence.get("candidate_state")
+    if isinstance(selected, Mapping):
+        payload["candidate_state"] = _evidence_safe(dict(selected))
     return _evidence_safe(payload)
 
 

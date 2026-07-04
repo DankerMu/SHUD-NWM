@@ -1,3 +1,6 @@
+import asyncio
+import threading
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -67,6 +70,51 @@ async def test_submit_job(client):
     assert data["run_id"] == "run_001"
     assert data["model_id"] == "model_001"
     assert data["status"] == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_submit_job_offloads_blocking_gateway_calls(client):
+    class BlockingGateway:
+        def __init__(self) -> None:
+            self.barrier = threading.Barrier(2)
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def submit_job(self, request):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                self.barrier.wait(timeout=2)
+            finally:
+                with self.lock:
+                    self.active -= 1
+            return {
+                "job_id": f"mock_{request.run_id}",
+                "run_id": request.run_id,
+                "model_id": request.model_id,
+                "status": "submitted",
+            }
+
+        def reset(self, _request=None):
+            return {"cleared": 0}
+
+    fake_gateway = BlockingGateway()
+    slurm_gateway._instance = fake_gateway
+    try:
+        responses = await asyncio.wait_for(
+            asyncio.gather(
+                client.post("/api/v1/slurm/jobs", json={"run_id": "run_a", "model_id": "model_001"}),
+                client.post("/api/v1/slurm/jobs", json={"run_id": "run_b", "model_id": "model_001"}),
+            ),
+            timeout=3,
+        )
+    finally:
+        slurm_gateway.reset_instance()
+
+    assert [response.status_code for response in responses] == [201, 201]
+    assert fake_gateway.max_active == 2
 
 
 @pytest.mark.asyncio

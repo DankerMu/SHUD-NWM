@@ -2432,6 +2432,7 @@ def test_parse_success_copybacks_active_run_trees(
             "object_store_root": orchestrator.config.object_store_root,
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
+            "extra_object_keys": (),
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
@@ -2475,6 +2476,7 @@ def test_forecast_state_save_qc_terminal_success_copybacks_active_run_trees(
             "object_store_root": orchestrator.config.object_store_root,
             "copyback_root": str(copyback_root),
             "run_ids": ["run_0", "run_1"],
+            "extra_object_keys": (),
         }
     ]
     event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
@@ -10269,6 +10271,44 @@ def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path
     assert retry_job["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
     assert idempotency_key_from_comment(comments[0]) == "cycle_gfs_2026050100:convert:retry_4"
     assert client.submissions[0]["stage"] == "convert"
+
+
+def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100_forecast",
+        all_basins=[],
+        active_basins=[
+            {
+                "state_evidence": {
+                    "decision": "retry_strict_warm_start_terminal_run_manifest_missing",
+                    "restart_stage": "forecast",
+                }
+            }
+        ],
+        restart_stage="forecast",
+    )
+
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
+    )
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "state_save_qc", "status": "succeeded"},
+    )
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forcing", "status": "succeeded"},
+    )
+
+    context.active_basins[0]["state_evidence"] = {"decision": "skip_terminal", "restart_stage": "forecast"}
+    assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "succeeded"},
+    )
 
 
 class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):

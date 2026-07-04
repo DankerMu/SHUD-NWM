@@ -158,11 +158,19 @@ def _slurm_summary() -> dict[str, Any]:
 
 def _scheduler_summary(config: MonitorConfig, now: datetime) -> dict[str, Any]:
     evidence_dir = config.workspace_root / "scheduler" / "evidence"
-    files = sorted(evidence_dir.glob("scheduler_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-    if not files:
+    latest: Path | None = None
+    latest_mtime_seconds: float | None = None
+    for path in evidence_dir.glob("scheduler_*.json"):
+        try:
+            mtime_seconds = path.stat().st_mtime
+        except OSError:
+            continue
+        if latest_mtime_seconds is None or mtime_seconds > latest_mtime_seconds:
+            latest = path
+            latest_mtime_seconds = mtime_seconds
+    if latest is None or latest_mtime_seconds is None:
         return {"status": "missing", "latest_artifact": None}
-    latest = files[0]
-    mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=UTC)
+    mtime = datetime.fromtimestamp(latest_mtime_seconds, tz=UTC)
     age_minutes = max((now - mtime).total_seconds() / 60.0, 0.0)
     latest_status = None
     try:

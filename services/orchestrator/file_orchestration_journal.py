@@ -82,6 +82,7 @@ from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
+FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_journal.v1"
 FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_latest.v1"
 FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
@@ -92,6 +93,7 @@ MAX_FILE_JOURNAL_SCAN_DEPTH = 32
 MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
 MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
+MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
@@ -250,6 +252,59 @@ class _CycleRows:
     replay: dict[str, Any] = field(default_factory=dict)
 
 
+def _clone_cycle_rows(rows: _CycleRows) -> _CycleRows:
+    return _CycleRows(
+        hydro_run=dict(rows.hydro_run) if isinstance(rows.hydro_run, Mapping) else None,
+        forecast_cycle=dict(rows.forecast_cycle) if isinstance(rows.forecast_cycle, Mapping) else None,
+        forcing_version=dict(rows.forcing_version) if isinstance(rows.forcing_version, Mapping) else None,
+        model_context=dict(rows.model_context) if isinstance(rows.model_context, Mapping) else None,
+        pipeline_jobs={str(job_id): dict(job) for job_id, job in rows.pipeline_jobs.items()},
+        pipeline_events=[dict(event) for event in rows.pipeline_events],
+        replay=dict(rows.replay),
+    )
+
+
+def _filter_cycle_rows_for_model(
+    rows: _CycleRows,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+) -> None:
+    rows.forecast_cycle = _candidate_scoped_forecast_cycle(rows.forecast_cycle)
+    rows.hydro_run = (
+        rows.hydro_run
+        if _row_matches_candidate(rows.hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        else None
+    )
+    rows.forcing_version = (
+        rows.forcing_version
+        if _row_matches_candidate(rows.forcing_version, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        else None
+    )
+    rows.model_context = (
+        rows.model_context
+        if _row_matches_candidate(rows.model_context, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        else None
+    )
+    rows.pipeline_jobs = {
+        job_id: job
+        for job_id, job in rows.pipeline_jobs.items()
+        if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+    }
+    rows.pipeline_events = [
+        event
+        for event in rows.pipeline_events
+        if _event_matches_candidate_rows(
+            event,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            pipeline_jobs=rows.pipeline_jobs,
+            forecast_cycle=rows.forecast_cycle,
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class _CycleSourceDiscovery:
     source_id: str
@@ -290,6 +345,7 @@ class FileOrchestrationJournalRepository:
         self.max_json_depth = int(max_json_depth)
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
+        self._cycle_rows_cache: dict[tuple[str, str, str | None, str | None], _CycleRows] = {}
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
@@ -1260,6 +1316,21 @@ class FileOrchestrationJournalRepository:
             source_segment_override=source_segment_override,
         )
         cycle_segment = format_cycle_time(cycle_time)
+        cache_key = (source_id, cycle_segment, model_id, source_segment_override)
+        cached = self._cycle_rows_cache.get(cache_key)
+        if cached is not None:
+            return _clone_cycle_rows(cached)
+        if model_id is not None:
+            rows = self._cycle_rows(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=None,
+                source_segment_override=source_segment_override,
+            )
+            _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            rows.pipeline_events = _dedupe_events(rows.pipeline_events)
+            self._cache_cycle_rows(cache_key, rows)
+            return _clone_cycle_rows(rows)
         latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
         for path in latest_paths:
             payload = self._read_optional_json(path)
@@ -1295,50 +1366,20 @@ class FileOrchestrationJournalRepository:
         ):
             _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
         if model_id is not None:
-            rows.forecast_cycle = _candidate_scoped_forecast_cycle(rows.forecast_cycle)
-            rows.hydro_run = (
-                rows.hydro_run
-                if _row_matches_candidate(rows.hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
-                else None
-            )
-            rows.forcing_version = (
-                rows.forcing_version
-                if _row_matches_candidate(
-                    rows.forcing_version,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    model_id=model_id,
-                )
-                else None
-            )
-            rows.model_context = (
-                rows.model_context
-                if _row_matches_candidate(
-                    rows.model_context,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    model_id=model_id,
-                )
-                else None
-            )
-            rows.pipeline_jobs = {
-                job_id: job
-                for job_id, job in rows.pipeline_jobs.items()
-                if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
-            }
-            rows.pipeline_events = [
-                event
-                for event in rows.pipeline_events
-                if _event_matches_candidate_rows(
-                    event,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    pipeline_jobs=rows.pipeline_jobs,
-                    forecast_cycle=rows.forecast_cycle,
-                )
-            ]
+            _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-        return rows
+        self._cache_cycle_rows(cache_key, rows)
+        return _clone_cycle_rows(rows)
+
+    def _cache_cycle_rows(
+        self,
+        cache_key: tuple[str, str, str | None, str | None],
+        rows: _CycleRows,
+    ) -> None:
+        cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
+        if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
+            self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
+        self._cycle_rows_cache[cache_key] = _clone_cycle_rows(rows)
 
     def _latest_paths(self, source_segment: str, cycle_segment: str, *, model_id: str | None) -> list[Path]:
         directory = self.root / "latest" / source_segment / cycle_segment
@@ -2217,9 +2258,13 @@ class FileOrchestrationJournalRepository:
     @contextmanager
     def _locked_cycle_write(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
         with self._write_lock:
+            self._cycle_rows_cache.clear()
             self._ensure_root_unlocked()
-            with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
-                yield
+            try:
+                with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
+                    yield
+            finally:
+                self._cycle_rows_cache.clear()
 
     @contextmanager
     def _cycle_file_lock_unlocked(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
@@ -2233,6 +2278,7 @@ class FileOrchestrationJournalRepository:
         )
         parent_fd: int | None = None
         lock_fd: int | None = None
+        lock_held = False
         try:
             lock_dir = ensure_directory_no_follow(lock_path.parent, containment_root=self.root)
             parent_fd = os.open(
@@ -2248,7 +2294,9 @@ class FileOrchestrationJournalRepository:
             lock_stat = os.fstat(lock_fd)
             if not stat.S_ISREG(lock_stat.st_mode):
                 raise SafeFilesystemError(f"Cycle lock target must be a regular file: {lock_path}")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if _file_lock_guard_mode() == "flock":
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                lock_held = True
             yield
         except (OSError, SafeFilesystemError) as error:
             raise OrchestratorError(
@@ -2258,10 +2306,11 @@ class FileOrchestrationJournalRepository:
             ) from error
         finally:
             if lock_fd is not None:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
+                if lock_held:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
                 os.close(lock_fd)
             if parent_fd is not None:
                 os.close(parent_fd)
@@ -2278,6 +2327,15 @@ class FileOrchestrationJournalRepository:
                 "failed to create file orchestration journal root",
                 {"error_type": type(error).__name__},
             ) from error
+
+
+def _file_lock_guard_mode() -> str:
+    value = os.getenv(FILE_LOCK_GUARD_MODE_ENV, "flock").strip().lower()
+    if value in {"", "flock", "fcntl"}:
+        return "flock"
+    if value in {"atomic", "none", "off", "disabled"}:
+        return "atomic"
+    raise SafeFilesystemError(f"Unsupported {FILE_LOCK_GUARD_MODE_ENV}: {value}")
 
 
 class FileJournalRetryService:

@@ -123,6 +123,9 @@ def _candidate_state_evidence(candidate: SchedulerCandidateLike, state: Mapping[
     nfs_raw_manifest = state.get("nfs_raw_manifest")
     if isinstance(nfs_raw_manifest, Mapping):
         evidence["nfs_raw_manifest"] = _evidence_safe(dict(nfs_raw_manifest))
+    run_manifest_initial_state = state.get("run_manifest_initial_state")
+    if isinstance(run_manifest_initial_state, Mapping):
+        evidence["run_manifest_initial_state"] = _evidence_safe(dict(run_manifest_initial_state))
     overflow = _state_overflow_evidence(state)
     if overflow:
         evidence["state_bounds"] = overflow
