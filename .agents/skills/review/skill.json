@@ -3,7 +3,7 @@
   "name": "review",
   "displayName": "Review",
   "description": "Perform structured, agent-oriented reviews of PRs, diffs, commits, code, tests, frontend, docs, API specs, design docs, migrations, and infrastructure/config changes with severity-graded findings, behavioral-change checks, and actionable fix directions.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "maturity": "experimental",
   "categories": [
     "review",

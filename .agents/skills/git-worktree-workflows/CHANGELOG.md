@@ -5,6 +5,11 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-02
+
+### Added
+- Added `invocation_posture: manual-first` to the SKILL.md frontmatter to match the body's self-described manual-first posture and align with sibling skill-package conventions.
+
 ## [0.1.4] - 2026-03-28
 
 ### Fixed

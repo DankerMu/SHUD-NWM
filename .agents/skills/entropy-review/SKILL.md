@@ -11,6 +11,7 @@ description: >-
   (use repo-entropy-audit), control-plane audit (use control-plane-auditor),
   brainstorming, or implementation tasks.
 invocation_posture: manual-first
+version: 0.2.0
 ---
 
 # Entropy Review
@@ -67,7 +68,8 @@ For each affected module/directory:
 1. Read the nearest AGENTS.md (walk up from the changed file)
 2. Read the root AGENTS.md
 3. Extract: glossary, dependency rules, error model, naming conventions, doc freshness rules, state model references
-4. If none found, note "no formal constraints available; reviewing against surrounding code patterns"
+4. When `openspec/glossary.md` exists, treat it as the canonical domain glossary (the convention maintained by `grill-with-docs`); AGENTS.md-level constraints supplement it
+5. If none found, note "no formal constraints available; reviewing against surrounding code patterns"
 
 ### 1c. Read surrounding context
 
@@ -80,7 +82,7 @@ For each changed file, read enough surrounding code to understand the local patt
 
 ## Phase 2 — Analyze
 
-Check the change set against six dimensions. Use the [Entropy Checklist](references/entropy-checklist.md) for detailed detection guidance.
+Check the change set against eight dimensions. Use the [Entropy Checklist](references/entropy-checklist.md) for detailed detection guidance.
 
 ### 2a. Naming Consistency
 
@@ -136,36 +138,68 @@ Check:
 
 Flag: reimplemented logic, copied deprecated patterns.
 
+### 2g. Pattern Contagion (agent-era)
+
+Check whether the change replicates a suboptimal, deprecated, or flagged pattern that future agents may treat as the project standard. The core test is not "is this duplicated?" but "if an agent sees this merged and copies it N more times, is that acceptable?"
+
+Flag: new code modeled on a `@deprecated`/`LEGACY`/`HACK` template, or a weak pattern likely to replicate with no enforcement brake. See the [Entropy Checklist](references/entropy-checklist.md).
+
+### 2h. Agent Verifiability (agent-era)
+
+Check whether the behavioral change can be verified by an agent without human help — via tests, a smoke check, or an observable outcome.
+
+Flag: behavior verifiable only in production, changed routes with no integration/contract test, or config/environment-dependent behavior with no local check. See the [Entropy Checklist](references/entropy-checklist.md).
+
 ---
 
 ## Phase 3 — Synthesize
 
 ### Severity Levels
 
-| Level | Name | Meaning |
-|-------|------|---------|
-| **E0** | Pattern Fork | Introduces a new error model, state definition, or return format that directly conflicts with the project standard |
-| **E1** | Naming Drift | Introduces a new name for an existing concept, or uses inconsistent casing/style |
-| **E2** | Structural Deviation | Violates dependency direction, penetrates layer boundaries, or adds business logic to shared packages |
-| **E3** | Doc Desync | Changes behavior but does not update corresponding documentation or instruction files |
-| **—** | Suggestion | Not a problem, but could improve consistency |
+Grades are **harm-based, not dimension-coded**: any of the eight dimensions can yield any grade. A naming change is E0 when it forks the glossary's canonical term, but E2 when it is a one-off local inconsistency. Grade by the harm the change does, then name the dimension in the finding.
+
+| Level | Name | Meaning | Gate |
+|-------|------|---------|------|
+| **E0** | Standard Conflict | Direct conflict or fork with an established project standard (error model, state definition, glossary term, dependency rule) | Fails the entropy verdict |
+| **E1** | Divergent Pattern | Introduces a new divergent pattern with high replication risk | Fix before merge |
+| **E2** | Localized Inconsistency | Local inconsistency that does not fork a standard | Fix or accept with a note |
+| **E3** | Doc/Metadata Desync | Documentation or metadata out of sync with the changed behavior | Note |
+| **—** | Suggestion | Not a problem, but could improve consistency | — |
 
 ### Finding Format
 
-For each finding:
+For each finding, tag the grade, name the dimension, cite the location, and give a fix direction. One worked example per grade:
 
 ```
+**[E0] Error-model fork** — `apps/api/src/orders/handler.ts:88`
+New handler returns `{ error: string }` instead of the project's standard
+`{ code, message, details }` envelope (AGENTS.md → Error Model).
+→ Fix before merge: return the standard envelope. E0 fails the entropy verdict.
+
 **[E1] Naming Drift** — `apps/api/src/auth/handler.ts:42`
 New identifier `fetchUserProfile` uses "User" instead of glossary term "Member".
-Surrounding code uses `getMember*` pattern.
-→ Consider: rename to `fetchMemberProfile`
+Surrounding code uses `getMember*` pattern; likely to be copied by later code.
+→ Consider: rename to `fetchMemberProfile` before merge.
+
+**[E2] Localized inconsistency** — `apps/api/src/reports/util.ts:15`
+Uses `snake_case` keys in a module that is otherwise `camelCase`; no standard is
+forked and the impact stays local.
+→ Fix or accept with a note: align to `camelCase`.
+
+**[E3] Doc desync** — `apps/api/src/auth/handler.ts:42`
+The endpoint signature changed but its API doc still lists the old parameter.
+→ Note: update the API doc to match the new signature.
 ```
 
 ### Verdict
 
-- ✅ **Clean** — no entropy findings (or only Suggestions)
-- ⚠️ **Drift detected** — E1-E3 findings; recommend fixing before merge
-- ❌ **Pattern fork** — E0 findings; strongly recommend fixing before merge
+Grade the change by its highest-severity finding, using the tiers distinctly:
+
+- ❌ **Standard conflict** — any E0 finding. The change forks an established project standard; the entropy verdict fails until it is resolved.
+- ⚠️ **Fix before merge** — no E0, but one or more E1 findings. Divergent patterns with replication risk; recommend fixing before merge.
+- ✅ **Clean** — no E0 or E1. E2 (localized inconsistency) and E3 (doc/metadata desync) are reported as notes: fix opportunistically or accept with a recorded note.
+
+To fold these E-grades into a P0/P1/P2/Note cross-review, use the Severity Crosswalk in `risk-adaptive-cross-review`'s `references/finding-contract.md` (E0 → P1, or P0 if it breaks a selected risk-pack invariant; E1 → P2; E2 → P2; E3 → Note).
 
 ### Constraint Gaps
 

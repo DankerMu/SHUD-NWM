@@ -13,8 +13,8 @@ Skip DAG selection if the user specified an issue number.
 5. Locate `openspec/changes/<change-name>/{proposal.md,design.md,tasks.md}` in the active repo or workspace. If the change is missing, create it in Phase 0.5 before implementation.
 6. Resolve the project profile (lookup order):
    1. If `openspec/project-profile.md` exists, load it as the active profile.
-   2. If it is absent, run the one-time **profile bootstrap** (Phase 0.0 below), which writes `openspec/project-profile.md`, then load it.
-   3. Only if bootstrap cannot infer anything project-specific, fall back to the **Generic** profile in `project-profiles.md`.
+   2. If it is absent, run the one-time **profile bootstrap** (Phase 0.0 below), which always writes `openspec/project-profile.md`, then load it.
+   3. Bootstrap always persists a file: when it cannot infer anything project-specific it still writes `openspec/project-profile.md`, stamped as **Generic** with a note that nothing project-specific was found (the shared `project-profiles.md` Generic section is the template, not an in-memory-only fallback).
    Then load `issue-risk-contract.md`.
 7. Announce the DAG sketch, the active project profile, and whether the OpenSpec change exists.
 
@@ -26,8 +26,8 @@ example templates to copy from; the active profile is project-local and survives
 skill reinstalls because it lives under `openspec/`, not inside the skill.
 
 1. Scan the repo for risk-bearing structure: primary language/build system, public entrypoints (CLI, API, services), data schemas/formats/serializers, external integrations and credentials, persisted/shared state, and shared helper roots.
-2. Match against `project-profiles.md`. If an example profile fits (e.g. an AutoSHUD repo), copy it as the starting point; otherwise start from Generic.
-3. Write `openspec/project-profile.md` with the six profile fields: entry surfaces, contracts, risk axes, typical evidence, domain risk packs, domain expanded-triggers. Respect the size budget in `project-profiles.md`: short bullets not prose, never restate core packs/triggers, and stay under ~25 lines for a simple project or ~60 for a broad multi-subsystem system. Over-budget means it restates core or the repo should split into narrower profiles.
+2. Match against `project-profiles.md`. If an example profile fits (e.g. an AutoSHUD repo), copy it as the starting point; otherwise start from Generic. A pure-Generic bootstrap (nothing project-specific inferred) still produces a file: stamp it as Generic with a one-line note that nothing project-specific was found.
+3. Always write `openspec/project-profile.md` with the six profile fields: entry surfaces, contracts, risk axes, typical evidence, domain risk packs, domain expanded-triggers. Respect the size budget in `project-profiles.md`: short bullets not prose, never restate core packs/triggers, and stay under ~25 lines for a simple project or ~60 for a broad multi-subsystem system. Over-budget means it restates core or the repo should split into narrower profiles.
 4. Note in the file that it is a living artifact maintained in Phase 0.5 as the project evolves.
 
 The profile is a living document, not a one-shot. It does not change per issue, but it is updated whenever the project grows a new risk surface (see Phase 0.5 profile-gap maintenance).
@@ -133,10 +133,10 @@ Select reviewers from fixture level:
 - `none`: skip unless Phase 2 audit finds risk.
 - `compact`: run 1-2 reviewers focused on changed behavior and selected risk packs.
 - `expanded`: run 2-4 reviewers; use all 4 for shared entrypoints, file/schema/publish behavior, solver/runtime behavior, or legacy compatibility.
-- `high` or `broad-expanded`: use all 4 standard reviewers. Escalate to 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The two additional reviewers are `Test & Evidence Coverage` and `Invariant / State Machine / Compatibility`.
+- `high` or `broad-expanded`: use all 4 standard reviewers (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Escalate to 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The two additional reviewers are `Spec Compliance` and `Invariant / State Machine / Compatibility`.
 - Initial round only: if repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the 6-review high-risk escalation in `SKILL.md`; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
 
-Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Do not post PR comments in this phase.
+Use `phase-4-cross-review.md` to build the parallel reviewer-subagent briefs. Prefer spawning the full reviewer set as parallel subagents in one batch (Claude Code: multiple Task calls in one message; Codex: parallel subagents). Reviewer subagents are read-only and return their complete reports as their final messages; the orchestrator collects each returned report and persists it to `<REVIEW_DIR>/<report file>` (default `<REVIEW_DIR>` = `.workplans/<issue-or-pr>/review/`). Do not post PR comments in this phase.
 
 Review rounds:
 
@@ -144,6 +144,7 @@ Review rounds:
 - After a Phase 6 fix pass, rerun cross-review before Phase 7 using the same risk-adaptive reviewer count and reviewer mix as Phase 4 on the current head.
 - Do not narrow follow-up rounds to only the risk areas touched by the fix. A prior round can miss issues outside the fix area, so each post-fix round must be a comprehensive review of the updated PR diff and OpenSpec fixture before Phase 7.
 - A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis.
+- When a comprehensive cross-review round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle. This recorded SHA — not the frozen final HEAD — is the rollback anchor the Phase 8 pre-merge gate resets to if a later fix round corrupts a clean reviewed state.
 - A finding is actionable only if it satisfies the finding contract defined in the `risk-adaptive-cross-review` skill (`finding-contract.md`): severity, failure class, violated invariant/contract, concrete scenario, evidence, fix direction, required test/proof, sibling surfaces, and blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless the orchestrator can complete the missing fields from the diff and fixture.
 - If a follow-up round finds the same failure class in another module, helper, or sibling surface, treat that as an invariant miss, not as a new isolated finding. Trigger Phase 6.2 before issuing the next fix prompt.
 - If Round 3 still reports the same failure class after an invariant-closure pass, stop ordinary review looping. Run a Review Failure Retro before another fix or review pass.
@@ -170,7 +171,7 @@ Steps:
    - `high` / `broad-expanded`: CONFIRMED and PLAUSIBLE are both merge-blocking inputs to Phase 5 (recall-biased).
    - `expanded`: CONFIRMED is merge-blocking; PLAUSIBLE is merge-blocking only when it maps to a selected risk pack or Invariant Matrix row, otherwise a non-blocking note.
    - `low` / `compact`: only CONFIRMED is merge-blocking; PLAUSIBLE becomes a non-blocking note (precision-biased).
-6. Drop every REFUTED candidate and each `wontfix` test-coverage exception is still forbidden. Record one line per dropped candidate: `<candidate> -> REFUTED: <verifier rationale>`. Persist the verdict table to the local review directory.
+6. Drop every REFUTED candidate, recording one line per dropped candidate: `<candidate> -> REFUTED: <verifier rationale>`. A `wontfix` test-coverage exception remains forbidden: test coverage gaps are never dropped this way. Persist the verdict table to the review evidence directory (`<REVIEW_DIR>`, default `.workplans/<issue-or-pr>/review/`).
 
 Rules:
 
@@ -375,13 +376,9 @@ Report:
 - Verification commands/results
 ```
 
-Run Phase 2 verification after the implementer subagent returns. If verification passes, commit/push the fix and rerun a full Phase 4-style cross-review on the current head, except for CI-only repairs classified in Phase 8. Continue Phase 5-6-review only while no ordinary-loop gate has triggered and until the latest comprehensive cross-review round is clean.
+Run Phase 2 verification after the implementer subagent returns. If verification passes, commit/push the fix. Before committing or finishing any Phase 6 fix round that used delegated worktrees, complete the cleanup checklist in `parallel-worktree-delegation.md` and persist any intentionally retained worktree path and reason in the evidence directory.
 
-Before cross-review after a pattern escalation, run Phase 6.2. Do not skip Phase 6.2 merely because local tests passed.
-
-Before committing or finishing any Phase 6 fix round that used delegated worktrees, complete the cleanup checklist in `parallel-worktree-delegation.md` and persist any intentionally retained worktree path and reason in the evidence directory.
-
-Continue fix/review loops only while no ordinary-loop gate has triggered. Count repeated same-class findings as invariant misses requiring another cross-cutting closure pass, not as fresh isolated issues. Do not continue ordinary loops past a third same-class round; use Review Failure Retro to change the plan. Do not continue ordinary loops at or after 5 comprehensive cross-review rounds; use the five-round gate package to decide whether the PR direction, architecture, implementation strategy, feature contract, or security/safety invariant is wrong, then continue by executing the selected root-cause corrective action. Escalate only for real blockers, contradictory requirements, missing tooling, or unresolved product/scope decisions.
+Before the post-fix cross-review after a pattern escalation, run Phase 6.2. Do not skip Phase 6.2 merely because local tests passed. Then proceed to Phase 6.5 to rerun cross-review on the fixed head, except for CI-only repairs classified in Phase 8.
 
 ## Phase 6.2: Invariant Audit
 
@@ -420,7 +417,15 @@ Remaining findings:
 - <severity> <problem> | <impact> | <requested fix/test>
 ```
 
-If the invariant audit reports findings, return to Phase 6 with an invariant-closure prompt. If the audit only checked changed files for a high-risk or repeated class, treat it as invalid and rerun it with the full inventory. If clean, rerun the normal full Phase 4-style cross-review.
+If the invariant audit reports findings, return to Phase 6 with an invariant-closure prompt. If the audit only checked changed files for a high-risk or repeated class, treat it as invalid and rerun it with the full inventory. If clean, proceed to Phase 6.5 for the normal full Phase 4-style cross-review.
+
+## Phase 6.5: Repeat Cross-Review After Fixes
+
+After a Phase 6 fix pass (and Phase 6.2 when a pattern escalation triggered it), rerun a full Phase 4-style comprehensive cross-review on the current head, except for CI-only repairs classified in Phase 8. Use the same risk-adaptive reviewer count and reviewer mix as Phase 4; do not narrow the rerun to only the fixed area, because a prior round can miss issues outside it.
+
+When the rerun round comes back clean, record `Last clean reviewed SHA: <sha>` in the evidence bundle as the rollback anchor (see the Phase 4 review-round rule).
+
+Continue Phase 5-6-6.5 loops only while no ordinary-loop gate has triggered and until the latest comprehensive cross-review round is clean. Count repeated same-class findings as invariant misses requiring another cross-cutting closure pass, not as fresh isolated issues. Do not continue ordinary loops past a third same-class round; use Review Failure Retro to change the plan. Do not continue ordinary loops at or after 5 comprehensive cross-review rounds; use the five-round gate package to decide whether the PR direction, architecture, implementation strategy, feature contract, or security/safety invariant is wrong, then continue by executing the selected root-cause corrective action. Escalate only for real blockers, contradictory requirements, missing tooling, or unresolved product/scope decisions.
 
 ## Phase 7: Independent Final Review
 
@@ -468,7 +473,7 @@ Generate evidence locally before posting:
    - no secrets, tokens, signed URLs, or private env values appear.
 6. Post with `gh pr comment --body-file <file>` or file-based API calls. Do not pass multi-line markdown through command substitution.
 
-Post evidence for the cross-review reports actually used to gate merge. Prefer one concise evidence bundle per review round plus Phase 7 final review when many rounds occurred. If repository policy requires one comment per reviewer or a fixed comment count, follow it only when it does not reduce the reviewer set required by Phase 4; otherwise use a consolidated evidence bundle. Include reviewer names, SHA, local report paths, findings/resolution status, and whether the latest round is clean:
+Post evidence for the cross-review reports actually used to gate merge. Prefer one concise evidence bundle per review round plus Phase 7 final review when many rounds occurred. If repository policy requires one comment per reviewer or a fixed comment count, follow it only when it does not reduce the reviewer set required by Phase 4; otherwise use a consolidated evidence bundle. Include reviewer names, SHA, local report paths (under `<REVIEW_DIR>`, default `.workplans/<issue-or-pr>/review/`), findings/resolution status, and whether the latest round is clean:
 
 ```text
 Reviewer agent: <name>
@@ -528,14 +533,20 @@ Post Chinese work-summary comment before the merge gate or pre-authorized auto-m
 
 Before requesting merge approval or running a pre-authorized auto-merge, verify all of the following for the frozen final HEAD. If any fails, do not merge — re-run the missing phase or fix the gap, and record a skip block for the accountability log:
 
-- The PR `Agent Review` section lists the reviewer agents actually used and a `Reviewed head SHA` equal to the frozen `FULL_SHA`.
-- The Phase 4.5 verifier verdict table for the final head is persisted in the review evidence directory.
-- The latest comprehensive cross-review round is clean (no actionable findings) and the Phase 7 final review is complete on the final head.
+- The review track is satisfied by EITHER (a) or (b):
+  - **(a) SHA-matched review artifacts**, all present for the frozen final HEAD:
+    - The PR `Agent Review` section lists the reviewer agents actually used and a `Reviewed head SHA` equal to the frozen `FULL_SHA`.
+    - The Phase 4.5 verifier verdict table for the final head is persisted in the review evidence directory (`<REVIEW_DIR>`, default `.workplans/<issue-or-pr>/review/`).
+    - The latest comprehensive cross-review round is clean (no actionable findings) and the Phase 7 final review is complete on the final head.
+  - **(b) "review not required" record**: the fixture risk tier is `none` and the Phase 2 audit found no risk, and that fact is persisted in the evidence bundle against the frozen `FULL_SHA`. This is the only path that legitimately skips Phase 4/4.5/7 (see Phase 4 `none` handling and the Phase 2 audit).
+  - Missing both (a) and (b) is a skip block: do not merge, and record it for the accountability log.
 - No posted evidence presents stale findings as current.
 - **Completion self-audit (premature-completion guard)**: re-derive each issue acceptance criterion and each selected `tasks.md` item and confirm the diff/tests actually satisfy it — not "the agent said done". Confirm no leftover edge/error path the fixture required is unhandled, and that the final changes are internally consistent (no two fixes that contradict each other). Any uncovered criterion blocks the merge and returns to Phase 5-6; it does not become a silent deferral.
 - **Oracle integrity**: confirm the OpenSpec fixture, acceptance criteria, existing tests, and CI gates were not weakened, deleted, or rewritten to make the gate pass (`risk-adaptive-cross-review` → `finding-contract.md` Oracle Integrity). A test/spec change is legitimate only when it tracks a real contract change recorded in the OpenSpec change, never to silence a failure.
 
-The frozen final HEAD is the clean rollback anchor for this gate: it is a deterministic check, so a failure blocks the merge rather than producing a "probably fine" pass. If a late fix round corrupts a previously clean reviewed state, reset the branch to the last clean reviewed SHA and re-run the fix rather than layering patches on a broken head.
+This gate mixes deterministic and judgment-based checks. The SHA-match and artifact-presence clauses above are deterministic: they either hold against the frozen final HEAD or they do not. The completion self-audit and oracle-integrity clauses are mandatory checkable procedures — enumerate each acceptance criterion and selected task and confirm the diff/tests satisfy it, and diff the test/spec/CI files against the reviewed baseline — that still require reviewer judgment. A failure of any clause, deterministic or judgment-based, blocks the merge rather than producing a "probably fine" pass.
+
+The rollback anchor is the last clean reviewed SHA, not the frozen final HEAD. After each clean comprehensive cross-review round the orchestrator records `Last clean reviewed SHA: <sha>` in the evidence bundle (Phase 4 / Phase 6.5). If a late fix round corrupts a previously clean reviewed state, reset the branch to that recorded SHA and re-run the fix rather than layering patches on a broken head.
 
 This gate is orchestrator-enforced by default. Where the host repo supports it, add a required CI/branch-protection status check that fails the merge unless the `Agent Review` evidence block is present and SHA-matched, so skipping the review/verify loop is a detectable hard action rather than discretionary. A portable skill cannot install that check; recommend it as host-repo setup and, until it exists, treat the orchestrator gate as the enforcement point and log every skip block.
 

@@ -2,7 +2,7 @@
 name: repo-entropy-audit
 description: >-
   Full-repository entropy scan across six axes: structure (dependency graph,
-  layering, SCC), semantics (naming diversity, state model fragmentation),
+  layering, cycles), semantics (naming diversity, state model fragmentation),
   behavior (error model variants, boundary handling), context (doc freshness,
   instruction-file coverage), protocol (instruction-file consistency), and
   control (rule enforcement gaps). Produces a module-level heatmap, trend
@@ -31,7 +31,6 @@ This skill examines the **code itself** for entropy patterns. For auditing the c
 - Reviewing a specific PR or diff → `entropy-review`
 - Auditing instruction files and control infrastructure → `control-plane-auditor`
 - Reviewing code for correctness → `review`
-- Auditing dependencies → `dependency-audit`
 
 ---
 
@@ -67,7 +66,7 @@ If a baseline exists, load it for trend comparison in Phase 3.
 
 ### 1d. Load constraint context
 
-Read available instruction files and extract any defined constraints (glossary, dependency rules, error model, naming conventions). These improve scan accuracy but are not required.
+Read available instruction files and extract any defined constraints (glossary, dependency rules, error model, naming conventions). These improve scan accuracy but are not required. When `openspec/glossary.md` exists, treat it as the canonical domain glossary (the convention maintained by `grill-with-docs`); AGENTS.md-level constraints supplement it.
 
 ---
 
@@ -81,7 +80,7 @@ Adapt commands to the project's tech stack. The reference methods target TypeScr
 
 For each module:
 - **Dependency direction**: identify imports, check for layer violations
-- **Circular dependencies**: check for SCCs in the import graph
+- **Circular dependencies**: detect import cycles (pairwise 2-cycles via grep; full SCCs via `madge`/`dependency-cruiser` when available)
 - **Utility coupling**: measure util/common/helpers directory size and who depends on them
 - **File size distribution**: find oversized files (> 500 lines)
 
@@ -158,7 +157,7 @@ Identify the patterns with highest replication risk:
 - Which patterns are still being actively copied (evidence from recent commits)?
 - How many files/modules are affected?
 
-Rank by: (occurrence count) × (recency of replication).
+Rank by occurrence count. Use recency — any replication within the last N commits (e.g., the last 30 days) — as a tiebreaker and an "actively spreading" flag, not as a multiplier.
 
 ### 3d. Cleanup Priorities
 
@@ -166,13 +165,15 @@ Rank cleanup targets by (impact × inverse effort):
 
 1. High-spread, low-effort items first (e.g., naming unification with search-replace)
 2. High-spread, medium-effort items next (e.g., error model unification)
-3. High-spread, high-effort items last (e.g., structural decomposition of SCC)
+3. High-spread, high-effort items last (e.g., structural decomposition of dependency cycles)
 
 For each target, suggest which tool or skill can help:
 - Naming unification → refactoring task
 - Error model → `review` + architecture decision
 - Structural issues → `implementation-planning` for phased refactor
 - Doc gaps → `project-documentation` or `control-plane-auditor`
+
+After the user confirms the priority list, offer to make the top targets trackable instead of leaving them as report-only recommendations: `gh-create-issue` for direct cleanup issues (epic + sub-issues for multi-module efforts), or `stage-change-pipeline` when a target needs a reviewed OpenSpec change and design review before implementation. Do not start implementing cleanups inside the audit. Sequence this after Phase 4: record the baseline snapshot first, then create the issues or route to the pipeline, so every tracked item points back to a committed audit trail.
 
 ---
 
@@ -182,7 +183,7 @@ For each target, suggest which tool or skill can help:
 
 Write a baseline snapshot to `.entropy-baseline/latest.json` using the format in [Baseline Format](references/baseline-format.md).
 
-If a previous `latest.json` exists, rename it to `.entropy-baseline/<date>.json` before writing the new one.
+If a previous `latest.json` exists, archive it first: rename it to `.entropy-baseline/<timestamp>.json`, where `<timestamp>` is the `timestamp` value stored inside that old snapshot with colons replaced by hyphens (e.g. `2026-05-24T12-00-00Z.json`). Using the snapshot's own timestamp rather than today's date keeps same-day reruns from colliding.
 
 ### 4b. Confirm with user
 
@@ -218,4 +219,4 @@ Proceed only with user confirmation.
 - The heatmap identifies **where** entropy is concentrated, not **why**. Understanding root causes requires reading the code. Use findings as starting points for investigation, not as definitive judgments.
 - Detection methods use heuristic shell commands and pattern matching. They will miss some issues and may flag false positives. Judgment is still required.
 - Baseline files contain project metadata. Consider whether they should be gitignored or committed, depending on your project's preferences.
-- This skill writes only to `.entropy-baseline/`. It does not modify source code, tests, or documentation.
+- The audit itself writes only to `.entropy-baseline/` and never modifies source code, tests, or documentation. The optional Phase 3d handoff — offered only on explicit user confirmation — may create GitHub issues (`gh-create-issue`) or route a target to `stage-change-pipeline`; those are external work-tracking side effects, not edits to repository content.

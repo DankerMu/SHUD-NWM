@@ -5,6 +5,14 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-02
+- Add a runnable **Command Reference** section (`gh label create --force` bootstrap, `gh issue create --body-file - <<EOF`, epic-first then sub-issue ordering, issue-number capture via URL parsing or `gh issue view --json number -q .number`, optional `gh project item-add`).
+- Standardize dependency **detection and emission** on one `Depends on #NN` line per dependency — the exact literal the `subagent-workflow` DAG reader greps; keep `Blocked by #NN` / `After #NN` / `Requires #NN` as accepted input aliases only. Replaces the old `**Dependencies:** #a, #b` emission.
+- Extend the sub-issue template with the downstream implementation-ready contract fields (`Implementation Ready`, `Module / Scope`, `In Scope` / `Out of Scope`, `PR Boundary`, per-line `Depends on #NN`, optional `OpenSpec change:`); mark them required when issues feed `stage-change-pipeline` Stage 5 → `subagent-workflow`, optional otherwise.
+- Add the `needs-followup` label and a `stage_label` passthrough parameter, plus a `--force` label-bootstrap block.
+- Operationalize complexity auto-detect: epic + sub-issues when >5 subtasks, more than one module touched, or any cross-issue dependency; single issue otherwise; ask when borderline.
+- Add YAML frontmatter `invocation_posture: hybrid` and `version`, align the frontmatter description with `skill.json`, and clarify that "epic + sub-issues" is a body-text convention (`Part of #`, checklists), not GitHub's native sub-issue API.
+
 ## [0.1.1] - 2026-06-15
 - Update stale cross-reference: `codex-codeagent-workflow` -> `subagent-workflow` (skill renamed).
 

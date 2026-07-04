@@ -10,6 +10,7 @@ export const meta = {
 
 // args: { changeName: string, epicNumber: number, stageLabel?: string }
 
+// NOTE: duplicated in full-pipeline.workflow.js + SKILL.md Stage 5.5 — keep in sync
 const ALIGNMENT_SCHEMA = {
   type: "object",
   properties: {
@@ -68,26 +69,32 @@ const VERIFY_SCHEMA = {
   required: ["verdicts"]
 };
 
-const changeName = args.changeName;
+// Defensive: handle args passed as JSON string (caller-side serialization bug)
+const _args = typeof args === "string" ? JSON.parse(args) : args || {};
+const changeName = _args.changeName;
 const changePath = `openspec/changes/${changeName}`;
-const epicNumber = args.epicNumber;
-const stageLabel = args.stageLabel || "";
+const epicNumber = _args.epicNumber;
+const stageLabel = _args.stageLabel || "";
 const labelFilter = stageLabel ? ` --label "${stageLabel}"` : "";
+
+if (!changeName || !epicNumber) {
+  log("FATAL: changeName or epicNumber is missing from args — aborting");
+  return { verdict: "error", reason: "changeName or epicNumber is undefined" };
+}
 
 // ── Review: Issue-Change Alignment ──────────────────────────────
 
 phase("Review");
 log(`Reviewing issue-change alignment: ${changeName} (Epic #${epicNumber})`);
 
-const review = await agent(
-  `Review alignment between GitHub issues and the OpenSpec change.
+const reviewPrompt = `Review alignment between GitHub issues and the OpenSpec change.
 
 Change path: "${changePath}"
 Epic: #${epicNumber}
 
 Steps:
 1. Read the OpenSpec change artifacts: proposal.md, design.md, specs/*, tasks.md
-2. List all sub-issues of Epic #${epicNumber}: gh issue list${labelFilter} --json number,title,body --limit 100
+2. List all sub-issues of Epic #${epicNumber}: gh issue list${labelFilter} --json number,title,body --limit 100. If exactly 100 issues come back, the list is likely truncated — re-list with --limit 500 and flag the truncation in your output so coverage is not silently incomplete.
 3. For each issue, also read its full body: gh issue view <number> --json body
 4. Compare and find gaps in these dimensions:
 
@@ -99,11 +106,29 @@ Steps:
    - **content-drift**: issue content (task checklist, acceptance criteria, PR boundary) contradicts or diverges from change artifacts
 
 Return structured gaps. Each gap needs: id (IA-1, IA-2...), severity (P0/P1), type, title, evidence (quote both the change artifact and the issue), fixDirection, affectedIssue (#number).
-Reject vague concerns — only concrete, anchored gaps with evidence from both sides.`,
-  { label: "review:alignment", phase: "Review", schema: ALIGNMENT_SCHEMA }
-);
+Reject vague concerns — only concrete, anchored gaps with evidence from both sides.`;
 
-if (!review || review.gaps.length === 0) {
+let review = await agent(reviewPrompt, {
+  label: "review:alignment",
+  phase: "Review",
+  schema: ALIGNMENT_SCHEMA
+});
+
+if (!review) {
+  log("Alignment review returned null — retrying once");
+  review = await agent(reviewPrompt, {
+    label: "review:alignment-retry",
+    phase: "Review",
+    schema: ALIGNMENT_SCHEMA
+  });
+}
+
+if (!review) {
+  log("Alignment review failed twice — aborting; cannot certify issue-change alignment");
+  return { verdict: "error", reason: "alignment-review-failed", rounds: 0 };
+}
+
+if (review.gaps.length === 0) {
   log("Issues aligned with change — no gaps found");
   return { verdict: "clean", rounds: 0, gaps: [], residual: [] };
 }
@@ -144,11 +169,12 @@ ${gapsList}
 For each gap type, use gh CLI:
 - missing-coverage: create a new sub-issue linked to Epic #${epicNumber}, with proper module boundary and Implementation Ready contract
 - wrong-boundary: split the issue or re-scope using gh issue edit
-- wrong-dependency: update the Dependencies section in issue body
+- wrong-dependency: update the \`Depends on #NN\` lines in the issue body (one line per dependency)
 - scope-mismatch: edit In Scope / Out of Scope to match change artifacts
 - missing-reference: add spec/design doc references to issue body
 - content-drift: edit issue body to match change artifacts (task checklist, acceptance criteria, PR boundary)
 
+The OpenSpec change artifacts, design documents, implementation plan, and Stage 1 acceptance criteria are an immutable oracle — never edit them to make an issue align. Fix the GitHub issues only.
 Both P0 and P1 are blocking — fix all of them.`,
     { label: `fix:round-${round}`, phase: "Fix" }
   );

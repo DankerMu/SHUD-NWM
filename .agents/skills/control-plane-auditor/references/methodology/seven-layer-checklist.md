@@ -35,6 +35,7 @@ A reference model for assessing how well a repository can support sustained agen
 - [ ] Readonly/generated paths are protected by guards
 - [ ] Naming conventions are documented and at least partially enforced
 - [ ] Doc freshness rules exist: code changes require doc updates
+- [ ] Global/mutable state, undeclared side effects, and environment dependencies are declared where they exist (or better, eliminated) — undeclared implicit dependencies are a top agent-era bug source (per agents-md-spec Dimension 7)
 
 **"Not standing" signals:**
 - Architecture rules exist in docs but nothing enforces them
@@ -122,6 +123,8 @@ A reference model for assessing how well a repository can support sustained agen
 
 **Problem it solves:** What level of autonomy is warranted, and under what conditions?
 
+**Assessment mode:** ℹ️ Informational only. Unlike Layers 1–6, do not grade this layer ✅/⚠️/❌. The indicators below are observation prompts, not pass/fail criteria — autonomy decisions require human judgment.
+
 **"Standing" indicators:**
 - [ ] Execution autonomy levels are considered per context (not one global setting)
 - [ ] Autonomy level is based on coverage of other layers, not subjective maturity assessment
@@ -143,5 +146,6 @@ This checklist is designed for `control-plane-auditor` Phase 2 (Diagnose). For e
 - ✅ **Covered**: most indicators present and active
 - ⚠️ **Partial**: some indicators present, significant gaps remain
 - ❌ **Missing**: layer is not meaningfully established
+- ℹ️ **Informational**: (Layer 7 / Governance only) observations recorded without a pass/fail grade
 
 The goal is not to reach ✅ on every layer immediately. The goal is to know where you stand and make deliberate decisions about where to invest next.

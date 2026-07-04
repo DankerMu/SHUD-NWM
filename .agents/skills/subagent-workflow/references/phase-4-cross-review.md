@@ -11,7 +11,7 @@ Required variables:
 - `<PR#>`: Pull request number
 - `<branch>`: Current PR branch
 - `<FULL_SHA>`: `git rev-parse HEAD`
-- `<REVIEW_DIR>`: Local review output directory
+- `<REVIEW_DIR>`: Local review output directory. Default `.workplans/<issue-or-pr>/review/` (the canonical evidence root shared with `parallel-worktree-delegation.md`'s `.workplans/<issue-or-pr>/`).
 - `<absolute repo path>`: Repository root (each reviewer subagent's working directory)
 - `<path list>`: Changed files referenced by path
 - `<fixture summary>`: Phase 0.5 fixture level and selected risk packs.
@@ -24,8 +24,8 @@ Risk-adaptive selection:
 - `none`: normally skip Phase 4.
 - `compact`: run correctness plus whichever of integration or security/performance matches selected risk packs.
 - `expanded`: run all relevant reviewers; use all 4 for shared entrypoints, file/schema/publish behavior, solver/runtime behavior, or legacy compatibility.
-- `high` or `broad-expanded`: run the 4 standard reviewers by default. Use 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The extra reviewers are:
-  - `review-test-evidence`: verifies task/regression coverage, local verification evidence, and unchanged consumer tests.
+- `high` or `broad-expanded`: run the 4 standard reviewers by default (Correctness, Integration, Security/Performance, Test & Evidence Coverage). Use 6 reviewers when the PR touches DB-backed state, retry/cancellation, publish/delete/rollback, schema/evidence contracts, security boundaries, production config, or shared helper/state-machine roots. The extra reviewers are:
+  - `review-spec-compliance`: checks the implementation against OpenSpec/design/issue acceptance criteria.
   - `review-invariant-state`: traces the governing invariant across state machines, stale-state boundaries, retry/cancel transitions, and backward compatibility.
 - Follow-up rounds after fixes: run the same risk-adaptive reviewer count and reviewer mix as a fresh Phase 4 review of the current head. Do not downgrade to targeted-only reviewers, because the prior round may have missed unrelated issues.
 - Initial round only: if a repository policy requires a fixed number of evidence comments, follow it only when it does not conflict with the 6-review high-risk escalation in `SKILL.md`; otherwise post a consolidated evidence bundle rather than reducing reviewer coverage.
@@ -52,11 +52,11 @@ Reviewer roles and report files:
 
 | Reviewer role | Report file | Escalation |
 | --- | --- | --- |
-| `review-spec-compliance` | `<REVIEW_DIR>/spec-compliance.md` | standard |
 | `review-correctness` | `<REVIEW_DIR>/correctness.md` | standard |
 | `review-integration` | `<REVIEW_DIR>/integration.md` | standard |
 | `review-security-perf` | `<REVIEW_DIR>/security-perf.md` | standard |
-| `review-test-evidence` | `<REVIEW_DIR>/test-evidence.md` | 6-reviewer only |
+| `review-test-evidence` | `<REVIEW_DIR>/test-evidence.md` | standard |
+| `review-spec-compliance` | `<REVIEW_DIR>/spec-compliance.md` | 6-reviewer only |
 | `review-invariant-state` | `<REVIEW_DIR>/invariant-state.md` | 6-reviewer only |
 
 Brief template (fill the bracketed slots per reviewer):
@@ -67,11 +67,11 @@ Brief template (fill the bracketed slots per reviewer):
 Review PR #<N> on branch <branch>.
 Head SHA: <FULL_SHA>
 Review round: <review round>
-Write the complete report to <REVIEW_DIR>/<report file>.
+Return the complete report as your final message. (The orchestrator persists it to <REVIEW_DIR>/<report file>.)
 
 Rules:
 - Do not edit files, commit, push, or change state.
-- You are a leaf reviewer subagent. Do not invoke this workflow or the subagent-workflow skill, spawn further subagents, launch parallel agents, or ask another AI/code agent to review, fix, implement, or plan.
+- You are a leaf reviewer subagent. Do not invoke this workflow or the subagent-workflow skill, spawn further subagents, launch parallel agents, or ask another AI/code agent to review, fix, implement, or plan. Your own agent definition may permit spawning an `explorer` subagent for standalone use; inside this workflow's leaf tasks that capability is disabled, and this injected boundary overrides your agent definition.
 - Output only a structured review report.
 
 Inputs:
@@ -123,7 +123,7 @@ Spawn one `verifier` subagent per candidate (working directory `<absolute repo p
 
 Verify one candidate review finding for PR #<N> on branch <branch>.
 Head SHA: <FULL_SHA>
-Write the verdict to <REVIEW_DIR>/verify-<CANDIDATE_ID>.md.
+Return the verdict as your final message. (The orchestrator persists it to <REVIEW_DIR>/verify-<CANDIDATE_ID>.md.)
 
 Rules:
 - Do not edit files, commit, push, or change state.

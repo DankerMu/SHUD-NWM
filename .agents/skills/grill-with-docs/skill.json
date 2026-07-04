@@ -3,7 +3,7 @@
   "name": "grill-with-docs",
   "displayName": "Grill With Docs",
   "description": "grill-me 的领域增强变体：对抗式压测计划/设计的同时对齐项目术语、用具体场景探边界、与代码交叉核对，并把术语 inline 沉淀到 openspec/glossary.md、把够格的长期决策落到 docs/adr/。Use to stress-test a plan against the project's domain language and persist glossary terms and ADRs inline.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "maturity": "experimental",
   "categories": [
     "workflow",

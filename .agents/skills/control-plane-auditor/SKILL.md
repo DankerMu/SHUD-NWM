@@ -7,9 +7,9 @@ description: >-
   the control system", "check what's missing for agents", or wants
   to know what's missing in their instruction files, rules, and
   verification infrastructure. Do NOT use for code review (use review),
-  dependency audit (use dependency-audit), general documentation work
-  (use project-documentation), or reviewing a specific PR or diff
-  (use review or entropy-review).
+  full-repo code/entropy scan (use repo-entropy-audit), general
+  documentation work (use project-documentation), or reviewing a
+  specific PR or diff (use review or entropy-review).
 invocation_posture: manual-first
 ---
 
@@ -17,7 +17,7 @@ invocation_posture: manual-first
 
 Audit a repository's control plane — instruction files, rules, guards, verification infrastructure, and governance posture — across a seven-layer model. Produce a structured report with coverage status, gaps, and prioritized improvement recommendations.
 
-This skill examines the **control system itself** (memory, invariants, protocols, permissions, sensors, GC, governance), not the code those systems govern. For code-level entropy scanning, use `repo-entropy-audit`. For PR-level consistency checks, use `entropy-review`.
+This skill examines the **control system** — memory, invariants, protocols, permissions, sensors, GC, governance — in depth. Its relationship to `repo-entropy-audit` is depth-vs-breadth on the context, protocol, and control axes: this skill is the deep-dive of those three axes, while `repo-entropy-audit` covers all six axes at breadth. The structure, semantics, and behavior of the CODE itself remain `repo-entropy-audit`'s territory. For PR-level consistency checks, use `entropy-review`.
 
 ## When To Use
 
@@ -29,10 +29,9 @@ This skill examines the **control system itself** (memory, invariants, protocols
 ## When Not To Use
 
 - Reviewing a specific PR or diff → `review` or `entropy-review`
-- Auditing dependencies for security/licensing → `dependency-audit`
 - Restructuring the docs/ directory → `project-documentation`
 - Designing the AI tool setup → `agent-architect`
-- Scanning code itself for entropy patterns → `repo-entropy-audit`
+- Breadth scan across all six entropy axes (code structure, semantics, behavior) → `repo-entropy-audit`
 
 ---
 
@@ -116,6 +115,7 @@ Check:
 - Are readonly/generated paths protected?
 - Are naming conventions documented and enforced?
 - Do code changes require doc updates (freshness rules)?
+- Are global/mutable state, undeclared side effects, and environment dependencies declared where they exist (or better, eliminated)? Undeclared implicit dependencies are a top agent-era bug source (per agents-md-spec Dimension 7).
 
 Assess: rule count, enforcement ratio (documented vs automated), guard coverage.
 
@@ -135,6 +135,7 @@ Check:
 - Are readonly boundaries enforced?
 - Are high-risk operations gated (DB migrations, deploys, secret access)?
 - Is external input treated as untrusted?
+- Are agent tool permissions scoped to what the current task requires?
 
 Assess: guard count, high-risk operation identification.
 
@@ -144,6 +145,7 @@ Check:
 - Do tests span multiple types (unit, integration, e2e, contract)?
 - Can the application be started and observed locally?
 - Are logs structured?
+- Does each milestone in a plan have a verification command or observable outcome?
 - Are there executable "done" definitions?
 
 Assess: test type coverage, dev server presence, log structure.
@@ -162,6 +164,7 @@ Assess: GC tooling presence, cleanup backlog visibility.
 
 Do not auto-evaluate. Instead, note observations:
 - Is there any explicit autonomy level configuration?
+- Is the autonomy level based on coverage of other layers (not subjective maturity assessment)?
 - Are escalation paths defined in instruction files?
 - Is need autonomy distinguished from execution autonomy?
 
@@ -179,9 +182,11 @@ For each layer, assign:
 - ❌ **Missing**: layer not meaningfully established
 - ℹ️ **Informational**: (Governance only) observations without judgment
 
+These glyphs grade layer **coverage** (covered / partial / missing), not finding severity — they are distinct from `entropy-review`'s verdict glyphs.
+
 ### AGENTS.md Constraint Dimensions
 
-Using the [AGENTS.md Spec](references/methodology/agents-md-spec.md), audit all instruction files for six constraint dimensions:
+Using the [AGENTS.md Spec](references/methodology/agents-md-spec.md), audit all instruction files for seven constraint dimensions:
 
 1. **Glossary** — canonical terms with prohibited aliases
 2. **Dependency Rules** — allowed/prohibited import directions
@@ -189,8 +194,11 @@ Using the [AGENTS.md Spec](references/methodology/agents-md-spec.md), audit all 
 4. **Naming Conventions** — case rules, verb conventions, file naming
 5. **Doc Freshness Rules** — "if X changes, update Y"
 6. **State Model References** — pointers to canonical state definitions
+7. **Implicit Dependencies** — declared global/mutable state, env vars, and side effects (agent-era addition)
 
 For each dimension: report present/partial/missing, quality notes, and file location.
+
+Canonical dimension definitions: references/methodology/agents-md-spec.md
 
 ### Priority Actions
 
@@ -201,16 +209,30 @@ Rank the top 3–5 improvement actions by impact on **future agent correct-chang
 3. Adding instruction files to critical modules that lack them (reduces re-discovery cost)
 4. Establishing freshness checks for key documentation (prevents context rot)
 
+**Severity semantics:** Priority Actions are repo-setup improvements, deliberately outside the P0/P1/P2/Note change-review scale. When a control-plane gap blocks an active change, raise it through `entropy-review` (E-grades) and fold it via the Severity Crosswalk in `risk-adaptive-cross-review`'s `finding-contract.md`.
+
 ### Tool Recommendations
 
 Based on gaps found, recommend which other skills can help:
-- `entropy-review` — for PR-level consistency checks (requires constraint dimensions in AGENTS.md)
-- `repo-entropy-audit` — for code-level entropy scanning
+- `entropy-review` — for PR-level consistency checks and dependency-direction drift in a change (requires constraint dimensions in AGENTS.md)
+- `repo-entropy-audit` — for code-level entropy scanning, including whole-repo structural dependency scans
 - `project-documentation` — for docs/ tree restructuring
-- `dependency-audit` — for dependency health
 - `review` — for general code review
 
 ---
+
+## Two Frameworks: Seven Layers and Six Axes
+
+This skill hosts two methodology files that play different roles:
+
+- **The Seven-Layer Checklist IS this skill's audit procedure.** Phase 2 diagnoses the control *system* — memory, invariants, protocols, permissions, sensors, GC, governance — layer by layer. That is what this skill does.
+- **The Six Entropy Axes is the entropy suite's shared repo-level vocabulary.** This skill is its methodology home, but the axes are consumed equally by `repo-entropy-audit` and `entropy-review`. This skill applies the axes only when aggregating or aligning findings with those siblings — not as a standalone audit procedure.
+
+For orientation only (not a formal mapping), the seven layers align loosely with the six axes:
+
+Memory → Context · Invariant → Control/Behavioral · Protocol → Protocol · Permission → Control · Sensorium → Behavioral/Context · Evaluation/GC → Control · Governance → Control
+
+Treat this as directional orientation; the layer model and the axis model are deliberately different objects at different granularities.
 
 ## Methodology References
 

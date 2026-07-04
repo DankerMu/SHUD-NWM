@@ -2,6 +2,23 @@
 
 Detailed checks for each analysis dimension. Use during Phase 2 — Analyze.
 
+These dimensions are the diff-granularity instantiation of the entropy suite's shared six-axes vocabulary (`control-plane-auditor` `references/methodology/six-entropy-axes.md`). Mapping:
+
+| Dimension | Six-axes vocabulary |
+|---|---|
+| Naming Consistency | Semantic |
+| Error Handling Consistency | Behavioral |
+| Dependency Direction | Structural |
+| Documentation Sync | Context |
+| State Model | Semantic |
+| Pattern Duplication | Structural / Behavioral |
+| Pattern Contagion (agent-era) | Control (replication with no enforcement brake) |
+| Agent Verifiability (agent-era) | Context / Control |
+
+The names differ because the object differs: axes describe where a *repository* loses order; these dimensions describe what a *single change* is about to make worse. Keep using the dimension names in findings; use the axes when aggregating across changes or comparing with `repo-entropy-audit` output.
+
+No diff-level dimension maps to the **Protocol** axis: changes to instruction files, CI, or agent protocols are control-plane concerns and should route to `control-plane-auditor` rather than an entropy review.
+
 ---
 
 ## Naming Consistency

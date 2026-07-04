@@ -117,6 +117,8 @@ Use when the architecture work needs a clearer decision process and review loop.
 ## ADR Seed
 
 Use when the user wants a durable record that can later become a full ADR.
+Save it to the project's ADR directory (default `docs/adr/`, created lazily)
+rather than an unspecified location, so future reviews can find it.
 
 ```markdown
 # ADR Seed: [Decision]

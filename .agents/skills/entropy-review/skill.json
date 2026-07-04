@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "name": "entropy-review",
   "displayName": "Entropy Review",
-  "description": "Review code changes for entropy introduction: naming drift, error-model fragmentation, dependency-direction violations, doc staleness, state-model splits, and pattern duplication. Produces severity-graded findings focused on consistency and drift rather than correctness.",
-  "version": "0.1.0",
+  "description": "Review code changes for entropy introduction across eight dimensions: naming drift, error-model fragmentation, dependency-direction violations, doc staleness, state-model splits, pattern duplication, pattern contagion, and agent verifiability. Produces harm-graded findings focused on consistency and drift rather than correctness.",
+  "version": "0.2.0",
   "maturity": "experimental",
   "categories": [
     "review",

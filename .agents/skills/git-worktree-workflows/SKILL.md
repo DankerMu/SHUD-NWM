@@ -7,7 +7,8 @@ description: >
   inspect, compare, clean up, or repair worktrees safely. Do not use for
   ordinary single-branch Git help, repo bootstrap tasks, or broader
   advanced-Git sessions where worktrees are only incidental.
-version: 0.1.4
+invocation_posture: manual-first
+version: 0.1.5
 ---
 
 # Git Worktree Workflows

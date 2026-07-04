@@ -4,7 +4,23 @@ Detailed methods for each entropy axis scan. Used during Phase 2 of repo-entropy
 
 For theoretical background, see [Six Entropy Axes](../../control-plane-auditor/references/methodology/six-entropy-axes.md).
 
-**Agent-era calibration:** Traditional proxy metrics (file line count, function length, nesting depth) have been replaced or recalibrated. We measure the actual underlying problems (mixed responsibilities, implicit dependencies, uncovered branches) rather than human cognitive proxies. See `docs/decisions/agent-era-metric-recalibration.md`.
+**Agent-era calibration:** Traditional proxy metrics (file line count, function length, nesting depth) have been replaced or recalibrated. We measure the actual underlying problems (mixed responsibilities, implicit dependencies, uncovered branches) rather than human cognitive proxies. See `docs/decisions/agent-era-metric-recalibration.md` (repo-level doc; not shipped with standalone skill installs).
+
+---
+
+## Language adaptation
+
+Every command below is a **TypeScript/JavaScript-flavored example**. The six axes and their thresholds are language-independent — before scanning, substitute your project's file extensions and import syntax:
+
+| Language | File glob | Import syntax to match |
+|----------|-----------|------------------------|
+| TypeScript/JS | `*.ts`, `*.tsx`, `*.js`, `*.mjs` | `import ... from`, `require(` |
+| Python | `*.py` | `^import `, `^from ... import` |
+| Go | `*.go` | `import (`, `import "` |
+| Rust | `*.rs` | `^use ` |
+| Java | `*.java` | `^import ` |
+
+Swap the `--include`/`-name` globs and the import-matching patterns to fit; the scoring bands stay the same.
 
 ---
 
@@ -15,21 +31,24 @@ For theoretical background, see [Six Entropy Axes](../../control-plane-auditor/r
 Build a module-level import graph and check for layering violations.
 
 ```bash
-# List all imports grouped by source module (TypeScript/JavaScript)
+# List all imports grouped by source module (TypeScript/JavaScript).
+# Scan the module roots detected in Phase 1b: apps/ packages/ for monorepos,
+# src/ for single-app layouts (2>/dev/null skips roots that do not exist).
 grep -rn "^import\|^} from\|require(" --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' \
-  apps/ packages/ | grep -v node_modules | grep -v '.test.' | grep -v '.spec.'
+  apps/ packages/ src/ 2>/dev/null | grep -v node_modules | grep -v '.test.' | grep -v '.spec.'
 ```
 
 Group imports by source module → target module. Flag edges that go "upward" (e.g., packages/db importing from apps/api).
 
-### Circular dependency detection
+### Cycle detection
 
-Identify strongly connected components (SCCs) in the module graph.
+Detect import cycles. Catching every strongly connected component (SCC) needs a real graph tool; without one, catch the common pairwise (2-node) cycles directly and escalate to a tool for longer chains.
 
-Approximate approach: for each module pair (A, B), check if A imports B and B imports A. For larger graphs, use `madge --circular` (if available) or manual SCC traversal.
+Pairwise approach (always available): for each module pair (A, B), check if A imports B and B imports A. This finds 2-cycles but not longer ones. For full SCC detection, use `madge --circular` or `dependency-cruiser` when installed; otherwise traverse the import graph manually.
 
 ```bash
-# Quick circular check with madge (if installed)
+# Quick circular check with madge (if installed) — point it at the module
+# roots detected in Phase 1b (apps/ packages/ for monorepos, src/ otherwise)
 npx madge --circular --extensions ts,tsx src/
 ```
 
@@ -38,11 +57,13 @@ npx madge --circular --extensions ts,tsx src/
 Measure the growth and coupling of utility/shared directories.
 
 ```bash
-# Count files in utility-like directories
-find . -type f -name '*.ts' -path '*/util/*' -o -path '*/common/*' -o -path '*/helpers/*' -o -path '*/shared/*' | wc -l
+# Count files in utility-like directories (grouped so the -o branches stay
+# inside the type/name filter, and node_modules is pruned)
+find . -path ./node_modules -prune -o -type f -name '*.ts' \
+  \( -path '*/util/*' -o -path '*/common/*' -o -path '*/helpers/*' -o -path '*/shared/*' \) -print | wc -l
 
 # Check what imports from these directories
-grep -rn "from.*['\"].*\/util\|from.*['\"].*\/common\|from.*['\"].*\/helpers" --include='*.ts' | wc -l
+grep -rn "from.*['\"].*\/util\|from.*['\"].*\/common\|from.*['\"].*\/helpers" --include='*.ts' | grep -v node_modules | wc -l
 ```
 
 Flag: utility directories with > 20 files, or utility directories importing from business-logic modules.
@@ -54,7 +75,7 @@ File line count alone is a poor signal in agent-first development — agents rea
 ```bash
 # Per-file import source diversity: count distinct top-level module sources
 for f in $(find . -name '*.ts' -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.*'); do
-  sources=$(grep "from ['\"]" "$f" 2>/dev/null | grep -oP "from ['\"]([^'\"]+)" | sed 's|from ['\''"]||' | grep -oP '^[^/]+(/[^/]+)?' | sort -u | wc -l)
+  sources=$(grep "from ['\"]" "$f" 2>/dev/null | grep -Eo "from ['\"][^'\"]+" | sed 's|from ['\''"]||' | grep -Eo '^[^/]+(/[^/]+)?' | sort -u | wc -l)
   [ "$sources" -gt 5 ] && echo "$f imports from $sources distinct modules"
 done
 ```
@@ -92,7 +113,7 @@ Flag: modules with > 3 mutable state declarations or side-effect imports.
 
 ### Naming diversity analysis
 
-For core domain concepts, count how many distinct identifier names are used.
+For core domain concepts, count how many distinct identifier names are used. The [Six Entropy Axes](../../control-plane-auditor/references/methodology/six-entropy-axes.md) framework phrases this as "cluster all exported identifiers by embedding similarity" — but a single agent session has no embedding-clustering step. The practical method is the grep-based variant below: enumerate candidate identifiers and group them by hand against the glossary.
 
 ```bash
 # Example: find all identifiers containing "user" or "member" (adjust per project glossary)
@@ -104,7 +125,7 @@ Approach:
 2. For each concept, search for all identifier variants
 3. Count unique variants per concept
 
-Score: concepts with > 3 naming variants are high semantic entropy. Concepts with a single canonical name are low.
+Score: concepts with ≥ 3 naming variants are high semantic entropy (🔴 in the heatmap). Concepts with a single canonical name are low; 1-2 variants are medium (🟡). See [Heatmap Format § Semantics](heatmap-format.md#semantics).
 
 ### State definition scatter
 
@@ -118,7 +139,7 @@ Count how many files define status/state enums for each domain entity. If the sa
 
 ### Glossary coverage
 
-If a glossary exists in AGENTS.md or a dedicated file:
+If a glossary exists (canonically `openspec/glossary.md`, otherwise AGENTS.md or another dedicated file):
 - List all glossary terms
 - For each, search the codebase for the canonical name vs prohibited aliases
 - Coverage = (terms where canonical name is dominant) / (total terms)
@@ -131,17 +152,18 @@ Approach:
 1. Identify known-bad patterns (from cleanup backlog, TODO/FIXME markers, deprecated annotations, or quality docs)
 2. For each bad pattern, count occurrences across the codebase
 3. Check recent commits: is this pattern still being replicated?
-4. Contagion risk = (occurrence count) × (recency of last replication)
+4. Contagion risk: rank by occurrence count. Break ties and raise priority using recency — flag any pattern replicated within the last N commits (e.g., the last 30 days) as "actively spreading". Recency is a flag/tiebreaker, not a multiplier.
 
 ```bash
 # Find deprecated/flagged patterns and count occurrences
 grep -rn "@deprecated\|DEPRECATED\|LEGACY\|HACK" --include='*.ts' | grep -v node_modules
 
-# Check if deprecated patterns were touched in recent commits
-git log --since="3 months ago" --oneline -- $(grep -rl "@deprecated" --include='*.ts' | head -10)
+# Check whether flagged patterns were replicated recently (the "actively
+# spreading" recency window — adjust the last-N-days value as needed)
+git log --since="30 days ago" --oneline -- $(grep -rl "@deprecated" --include='*.ts' | head -10)
 ```
 
-Score: patterns with > 3 occurrences AND recent replication activity (< 3 months) are high contagion risk.
+Score: patterns with > 3 occurrences are high contagion risk (ranked by count). Those also replicated within the recency window (last ~30 days / last N commits) are flagged "actively spreading" and handled first, even at equal occurrence counts.
 
 ---
 
@@ -151,7 +173,7 @@ Score: patterns with > 3 occurrences AND recent replication activity (< 3 months
 
 ```bash
 # Classify error handling approaches
-grep -rn "catch\s*(" --include='*.ts' | wc -l          # try-catch count
+grep -rn "catch[[:space:]]*(" --include='*.ts' | wc -l  # try-catch count (POSIX class; portable on BSD/macOS + GNU)
 grep -rn "\.catch(" --include='*.ts' | wc -l            # promise catch count
 grep -rn "Result<\|Either<\|Ok(\|Err(" --include='*.ts' | wc -l  # Result type count
 grep -rn "return null\|return undefined" --include='*.ts' | wc -l # null return count
@@ -181,7 +203,7 @@ Type signatures are the primary channel through which agents understand function
 
 ```bash
 # Count any/unknown usage
-grep -rn ": any\b\|: unknown\b\|as any\b" --include='*.ts' | grep -v node_modules | grep -v '.test.' | wc -l
+grep -rnE "(: any|: unknown|as any)([^[:alnum:]_]|$)" --include='*.ts' | grep -v node_modules | grep -v '.test.' | wc -l  # -E + POSIX class replaces GNU \b/\|
 
 # Count total type annotations (rough proxy for type coverage)
 grep -rn ": [A-Z]" --include='*.ts' | grep -v node_modules | wc -l
@@ -230,11 +252,20 @@ Flag: instruction files not modified in > 3 months while corresponding code has 
 
 ### Dead reference detection
 
+Resolve each relative Markdown link against the directory of the file that contains it (not the current working directory), and cover nested `AGENTS.md`/`CLAUDE.md` files, not just the repo root.
+
 ```bash
-# Find markdown links in instruction files and check if targets exist
-grep -rn '\[.*\](.*\.md)' AGENTS.md docs/ 2>/dev/null | while read -r line; do
-  target=$(echo "$line" | grep -oP '\(([^)]+\.md)\)' | tr -d '()')
-  [ -n "$target" ] && [ ! -f "$target" ] && echo "DEAD: $line → $target"
+# Collect instruction files (nested included) + docs, then check each .md link
+# relative to the containing file's own directory. Portable on BSD/macOS + GNU.
+files="$(find . \( -name AGENTS.md -o -name CLAUDE.md \) -not -path '*/node_modules/*'; find docs -name '*.md' 2>/dev/null)"
+for file in $files; do
+  dir=$(dirname "$file")
+  grep -Eo '\]\([^)]+\)' "$file" 2>/dev/null | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' | while read -r link; do
+    case "$link" in
+      ''|/*|http://*|https://*) continue ;;   # skip empty, absolute, and URL links
+      *.md) [ -f "$dir/$link" ] || echo "DEAD: $file -> $link" ;;
+    esac
+  done
 done
 ```
 

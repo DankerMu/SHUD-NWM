@@ -5,6 +5,12 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-02
+- Add a **Severity Crosswalk** section to `finding-contract.md` mapping sibling pack vocabularies into the canonical P0/P1/P2/Note: `review` P0/P1/P2 map 1:1 and P3/Nit → Note; `entropy-review` E0 → P1 (P0 when it breaks a selected risk-pack invariant), E1 → P2, E2 → P2, E3 → Note; plus a dimension→failure-class map (naming drift → `conventions`, error-model fork → `contract`, state split → `state-transition`, duplication → `reuse`, dependency-direction violation → `altitude`). Lets consumers fold sibling grades into this contract without re-deriving them.
+- Add `invocation_posture: hybrid` to `SKILL.md` frontmatter, matching the sibling `review` and `entropy-review` skills.
+- Fix the under-specified output template: each finding now points at all ten finding-contract fields instead of four, and the merge-blocking field list in `SKILL.md` adds the missing **Consequence**.
+- Give Risk Triage a concrete Low/Medium discriminator — Medium when the change touches more than 3 files, more than one module, or any public/exported API; otherwise Low — so the mandatory removed-behavior audit (`reviewer-packages.md`) no longer flips on a fuzzy boundary. High enumeration unchanged.
+
 ## [0.3.0] - 2026-06-18
 - Add a closed **Failure-Class Vocabulary** to `finding-contract.md` (implementation/code classes plus spec/OpenSpec-artifact classes plus `other`) so the `Failure class` field draws from a whitelist; this makes dedup, failure-class synthesis, and cross-run logging consistent across reviewers and the workflows that consume this skill. Adapted (clean-room, with author permission) from the stellarlinkco/skills `code-review` category taxonomy and broadened to cover the OpenSpec review modes.
 - Add a **Reject When (Precision Gate)** to `finding-contract.md`: explicit precision rules (no speculative/unanchored/style-only findings; no "add guards" without naming the failing input and wrong result; no race without naming shared state and concurrent access) that turn weak items into non-blocking notes instead of blocking findings.

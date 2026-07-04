@@ -7,7 +7,7 @@ description: >
   或用户希望在动手前把计划/设计的每个决策点逼到清晰。
   不用于开放式头脑风暴、方向选型，或已经明确、无歧义的任务。
 invocation_posture: hybrid
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Grill Me
@@ -35,7 +35,7 @@ version: 0.1.0
 - 开放式选型、方向探索、头脑风暴 → `brainstorming` / `future-aware-architecture`
 - 从零把模糊需求变成 actionable scope → `clarify`（grill-me 针对**已有计划**做对抗，不做从零需求澄清）
 - 已经明确、无歧义、可直接执行的小任务
-- 需要边谈边沉淀术语表（CONTEXT.md）或 ADR 的领域建模场景 → 那是上游 `grill-with-docs` 的职责；**本 skill 只对话、不写任何文档**
+- 需要边谈边沉淀术语表（`openspec/glossary.md`）或 ADR（`docs/adr/`）的领域建模场景 → 那是同仓的 `grill-with-docs` 的职责；**本 skill 只对话、不写任何文档**
 
 ## 怎么 Grill（流程）
 
@@ -59,4 +59,4 @@ version: 0.1.0
 
 ---
 
-改编自 [`mattpocock/skills`](https://github.com/mattpocock/skills) 的 `grill-me`（中文参考 [`vinvcn/mattpocock-skills-zh-CN`](https://github.com/vinvcn/mattpocock-skills-zh-CN)），按本仓库 skill 规范本地化，并接入 `stage-change-pipeline` 工作体系。原作的文档持久化变体见 `grill-with-docs`（本 skill 刻意不含其 CONTEXT.md/ADR 写入行为）。
+改编自 [`mattpocock/skills`](https://github.com/mattpocock/skills) 的 `grill-me`（中文参考 [`vinvcn/mattpocock-skills-zh-CN`](https://github.com/vinvcn/mattpocock-skills-zh-CN)），按本仓库 skill 规范本地化，并接入 `stage-change-pipeline` 工作体系。原作另有一个文档持久化变体；本仓库对应的是同仓的 `grill-with-docs`（沉淀落点为 `openspec/glossary.md` 与 `docs/adr/`），而本 skill 刻意不含任何文档写入行为。

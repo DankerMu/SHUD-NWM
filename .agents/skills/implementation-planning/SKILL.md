@@ -7,7 +7,7 @@ description: >
   brainstorming, choosing between competing directions, requirements clarification, business
   planning, generic project management, or code execution.
 invocation_posture: manual-first
-version: 0.1.4
+version: 0.1.5
 ---
 
 # Implementation Planning
@@ -62,6 +62,15 @@ request just because the user used the word "plan".
 
 Even if the user explicitly names `implementation-planning`, that explicit invocation does **not**
 override the boundary above.
+
+## Pipeline Consumers
+
+Two automated workflows consume this skill's plans:
+
+- `stage-change-pipeline` — Stage 2 turns the plan into `tasks.md`; Stage 5 reuses its phases and dependencies to group tasks into implementation-ready GitHub issues.
+- `subagent-workflow` — uses the plan's phases, dependencies, and verification as an execution-strategy aid while implementing an issue.
+
+Keep phases, dependencies, and verification explicit enough that these consumers can map them onto tasks and issues without re-planning.
 
 ## Question Handling
 

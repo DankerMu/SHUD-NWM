@@ -34,7 +34,7 @@ maintainers 从 depth 获得的东西。change、bugs、knowledge 和 verificati
 ## Principles
 
 - **Depth is a property of the interface, not the implementation.** deep module 内部可以由小的、mockable、swappable parts 组成，只是它们不是 interface 的一部分。module 可以有 **internal seams**（implementation 私有，由自己的 tests 使用），也可以有 interface 上的 **external seam**。
-- **The deletion test.** 想象删除 module。如果复杂性消失，module 没隐藏任何东西（只是 pass-through）。如果复杂性在 N 个 callers 中重新出现，module 就在发挥价值。
+- **The deletion test.** 想象把 module 内联进它的每个 caller，观察复杂性的去向：**消失**（module 没隐藏任何东西，只是 pass-through）/ **在 N 个 caller 中重现**（module 是 deep 的，在发挥价值）/ **集中迁移到某个邻居**（module 是 shallow 簇的一部分，应深化到那个邻居）。操作四步与徽章映射见 [SKILL.md](SKILL.md) 的 Explore 步骤。
 - **The interface is the test surface.** Callers 和 tests 跨越同一个 seam。如果你想测试 interface _后面_的东西，module 形状可能不对。
 - **One adapter means a hypothetical seam. Two adapters means a real one.** 除非确实有东西会跨 seam 变化，否则不要引入 seam。
 

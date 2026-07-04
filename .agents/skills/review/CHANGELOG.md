@@ -5,19 +5,23 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Changed
-- Clarified that validation and eval guidance in `SKILL.md` is for maintainers of the canonical package, not a runtime requirement for projected installs on other repositories.
-- Expanded metadata description scope so `skill.json` matches the broader review surface documented in `SKILL.md`.
+## [0.5.1] - 2026-07-02
 
 ### Added
+- Cross-skill routing in "When Not To Activate": multi-perspective, high-risk, or risk-adaptive-depth reviews route to `risk-adaptive-cross-review`; consistency, drift, or pattern-duplication-only concerns route to `entropy-review`.
+- Severity-crosswalk pointer near the severity table: P3/Nit maps to "Note" in the `risk-adaptive-cross-review` finding contract when findings are folded into a cross-review.
+- Canonical-source note: for `subagent-workflow` Phase 4, `reviewer-packages.md` in `risk-adaptive-cross-review` is the canonical checklist source; this skill's per-type checklists serve standalone single-pass reviews.
 - Expanded eval coverage to check two new protocol contracts:
   - clear findings should not be softened into open questions
   - review should happen before repair, even when a follow-up fix may be appropriate
 
+### Changed
+- Clarified that validation and eval guidance in `SKILL.md` is for maintainers of the canonical package, not a runtime requirement for projected installs on other repositories.
+
 ## [0.5.0] - 2026-03-28
 
 ### Changed
-- **Positioned the skill for agent review of artifacts**: reframed the core description and opening summary around agent-performed, artifact-scoped review rather than reviewer coaching or general feedback conversations.
+- **Positioned the skill for agent review of artifacts**: reframed the core description and opening summary around agent-performed, artifact-scoped review rather than reviewer coaching or general feedback conversations. Also expanded the `skill.json` metadata description to match the broader review surface (migrations, infrastructure/config) documented in `SKILL.md`.
 - **Tightened trigger boundaries**: removed `audit` and broad quality-language from the primary trigger path, added an explicit `## When Not To Activate` section, and made explicit invocation guidance platform-neutral.
 - **Strengthened finding protocol**: P0/P1/P2 findings now require issue, consequence, evidence, and fix direction; clear bugs should no longer be softened into open-ended questions.
 - **Reduced low-value review noise**: added explicit non-findings guidance for formatter noise, import ordering, lint-only issues, and style-only feedback without real consequence.

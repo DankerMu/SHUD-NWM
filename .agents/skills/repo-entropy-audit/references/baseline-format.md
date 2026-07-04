@@ -8,11 +8,13 @@ The baseline snapshot captures the entropy state at a point in time for trend co
 
 Default: `.entropy-baseline/latest.json`
 
-The skill creates or updates this file on each run. Previous baselines are preserved as `.entropy-baseline/<date>.json`.
+The skill creates or updates this file on each run. Previous baselines are archived as `.entropy-baseline/<timestamp>.json`, where `<timestamp>` is the `timestamp` field of the snapshot being replaced, with colons replaced by hyphens for filename safety (e.g. `2026-05-24T12-00-00Z.json`). Using the snapshot's own timestamp rather than the run date keeps same-day reruns from colliding.
 
 If the user prefers a different location, store it where specified but use the same format.
 
-## JSON Schema
+## Baseline instance format
+
+The block below is an **illustrative instance**, not a formal JSON Schema. The field names and shapes are the convention; `version` stays `1` until the format changes incompatibly.
 
 ```json
 {
@@ -27,6 +29,9 @@ If the user prefers a different location, store it where specified but use the s
     "total_instruction_files": 14,
     "total_modules": 12,
     "modules_with_high_entropy": 2,
+    "naming_variant_total": 9,
+    "error_envelope_variants_max_per_module": 3,
+    "stale_docs_total": 1,
     "overall_trend": "stable"
   },
   "modules": {
@@ -34,7 +39,7 @@ If the user prefers a different location, store it where specified but use the s
       "file_count": 85,
       "structure": {
         "score": "low",
-        "scc_count": 0,
+        "cycle_count": 0,
         "max_file_lines": 320,
         "layer_violations": 1
       },
@@ -103,6 +108,25 @@ When a previous baseline exists, produce a comparison:
 - `apps/api` behavior: 🔴 → 🟡 (improved after error model unification)
 - `packages/ui` context: 🟡 → ❌ (AGENTS.md removed during refactor)
 ```
+
+## Summary metric aggregation
+
+The trend table compares repo-wide numbers, so the `summary` object persists them (not just per-module scores). Each derived metric is computed as:
+
+- `naming_variant_total` — **sum** over tracked core concepts of the distinct-variant count per concept (repo-wide per-concept rollup; the per-module `semantics.naming_variants` is a local view). Higher = more naming entropy.
+- `error_envelope_variants_max_per_module` — **max** over modules of `behavior.error_envelope_variants`. Max (not sum) is the aggregation-valid choice: envelope shapes are often shared across modules, so summing double-counts; the worst single module is what matters.
+- `stale_docs_total` — **count** of documents past their staleness threshold (instruction files > 3 months behind code, general docs > 6 months).
+- `modules_with_high_entropy` — **count** of modules whose worst axis score is `high` or `critical`.
+- `total_instruction_files` — **count** of substantive AGENTS.md/CLAUDE.md files (more is better; a drop is a regression).
+
+## Regression rule
+
+A run regresses versus its baseline if **either**:
+
+1. **any module's axis score moves to a worse band** (`low`→`medium`, `medium`→`high`, or any axis → `critical`); or
+2. **any tracked count worsens**: `modules_with_high_entropy`, `naming_variant_total`, `error_envelope_variants_max_per_module`, or `stale_docs_total` increases, or `total_instruction_files` decreases.
+
+On a regression, flag the offending modules and metrics prominently in the trend comparison and set `summary.overall_trend` to `"worsening"`. A run with no band drops and no count worsening is `"stable"` (or `"improving"` if any tracked metric got better).
 
 ## Notes
 

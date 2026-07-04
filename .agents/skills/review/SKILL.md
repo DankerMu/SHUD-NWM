@@ -11,7 +11,7 @@ description: >
   Do NOT activate for brainstorming, open-ended design feedback, governance/library
   audits, or general conversations about whether an approach seems good.
 invocation_posture: hybrid
-version: 0.5.0
+version: 0.5.1
 ---
 
 # Review
@@ -36,6 +36,8 @@ Do not activate for:
 - Governance or library-audit requests about skills, agents, or repository hygiene
 - Requests to teach review culture, reviewer communication, or mentoring practices
 - General quality feedback without a concrete artifact or change set to inspect
+- Multi-perspective, high-risk, or risk-adaptive-depth reviews (parallel reviewer packs, invariant/state-machine focus) → use `risk-adaptive-cross-review`
+- Consistency, drift, or pattern-duplication-only concerns (naming drift, error-model splits) → use `entropy-review`
 
 Use `brainstorming`, `skill-lifecycle-manager`, or a general design discussion instead when the user wants exploration rather than a structured review protocol.
 
@@ -97,6 +99,8 @@ Each changed file maps to one or more content types. The Dimensions column below
 **Priority resolves overlaps**: a `*.tsx` file in `__tests__/` is **Tests** (priority 4), not Frontend (7). A `config.yaml` in `k8s/` is **Infrastructure** (3), not Configuration (8).
 
 For the detailed checklist of each content type, read the relevant reference file.
+
+> **Canonical-source note**: For `subagent-workflow` Phase 4 (parallel reviewer packs), `reviewer-packages.md` in `risk-adaptive-cross-review` is the canonical checklist source. This skill's per-type checklists serve standalone single-pass reviews.
 
 ---
 
@@ -182,6 +186,8 @@ For changes to exported functions, public APIs, schemas, or shared interfaces:
 | **P3** | 🟢 Nit | Optional | Style preference, minor wording that doesn't cause confusion |
 | — | 💡 Suggestion | — | Alternative approach, learning opportunity |
 | — | 🎉 Praise | — | Good pattern, clean code, thorough docs |
+
+P3/Nit maps to "Note" in the `risk-adaptive-cross-review` finding contract (see its Severity crosswalk) when these findings are folded into a cross-review.
 
 ### Finding protocol
 

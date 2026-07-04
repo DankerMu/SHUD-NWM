@@ -3,7 +3,7 @@
   "name": "control-plane-auditor",
   "displayName": "Control Plane Auditor",
   "description": "Audit a repository's control plane health across seven layers (memory, invariant, protocol, permission, sensorium, evaluation, governance) and produce an actionable improvement report. Covers instruction-file completeness, rule enforcement coverage, doc freshness, test infrastructure, and agent readiness.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "maturity": "experimental",
   "categories": [
     "workflow",

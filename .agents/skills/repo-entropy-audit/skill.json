@@ -3,7 +3,7 @@
   "name": "repo-entropy-audit",
   "displayName": "Repo Entropy Audit",
   "description": "Scan an entire repository for entropy across six axes (structure, semantics, behavior, context, protocol, control) and produce a module-level heatmap, trend comparison against baseline, and prioritized cleanup targets. Use for periodic health checks or before major releases.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "maturity": "experimental",
   "categories": [
     "workflow",
@@ -30,8 +30,10 @@
   },
   "requirements": {
     "tools": [
-      "git"
-    ]
+      "git",
+      "gh"
+    ],
+    "network": "optional"
   },
   "capabilities": {
     "shell": true,

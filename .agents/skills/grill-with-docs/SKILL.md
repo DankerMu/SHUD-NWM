@@ -7,7 +7,7 @@ description: >
   或用户希望在压测计划的同时统一项目语言、沉淀长期决策。
   不用于不需要术语/决策沉淀的轻量压测（用 grill-me），也不用于纯需求澄清（用 clarify）。
 invocation_posture: hybrid
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Grill With Docs
@@ -79,7 +79,7 @@ version: 0.1.0
 3. **逐分支追问**：一次一个问题，每问附推荐答案 + 理由。
 4. **顺依赖深入**：用户定一个决策后，顺着新引出的子决策继续。
 5. **领域增强 + inline 沉淀**：在追问中执行上面"四件事"；术语一解决就写进 `openspec/glossary.md`，够三门槛的决策当场落 `docs/adr/`。
-6. **收敛输出**：每个分支达成共同理解后，给小结——已确定决策、开放项、关键假设，外加**本轮新增/修订的 glossary 术语与 ADR 列表**，作为 `stage-change-pipeline` Stage 2 的输入。
+6. **收敛输出**：每个分支达成共同理解后，给小结——已确定决策、开放项、关键假设，外加**本轮新增/修订的 glossary 术语与 ADR 列表**。本 skill 运行于 `stage-change-pipeline` Stage 2 内部，故该小结是 Stage 2 `design.md`/`specs/` 定稿与 Stage 3 审核的输入。
 
 ## 与本仓库其它 skill 的关系
 

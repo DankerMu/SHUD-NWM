@@ -7,7 +7,7 @@ description: >
   architecture direction or selection decisions; do not use for pure
   implementation planning, narrow stack research, or review-only tasks.
 invocation_posture: manual-first
-version: 0.2.4
+version: 0.3.0
 ---
 
 # Future-Aware Architecture
@@ -248,7 +248,10 @@ Default outputs:
 
 - **Quick**: architecture recommendation inline in chat
 - **Standard**: Architecture Decision Brief
-- **Deep**: Architecture Decision Record or ADR seed saved to file
+- **Deep**: Architecture Decision Record or ADR seed saved to the project's ADR
+  directory — use the existing one if the project has one, otherwise default to
+  `docs/adr/` (create lazily). When the `grill-with-docs` skill is installed,
+  follow its `ADR-FORMAT.md`.
 
 When the direction is approved and the next problem is execution, hand off to
 `implementation-planning`. If the user wants a formal review of the resulting

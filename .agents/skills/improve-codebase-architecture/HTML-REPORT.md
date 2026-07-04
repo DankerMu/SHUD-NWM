@@ -1,6 +1,6 @@
 # HTML Report Format
 
-Architectural review 会被渲染成一个 self-contained HTML file，放在 OS temp directory。Tailwind 和 Mermaid 都来自 CDNs。Mermaid 能稳定处理 graph-shaped diagrams；手写 divs 和 inline SVG 更适合 editorial visuals（mass diagrams、cross-sections）。两者混用，不要所有东西都依赖 Mermaid，否则看起来会很 generic。
+Architectural review 会被渲染成一个**单文件 HTML**（样式与图表经 CDN 加载，查看时需要网络），放在 OS temp directory。Tailwind 和 Mermaid 都来自 CDNs。离线打开时无样式无图表——需要离线可用时，把 CDN 资源内联或接受纯文本降级。Mermaid 能稳定处理 graph-shaped diagrams；手写 divs 和 inline SVG 更适合 editorial visuals（mass diagrams、cross-sections）。两者混用，不要所有东西都依赖 Mermaid，否则看起来会很 generic。
 
 ## Scaffold
 
@@ -32,6 +32,8 @@ Architectural review 会被渲染成一个 self-contained HTML file，放在 OS 
   </body>
 </html>
 ```
+
+> **`securityLevel: "loose"`** 仅因为报告内容是本地从 repo 路径生成的才可接受——绝不要把不可信文本喂进 Mermaid。
 
 ## Header
 
@@ -86,6 +88,8 @@ Modules 用带 border 和 label 的 `<div>` 表示。Arrows 用 inline SVG `<lin
 ### Mass diagram（适合 “interface as wide as implementation”）
 
 每个 module 用两个 rectangles：一个表示 interface surface area，一个表示 implementation。Before：interface rectangle 几乎和 implementation rectangle 一样高（shallow）。After：interface rectangle 很短，implementation rectangle 很高（deep）。
+
+**注意**：矩形高度表达的是 **behaviour 量 / leverage**，不是代码行数。不要用"把 implementation 画高"来伪造 depth——那正是 [LANGUAGE.md](LANGUAGE.md) 拒绝的 implementation-lines/interface-lines 比例。
 
 ### Call-graph collapse
 

@@ -268,6 +268,8 @@ Required additions:
 - <only if revise>
 ```
 
+The fixture reviewer is read-only and has no write access: it returns this verdict as its final message, and the orchestrator records the outcome (and reruns the fixture review once if `revise`, per Phase 0.5).
+
 Then run `openspec validate <change-name> --strict --no-interactive`.
 
 Do not run a four-agent fixture review. If fixture content takes more than a few hundred tokens to explain, it is too large for this workflow.

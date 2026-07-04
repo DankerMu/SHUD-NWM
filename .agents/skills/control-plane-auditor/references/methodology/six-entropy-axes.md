@@ -2,7 +2,9 @@
 
 Six diagnostic lenses for identifying where a repository is losing order. Each axis is independent but interacts with the others; a problem on one axis often amplifies problems on adjacent axes.
 
-**Agent-era calibration note:** Several metrics in this framework have been recalibrated for agent-first development. Traditional proxies for human cognitive limits (file line count, function length, nesting depth, comment density) are replaced by metrics that measure the actual underlying problems (mixed responsibilities, implicit dependencies, uncovered branches, constraint accessibility). See `docs/decisions/agent-era-metric-recalibration.md` for the full rationale.
+**Shared vocabulary, per-object instantiation.** This file is the entropy suite's canonical abstract vocabulary, consumed by `repo-entropy-audit` (whole-repo scans), `entropy-review` (per-change reviews, via its diff-granularity dimension mapping), and `control-plane-auditor` (which additionally applies its own seven-layer model to the control *system* itself). The axes are shared; the detection methods are not — each consumer instantiates them for its own object and granularity. Do not force one checklist across objects: a unified abstract language with divergent concrete probes is the intended design.
+
+**Agent-era calibration note:** Several metrics in this framework have been recalibrated for agent-first development. Traditional proxies for human cognitive limits (file line count, function length, nesting depth, comment density) are replaced by metrics that measure the actual underlying problems (mixed responsibilities, implicit dependencies, uncovered branches, constraint accessibility). See `docs/decisions/agent-era-metric-recalibration.md` for the full rationale (repo-level doc; not shipped with standalone skill installs).
 
 ---
 

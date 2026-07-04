@@ -1,6 +1,6 @@
 # Interface Design
 
-当用户想为选中的 deepening candidate 探索替代 interfaces 时，使用这个 parallel sub-agent pattern。基于 “Design It Twice”（Ousterhout）：你的第一个想法很可能不是最好的。
+当用户想为选中的 deepening candidate 探索替代 interfaces 时，使用这个 parallel sub-agent pattern。基于 “Design It Twice (or more)”（Ousterhout）：你的第一个想法很可能不是最好的，所以这里一次派生 3–4 个根本不同的 interface 一起比较。
 
 使用 [LANGUAGE.md](LANGUAGE.md) 中的词汇：**module**、**interface**、**seam**、**adapter**、**leverage**。
 
@@ -19,6 +19,8 @@
 ### 2. Spawn sub-agents
 
 用编排器的原生并行 subagent 机制（Claude Code Task subagent 或 Codex subagent）并行生成 3+ 个 subagent。每个都必须为 deepened module 产出一个**根本不同**的 interface。
+
+> 若本 skill 自身运行在无派生能力的 subagent 里，这里的并行 design-it-twice（以及 Explore 步的 explorer 扫描）退化为编排器内联顺序执行：你仍然产出 3–4 个根本不同的 interface，只是顺序生成、自己比较。
 
 给每个 sub-agent 单独的 technical brief（file paths、coupling details、[DEEPENING.md](DEEPENING.md) 中的 dependency category、seam 后面是什么）。brief 独立于 Step 1 中面向用户的问题空间说明。给每个 agent 不同的 design constraint：
 

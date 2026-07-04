@@ -2,6 +2,8 @@
 
 Proxy metrics for approximating the latent variable: **future agent correct-change cost**. These are not precise measurements — they are trend signals. Watch direction over time, not absolute values.
 
+**Agent-era calibration note:** Several proxies here have been recalibrated for agent-first development. Structural diagnostics no longer lead with human-cognition proxies (file line count, function length); they lead with metrics for the actual underlying problems — import-source diversity for mixed responsibilities, and implicit-dependency declarations. File size survives only as a secondary informational signal. See `docs/decisions/agent-era-metric-recalibration.md` for the full rationale (repo-level doc; not shipped with standalone skill installs).
+
 ---
 
 ## Operational Metrics (Primary Dashboard)
@@ -107,9 +109,10 @@ These metrics feed into the six entropy axes. They are useful for heat maps and 
 
 ### Structural Axis
 - **SCC count and size**: number and size of strongly connected components in the module dependency graph
+- **Import-source diversity**: per-file count of distinct unrelated top-level modules imported (flag files importing from > 5) — the primary structural diagnostic, a proxy for mixed responsibilities
 - **Util/common volume**: file count and line count in utility directories
 - **Layer violation count**: imports that cross declared layer boundaries
-- **Max file size**: largest files by line count (flag > 500 lines)
+- **Max file size**: largest files by line count — secondary informational signal only (1000+ lines is informational, never a red flag on its own; investigate via import-source diversity)
 
 ### Semantic Axis
 - **Naming variant count**: for core domain concepts, how many distinct identifiers are used
@@ -146,6 +149,6 @@ These metrics feed into the six entropy axes. They are useful for heat maps and 
 
 3. **Don't compare across projects.** These metrics are calibrated per-repo. A monorepo with 50 packages and a single-app repo will have different baselines.
 
-4. **Automate what you can; estimate the rest.** Some metrics (SCC count, file sizes, instruction file presence) are trivially automatable. Others (plan coverage, cleanup half-life) require judgment. Start with the automatable ones.
+4. **Automate what you can; estimate the rest.** Some metrics (SCC count, import-source diversity, instruction file presence) are trivially automatable. Others (plan coverage, cleanup half-life) require judgment. Start with the automatable ones.
 
 5. **Review quarterly.** Monthly is too noisy for most of these signals. Quarterly gives enough data to see real trends.

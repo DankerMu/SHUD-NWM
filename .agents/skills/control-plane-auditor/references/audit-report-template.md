@@ -66,6 +66,9 @@ Use this template for Phase 3 output.
 | Naming Conventions | Yes / Partial / No | <notes> | <file path or "missing"> |
 | Doc Freshness Rules | Yes / Partial / No | <notes> | <file path or "missing"> |
 | State Model References | Yes / Partial / No | <notes> | <file path or "missing"> |
+| Implicit Dependencies | Yes / Partial / No | <notes> | <file path or "missing"> |
+
+Canonical dimension definitions: references/methodology/agents-md-spec.md
 
 ## Priority Actions
 
@@ -75,12 +78,13 @@ Ordered by impact on future agent correct-change cost:
 2. **<action>** — <why>
 3. **<action>** — <why>
 
+**Severity note:** These are repo-setup improvements, outside the P0/P1/P2/Note change-review scale. If a gap blocks an active change, raise it through `entropy-review` (E-grades) and fold it via the Severity Crosswalk in `risk-adaptive-cross-review`'s `finding-contract.md`.
+
 ## Recommended Tools
 
 Based on findings, consider using:
-- `entropy-review` — for PR-level consistency checks (after adding constraint dimensions)
-- `repo-entropy-audit` — for full-repo entropy scan and baseline
+- `entropy-review` — for PR-level consistency checks and dependency-direction drift in a change (after adding constraint dimensions)
+- `repo-entropy-audit` — for full-repo entropy scan and baseline, including whole-repo structural dependency scans
 - `project-documentation` — for docs/ tree governance
-- `dependency-audit` — for dependency health
 - `review` — for general code review with broader scope
 ```

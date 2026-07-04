@@ -67,6 +67,26 @@ Spec/OpenSpec-artifact classes (for OpenSpec and Hybrid review):
 
 - `other` — a real defect that fits none of the above; name the concrete invariant
 
+## Severity Crosswalk
+
+When a finding arrives from a sibling review pack, map its grade into this
+contract's canonical P0/P1/P2/Note before synthesis so dedup, gating, and
+cross-run logging stay consistent.
+
+- **`review` skill**: P0 → P0, P1 → P1, P2 → P2; P3/Nit → Note.
+- **`entropy-review`**: E0 → P1 (P0 when it breaks a selected risk-pack
+  invariant); E1 → P2; E2 → P2; E3 → Note.
+
+Map `entropy-review` dimensions onto this contract's Failure-Class Vocabulary:
+
+- naming drift → `conventions`
+- error-model fork → `contract`
+- state split → `state-transition`
+- duplication → `reuse`
+- dependency-direction violation → `altitude` (business logic or imports at the
+  wrong ownership layer); if a specific declared import boundary is broken, use
+  the most specific existing class that fits.
+
 ## Non-Blocking Notes
 
 Keep a concern non-blocking when it lacks a concrete scenario, cannot name the

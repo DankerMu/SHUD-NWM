@@ -8,7 +8,8 @@ description: >
   test evidence, spec compliance, or invariant/state-machine compatibility. Do
   not use for ordinary quick review unless the user asks for multi-perspective
   or risk-adaptive depth.
-version: 0.3.0
+invocation_posture: hybrid
+version: 0.4.0
 ---
 
 # Risk-Adaptive Cross Review
@@ -44,8 +45,12 @@ request is only consistency/drift-focused, use `entropy-review`.
 
 Classify the review before launching reviewers:
 
-- **Low**: small local change, no public contract, no data/security/CI behavior.
-- **Medium**: multiple files or modules, test behavior, public-ish API, shared helper.
+- **Low**: 3 or fewer files, a single module, no public/exported API, and no
+  data/security/CI behavior.
+- **Medium**: more than 3 files, more than one module, or any public/exported
+  API; also test-behavior changes or a shared helper. This boundary is what makes
+  the removed-behavior audit mandatory (see `reviewer-packages.md`), so classify
+  it explicitly rather than by feel.
 - **High**: auth/permissions, file IO/path safety, DB-backed state, migrations,
   retries/cancellation, publish/delete/rollback, schema/evidence contracts,
   production config, money, security, data loss, shared state machines.
@@ -80,8 +85,8 @@ skill, or spawn further nested subagents.
 Read [finding-contract.md](references/finding-contract.md) before synthesizing.
 Treat a finding as merge-blocking only when it names severity, a failure class
 from the contract's Failure-Class Vocabulary, violated contract/invariant,
-concrete scenario, evidence, required fix direction, required test or proof,
-sibling surfaces to audit, and blocking status.
+concrete scenario, evidence, consequence, required fix direction, required test
+or proof, sibling surfaces to audit, and blocking status.
 
 Apply the contract's Reject When precision gate so speculative, unanchored,
 or style-only items become notes rather than blocking findings. Respect Oracle
@@ -131,7 +136,10 @@ Return concise structured output:
 **verdict**: approve | request-changes | needs-discussion
 
 ### Findings
-- **P0/P1/P2** `<failure-class>`: <issue, evidence, consequence, fix direction>
+- **P0/P1/P2** `<failure-class>`: per finding, all ten finding-contract fields —
+  severity, failure class, violated invariant/contract, concrete scenario,
+  evidence, consequence, fix direction, required test/proof, sibling surfaces,
+  blocking status
 
 ### Fix Groups
 - `<failure-class>`: <class-level closure task and verification>
