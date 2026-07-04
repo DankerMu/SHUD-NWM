@@ -91,3 +91,9 @@ def test_config_does_not_emit_database_url(monkeypatch: pytest.MonkeyPatch) -> N
     assert config.database_url == "postgresql://secret-user:secret-pass@localhost:55432/nhms"
     assert "secret-pass" not in rendered
     assert receipt["safety"]["database_url_redacted"] is True
+
+
+def test_quiet_flag_is_available_for_systemd_wrapper() -> None:
+    args = governance.build_parser().parse_args(["--quiet"])
+
+    assert args.quiet is True

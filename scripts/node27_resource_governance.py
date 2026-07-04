@@ -717,6 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda raw: _positive_bytes(raw, label="database-critical-bytes"),
         default=AuditThresholds.database_critical_bytes,
     )
+    parser.add_argument("--quiet", action="store_true", help="Do not print the full receipt to stdout.")
     parser.add_argument("--pretty", action="store_true")
     return parser
 
@@ -748,8 +749,9 @@ def main(argv: list[str] | None = None) -> int:
     receipt = build_receipt(config)
     if config.summary_path is not None:
         _write_summary(config.summary_path, receipt)
-    indent = 2 if args.pretty else None
-    print(json.dumps(receipt, indent=indent, sort_keys=True, default=_json_default))
+    if not args.quiet:
+        indent = 2 if args.pretty else None
+        print(json.dumps(receipt, indent=indent, sort_keys=True, default=_json_default))
     return 0 if receipt.get("status") == "completed" else 1
 
 

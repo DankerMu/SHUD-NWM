@@ -65,7 +65,7 @@ START=$(date +%s)
 cd "$REPO" || blocked "REPO_UNAVAILABLE"
 
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_resource_governance.py" \
-  --summary-path "$SUMMARY_PATH" >> "$LOG_FILE" 2>&1
+  --summary-path "$SUMMARY_PATH" --quiet >> "$LOG_FILE" 2>&1
 RC=$?
 
 END=$(date +%s)
