@@ -94,6 +94,8 @@ MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
 MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
+MAX_FILE_JOURNAL_READ_CACHE_ENTRIES = 4096
+MAX_FILE_JOURNAL_READ_CACHE_BYTES = 64 * 1024 * 1024
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
@@ -346,6 +348,8 @@ class FileOrchestrationJournalRepository:
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
         self._cycle_rows_cache: dict[tuple[str, str, str | None, str | None], _CycleRows] = {}
+        self._read_bytes_cache: dict[str, tuple[tuple[int, int, int], bytes, bool]] = {}
+        self._read_bytes_cache_total = 0
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         try:
@@ -1536,9 +1540,59 @@ class FileOrchestrationJournalRepository:
             )
         return payload
 
+    def _read_bytes_limited_cached(self, path: Path) -> tuple[bytes, bool]:
+        """Read file bytes through a stat-identity cache.
+
+        The stat probe is only a cache key: any anomaly (missing file,
+        symlink, non-regular target) falls through to the hardened
+        no-follow reader, which stays the sole authority for errors and
+        content. A hit requires an exact (mtime_ns, size, inode) match,
+        so appends and atomic-rename replacements always miss. The
+        returned flag is True when these exact bytes already passed
+        `_decode_mapping` validation in this process.
+        """
+        key = str(path)
+        signature: tuple[int, int, int] | None = None
+        try:
+            probe = os.stat(path, follow_symlinks=False)
+        except OSError:
+            probe = None
+            self._read_bytes_cache_drop(key)
+        if probe is not None and stat.S_ISREG(probe.st_mode):
+            signature = (probe.st_mtime_ns, probe.st_size, probe.st_ino)
+            cached = self._read_bytes_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                return cached[1], cached[2]
+        content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
+        if signature is not None and len(content) == probe.st_size:
+            self._read_bytes_cache_store(key, signature, content)
+        return content, False
+
+    def _read_bytes_cache_store(self, key: str, signature: tuple[int, int, int], content: bytes) -> None:
+        if len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES:
+            return
+        self._read_bytes_cache_drop(key)
+        while self._read_bytes_cache and (
+            len(self._read_bytes_cache) >= MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
+            or self._read_bytes_cache_total + len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES
+        ):
+            self._read_bytes_cache_drop(next(iter(self._read_bytes_cache)))
+        self._read_bytes_cache[key] = (signature, content, False)
+        self._read_bytes_cache_total += len(content)
+
+    def _read_bytes_cache_drop(self, key: str) -> None:
+        entry = self._read_bytes_cache.pop(key, None)
+        if entry is not None:
+            self._read_bytes_cache_total -= len(entry[1])
+
+    def _read_bytes_cache_mark_validated(self, key: str, content: bytes) -> None:
+        entry = self._read_bytes_cache.get(key)
+        if entry is not None and entry[1] is content:
+            self._read_bytes_cache[key] = (entry[0], entry[1], True)
+
     def _read_optional_json(self, path: Path) -> dict[str, Any] | None:
         try:
-            content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
+            content, prevalidated = self._read_bytes_limited_cached(path)
         except FileNotFoundError:
             return None
         except (OSError, SafeFilesystemError) as error:
@@ -1548,16 +1602,20 @@ class FileOrchestrationJournalRepository:
                 evidence={"error_type": type(error).__name__},
             ) from error
         self._require_within_byte_limit(content, path)
-        return _decode_mapping(
+        if prevalidated:
+            return _decode_mapping_prevalidated(content, field=str(_relative_evidence(path, self.root)))
+        payload = _decode_mapping(
             content,
             field=str(_relative_evidence(path, self.root)),
             max_nodes=self.max_json_nodes,
             max_depth=self.max_json_depth,
         )
+        self._read_bytes_cache_mark_validated(str(path), content)
+        return payload
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         try:
-            content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
+            content, prevalidated = self._read_bytes_limited_cached(path)
         except FileNotFoundError:
             return []
         except (OSError, SafeFilesystemError) as error:
@@ -1573,14 +1631,22 @@ class FileOrchestrationJournalRepository:
                 continue
             if len(records) >= MAX_FILE_JOURNAL_RECORDS:
                 raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field="journal")
-            record = _decode_mapping(
-                raw_line,
-                field=f"{_relative_evidence(path, self.root)}:{line_number}",
-                max_nodes=self.max_json_nodes,
-                max_depth=self.max_json_depth,
-            )
+            if prevalidated:
+                record = _decode_mapping_prevalidated(
+                    raw_line,
+                    field=f"{_relative_evidence(path, self.root)}:{line_number}",
+                )
+            else:
+                record = _decode_mapping(
+                    raw_line,
+                    field=f"{_relative_evidence(path, self.root)}:{line_number}",
+                    max_nodes=self.max_json_nodes,
+                    max_depth=self.max_json_depth,
+                )
             record[_REPLAY_ORDER_FIELD] = line_number
             records.append(record)
+        if not prevalidated:
+            self._read_bytes_cache_mark_validated(str(path), content)
         return records
 
     def _require_within_byte_limit(self, content: bytes, path: Path) -> None:
@@ -2187,9 +2253,56 @@ class FileOrchestrationJournalRepository:
         content += line
         self._require_within_byte_limit(content, path)
         self._atomic_write_bytes_unlocked(path, content)
+        self._apply_record_to_cycle_rows_cache(source_id=source_id, cycle_time=cycle_time, record=record)
 
-    def _materialize_latest_unlocked(self, *, source_id: str, cycle_time: datetime, model_id: str) -> None:
+    def _apply_record_to_cycle_rows_cache(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        record: Mapping[str, Any],
+    ) -> None:
+        """Keep the in-window rows cache coherent with a just-appended record.
+
+        Applying the record through the same reducer used by fresh reads is
+        equivalent to re-reading the journal: merges are decided by the
+        strictly increasing replay sequence, not list position. Derived
+        (model-scoped and segment-override) entries are dropped and rebuilt
+        lazily from the updated base entry.
+        """
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        cycle_segment = format_cycle_time(cycle_time)
+        base_key = (source_id, cycle_segment, None, None)
+        stale_keys = [
+            key
+            for key in self._cycle_rows_cache
+            if key[0] == source_id and key[1] == cycle_segment and key != base_key
+        ]
+        for key in stale_keys:
+            self._cycle_rows_cache.pop(key, None)
+        cached = self._cycle_rows_cache.get(base_key)
+        if cached is None:
+            return
+        updated = _clone_cycle_rows(cached)
+        try:
+            self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
+            updated.pipeline_events = _dedupe_events(updated.pipeline_events)
+        except FileOrchestrationJournalError:
+            self._cycle_rows_cache.pop(base_key, None)
+            return
+        self._cycle_rows_cache[base_key] = updated
+
+    def _materialize_latest_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        next_sequence: int | None = None,
+    ) -> None:
         rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        if next_sequence is None:
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         latest = {
             "schema_version": FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
             "generated_at": _format_utc(_utcnow()),
@@ -2203,7 +2316,7 @@ class FileOrchestrationJournalRepository:
             "pipeline_jobs": [_strip_internal_fields(job) for job in rows.pipeline_jobs.values()],
             "pipeline_events": [_strip_internal_fields(event) for event in rows.pipeline_events],
             "replay": {
-                "latest_sequence": self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time) - 1,
+                "latest_sequence": next_sequence - 1,
                 "job_count": len(rows.pipeline_jobs),
                 "event_count": len(rows.pipeline_events),
             },
@@ -2218,8 +2331,16 @@ class FileOrchestrationJournalRepository:
         )
 
     def _materialize_cycle_latest_unlocked(self, *, source_id: str, cycle_time: datetime) -> None:
+        # The journal cannot change mid-sweep (cycle write lock is held), so
+        # the next sequence is computed once instead of per model.
+        next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         for model_id in self._cycle_materialization_model_ids_unlocked(source_id=source_id, cycle_time=cycle_time):
-            self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            self._materialize_latest_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                next_sequence=next_sequence,
+            )
 
     def _cycle_materialization_model_ids_unlocked(self, *, source_id: str, cycle_time: datetime) -> list[str]:
         model_ids: set[str] = set()
@@ -2254,6 +2375,7 @@ class FileOrchestrationJournalRepository:
                 "failed to atomically write file journal state",
                 {"error_type": type(error).__name__},
             ) from error
+        self._read_bytes_cache_drop(str(path))
 
     @contextmanager
     def _locked_cycle_write(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
@@ -4229,6 +4351,26 @@ def _decode_mapping(content: bytes, *, field: str, max_nodes: int, max_depth: in
     if not isinstance(payload, Mapping):
         raise FileOrchestrationJournalError("file_journal_expected_object", field=field)
     _validate_json_complexity(payload, field=field, max_nodes=max_nodes, max_depth=max_depth)
+    return dict(payload)
+
+
+def _decode_mapping_prevalidated(content: bytes, *, field: str) -> dict[str, Any]:
+    """Decode bytes whose complexity validation already passed once.
+
+    The complexity limits are a pure function of the bytes, so the graph
+    walk is skipped for byte-identical re-reads; decoding still returns
+    fresh objects on every call.
+    """
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise FileOrchestrationJournalError(
+            "file_journal_malformed_json",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+    if not isinstance(payload, Mapping):
+        raise FileOrchestrationJournalError("file_journal_expected_object", field=field)
     return dict(payload)
 
 
