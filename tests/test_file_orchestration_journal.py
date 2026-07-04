@@ -4617,6 +4617,15 @@ def test_db_free_scheduler_from_env_uses_file_journal_without_database_url(
         paths["NHMS_SCHEDULER_JOURNAL_ROOT"] / "latest/gfs/2026062800/model_a.json",
         _latest_view(cycle_time=cycle_time, hydro_status="complete"),
     )
+    _write_json(
+        roots["object_store_root"] / "runs/fcst_gfs_2026062800_model_a/input/manifest.json",
+        {
+            "initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026062800_gfs_2026062718_f006",
+            }
+        },
+    )
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> Any:
@@ -4641,7 +4650,11 @@ def test_db_free_scheduler_from_env_uses_file_journal_without_database_url(
 
     assert result.status == "planned"
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["skipped_candidates"][0]["reason"] == "completed_duplicate_pipeline"
+    # The journal-backed candidate-state provider now resolves the completed
+    # run into a durable terminal skip instead of the provider-less
+    # completed_duplicate_pipeline early exit.
+    assert result.evidence["skipped_candidates"][0]["reason"] == "terminal_hydro_success"
+    assert result.evidence["skipped_candidates"][0]["state_evidence"]["decision"] == "skip_terminal"
 
 
 def test_db_free_scheduler_from_env_run_once_uses_file_journal_active_slurm_evidence(

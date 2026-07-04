@@ -2169,15 +2169,17 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cycle_time = _dt("2026-05-21T06:00:00Z")
+    # NFS-required discovery only surfaces the 00Z/12Z production cadence,
+    # so the persisted-identity fixture must live on an allowed cycle hour.
+    cycle_time = _dt("2026-05-21T00:00:00Z")
     nfs_root = tmp_path / "nfs"
-    raw_key = "raw/gfs/2026052106/gfs.t06z.pgrb2.0p25.f000.bundle.grib2"
+    raw_key = "raw/gfs/2026052100/gfs.t00z.pgrb2.0p25.f000.bundle.grib2"
     raw_file = nfs_root / raw_key
     raw_file.parent.mkdir(parents=True, exist_ok=True)
     raw_file.write_bytes(b"node27-raw")
     persisted_source_object = {
         "source": "gfs",
-        "manifest_object_key": "raw/gfs/2026052106/manifest.json",
+        "manifest_object_key": "raw/gfs/2026052100/manifest.json",
         "manifest_digest": "persisted-nfs-manifest-digest",
         "raw_entry_digest": "persisted-raw-entry-digest",
     }
@@ -2189,8 +2191,8 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
     }
     manifest = {
         "source_id": "gfs",
-        "cycle_time": "2026-05-21T06:00:00+00:00",
-        "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+        "cycle_time": "2026-05-21T00:00:00+00:00",
+        "manifest_uri": "s3://nhms/raw/gfs/2026052100/manifest.json",
         "metadata": {
             "physical_file_count": 1,
             "source_object_identity": persisted_source_object,
@@ -2205,7 +2207,7 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
             }
         ],
     }
-    (nfs_root / "raw/gfs/2026052106/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (nfs_root / "raw/gfs/2026052100/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     nfs_readiness = nfs_raw_manifest_readiness(
         source_id="gfs",
         cycle_time=cycle_time,
@@ -2244,7 +2246,7 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
         adapters={
             "gfs": FakeAdapter(
                 "gfs",
-                [("2026-05-21T06:00:00Z", True)],
+                [("2026-05-21T00:00:00Z", True)],
                 policy_identity={"source": "gfs", "cycle_hours_utc": [0, 12], "forecast_hours": [0, 3]},
                 source_object_identity={"source": "gfs", "manifest_digest": "adapter-digest"},
             )
@@ -2252,11 +2254,11 @@ def test_canonical_readiness_prefers_persisted_nfs_raw_source_object_identity(
         active_repository=FakeCandidateStateRepository(
             {
                 "forecast_cycle": {
-                    "cycle_id": "gfs_2026052106",
+                    "cycle_id": "gfs_2026052100",
                     "source_id": "gfs",
-                    "cycle_time": "2026-05-21T06:00:00Z",
+                    "cycle_time": "2026-05-21T00:00:00Z",
                     "status": "raw_complete",
-                    "manifest_uri": "s3://nhms/raw/gfs/2026052106/manifest.json",
+                    "manifest_uri": "s3://nhms/raw/gfs/2026052100/manifest.json",
                 },
                 "nfs_raw_manifest": nfs_readiness,
             }
@@ -5691,6 +5693,10 @@ def test_top_level_legacy_candidate_state_with_old_same_candidate_proof_can_skip
                 "cycle_time": "2026-05-21T06:00:00Z",
                 "hydro_status": "succeeded",
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "run_manifest_initial_state": {
+                    "quality": "fresh",
+                    "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+                },
             }
         ),
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
@@ -9917,6 +9923,10 @@ def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
         {
             "hydro_status": hydro_status,
             "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+            },
         }
     )
     orchestrator = FakeProductionOrchestrator()
@@ -9958,6 +9968,10 @@ def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tm
         {
             "hydro_status": "succeeded",
             "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+            },
         }
     )
     scheduler = ProductionScheduler(
@@ -10191,6 +10205,10 @@ def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Pat
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
                 "updated_at": "2026-05-21T07:00:00Z",
             },
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+            },
             "pipeline_status": "failed",
             "failed_stage": "parse",
             "error_code": "FAILED_PARSE",
@@ -10248,6 +10266,10 @@ def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "published",
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+            },
             "pipeline_jobs": [
                 {
                     "job_id": "job_failed",
@@ -10331,6 +10353,10 @@ def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_pat
                 "status": "published",
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
                 "updated_at": "2026-05-21T06:30:00Z",
+            },
+            "run_manifest_initial_state": {
+                "quality": "fresh",
+                "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
             },
             "pipeline_events": [
                 {
@@ -17113,6 +17139,13 @@ def _write_db_free_file_provider_fixtures(
         object_store_prefix="s3://nhms",
         generated_at=generated_at,
     )
+    # Keep an already-published real index; otherwise replace the "{}" env
+    # placeholder with a valid empty one so the DB-free continuity gate can
+    # load it. Warm-start tests overwrite it via
+    # _write_db_free_state_index_fixture afterwards.
+    state_index_path = Path(paths["NHMS_SCHEDULER_STATE_INDEX"])
+    if not state_index_path.exists() or state_index_path.read_text(encoding="utf-8").strip() in ("", "{}"):
+        _publish_empty_state_index(roots, paths, generated_at=generated_at)
     return {
         "model": model_row,
         "package_checksum": package_checksum,
@@ -17122,6 +17155,27 @@ def _write_db_free_file_provider_fixtures(
         "registry_receipt": registry_receipt,
         "readiness_receipt": readiness_receipt,
     }
+
+
+def _publish_empty_state_index(
+    roots: Mapping[str, Path],
+    paths: Mapping[str, Path],
+    *,
+    generated_at: datetime,
+) -> None:
+    """Replace the '{}' env placeholder with a loadable empty index.
+
+    The DB-free continuity gate fail-closes on an unloadable state snapshot
+    index; a valid empty index is the cold-start bootstrap contract and lets
+    candidates reach the decision under test.
+    """
+    publish_state_snapshot_index(
+        [],
+        paths["NHMS_SCHEDULER_STATE_INDEX"],
+        object_store_root=roots["object_store_root"],
+        object_store_prefix="s3://nhms",
+        generated_at=generated_at,
+    )
 
 
 def _write_db_free_state_index_fixture(
@@ -18637,24 +18691,27 @@ def test_file_canonical_readiness_publisher_failure_keeps_previous_index(
 
 
 @pytest.mark.parametrize(
-    ("case_name", "expected_reason"),
+    ("case_name", "expected_status", "expected_reason"),
     [
-        ("missing", "file_manifest_missing"),
-        ("stale", "file_manifest_stale"),
-        ("schema", "file_manifest_schema_unsupported"),
-        ("checksum", "file_manifest_checksum_mismatch"),
-        ("deep", "file_manifest_json_depth_exceeded"),
-        ("object_missing", "readiness_product_object_missing"),
-        ("self_reported_checksum", "readiness_product_object_checksum_mismatch"),
-        ("local_object_uri", "readiness_product_object_unsupported_uri"),
-        ("identity", "canonical_readiness_index_identity_mismatch"),
-        ("forecast_hours_missing", "canonical_readiness_index_forecast_hours_missing"),
+        ("missing", "canonical_unavailable", "file_manifest_missing"),
+        ("stale", "canonical_unavailable", "file_manifest_stale"),
+        ("schema", "canonical_unavailable", "file_manifest_schema_unsupported"),
+        ("checksum", "canonical_unavailable", "file_manifest_checksum_mismatch"),
+        ("deep", "canonical_unavailable", "file_manifest_json_depth_exceeded"),
+        ("object_missing", "canonical_unavailable", "readiness_product_object_missing"),
+        ("self_reported_checksum", "canonical_unavailable", "readiness_product_object_checksum_mismatch"),
+        ("local_object_uri", "canonical_unavailable", "readiness_product_object_unsupported_uri"),
+        # Identity mismatch is a stale-catalog cache miss that triggers
+        # canonical recompute rather than a permanent unavailability.
+        ("identity", "canonical_incomplete", "canonical_identity_mismatch_cache_miss"),
+        ("forecast_hours_missing", "canonical_unavailable", "canonical_readiness_index_forecast_hours_missing"),
     ],
 )
 def test_file_canonical_readiness_index_fail_closed_cases(
     monkeypatch: Any,
     tmp_path: Path,
     case_name: str,
+    expected_status: str,
     expected_reason: str,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
@@ -18823,7 +18880,7 @@ def test_file_canonical_readiness_index_fail_closed_cases(
     )
 
     assert evidence["ready"] is False
-    assert evidence["status"] == "canonical_unavailable"
+    assert evidence["status"] == expected_status
     assert evidence["reason"] == expected_reason
     assert evidence["readiness_index"]["index"] == "[local-path]"
     rendered = json.dumps(evidence, sort_keys=True)
@@ -20395,7 +20452,8 @@ def test_db_free_injected_collaborators_plan_without_unimplemented_provider_bloc
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _publish_empty_state_index(roots, paths, generated_at=_dt("2026-05-21T12:00:00Z"))
     config = ProductionSchedulerConfig(dry_run=True, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
@@ -20420,7 +20478,8 @@ def test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _publish_empty_state_index(roots, paths, generated_at=_dt("2026-05-21T12:00:00Z"))
     factory_calls: list[str] = []
     forcing_producer = FakeForcingProducer()
 
@@ -20456,7 +20515,8 @@ def test_db_free_journal_write_block_forces_retention_dry_run_before_deletion(
     tmp_path: Path,
 ) -> None:
     now = _dt("2026-05-21T12:00:00Z")
-    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    _publish_empty_state_index(roots, paths, generated_at=now)
     old_cycle = format_cycle_time(now - timedelta(days=30))
     expired_file = roots["object_store_root"] / "raw" / "gfs" / old_cycle / "gfs.f000.nc"
     expired_file.parent.mkdir(parents=True)
@@ -20493,7 +20553,8 @@ def test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factor
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _publish_empty_state_index(roots, paths, generated_at=_dt("2026-05-21T12:00:00Z"))
     factory_calls: list[str] = []
     active_state = {
         "pipeline_status": "running",
@@ -20546,7 +20607,8 @@ def test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_cal
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    _publish_empty_state_index(roots, paths, generated_at=_dt("2026-05-21T12:00:00Z"))
     factory_calls: list[str] = []
     active_jobs = [
         {

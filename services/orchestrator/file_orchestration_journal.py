@@ -273,7 +273,9 @@ def _filter_cycle_rows_for_model(
     cycle_time: datetime,
     model_id: str,
 ) -> None:
-    rows.forecast_cycle = _candidate_scoped_forecast_cycle(rows.forecast_cycle)
+    scoped_forecast_cycle = _candidate_scoped_forecast_cycle(rows.forecast_cycle)
+    cycle_terminated = rows.forecast_cycle is not None and scoped_forecast_cycle is None
+    rows.forecast_cycle = scoped_forecast_cycle
     rows.hydro_run = (
         rows.hydro_run
         if _row_matches_candidate(rows.hydro_run, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
@@ -303,6 +305,7 @@ def _filter_cycle_rows_for_model(
             cycle_time=cycle_time,
             pipeline_jobs=rows.pipeline_jobs,
             forecast_cycle=rows.forecast_cycle,
+            cycle_terminated=cycle_terminated,
         )
     ]
 
@@ -347,7 +350,14 @@ class FileOrchestrationJournalRepository:
         self.max_json_depth = int(max_json_depth)
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
-        self._cycle_rows_cache: dict[tuple[str, str, str | None, str | None], _CycleRows] = {}
+        self._cycle_rows_cache: dict[
+            tuple[str, str, str | None, str | None],
+            tuple[tuple[Any, ...] | None, _CycleRows],
+        ] = {}
+        self._direct_jobs_cycle_cache: dict[
+            tuple[str, str],
+            tuple[tuple[int, int, int] | None, list[dict[str, Any]]],
+        ] = {}
         self._read_bytes_cache: dict[str, tuple[tuple[int, int, int], bytes, bool]] = {}
         self._read_bytes_cache_total = 0
 
@@ -1321,20 +1331,28 @@ class FileOrchestrationJournalRepository:
         )
         cycle_segment = format_cycle_time(cycle_time)
         cache_key = (source_id, cycle_segment, model_id, source_segment_override)
+        # Inside a locked write window the cycle flock excludes external
+        # writers and the append hook keeps the cache coherent, so hits are
+        # trusted as-is. Outside a window a hit must prove its source files
+        # are stat-identical, otherwise writes from other processes (or
+        # direct file fixtures) would be served stale forever.
+        in_write_window = self._write_lock.locked()
+        fingerprint = (
+            None
+            if in_write_window
+            else self._cycle_rows_source_fingerprint(source_segment=source_segment, cycle_segment=cycle_segment)
+        )
         cached = self._cycle_rows_cache.get(cache_key)
-        if cached is not None:
-            return _clone_cycle_rows(cached)
-        if model_id is not None:
-            rows = self._cycle_rows(
-                source_id=source_id,
-                cycle_time=cycle_time,
-                model_id=None,
-                source_segment_override=source_segment_override,
-            )
-            _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
-            rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-            self._cache_cycle_rows(cache_key, rows)
-            return _clone_cycle_rows(rows)
+        if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
+            return _clone_cycle_rows(cached[1])
+        # Model-scoped reads build from the model's own latest view plus
+        # model-filtered journal records. They must not derive hydro_run /
+        # forcing_version / model_context from the merged model_id=None rows:
+        # _CycleRows keeps single slots for those, so the cross-model merge
+        # keeps one winner and the model filter then erases every other
+        # model's rows. Only pipeline jobs (keyed by job_id, collapse-free)
+        # are shared with the base rows so the pipeline-jobs directory is
+        # scanned once per cycle instead of once per model.
         latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
         for path in latest_paths:
             payload = self._read_optional_json(path)
@@ -1363,27 +1381,96 @@ class FileOrchestrationJournalRepository:
                 expected_record_type="pipeline_event",
                 expected_model_id=model_id,
             )
-        for job in self._iter_direct_pipeline_job_records_for_cycle(
+        for job in self._direct_pipeline_job_records_for_cycle_cached(
             source_id=source_id,
             cycle_time=cycle_time,
-            model_id=model_id,
         ):
             _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
         if model_id is not None:
             _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-        self._cache_cycle_rows(cache_key, rows)
+        self._cache_cycle_rows(cache_key, rows, fingerprint=fingerprint)
         return _clone_cycle_rows(rows)
+
+    def _direct_pipeline_job_records_for_cycle_cached(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> list[dict[str, Any]]:
+        """One pipeline-jobs directory scan per cycle, shared across models.
+
+        Entries in that directory only change via atomic rename, which bumps
+        the directory's (mtime_ns, size, inode); a matching signature proves
+        the memoized listing still reflects the on-disk job set. Model-level
+        scoping happens in _filter_cycle_rows_for_model, mirroring how the
+        unfiltered scan feeds the model_id=None rows.
+        """
+        cache_key = (source_id, format_cycle_time(cycle_time))
+        signature = _stat_signature(self.root / "pipeline-jobs")
+        cached = self._direct_jobs_cycle_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return [dict(job) for job in cached[1]]
+        jobs = [
+            dict(job)
+            for job in self._iter_direct_pipeline_job_records_for_cycle(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=None,
+            )
+        ]
+        cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
+        if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
+            self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
+        self._direct_jobs_cycle_cache[cache_key] = (signature, [dict(job) for job in jobs])
+        return jobs
+
+    def _cycle_rows_source_fingerprint(
+        self,
+        *,
+        source_segment: str,
+        cycle_segment: str,
+    ) -> tuple[Any, ...]:
+        """Stat-level identity of every file that feeds `_cycle_rows`.
+
+        Appends, atomic replaces, additions and removals all change the
+        (mtime_ns, size, inode) of a source file — or the latest-directory
+        listing, or the pipeline-jobs directory whose entries only change
+        via rename — so a matching fingerprint proves a cached entry still
+        reflects the on-disk state.
+        """
+        latest_entries: list[tuple[str, tuple[int, int, int] | None]] = []
+        try:
+            with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
+                for entry in it:
+                    if entry.name.endswith(".json"):
+                        try:
+                            entry_stat = entry.stat(follow_symlinks=False)
+                            latest_entries.append(
+                                (entry.name, (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino))
+                            )
+                        except OSError:
+                            latest_entries.append((entry.name, None))
+        except OSError:
+            pass
+        return (
+            _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+            _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+            tuple(sorted(latest_entries)),
+            _stat_signature(self.root / "pipeline-jobs"),
+        )
 
     def _cache_cycle_rows(
         self,
         cache_key: tuple[str, str, str | None, str | None],
         rows: _CycleRows,
+        *,
+        fingerprint: tuple[Any, ...] | None,
     ) -> None:
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
         if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
             self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
-        self._cycle_rows_cache[cache_key] = _clone_cycle_rows(rows)
+        self._cycle_rows_cache[cache_key] = (fingerprint, _clone_cycle_rows(rows))
 
     def _latest_paths(self, source_segment: str, cycle_segment: str, *, model_id: str | None) -> list[Path]:
         directory = self.root / "latest" / source_segment / cycle_segment
@@ -2283,14 +2370,16 @@ class FileOrchestrationJournalRepository:
         cached = self._cycle_rows_cache.get(base_key)
         if cached is None:
             return
-        updated = _clone_cycle_rows(cached)
+        updated = _clone_cycle_rows(cached[1])
         try:
             self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
             updated.pipeline_events = _dedupe_events(updated.pipeline_events)
         except FileOrchestrationJournalError:
             self._cycle_rows_cache.pop(base_key, None)
             return
-        self._cycle_rows_cache[base_key] = updated
+        # In-window entries carry no fingerprint: hits are trusted while the
+        # cycle flock is held, and the window clears the cache on exit.
+        self._cycle_rows_cache[base_key] = (None, updated)
 
     def _materialize_latest_unlocked(
         self,
@@ -4099,6 +4188,7 @@ def _event_matches_candidate_rows(
     cycle_time: datetime,
     pipeline_jobs: Mapping[str, Mapping[str, Any]],
     forecast_cycle: Mapping[str, Any] | None,
+    cycle_terminated: bool = False,
 ) -> bool:
     entity_type = str(event.get("entity_type") or "pipeline_job")
     entity_id = str(event.get("entity_id") or "")
@@ -4108,7 +4198,12 @@ def _event_matches_candidate_rows(
         expected_cycle_id = _cycle_id_for_file_source(source_id, cycle_time)
         if entity_id != expected_cycle_id:
             return False
-        return forecast_cycle is not None and str(forecast_cycle.get("cycle_id") or "") == expected_cycle_id
+        if forecast_cycle is not None:
+            return str(forecast_cycle.get("cycle_id") or "") == expected_cycle_id
+        # A terminally-succeeded cycle keeps its events suppressed so stale
+        # cohort events cannot resurrect candidate work; a cycle with no row
+        # at all still surfaces its own events (read contract).
+        return not cycle_terminated
     return False
 
 
@@ -4352,6 +4447,14 @@ def _decode_mapping(content: bytes, *, field: str, max_nodes: int, max_depth: in
         raise FileOrchestrationJournalError("file_journal_expected_object", field=field)
     _validate_json_complexity(payload, field=field, max_nodes=max_nodes, max_depth=max_depth)
     return dict(payload)
+
+
+def _stat_signature(path: Path) -> tuple[int, int, int] | None:
+    try:
+        file_stat = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None
+    return (file_stat.st_mtime_ns, file_stat.st_size, file_stat.st_ino)
 
 
 def _decode_mapping_prevalidated(content: bytes, *, field: str) -> dict[str, Any]:

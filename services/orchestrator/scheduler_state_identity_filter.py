@@ -505,10 +505,14 @@ def _candidate_state_decision_event(
             if f"{source}.details.task_results[{task_index}]" not in legacy_sources
         ]
         if task_results:
-            for key in ("event_type", "status_from", "status_to"):
-                value = event.get(key)
-                if value not in (None, ""):
-                    sanitized[key] = value
+            # Nested task proofs only make the parent event's status fields
+            # authoritative for terminal SUCCESS trust; an active status like
+            # "running" must not be resurrected by its nested task results.
+            if str(event.get("status_to") or "") in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+                for key in ("event_type", "status_from", "status_to"):
+                    value = event.get(key)
+                    if value not in (None, ""):
+                        sanitized[key] = value
             details_payload["task_results"] = task_results
             details_payload["task_results_total"] = len(task_results)
             details_payload["task_results_included"] = len(task_results)
