@@ -3394,14 +3394,13 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
         },
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_qhh_latest_window_idx",
-            "status": "covered_by_latest_product_window_index",
+            "index": "river_timeseries_mvt_identity_lookup_idx",
+            "status": "covered_by_mvt_identity_lookup_index",
             "columns": [
                 "run_id",
-                "basin_version_id",
-                "river_network_version_id",
                 "variable",
-                "valid_time DESC",
+                "valid_time",
+                "river_network_version_id",
                 "river_segment_id",
             ],
         },

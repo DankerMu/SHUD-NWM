@@ -1695,7 +1695,7 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "river_timeseries_qhh_latest_window_idx",
+        "river_timeseries_mvt_identity_lookup_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
     }

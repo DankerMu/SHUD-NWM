@@ -274,6 +274,12 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
     parsed_status_migration = dict(_migration_sql())["000030_qhh_latest_display_parsed_status_index.sql"]
     display_ready_migration = dict(_migration_sql())["000040_display_ready_succeeded_status_index.sql"]
+    drop_redundant_river_index_migration = dict(_migration_sql())[
+        "000041_drop_redundant_river_qhh_latest_window_idx.sql"
+    ]
+    drop_selected_identity_index_migration = dict(_migration_sql())[
+        "000042_drop_redundant_river_selected_identity_lookup_idx.sql"
+    ]
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
     ).read_text(encoding="utf-8")
@@ -335,12 +341,20 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "valid_time DESC",
         "river_segment_id",
     )
+    assert (
+        "DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_qhh_latest_window_idx"
+        in drop_redundant_river_index_migration
+    )
+    assert (
+        "DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_selected_identity_lookup_idx"
+        in drop_selected_identity_index_migration
+    )
     for index_name in (
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
-        "river_timeseries_qhh_latest_window_idx",
+        "river_timeseries_mvt_identity_lookup_idx",
     ):
         assert index_name in index_evidence_source
 
