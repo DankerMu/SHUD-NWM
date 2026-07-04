@@ -2701,6 +2701,33 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert response["quality"]["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
 
 
+def test_latest_qhh_display_product_fast_path_sql_has_valid_candidate_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SqlCaptureCursor, "_REGCLASS_PRESENT", ("hydro.run_display_coverage",))
+    candidate = _qhh_candidate_row()
+    candidate["coverage_present"] = True
+    store = SqlCaptureForecastStore([[candidate]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    statement, parameters = store.cursor.executions[0]
+    candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("SELECT\n                cr.*")]
+    assert "LEAST(\n                        h.end_time," in candidate_cte
+    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in candidate_cte
+    assert "AS display_end_time\n                FROM hydro.hydro_run h" in candidate_cte
+    assert "AS display_end_time,\n                FROM hydro.hydro_run h" not in candidate_cte
+    assert "hydro.run_display_coverage" in statement
+    assert "station_sample_rows AS" not in statement
+    assert parameters == (
+        QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basins_qhh",
+        "GFS",
+        QHH_LATEST_SEARCH_LIMIT,
+    )
+    assert response["run_id"] == "qhh_gfs_2026050700"
+
+
 def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_ready_candidate_window() -> None:
     nonready_context = _qhh_candidate_row(
         run_id="qhh_gfs_2026050800",

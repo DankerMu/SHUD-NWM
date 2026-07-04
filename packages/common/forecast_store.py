@@ -1262,7 +1262,7 @@ class PsycopgForecastStore:
                         h.end_time,
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
-                    ) AS display_end_time,
+                    ) AS display_end_time
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1800,7 +1800,7 @@ class PsycopgForecastStore:
                         h.end_time,
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
-                    ) AS display_end_time,
+                    ) AS display_end_time
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id

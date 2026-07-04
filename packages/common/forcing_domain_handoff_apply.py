@@ -586,11 +586,7 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
           AND rtrim(met.forcing_version.forcing_package_uri, '/') = rtrim(EXCLUDED.forcing_package_uri, '/')
           AND (
               met.forcing_version.checksum IS NULL
-              OR (
-                  met.forcing_version.checksum = EXCLUDED.checksum
-                  AND met.forcing_version.start_time = EXCLUDED.start_time
-                  AND met.forcing_version.end_time = EXCLUDED.end_time
-              )
+              OR met.forcing_version.checksum = EXCLUDED.checksum
           )
         RETURNING forcing_version_id
         """,

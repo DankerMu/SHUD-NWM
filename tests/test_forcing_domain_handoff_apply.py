@@ -171,6 +171,31 @@ def test_existing_placeholder_forcing_version_is_completed_by_apply() -> None:
     )
 
 
+def test_existing_seed_forcing_version_with_same_checksum_allows_handoff_time_window() -> None:
+    envelope = _parse_complete()
+    seed = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
+    seed["source_id"] = "gfs"
+    seed["end_time"] = "2026-06-20T18:00:00Z"
+    seed["forcing_package_uri"] = f"{seed['forcing_package_uri']}/"
+    seed["lineage_json"] = {
+        "seed": "node27_ingest_run",
+        "quality_flag": "station_forcing_unavailable",
+    }
+    connection = _FakeConnection()
+    connection.tables["met.forcing_version"].append(seed)
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "applied"
+    forcing_version = connection.tables["met.forcing_version"][0]
+    assert forcing_version["start_time"] == envelope["parsed"]["met.forcing_version"][0]["start_time"]
+    assert forcing_version["end_time"] == envelope["parsed"]["met.forcing_version"][0]["end_time"]
+    assert forcing_version["lineage_json"]["mode"] == apply_module.APPLY_MODE
+    assert len(connection.tables["met.forcing_station_timeseries"]) == EXPECTED_COUNTS[
+        "met.forcing_station_timeseries"
+    ]
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_code"),
     [
@@ -653,11 +678,7 @@ class _FakeCursor:
         record_uri = str(record.get("forcing_package_uri") or "").rstrip("/")
         identity_compatible = identity_compatible and existing_uri == record_uri
         placeholder_compatible = existing.get("checksum") is None
-        finalized_compatible = (
-            existing.get("checksum") == record["checksum"]
-            and existing["start_time"] == record["start_time"]
-            and existing["end_time"] == record["end_time"]
-        )
+        finalized_compatible = existing.get("checksum") == record["checksum"]
         compatible = identity_compatible and (placeholder_compatible or finalized_compatible)
         if not compatible:
             self._fetchone = None
