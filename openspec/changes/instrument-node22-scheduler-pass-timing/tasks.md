@@ -70,17 +70,17 @@
 
 ## 8. Local verification gate
 
-- [ ] 8.1 `uv run ruff check .` — All checks passed.
-- [ ] 8.2 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py tests/test_scheduler_timing.py tests/test_scheduler_evidence_retention.py` — full green.
-- [ ] 8.3 `openspec validate instrument-node22-scheduler-pass-timing --strict --no-interactive` — pass.
+- [x] 8.1 `uv run ruff check .` — All checks passed.
+- [x] 8.2 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py tests/test_scheduler_timing.py tests/test_scheduler_evidence_retention.py` — 1046 passed in 66.42s.
+- [x] 8.3 `openspec validate instrument-node22-scheduler-pass-timing --strict --no-interactive` — pass.
 
 ## 9. Implementation-merge gate (single-session, blocks PR merge)
 
-- [ ] 9.1 Push to origin/master; on node-22 `cd /scratch/frd_muziyao/NWM && git pull --ff-only`; redeploy systemd units for the timer and set `NHMS_SCHEDULER_TIMING_LEVEL=candidate` in `infra/env/compute.scheduler-dbfree.env` for one deliberate collection pass.
-- [ ] 9.2 Trigger a single production pass (do not block on the pass finishing 1h04–2h43 wall-clock at merge time; capture the running-state receipt showing that instrumentation writes structured JSON stdout and that `timing.pass` starts populating — one live pass fully completing is deferred to §10 post-merge).
-- [ ] 9.3 Attach a short `journalctl --user -u nhms-compute-scheduler.service --since <deploy-utc>` excerpt showing at least one single-line JSON `phase=pass:started` record parsed cleanly by `jq`.
-- [ ] 9.4 Deploy the retention timer on node-22 and record `systemctl --user is-active nhms-scheduler-evidence-retention.timer == active` plus `systemctl --user list-timers` next-fire timestamp — the 24 h fire itself is deferred to §10 post-merge.
-- [ ] 9.5 Revert env to `NHMS_SCHEDULER_TIMING_LEVEL=stage` (or unset for default) after the collection pass has started so steady-state stdout volume matches the design contract; the running pass keeps the level it started with per D4 (`NHMS_SCHEDULER_TIMING_LEVEL` is read at pass entry).
+- [x] 9.1 Push to origin/master; on node-22 `cd /scratch/frd_muziyao/NWM && git pull --ff-only`; redeploy systemd units for the timer and set `NHMS_SCHEDULER_TIMING_LEVEL=candidate` in `infra/env/compute.scheduler-dbfree.env` for one deliberate collection pass.
+- [x] 9.2 Trigger a single production pass (do not block on the pass finishing 1h04–2h43 wall-clock at merge time; capture the running-state receipt showing that instrumentation writes structured JSON stdout and that `timing.pass` starts populating — one live pass fully completing is deferred to §10 post-merge).
+- [x] 9.3 Attach a short `journalctl --user -u nhms-compute-scheduler.service --since <deploy-utc>` excerpt showing at least one single-line JSON `phase=pass:started` record parsed cleanly by `jq`. **Actual stdout path**: the deployed `.service` unit routes `StandardOutput=append:/scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.log` rather than journal, so the receipt draws from that log file with same schema & `jq -c` parseability (see receipt `docs/runbooks/receipts/issue-868-node22-sub10-implementation-gate-2026-07-05.md`).
+- [x] 9.4 Deploy the retention timer on node-22 and record `systemctl --user is-active nhms-scheduler-evidence-retention.timer == active` plus `systemctl --user list-timers` next-fire timestamp — the 24 h fire itself is deferred to §10 post-merge.
+- [x] 9.5 Revert env to `NHMS_SCHEDULER_TIMING_LEVEL=stage` (or unset for default) after the collection pass has started so steady-state stdout volume matches the design contract; the running pass keeps the level it started with per D4 (`NHMS_SCHEDULER_TIMING_LEVEL` is read at pass entry).
 
 ## 10. Post-merge live audit (deferred deliverables, NOT blocking PR merge)
 
