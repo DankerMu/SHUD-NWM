@@ -133,7 +133,7 @@ An unrecognised value SHALL cause `run_once` to return `SchedulerPassResult(stat
 
 ### Requirement: Stdout emission uses one JSON line per event, versioned
 
-At levels `stage` and `candidate`, the scheduler SHALL emit one complete JSON line to stdout per pass entry, stage entry, stage exit, and pass exit; candidate-layer events SHALL NOT reach stdout.
+At every `NHMS_SCHEDULER_TIMING_LEVEL` (including `pass`), the scheduler SHALL emit one complete JSON line to stdout per pass entry and pass exit. At levels `stage` and `candidate`, the scheduler SHALL additionally emit one complete JSON line per stage entry and stage exit. Candidate-layer events SHALL NOT reach stdout at any level. The rollback posture in design D3/rollback-note relies on `NHMS_SCHEDULER_TIMING_LEVEL=pass` preserving pass-boundary regression detection while silencing stage/candidate output.
 
 Every stdout line SHALL be a self-delimited JSON object terminated with `\n`, containing at minimum `schema_version` (fixed string `"nhms.scheduler_pass_timing.v1"`), `ts` (UTC ISO 8601), `pass_id`, `level`, `phase`.
 
