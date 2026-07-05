@@ -144,6 +144,9 @@ class ProductionSchedulerConfig:
             _scheduler.DEFAULT_CONCURRENT_SUBMIT_BOUND,
         )
     )
+    timing_level: str = field(
+        default_factory=lambda: (os.environ.get("NHMS_SCHEDULER_TIMING_LEVEL") or "stage").strip().lower()
+    )
     restart_reconcile_enabled: bool = field(
         default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_RESTART_RECONCILE", default=True)
     )
@@ -376,6 +379,12 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "interval_seconds", max(float(self.interval_seconds), 1.0))
         object.__setattr__(self, "retry_limit", max(int(self.retry_limit), 0))
         object.__setattr__(self, "concurrent_submit_bound", max(int(self.concurrent_submit_bound), 1))
+        # NHMS_SCHEDULER_TIMING_LEVEL is a plain string here (case-insensitive,
+        # lowercase-normalised); validation is deferred to run_once per D4 so an
+        # unrecognised value does not crash the daemon at startup.
+        timing_level_raw = self.timing_level if self.timing_level is not None else "stage"
+        timing_level_normalised = str(timing_level_raw).strip().lower() or "stage"
+        object.__setattr__(self, "timing_level", timing_level_normalised)
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
