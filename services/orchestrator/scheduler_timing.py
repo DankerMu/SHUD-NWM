@@ -90,25 +90,18 @@ class StageSpan:
     def set_failed_count(self, value: int) -> None:
         self._record["failed_count"] = int(value)
 
-    def add_slurm_wait_ms(self, value: float) -> None:
-        """Aggregate direct-measured Slurm-wait milliseconds for this stage.
-
-        Used when the caller doesn't have (start, end) interval endpoints
-        handy; simply accumulates the total.  Callers that DO have interval
-        endpoints should prefer :meth:`add_slurm_wait_interval` so pass-level
-        union-of-intervals works correctly under concurrent dispatch.
-        """
-
-        self._record["slurm_wait_ms"] = float(self._record.get("slurm_wait_ms", 0.0)) + float(value)
-
     def add_slurm_wait_interval(self, start_ms_from_pass_entry: float, end_ms_from_pass_entry: float) -> None:
         """Record a direct-measured Slurm-wait interval on the pass timeline.
 
         Interval endpoints are expressed as milliseconds from pass entry
-        (see :meth:`SchedulerPassTiming._ms_from_pass_entry`).  The pass
+        (see :meth:`SchedulerPassTiming._ms_from_pass_entry`) and are the
+        ONLY supported way to attribute Slurm wall-clock: the pass
         collector unions overlapping intervals across all stages at
         finalisation so ``pass.slurm_wait_ms`` stays correct when
-        ``concurrent_submit_bound > 1``.
+        ``concurrent_submit_bound > 1``.  Delta-only accumulators are
+        deliberately not exposed — they cannot participate in the
+        union-of-intervals computation and would silently leak Slurm
+        wall-clock into ``pass.python_time_ms``.
         """
 
         interval = (float(start_ms_from_pass_entry), float(end_ms_from_pass_entry))
