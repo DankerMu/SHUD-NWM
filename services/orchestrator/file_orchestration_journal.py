@@ -100,6 +100,8 @@ MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 MAX_FILE_JOURNAL_READ_CACHE_ENTRIES = 4096
 MAX_FILE_JOURNAL_READ_CACHE_BYTES = 64 * 1024 * 1024
+FILE_RECONCILE_SCAN_LIMIT_ENV = "NHMS_FILE_RECONCILE_SCAN_LIMIT"
+DEFAULT_FILE_RECONCILE_SCAN_LIMIT = 512
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
@@ -624,7 +626,7 @@ class FileOrchestrationJournalRepository:
     def query_reserved_unbound_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
-            for job in self._iter_pipeline_job_records()
+            for job in self._iter_reconcile_pipeline_job_records()
             if str(job.get("status") or "") == "reserved"
             and job.get("slurm_job_id") in (None, "")
             and job.get("idempotency_key") not in (None, "")
@@ -635,7 +637,7 @@ class FileOrchestrationJournalRepository:
     def query_inflight_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
-            for job in self._iter_pipeline_job_records()
+            for job in self._iter_reconcile_pipeline_job_records()
             if str(job.get("status") or "") in {"pending", "queued", "submitted", "running"}
             and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
         ]
@@ -1843,6 +1845,78 @@ class FileOrchestrationJournalRepository:
                 _insert_missing_by_key(jobs, job, key="job_id")
         yield from jobs.values()
 
+    def _iter_reconcile_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+        """Bounded restart-reconcile scan for DB-free file journals.
+
+        The full read surface intentionally reconstructs historical state from
+        every latest/journal/direct file. Restart reconcile runs at the top of
+        every live scheduler pass, so it must not recursively validate the whole
+        journal tree before the progress guard can trip. Scan recent direct job
+        records and recent journal files only; candidate-scoped reads still use
+        the full identity-bound surfaces later in the pass.
+        """
+
+        jobs: dict[str, dict[str, Any]] = {}
+        budget = _RecordBudget(max(self.max_records, 1), "reconcile_pipeline_job_records")
+        for job in self._iter_recent_direct_pipeline_job_records(_file_reconcile_scan_limit()):
+            budget.consume()
+            _upsert_by_key(jobs, job, key="job_id")
+        for path in self._iter_recent_reconcile_journal_paths(_file_reconcile_scan_limit()):
+            try:
+                source_id, cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
+                records = self._read_jsonl(path)
+            except FileOrchestrationJournalError:
+                continue
+            rows = _CycleRows()
+            try:
+                for record in records:
+                    budget.consume()
+                    self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
+            except FileOrchestrationJournalError:
+                continue
+            for job in rows.pipeline_jobs.values():
+                _upsert_by_key(jobs, job, key="job_id")
+        yield from jobs.values()
+
+    def _iter_recent_direct_pipeline_job_records(self, limit: int) -> Iterable[dict[str, Any]]:
+        for path in self._recent_files(self.root / "pipeline-jobs", suffix=".json", limit=limit):
+            try:
+                expected_job_id = _safe_segment(path.stem)
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+            except FileOrchestrationJournalError:
+                continue
+
+    def _iter_recent_reconcile_journal_paths(self, limit: int) -> Iterable[Path]:
+        yield from self._recent_files(self.root / "journal", suffix=".jsonl", limit=limit)
+
+    def _recent_files(self, directory: Path, *, suffix: str, limit: int) -> Iterable[Path]:
+        if limit <= 0 or not directory.exists():
+            return
+        discovered: list[tuple[int, str, Path]] = []
+        root = self.root.resolve(strict=False)
+        try:
+            iterator = directory.rglob(f"*{suffix}")
+        except OSError:
+            return
+        for path in iterator:
+            if len(discovered) >= max(self.max_files, 1):
+                break
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                resolved = path.resolve(strict=False)
+                rel = resolved.relative_to(root)
+                if len(rel.parts) > self.max_depth:
+                    continue
+                stat_result = path.stat()
+            except (OSError, ValueError):
+                continue
+            discovered.append((stat_result.st_mtime_ns, str(rel), path))
+        for _mtime, _rel, path in sorted(discovered, reverse=True)[:limit]:
+            yield path
+
     def _model_context(self, model_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "models" / f"{_safe_segment(model_id)}.json")
         if payload is not None:
@@ -2551,6 +2625,14 @@ def _file_lock_guard_mode() -> str:
     if value in {"atomic", "none", "off", "disabled"}:
         return "atomic"
     raise SafeFilesystemError(f"Unsupported {FILE_LOCK_GUARD_MODE_ENV}: {value}")
+
+
+def _file_reconcile_scan_limit() -> int:
+    value = os.getenv(FILE_RECONCILE_SCAN_LIMIT_ENV)
+    try:
+        return max(int(value), 1) if value not in (None, "") else DEFAULT_FILE_RECONCILE_SCAN_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_FILE_RECONCILE_SCAN_LIMIT
 
 
 class FileJournalRetryService:

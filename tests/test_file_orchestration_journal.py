@@ -1140,6 +1140,30 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     assert repository.query_reserved_unbound_jobs() == []
 
 
+def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    pending_bound = _pipeline_reservation_record(
+        cycle_time,
+        job_id="job_reconcile_pending_after_bad_path",
+        status="pending",
+    )
+    pending_bound["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_pending_after_bad_path"
+    pending_bound["slurm_job_id"] = "3003"
+    repository.upsert_pipeline_job(pending_bound)
+
+    bad_path = journal_root / "journal" / "not_a_source" / "bad_cycle.jsonl"
+    bad_path.parent.mkdir(parents=True)
+    bad_path.write_text('{"record_type":"pipeline_job","job_id":"bad"}\n', encoding="utf-8")
+
+    inflight = repository.query_inflight_jobs()
+
+    assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
+
+
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
