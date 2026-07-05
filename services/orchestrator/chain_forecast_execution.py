@@ -7,6 +7,20 @@ from typing import Any
 
 from services.orchestrator import chain as _chain
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
+from services.orchestrator.scheduler_timing import (
+    current_scheduler_pass_timing,
+    current_stage_span,
+    set_current_stage_span,
+)
+
+# SUB-3 (#861): canonical five-entry ``stage_name`` domain per spec.md §
+# "Stage-layer timing" — mirrors ``chain_repository_state._FORECAST_STAGE_ORDER``.
+# Only stages in this set open a ``stage_span`` inside ``_run_cycle_chain``;
+# the ``publish`` stage runs locally on the control node (no Slurm dispatch)
+# and is intentionally out of the canonical timing domain.
+_CANONICAL_TIMING_STAGES = frozenset(
+    ("convert", "forcing", "forecast", "parse", "state_save_qc")
+)
 
 AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
@@ -92,99 +106,143 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
     start_stage_index = _restart_stage_index(context.restart_stage, self.stages)
     existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
     refreshed_upstream_finished_at: datetime | None = None
+    # SUB-3 (#861) Phase 6.5: per-pipeline-stage ``stage_span`` — the collector
+    # is bound to a ``ContextVar`` in ``scheduler_execution.execute_candidate_cohort``
+    # before ``orchestrate_cycle`` is called, so this read is per-worker-thread
+    # safe under ``concurrent_submit_bound > 1``. ``None`` in the ``trigger_forecast``
+    # / test-fixture code paths that never enter a scheduler pass.
+    collector = current_scheduler_pass_timing()
     for stage_index, stage in enumerate(self.stages):
         if stage_index < start_stage_index:
             continue
         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
         had_partial_before_stage = context.had_partial
         last_partial_before_stage = context.last_partial_status
-        retry_attempts = 0
-        retry_pipeline_job_id: str | None = None
-        while True:
-            existing_job = self._find_existing_stage_job(existing_jobs, stage, context=context)
-            if (
-                existing_job is not None
-                and retry_pipeline_job_id is None
-                and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
-            ):
-                retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
-            if (
-                existing_job is not None
-                and retry_pipeline_job_id is None
-                and self._terminal_stage_can_retry_after_upstream_refresh(
-                    existing_job,
-                    refreshed_upstream_finished_at=refreshed_upstream_finished_at,
-                )
-            ):
-                retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
-            if (
-                existing_job is not None
-                and retry_pipeline_job_id is None
-                and not self._job_needs_submission(existing_job)
-                and not self._terminal_stage_needs_manual_retry(context, existing_job)
-            ):
-                result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
-            else:
-                pipeline_job_id = retry_pipeline_job_id
-                if pipeline_job_id is None and existing_job is not None:
-                    pipeline_job_id = (
-                        self._retry_cycle_stage_job_id(context, stage, existing_job)
-                        if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
-                        else str(existing_job["job_id"])
-                    )
-                result, aggregation = self._submit_and_wait_cycle_stage(
-                    stage,
-                    context,
-                    pipeline_job_id=pipeline_job_id,
-                )
-                retry_pipeline_job_id = None
-                existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
+        # Open one ``stage_span`` per (source_id, cycle_id, stage.stage) tuple —
+        # the canonical five-entry ``_FORECAST_STAGE_ORDER`` domain matches
+        # spec.md §"Stage-layer timing"; the non-canonical ``publish`` stage
+        # (local control-node work, no Slurm dispatch) is intentionally
+        # excluded. ``retry_attempts`` loop runs INSIDE the span so retries
+        # collapse into a single stage record.
+        with _open_stage_timing_span(collector, stage, context) as span:
+            with set_current_stage_span(span):
+                basin_count_at_entry = len(context.active_basins)
+                retry_attempts = 0
+                retry_pipeline_job_id: str | None = None
+                pipeline_result: PipelineResult | None = None
+                while True:
+                    existing_job = self._find_existing_stage_job(existing_jobs, stage, context=context)
+                    if (
+                        existing_job is not None
+                        and retry_pipeline_job_id is None
+                        and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
+                    ):
+                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
+                    if (
+                        existing_job is not None
+                        and retry_pipeline_job_id is None
+                        and self._terminal_stage_can_retry_after_upstream_refresh(
+                            existing_job,
+                            refreshed_upstream_finished_at=refreshed_upstream_finished_at,
+                        )
+                    ):
+                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
+                    if (
+                        existing_job is not None
+                        and retry_pipeline_job_id is None
+                        and not self._job_needs_submission(existing_job)
+                        and not self._terminal_stage_needs_manual_retry(context, existing_job)
+                    ):
+                        result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
+                    else:
+                        pipeline_job_id = retry_pipeline_job_id
+                        if pipeline_job_id is None and existing_job is not None:
+                            pipeline_job_id = (
+                                self._retry_cycle_stage_job_id(context, stage, existing_job)
+                                if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
+                                else str(existing_job["job_id"])
+                            )
+                        result, aggregation = self._submit_and_wait_cycle_stage(
+                            stage,
+                            context,
+                            pipeline_job_id=pipeline_job_id,
+                        )
+                        retry_pipeline_job_id = None
+                        existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
-            if stage_results and len(stage_results) > stage_index:
-                stage_results[stage_index] = result
-            elif stage_results and stage_results[-1].stage == result.stage:
-                stage_results[-1] = result
-            else:
-                stage_results.append(result)
+                    if stage_results and len(stage_results) > stage_index:
+                        stage_results[stage_index] = result
+                    elif stage_results and stage_results[-1].stage == result.stage:
+                        stage_results[-1] = result
+                    else:
+                        stage_results.append(result)
 
-            if result.status in {"failed", "submission_failed", "permanently_failed"}:
-                retry_attempts += 1
-                retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
-                if retry_pipeline_job_id is not None:
-                    existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
-                    continue
-                if stage.is_array and aggregation is not None:
-                    _record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
-                return PipelineResult(
-                    context.run_id,
-                    context.cycle_id,
-                    "failed",
-                    tuple(stage_results),
-                    _candidate_outcomes(context, final_status="failed"),
+                    if result.status in {"failed", "submission_failed", "permanently_failed"}:
+                        retry_attempts += 1
+                        retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
+                        if retry_pipeline_job_id is not None:
+                            existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
+                            continue
+                        if stage.is_array and aggregation is not None:
+                            _record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
+                        pipeline_result = PipelineResult(
+                            context.run_id,
+                            context.cycle_id,
+                            "failed",
+                            tuple(stage_results),
+                            _candidate_outcomes(context, final_status="failed"),
+                        )
+                        break
+
+                    if result.status == "cancelled":
+                        pipeline_result = PipelineResult(
+                            context.run_id,
+                            context.cycle_id,
+                            "failed",
+                            tuple(stage_results),
+                            _candidate_outcomes(context, final_status="failed"),
+                        )
+                        break
+
+                    if stage.is_array and aggregation is not None and aggregation.status == "partially_failed":
+                        retried = self._retry_partial_array_stage(
+                            stage,
+                            context,
+                            result,
+                            aggregation,
+                            had_partial_before_stage,
+                            last_partial_before_stage,
+                        )
+                        if retried is not None:
+                            result, aggregation = retried
+                            stage_results[-1] = result
+                    break
+
+            # Populate stage-span counters from the final ``StageRunResult`` for
+            # this stage BEFORE ``stage_span.__exit__`` finalises the record so
+            # the per-stage invariant
+            # ``python_time_ms + slurm_wait_ms == total_wall_ms`` computed inside
+            # ``SchedulerPassTiming.stage_span`` holds. ``build_candidates_ms`` is
+            # a SUB-4 concern (per-basin sub-phases; see spec.md §candidate-layer
+            # and tasks.md §2.4) — SUB-3 leaves it at ``0.0`` so ``dispatch_ms``
+            # picks up the full python side.
+            if span is not None:
+                _populate_stage_span_counters(
+                    span, basin_count_at_entry=basin_count_at_entry, result=result
                 )
 
-            if result.status == "cancelled":
-                return PipelineResult(
-                    context.run_id,
-                    context.cycle_id,
-                    "failed",
-                    tuple(stage_results),
-                    _candidate_outcomes(context, final_status="failed"),
-                )
+        # After ``stage_span.__exit__`` has finalised ``python_time_ms`` /
+        # ``total_wall_ms`` on the record, backfill ``dispatch_ms`` = python-time
+        # (spec.md §"Stage-layer timing": ``python_time_ms = build_candidates_ms +
+        # dispatch_ms``; SUB-3 leaves ``build_candidates_ms`` at ``0`` so
+        # ``dispatch_ms`` equals ``python_time_ms``). The record dict is
+        # aliased into ``collector._stages`` so mutation after the ``with`` is
+        # immediately visible to ``finalize_evidence``.
+        if span is not None:
+            span.set_dispatch_ms(float(span.record.get("python_time_ms", 0.0)))
 
-            if stage.is_array and aggregation is not None and aggregation.status == "partially_failed":
-                retried = self._retry_partial_array_stage(
-                    stage,
-                    context,
-                    result,
-                    aggregation,
-                    had_partial_before_stage,
-                    last_partial_before_stage,
-                )
-                if retried is not None:
-                    result, aggregation = retried
-                    stage_results[-1] = result
-            break
+        if pipeline_result is not None:
+            return pipeline_result
 
         if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES and result.pipeline_job_id != _pipeline_job_id(
             context.run_id, stage.stage
@@ -202,6 +260,68 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
         tuple(stage_results),
         _candidate_outcomes(context, final_status=final_status or self.final_pipeline_status),
     )
+
+
+def _open_stage_timing_span(
+    collector: Any | None,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+) -> Any:
+    """Return a stage_span context manager for canonical stages, or a no-op stub.
+
+    Returning a context manager (rather than an optional value) lets the caller
+    use ``with _open_stage_timing_span(...) as span:`` regardless of whether the
+    collector is present or the stage is in the canonical timing domain.
+    ``span`` is ``None`` in the no-op case; the caller guards counter population
+    on ``span is not None``.
+    """
+
+    if collector is None or stage.stage not in _CANONICAL_TIMING_STAGES:
+        return _NoopStageSpanContext()
+    return collector.stage_span(
+        stage.stage, source_id=context.source_id, cycle_id=context.cycle_id
+    )
+
+
+class _NoopStageSpanContext:
+    """Context manager that yields ``None`` — used when timing is inactive."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        return None
+
+
+def _populate_stage_span_counters(
+    span: Any,
+    *,
+    basin_count_at_entry: int,
+    result: StageRunResult,
+) -> None:
+    """Attribute ``basin_count`` / ``submitted_count`` / ``failed_count`` to the span.
+
+    Per spec.md §"Stage-layer timing" each stage record carries these three
+    counters. Interpretation matches the ``StageRunResult.status`` domain:
+
+    - ``succeeded`` — all entering basins reached Slurm dispatch and completed
+      successfully, so ``submitted_count == basin_count`` and ``failed_count == 0``.
+    - ``partially_failed`` — array stages returning a mixed aggregation; treated
+      the same as ``succeeded`` for ``submitted_count`` because Slurm did dispatch
+      every basin (the partial failure is per-basin task outcome, tracked
+      separately in ``task_results``).
+    - Everything else (``failed`` / ``submission_failed`` / ``permanently_failed``
+      / ``cancelled`` / etc.) — none of the entering basins reached a successful
+      terminal state at this stage.
+    """
+
+    span.set_basin_count(basin_count_at_entry)
+    if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES or result.status == "partially_failed":
+        span.set_submitted_count(basin_count_at_entry)
+        span.set_failed_count(0)
+    else:
+        span.set_submitted_count(0)
+        span.set_failed_count(basin_count_at_entry)
 
 
 def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | None:
@@ -503,17 +623,23 @@ def _submit_and_wait(
         "manifest": self._slurm_submission_manifest(manifest),
     }
     # SUB-3 (#861): direct-measure the Slurm-boundary wall-clock at every
-    # dispatch site. ``collector`` + ``stage_span`` are stashed on the
-    # orchestrator by ``execute_candidate_cohort`` (SUB-3 wiring); both may
-    # be ``None`` in non-scheduler trigger paths (``trigger_forecast`` from
-    # a CLI / test), in which case the timing wrap is a no-op. Spec.md
+    # dispatch site. ``collector`` + ``stage_span`` come from the
+    # ``ContextVar`` slots bound in ``scheduler_execution.execute_candidate_cohort``
+    # (collector) and ``_run_cycle_chain`` per pipeline-stage iteration
+    # (stage_span). ContextVar keeps this per-worker-thread safe under
+    # ``concurrent_submit_bound > 1`` — the previous
+    # ``getattr(self, "_scheduler_pass_timing", ...)`` + attribute stash raced
+    # because a shared ``ForecastOrchestrator`` may serve multiple
+    # ``ThreadPoolExecutor`` workers. Both slots are ``None`` in the
+    # ``trigger_forecast`` path from CLI / unit-test fixtures that never enter
+    # a scheduler pass, in which case the timing wrap is a no-op. Spec.md
     # "python-time and slurm-wait attribution is direct-measured, never
     # inferred": both ``submit_job`` and ``_poll_until_terminal`` MUST be
     # wrapped so ``slurm_wait_ms`` is a measurement, not an inference by
     # subtraction (also covers the already-terminal-on-submit fast path
     # at L568-572 because ``submit_job`` is wrapped regardless of branch).
-    collector = getattr(self, "_scheduler_pass_timing", None)
-    stage_span = getattr(self, "_scheduler_active_stage_span", None)
+    collector = current_scheduler_pass_timing()
+    stage_span = current_stage_span()
     ns_before_submit = time.monotonic_ns()
     try:
         submitted = self.slurm_client.submit_job(payload)

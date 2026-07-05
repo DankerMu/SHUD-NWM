@@ -21,6 +21,7 @@ import json
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Callable, Iterator
 
@@ -28,9 +29,76 @@ __all__ = (
     "SCHEDULER_PASS_TIMING_SCHEMA_VERSION",
     "SchedulerPassTiming",
     "StageSpan",
+    "current_scheduler_pass_timing",
+    "current_stage_span",
+    "set_current_scheduler_pass_timing",
+    "set_current_stage_span",
 )
 
 SCHEDULER_PASS_TIMING_SCHEMA_VERSION = "nhms.scheduler_pass_timing.v1"
+
+# SUB-3 (#861) concurrency-safe wiring: replace the previous
+# ``orchestrator._scheduler_pass_timing`` + ``_scheduler_active_stage_span``
+# attribute stash (which raced under ``concurrent_submit_bound > 1`` because
+# a single ``ForecastOrchestrator`` instance may be reused by multiple
+# ``ThreadPoolExecutor`` workers) with ``contextvars.ContextVar`` slots.
+# ``ContextVar`` is per-thread by default under ``ThreadPoolExecutor.map``
+# (each worker starts with an empty context), so parallel cohorts cannot
+# clobber each other's active span.
+_CURRENT_PASS_TIMING: ContextVar["SchedulerPassTiming | None"] = ContextVar(
+    "nhms_scheduler_pass_timing", default=None
+)
+_CURRENT_STAGE_SPAN: ContextVar["StageSpan | None"] = ContextVar(
+    "nhms_scheduler_active_stage_span", default=None
+)
+
+
+def current_scheduler_pass_timing() -> "SchedulerPassTiming | None":
+    """Return the per-thread active ``SchedulerPassTiming`` collector, if any."""
+
+    return _CURRENT_PASS_TIMING.get()
+
+
+def current_stage_span() -> "StageSpan | None":
+    """Return the per-thread active :class:`StageSpan`, if any."""
+
+    return _CURRENT_STAGE_SPAN.get()
+
+
+@contextmanager
+def set_current_scheduler_pass_timing(
+    collector: "SchedulerPassTiming | None",
+) -> Iterator[None]:
+    """Bind ``collector`` as the active timing collector for the current context.
+
+    Used by ``scheduler_execution.execute_candidate_cohort`` immediately before
+    dispatching to ``orchestrator.orchestrate_cycle`` so downstream code inside
+    ``chain_forecast_execution._run_cycle_chain`` can reach the per-pass
+    collector without a shared-orchestrator attribute stash.
+    """
+
+    token = _CURRENT_PASS_TIMING.set(collector)
+    try:
+        yield
+    finally:
+        _CURRENT_PASS_TIMING.reset(token)
+
+
+@contextmanager
+def set_current_stage_span(span: "StageSpan | None") -> Iterator[None]:
+    """Bind ``span`` as the active stage span for the current context.
+
+    Called from ``chain_forecast_execution._run_cycle_chain`` around each
+    per-pipeline-stage iteration so ``_submit_and_wait`` (and any future
+    Slurm-boundary attribution site inside the current worker thread) can
+    read the active stage record without a shared attribute stash.
+    """
+
+    token = _CURRENT_STAGE_SPAN.set(span)
+    try:
+        yield
+    finally:
+        _CURRENT_STAGE_SPAN.reset(token)
 
 # ± tolerance for the invariant check on the returned dict.
 _INVARIANT_TOLERANCE_MS = 5.0

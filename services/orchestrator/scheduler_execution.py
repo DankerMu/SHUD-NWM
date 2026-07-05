@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
 from services.orchestrator import source_cycle_raw_manifest
+from services.orchestrator.scheduler_timing import set_current_scheduler_pass_timing
 
 
 class SchedulerExecutionCandidate(Protocol):
@@ -249,17 +249,25 @@ def execute_candidate_cohort(
     *,
     orchestration_run_id: str | None,
 ) -> list[dict[str, Any]]:
-    # SUB-3 (#861): wrap the cohort loop in a ``stage_span`` so the per-pass
-    # collector attributes ``build_candidates_ms`` (basin-manifest preparation
-    # loop) + ``dispatch_ms`` (python work up to ``orchestrate_cycle`` return)
-    # to the cohort. ``_submit_and_wait`` inside ``orchestrate_cycle`` reads
-    # the collector + active stage_span from the orchestrator instance we
-    # stash below and records direct-measured Slurm-wait intervals against
-    # the same span; the union collapses overlapping intervals at pass
-    # finalisation so ``pass.slurm_wait_ms`` stays correct under
-    # ``concurrent_submit_bound > 1`` (design D2).
-    collector = context.timing
-    if collector is None:
+    # SUB-3 (#861) Phase 6.5 refactor: the cohort-scope ``stage_span`` opened
+    # here previously used ``stage_name = orchestration_run_id or "full"``
+    # (outside spec's canonical five-entry ``_FORECAST_STAGE_ORDER`` domain)
+    # and stashed the collector + active span on ``orchestrator`` — a shared
+    # ``ForecastOrchestrator`` instance is reused across ``ThreadPoolExecutor``
+    # workers when ``concurrent_submit_bound > 1``, so those stashes raced
+    # (empirically 27-35% test flake on ``test_multi_candidate_restart_...`` +
+    # ``test_backfill_selects_global_oldest_cycle_...``).
+    #
+    # The correct wiring is: open one ``stage_span`` per pipeline stage
+    # (``convert``, ``forcing``, ``forecast``, ``parse``, ``state_save_qc``)
+    # inside ``chain_forecast_execution._run_cycle_chain`` — one canonical
+    # record per (source_id, cycle_id, stage_name) tuple as spec.md §"Stage-
+    # layer timing" requires. Downstream reads the collector via a
+    # ``contextvars.ContextVar`` bound here (per-thread, not shared) rather
+    # than an orchestrator attribute stash that raced across concurrent
+    # cohort workers.
+    orchestrator = context.orchestrator_for(source_id)
+    with set_current_scheduler_pass_timing(context.timing):
         return _execute_candidate_cohort_impl(
             context,
             source_id,
@@ -267,59 +275,8 @@ def execute_candidate_cohort(
             cycle_id,
             cycle_candidates,
             orchestration_run_id=orchestration_run_id,
-            orchestrator=context.orchestrator_for(source_id),
-            timing_state=None,
+            orchestrator=orchestrator,
         )
-    # ``stage_name`` here is the cohort semantic label (fallback ``"full"``
-    # matches ``candidate_execution_cohort_run_id_for_candidate`` when no
-    # restart stage narrows the cohort); the five ``_FORECAST_STAGE_ORDER``
-    # pipeline stages run inside a single ``orchestrate_cycle`` and their
-    # per-stage Slurm waits all attribute back to this same span via
-    # ``add_slurm_wait_interval``.
-    stage_name = orchestration_run_id or "full"
-    stage_entry_ns = time.monotonic_ns()
-    timing_state: dict[str, int] = {"build_candidates_end_ns": 0, "submitted_count": 0}
-    orchestrator = context.orchestrator_for(source_id)
-    prev_timing = getattr(orchestrator, "_scheduler_pass_timing", None)
-    prev_span = getattr(orchestrator, "_scheduler_active_stage_span", None)
-    with collector.stage_span(stage_name, source_id=source_id, cycle_id=cycle_id) as span:
-        orchestrator._scheduler_pass_timing = collector
-        orchestrator._scheduler_active_stage_span = span
-        try:
-            evidence = _execute_candidate_cohort_impl(
-                context,
-                source_id,
-                cycle_time,
-                cycle_id,
-                cycle_candidates,
-                orchestration_run_id=orchestration_run_id,
-                orchestrator=orchestrator,
-                timing_state=timing_state,
-            )
-        finally:
-            orchestrator._scheduler_pass_timing = prev_timing
-            orchestrator._scheduler_active_stage_span = prev_span
-        # Populate stage counters + dispatch_ms BEFORE ``stage_span.__exit__``
-        # finalises the record so the per-stage invariant
-        # (``python_time_ms == build_candidates_ms + dispatch_ms``) holds.
-        basin_count = len(cycle_candidates)
-        submitted_count = int(timing_state["submitted_count"])
-        span.set_basin_count(basin_count)
-        span.set_submitted_count(submitted_count)
-        span.set_failed_count(max(0, basin_count - submitted_count))
-        build_candidates_ms = 0.0
-        if timing_state["build_candidates_end_ns"]:
-            build_candidates_ms = max(
-                0.0,
-                (int(timing_state["build_candidates_end_ns"]) - stage_entry_ns) / 1_000_000.0,
-            )
-        span.set_build_candidates_ms(build_candidates_ms)
-        total_wall_ms = max(0.0, (time.monotonic_ns() - stage_entry_ns) / 1_000_000.0)
-        slurm_wait_ms = float(span.record.get("slurm_wait_ms", 0.0))
-        python_time_ms = max(0.0, total_wall_ms - slurm_wait_ms)
-        dispatch_ms = max(0.0, python_time_ms - build_candidates_ms)
-        span.set_dispatch_ms(dispatch_ms)
-    return evidence
 
 
 def _execute_candidate_cohort_impl(
@@ -331,7 +288,6 @@ def _execute_candidate_cohort_impl(
     *,
     orchestration_run_id: str | None,
     orchestrator: Any,
-    timing_state: dict[str, int] | None,
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     basins: list[dict[str, Any]] = []
@@ -374,12 +330,6 @@ def _execute_candidate_cohort_impl(
         if context.config.slurm_execution_enabled and context.config.slurm_env:
             basin_manifest["slurm_env"] = dict(context.config.slurm_env)
         basins.append(basin_manifest)
-    # SUB-3: snapshot end of build-candidates loop for stage_span attribution.
-    # This boundary is the "build_candidates -> dispatch" transition point;
-    # everything below (preflight, raw-input staging, orchestrate_cycle) is
-    # attributed to ``dispatch_ms`` net of direct-measured Slurm wait.
-    if timing_state is not None:
-        timing_state["build_candidates_end_ns"] = time.monotonic_ns()
     if not basins:
         return evidence
     if context.config.slurm_execution_enabled:
@@ -453,11 +403,6 @@ def _execute_candidate_cohort_impl(
                 }
             )
         return evidence
-    # SUB-3: snapshot submitted-candidate count at the ``orchestrate_cycle``
-    # boundary — this is the "reached dispatch" figure; anything filtered out
-    # earlier is counted against ``failed_count`` at stage exit.
-    if timing_state is not None:
-        timing_state["submitted_count"] = len(submitted_candidates)
     try:
         result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
     except Exception as error:
