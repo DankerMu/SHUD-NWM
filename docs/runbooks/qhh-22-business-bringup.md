@@ -226,6 +226,33 @@ uv run nhms-monitor                               # 打印 JSON 到 stdout，并
 
 阈值（env 可调）：`NHMS_MONITORING_MAX_STALE_MINUTES=20`（cycle 停滞）、`NHMS_MONITORING_MAX_FAILED_CYCLES=0`、`NHMS_MONITORING_MAX_ACTIVE_SLURM_JOBS=32`、`NHMS_MONITORING_LOOKBACK_HOURS=168`。任一告警 → `status=warning`；Slurm CLI 不可用单列 `slurm_monitor_unavailable`。
 
+### 5.1 Evidence retention timer (24h)
+
+**用途**：instrument-node22-scheduler-pass-timing 之后 per-pass evidence 体积上升，需要有界回收 `NHMS_SCHEDULER_EVIDENCE_ROOT`，避免 evidence 目录无限增长。
+retention 走 systemd user timer，每 24h 触发一次 age-then-size 清理，写 receipt 到 `<root>/retention/retention-<utc-iso>.json`。
+
+**部署步骤**（在 node-22 `frd_muziyao` 账户下执行）：
+
+```bash
+cd /scratch/frd_muziyao/NWM
+mkdir -p ~/.config/systemd/user
+cp infra/systemd/nhms-scheduler-evidence-retention.service ~/.config/systemd/user/
+cp infra/systemd/nhms-scheduler-evidence-retention.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-scheduler-evidence-retention.timer
+```
+
+**验证**：
+
+- `systemctl --user is-active nhms-scheduler-evidence-retention.timer` → `active`。
+- `systemctl --user list-timers | grep nhms-scheduler-evidence-retention` → 显示下一次触发时间在 24h 内。
+- 首次触发后，`ls $NHMS_SCHEDULER_EVIDENCE_ROOT/retention/retention-*.json` 应能看到 receipt 文件（首跑时脚本自建 `retention/` 子目录）。
+
+**rollback 独立性**：`systemctl --user disable --now nhms-scheduler-evidence-retention.timer` 只停 retention，**不影响** `nhms-compute-scheduler.timer`。
+两者是独立 unit 文件、无共享依赖，scheduler 继续照常提交 pass，只是 evidence 目录不再有上限。
+
+**On-disk 路径约定**：unit 源文件位于 `infra/systemd/nhms-scheduler-evidence-retention.{service,timer}`，与 `nhms-node27-raw-retention.{service,timer}` 保持同一命名约定（两个都是 user-scope 单元，但源文件都放在 `infra/systemd/`）。
+
 ---
 
 ## 6. 首跑已处置的问题清单（按出现顺序）

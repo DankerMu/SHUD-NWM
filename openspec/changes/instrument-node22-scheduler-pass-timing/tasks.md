@@ -51,9 +51,9 @@
 
 ## 6. Systemd user units for retention (module: `infra/systemd`)
 
-- [ ] 6.1 Add `infra/systemd/nhms-scheduler-evidence-retention.service` (sibling of the existing `infra/systemd/nhms-node27-raw-retention.service` template) invoking the retention script with the standard `EnvironmentFile=` pointing at the same env file used by `nhms-compute-scheduler.service` (`/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env` on node-22).
-- [ ] 6.2 Add `infra/systemd/nhms-scheduler-evidence-retention.timer` (sibling of the existing `infra/systemd/nhms-node27-raw-retention.timer` template) firing every 24 h with an initial delay avoiding overlap with peak scheduler pass activity.
-- [ ] 6.3 Add a paragraph to `docs/runbooks/qhh-22-business-bringup.md` describing the retention timer's deployment step (`systemctl --user daemon-reload && systemctl --user enable --now nhms-scheduler-evidence-retention.timer`); reference the on-disk path `infra/systemd/nhms-scheduler-evidence-retention.{service,timer}` (same convention as `nhms-node27-raw-retention.{service,timer}`; both are user-scope units that still live under `infra/systemd/`).
+- [x] 6.1 Add `infra/systemd/nhms-scheduler-evidence-retention.service` (sibling of the existing `infra/systemd/nhms-node27-raw-retention.service` template) invoking the retention script with the standard `EnvironmentFile=` pointing at the same env file used by `nhms-compute-scheduler.service` (`/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env` on node-22).
+- [x] 6.2 Add `infra/systemd/nhms-scheduler-evidence-retention.timer` (sibling of the existing `infra/systemd/nhms-node27-raw-retention.timer` template) firing every 24 h with an initial delay avoiding overlap with peak scheduler pass activity.
+- [x] 6.3 Add a paragraph to `docs/runbooks/qhh-22-business-bringup.md` describing the retention timer's deployment step (`systemctl --user daemon-reload && systemctl --user enable --now nhms-scheduler-evidence-retention.timer`); reference the on-disk path `infra/systemd/nhms-scheduler-evidence-retention.{service,timer}` (same convention as `nhms-node27-raw-retention.{service,timer}`; both are user-scope units that still live under `infra/systemd/`).
 
 ## 7. Retention unit tests (module: `tests`)
 
