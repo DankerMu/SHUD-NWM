@@ -369,6 +369,37 @@ class SchedulerPassTiming:
             record["total_wall_ms"] = max(0.0, candidate_finished_ms - candidate_start_ms)
             self._candidates.append(record)
 
+    # -- per-basin / per-cohort sub-phase attribution ----------------
+
+    def attribute_per_basin_fields(
+        self, *, basin: str, source_id: str, fields: dict[str, float]
+    ) -> None:
+        """Fan per-basin / per-cohort sub-phase ``*_ms`` fields onto every
+        already-recorded candidate record matching ``(basin, source_id)``.
+
+        Used by SUB-4 (``scheduler_execution.execute_candidate_cohort``) to
+        push the five per-basin measurements (``output_uri_lookup_ms``,
+        ``basin_manifest_build_ms``, ``slurm_env_check_ms``,
+        ``secret_manifest_scan_ms``, ``resource_profile_check_ms``) plus the
+        two per-cohort equal-share measurements (``stage_raw_input_ms``,
+        ``orchestrator_dispatch_ms``) onto every candidate record whose
+        ``(basin, source_id)`` matches this basin — one call per surviving
+        basin fans the values to all five stage records for that
+        ``(basin, source_id)`` created by ``_submit_and_wait`` under
+        ``orchestrate_cycle``.
+
+        No-op below ``candidate`` level (no candidate records exist).
+        Idempotent within a pass (last writer wins; SUB-4 issues exactly
+        one call per basin so this is a plain assignment).
+        """
+
+        if self._level != "candidate":
+            return
+        for record in self._candidates:
+            if record.get("basin") == basin and record.get("source_id") == source_id:
+                for key, value in fields.items():
+                    record[key] = float(value)
+
     # -- restart_reconcile pseudo-record ------------------------------
 
     def record_restart_reconcile(
