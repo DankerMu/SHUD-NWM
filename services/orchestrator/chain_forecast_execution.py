@@ -502,7 +502,31 @@ def _submit_and_wait(
         "job_type": stage.job_type,
         "manifest": self._slurm_submission_manifest(manifest),
     }
-    submitted = self.slurm_client.submit_job(payload)
+    # SUB-3 (#861): direct-measure the Slurm-boundary wall-clock at every
+    # dispatch site. ``collector`` + ``stage_span`` are stashed on the
+    # orchestrator by ``execute_candidate_cohort`` (SUB-3 wiring); both may
+    # be ``None`` in non-scheduler trigger paths (``trigger_forecast`` from
+    # a CLI / test), in which case the timing wrap is a no-op. Spec.md
+    # "python-time and slurm-wait attribution is direct-measured, never
+    # inferred": both ``submit_job`` and ``_poll_until_terminal`` MUST be
+    # wrapped so ``slurm_wait_ms`` is a measurement, not an inference by
+    # subtraction (also covers the already-terminal-on-submit fast path
+    # at L568-572 because ``submit_job`` is wrapped regardless of branch).
+    collector = getattr(self, "_scheduler_pass_timing", None)
+    stage_span = getattr(self, "_scheduler_active_stage_span", None)
+    ns_before_submit = time.monotonic_ns()
+    try:
+        submitted = self.slurm_client.submit_job(payload)
+    finally:
+        # Attribute submit wall-clock unconditionally in a ``finally`` so
+        # a raised ``submit_job`` (gateway timeout, transport error) still
+        # accounts for the wall it actually consumed on the Slurm side.
+        if collector is not None and stage_span is not None:
+            ns_after_submit = time.monotonic_ns()
+            stage_span.add_slurm_wait_interval(
+                collector._ms_from_pass_entry(ns_before_submit),
+                collector._ms_from_pass_entry(ns_after_submit),
+            )
     slurm_job_id = str(submitted["job_id"])
     pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
     log_publication = self._display_log_publication_for_stage(
@@ -566,19 +590,35 @@ def _submit_and_wait(
         self.repository.update_hydro_run_status(context.run_id, "submitted", slurm_job_id=slurm_job_id)
 
     if current_status in TERMINAL_JOB_STATUSES:
+        # Fast path (spec.md L172-176): submit_job returned terminal, so the
+        # ~100 ms of Slurm wall the test scenario attributes lives entirely
+        # inside the submit wrap above; ``_poll_until_terminal`` is never
+        # called and no additional interval is added here.
         terminal_observation = TerminalJobObservation(
             job=submitted,
             publication_attempt=submitted_publish_attempt,
         )
     else:
-        terminal_observation = self._poll_until_terminal(
-            stage=stage,
-            context=context,
-            pipeline_job_id=pipeline_job_id,
-            initial_job=submitted,
-            initial_status=str(pipeline_record["status"]),
-            log_publication=log_publication,
-        )
+        ns_before_poll = time.monotonic_ns()
+        try:
+            terminal_observation = self._poll_until_terminal(
+                stage=stage,
+                context=context,
+                pipeline_job_id=pipeline_job_id,
+                initial_job=submitted,
+                initial_status=str(pipeline_record["status"]),
+                log_publication=log_publication,
+            )
+        finally:
+            # Same rationale as the submit wrap: even if poll raises after
+            # sleeping in ``time.sleep``, the wall-clock consumed on the
+            # Slurm side is real and must be attributed.
+            if collector is not None and stage_span is not None:
+                ns_after_poll = time.monotonic_ns()
+                stage_span.add_slurm_wait_interval(
+                    collector._ms_from_pass_entry(ns_before_poll),
+                    collector._ms_from_pass_entry(ns_after_poll),
+                )
     terminal = terminal_observation.job
     publication_attempt = terminal_observation.publication_attempt
     log_uri = str(terminal.get("log_uri") or "")
