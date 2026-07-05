@@ -753,6 +753,7 @@ def bounded_evidence_payload(
         "restart_reconcile_proof": payload.get("restart_reconcile_proof"),
         "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
         "retention": payload.get("retention"),
+        "timing": payload.get("timing"),
     }
     if "db_free_runtime" not in payload:
         bounded_payload.pop("db_free_runtime", None)
@@ -760,6 +761,8 @@ def bounded_evidence_payload(
         bounded_payload.pop("retention", None)
     if "restart_reconcile_proof" not in payload:
         bounded_payload.pop("restart_reconcile_proof", None)
+    if "timing" not in payload:
+        bounded_payload.pop("timing", None)
     return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
 
 

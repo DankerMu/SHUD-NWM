@@ -6831,6 +6831,49 @@ def test_db_free_bounded_evidence_preserves_runtime_selector_proof(
     assert "db-free-local-root" not in rendered
 
 
+def test_bounded_evidence_preserves_timing_block_on_size_fallback() -> None:
+    payload = _large_scheduler_evidence_payload("scheduler_2026070500_timing_bounded")
+    payload["timing"] = {
+        "schema_version": "nhms.scheduler_pass_timing.v1",
+        "pass": {
+            "schema_version": "nhms.scheduler_pass_timing.v1",
+            "pass_id": "scheduler_2026070500_timing_bounded",
+            "level": "stage",
+            "status": "resource_limit_blocked",
+            "pass_started_at": "2026-07-05T00:00:00.000000Z",
+            "pass_finished_at": "2026-07-05T00:00:00.001000Z",
+            "total_wall_ms": 1.0,
+            "total_cpu_ms": 1.0,
+            "python_time_ms": 1.0,
+            "slurm_wait_ms": 0.0,
+        },
+        "stages": [],
+        "candidates": [],
+        "restart_reconcile": {
+            "python_time_ms": 0.0,
+            "slurm_wait_ms": 0.0,
+            "total_wall_ms": 0.0,
+        },
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=5_000,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 5_000
+    assert bounded["status"] == "resource_limit_blocked"
+    assert "timing" in bounded, (
+        "size-fallback allowlist must preserve timing: block on disk artifact "
+        "per proposal.md L15 / design D3"
+    )
+    assert bounded["timing"]["schema_version"] == "nhms.scheduler_pass_timing.v1"
+    assert bounded["timing"]["pass"]["pass_id"] == "scheduler_2026070500_timing_bounded"
+    assert bounded["timing"]["pass"]["pass_finished_at"].endswith("Z")
+
+
 def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_paths() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_bounded")
     payload["retention"] = {
