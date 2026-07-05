@@ -1903,18 +1903,7 @@ class FileOrchestrationJournalRepository:
         yield from jobs.values()
 
     def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
-        try:
-            paths = sorted(
-                _iter_regular_json_files(
-                    self.root / "pipeline-jobs",
-                    root=self.root,
-                    max_files=self.max_files,
-                    max_depth=self.max_depth,
-                )
-            )
-        except FileOrchestrationJournalError:
-            return
-        for path in paths:
+        for path in self._iter_reconcile_direct_pipeline_job_paths():
             try:
                 expected_job_id = _safe_segment(path.stem)
                 payload = self._read_optional_json(path)
@@ -1922,6 +1911,45 @@ class FileOrchestrationJournalRepository:
                     yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
             except FileOrchestrationJournalError:
                 continue
+
+    def _iter_reconcile_direct_pipeline_job_paths(self) -> Iterable[Path]:
+        directory = self.root / "pipeline-jobs"
+        if self.max_files <= 0 or self.max_depth < 0:
+            return
+        try:
+            directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError):
+            return
+        if not stat.S_ISDIR(directory_mode):
+            return
+        try:
+            entry_names = list_directory_no_follow_limited(
+                directory,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError):
+            return
+        if len(entry_names) > self.max_files:
+            return
+        for entry_name in sorted(entry_names):
+            if not entry_name.endswith(".json"):
+                continue
+            if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
+                continue
+            path = directory / entry_name
+            try:
+                mode = stat_no_follow(path, containment_root=self.root).st_mode
+            except FileNotFoundError:
+                continue
+            except (OSError, SafeFilesystemError):
+                continue
+            if stat.S_ISREG(mode):
+                yield path
 
     def _iter_recent_direct_pipeline_job_records(self, limit: int) -> Iterable[dict[str, Any]]:
         for path in self._recent_files(self.root / "pipeline-jobs", suffix=".json", limit=limit):

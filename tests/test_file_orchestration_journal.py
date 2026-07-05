@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
@@ -1259,6 +1260,50 @@ def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_recor
 
     assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved"]
     assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
+
+
+def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_keeps_old_active_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    old_reserved = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_old_reserved_after_bad_direct")
+    old_reserved["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_old_reserved_after_bad_direct"
+    repository.upsert_pipeline_job(old_reserved)
+    os.utime(journal_root / "journal/gfs/2026062800.jsonl", (1, 1))
+
+    for index in range(3):
+        terminal_cycle_time = _dt(f"2026-06-28T0{index + 1}:00:00Z")
+        terminal = _pipeline_reservation_record(
+            terminal_cycle_time,
+            job_id=f"job_reconcile_newer_terminal_after_bad_direct_{index}",
+            status="succeeded",
+        )
+        terminal["idempotency_key"] = f"gfs:gfs_202606280{index + 1}:basin_a:terminal_after_bad_direct_{index}"
+        terminal["slurm_job_id"] = str(4200 + index)
+        terminal_journal_path = journal_root / f"journal/gfs/{format_cycle_time(terminal_cycle_time)}.jsonl"
+        _write_jsonl(
+            terminal_journal_path,
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=terminal_cycle_time,
+                    payload=terminal,
+                )
+            ],
+        )
+        os.utime(terminal_journal_path, (10 + index, 10 + index))
+
+    bad_direct_path = journal_root / "pipeline-jobs/unrelated bad direct.json"
+    bad_direct_path.write_text("{not-json", encoding="utf-8")
+
+    reserved = repository.query_reserved_unbound_jobs()
+
+    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
 
 
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:
