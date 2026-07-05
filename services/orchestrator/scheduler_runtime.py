@@ -385,23 +385,27 @@ def _db_free_safe_lock_code(value: Any) -> str:
     return "[lock-payload]"
 
 
-def _attach_timing(
-    result: SchedulerPassResult,
+def _finalize_timing_into_evidence(
+    evidence: dict[str, Any],
     collector: SchedulerPassTiming,
     status: str,
-) -> SchedulerPassResult:
-    """Attach the finalised ``timing:`` block to a ``SchedulerPassResult``.
+) -> None:
+    """Populate ``evidence["timing"]`` from the collector, in place.
 
-    ``collector.finalize_evidence`` snapshots the pass-level union-of-intervals
-    plus per-stage / per-candidate records at call time; wrapping the block
-    under an explicit ``timing`` key keeps the evidence schema additive per
-    spec.md "Timing evidence is additive to existing scheduler evidence
-    schema" and mirrors the finalisation contract SUB-1 documented in its
-    Phase 4.5 C7 followup.
+    MUST be called BEFORE ``_write_evidence`` / ``_write_prelock_blocked_evidence``
+    at every ``SchedulerPassResult`` return site so the on-disk artifact carries
+    the ``timing:`` block (spec.md L15/design.md D3: "Evidence JSON gains a
+    top-level ``timing:`` block"). ``write_evidence`` clears + repopulates the
+    caller's dict from the serialised payload, so a post-write mutation would
+    only touch the in-memory dict and NEVER reach disk (Phase 4.5 C6).
+
+    ``collector.finalize_evidence`` is idempotent w.r.t. ``_pass_finished_at``
+    — it backfills the timestamp so callers can invoke it BEFORE
+    ``pass_span.__exit__`` and still get a non-null ``pass.pass_finished_at``
+    (Phase 4.5 C1).
     """
 
-    result.evidence["timing"] = collector.finalize_evidence(status)
-    return result
+    evidence["timing"] = collector.finalize_evidence(status)
 
 
 def _restart_reconcile_with_timing(
@@ -410,28 +414,45 @@ def _restart_reconcile_with_timing(
 ) -> dict[str, Any] | None:
     """Invoke ``_run_restart_reconcile`` inside the ``restart_reconcile`` span.
 
-    The whole call — reserved-unbound reconcile + inflight reconcile — is
-    treated as one Slurm-wait span per design D2: ``_run_restart_reconcile``
-    dispatches ``sacct`` subprocess queries via the injected queriers, so the
-    wall-clock is dominated by subprocess-wait; python-side work is bounded
-    to dict assembly and is charged to ``slurm_wait_ms`` for simplicity.
-    ``python_time_ms`` is left at ``0`` per the SUB-1 followup note item 4
-    (span covers the ``sacct`` subprocess only).
+    The span internally splits python-side work from ``sacct`` subprocess
+    wait per spec.md L80 + tasks.md §2.1 sub-item 4: only the actual
+    ``sacct`` subprocess calls (both ``comment_query`` and ``sacct_query``)
+    are attributed to ``slurm_wait_ms``; the surrounding python work (store
+    build, dict assembly, evidence packaging, exception handling) is
+    attributed to ``python_time_ms``.
+
+    Endpoint choice for ``record_restart_reconcile``: we report a single
+    ``[span_start, span_start + sacct_wait_ms_total]`` interval rather than
+    the two individual sacct sub-intervals. Reason: restart_reconcile is
+    strictly sequential (both sacct calls run inside the single-threaded
+    reconcile path), so under the pass-level union-of-intervals the
+    single interval is equivalent to the two individual ones, and the
+    ``record_restart_reconcile`` API takes exactly one interval pair.
     """
 
     span_start_monotonic_ns = time.monotonic_ns()
     span_start_ms_from_pass_entry = collector._ms_from_pass_entry(span_start_monotonic_ns)
+    sacct_wait_ms_total = 0.0
+
+    def _sink(delta_ms: float) -> None:
+        nonlocal sacct_wait_ms_total
+        if delta_ms > 0.0:
+            sacct_wait_ms_total += delta_ms
+
     try:
-        return self._run_restart_reconcile()
+        return self._run_restart_reconcile(sacct_wait_sink=_sink)
     finally:
         span_end_monotonic_ns = time.monotonic_ns()
-        span_end_ms_from_pass_entry = collector._ms_from_pass_entry(span_end_monotonic_ns)
-        slurm_wait_ms = max(0.0, (span_end_monotonic_ns - span_start_monotonic_ns) / 1_000_000.0)
+        total_span_ms = max(0.0, (span_end_monotonic_ns - span_start_monotonic_ns) / 1_000_000.0)
+        # Clamp sacct total so it can never exceed the total span (guards
+        # against a mis-clocked subprocess wrapper).
+        slurm_wait_ms = min(sacct_wait_ms_total, total_span_ms)
+        python_time_ms = max(0.0, total_span_ms - slurm_wait_ms)
         collector.record_restart_reconcile(
-            python_time_ms=0.0,
+            python_time_ms=python_time_ms,
             slurm_wait_ms=slurm_wait_ms,
             span_start_ms_from_pass_entry=span_start_ms_from_pass_entry,
-            span_end_ms_from_pass_entry=span_end_ms_from_pass_entry,
+            span_end_ms_from_pass_entry=span_start_ms_from_pass_entry + slurm_wait_ms,
         )
 
 
@@ -456,8 +477,10 @@ def run_once(self) -> SchedulerPassResult:
     # Enter pass_span immediately so pass_started_at / pass_finished_at are
     # pinned on every exit path — including the fail-closed
     # ``NHMS_SCHEDULER_TIMING_LEVEL`` validator below (Phase 7 P2 #2 + Phase
-    # 4.5 C4). Every ``return`` inside this ``with`` block first attaches
-    # the finalised ``timing:`` block via ``_attach_timing``.
+    # 4.5 C4). Every ``return`` inside this ``with`` block populates
+    # ``evidence["timing"]`` via ``_finalize_timing_into_evidence`` BEFORE
+    # ``_write_evidence`` / ``_write_prelock_blocked_evidence`` so the on-disk
+    # artifact carries the finalised ``timing:`` block (Phase 4.5 C6).
     with collector.pass_span():
         # NHMS_SCHEDULER_TIMING_LEVEL validation is fail-closed at pass entry
         # (D4). A recognised value passes through; an unrecognised value
@@ -489,18 +512,15 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "scheduler_timing_level_unrecognised",
                 }
             )
+            _finalize_timing_into_evidence(evidence, collector, "preflight_blocked")
             artifact_path = self._write_prelock_blocked_evidence(
                 pass_id, evidence, {"status": "not_required"}
             )
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status="preflight_blocked",
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                "preflight_blocked",
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status="preflight_blocked",
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
         db_free_required = bool(getattr(self.config, "db_free_required", False))
         root_preflight = (
@@ -537,16 +557,13 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "scheduler_root_preflight_blocked",
                 }
             )
+            _finalize_timing_into_evidence(evidence, collector, "preflight_blocked")
             artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status="preflight_blocked",
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                "preflight_blocked",
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status="preflight_blocked",
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
         db_free_preflight = self.config.db_free_runtime_preflight()
         if db_free_preflight["status"] == "blocked":
@@ -580,16 +597,13 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "db_free_runtime_preflight_blocked",
                 }
             )
+            _finalize_timing_into_evidence(evidence, collector, "preflight_blocked")
             artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status="preflight_blocked",
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                "preflight_blocked",
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status="preflight_blocked",
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
         lock = self._build_scheduler_lease()
         lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
@@ -612,17 +626,14 @@ def run_once(self) -> SchedulerPassResult:
             )
             if self.config.db_free_required:
                 evidence["db_free_runtime"] = db_free_preflight
-            artifact_path = self._write_evidence(pass_id, evidence)
             status = _evidence_status(evidence, "lock_contended")
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status=status,
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                status,
+            _finalize_timing_into_evidence(evidence, collector, status)
+            artifact_path = self._write_evidence(pass_id, evidence)
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status=status,
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
 
         heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
@@ -652,17 +663,14 @@ def run_once(self) -> SchedulerPassResult:
                         "execution_boundary": "scheduler_root_preflight_blocked",
                     }
                 )
-                artifact_path = self._write_evidence(pass_id, evidence)
                 status = _evidence_status(evidence, "preflight_blocked")
-                return _attach_timing(
-                    SchedulerPassResult(
-                        pass_id=pass_id,
-                        status=status,
-                        evidence=evidence,
-                        artifact_path=artifact_path,
-                    ),
-                    collector,
-                    status,
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
                 )
             # M24 §3A: before planning/submitting this pass, recover any jobs
             # stuck in the submit-crash window (reserved-unbound) and refresh
@@ -703,17 +711,14 @@ def run_once(self) -> SchedulerPassResult:
                         "execution_boundary": "db_free_registry_blocked",
                     }
                 )
-                artifact_path = self._write_evidence(pass_id, evidence)
                 status = _evidence_status(evidence, "preflight_blocked")
-                return _attach_timing(
-                    SchedulerPassResult(
-                        pass_id=pass_id,
-                        status=status,
-                        evidence=evidence,
-                        artifact_path=artifact_path,
-                    ),
-                    collector,
-                    status,
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
                 )
             cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
             (
@@ -780,17 +785,14 @@ def run_once(self) -> SchedulerPassResult:
                 )
                 if root_preflight["status"] != "not_required":
                     evidence["root_preflight"] = root_preflight
-                artifact_path = self._write_evidence(pass_id, evidence)
                 status = _evidence_status(evidence, "lease_lost")
-                return _attach_timing(
-                    SchedulerPassResult(
-                        pass_id=pass_id,
-                        status=status,
-                        evidence=evidence,
-                        artifact_path=artifact_path,
-                    ),
-                    collector,
-                    status,
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
                 )
             if not self.config.dry_run and mutation_candidate_count:
                 if evidence_reservation["status"] == "not_required":
@@ -1134,6 +1136,14 @@ def run_once(self) -> SchedulerPassResult:
                 started_at,
                 force_dry_run_reason=retention_force_reason,
             )
+            # Populate timing.pass BEFORE the write so the on-disk artifact
+            # carries the block (Phase 4.5 C6). Use ``pass_status`` (pre-write
+            # planned status) here; the evidence-size-fallback path can
+            # rewrite ``evidence["status"]`` inside ``_write_evidence`` when
+            # the payload exceeds ``MAX_EVIDENCE_BYTES``, and the final
+            # SchedulerPassResult.status must reflect that post-write value
+            # so the pass-result / on-disk / CLI statuses agree.
+            _finalize_timing_into_evidence(evidence, collector, pass_status)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)
             except (OSError, RuntimeError, ValueError, SchedulerEvidenceWriteError) as error:
@@ -1142,15 +1152,11 @@ def run_once(self) -> SchedulerPassResult:
                 evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)
                 artifact_path = None
             status = _evidence_status(evidence, pass_status)
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status=status,
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                status,
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status=status,
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
         except SchedulerResourceLimitError as error:
             finished_at = _now(self.config)
@@ -1174,17 +1180,14 @@ def run_once(self) -> SchedulerPassResult:
             )
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
-            artifact_path = self._write_evidence(pass_id, evidence)
             status = _evidence_status(evidence, "resource_limit_blocked")
-            return _attach_timing(
-                SchedulerPassResult(
-                    pass_id=pass_id,
-                    status=status,
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                ),
-                collector,
-                status,
+            _finalize_timing_into_evidence(evidence, collector, status)
+            artifact_path = self._write_evidence(pass_id, evidence)
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status=status,
+                evidence=evidence,
+                artifact_path=artifact_path,
             )
         finally:
             try:
@@ -1194,7 +1197,11 @@ def run_once(self) -> SchedulerPassResult:
             lock.release(pass_id=pass_id)
 
 
-def _run_restart_reconcile(self) -> dict[str, Any] | None:
+def _run_restart_reconcile(
+    self,
+    *,
+    sacct_wait_sink: Callable[[float], None] | None = None,
+) -> dict[str, Any] | None:
     """Recover submit-crash and in-flight jobs at the start of an exec pass.
 
     Reconcile is read-only w.r.t. submission: it binds reserved-unbound rows
@@ -1202,6 +1209,15 @@ def _run_restart_reconcile(self) -> dict[str, Any] | None:
     refreshes in-flight statuses from accounting. It NEVER re-submits, so an
     already in-flight cohort is recovered, not duplicated. Best-effort:
     failures are recorded but never abort the pass.
+
+    ``sacct_wait_sink`` (SUB-2 wiring): if supplied, invoked after each of
+    the two accounting calls (``reconcile_reserved_unbound_jobs`` and
+    ``reconcile_inflight_jobs``) with the elapsed wall-clock in
+    milliseconds. The reconcile functions are dominated by ``sacct``
+    subprocess wait, so per spec.md L80 the caller uses the sink to
+    attribute these deltas to ``pass.slurm_wait_ms`` (not
+    ``python_time_ms``). The sink is called even when the underlying call
+    raises, so a failed sacct still contributes its wait to the split.
     """
 
     if self.config.dry_run or not self.config.restart_reconcile_enabled:
@@ -1223,6 +1239,7 @@ def _run_restart_reconcile(self) -> dict[str, Any] | None:
     )
 
     evidence: dict[str, Any] = {"status": "completed"}
+    reserved_call_start_ns = time.monotonic_ns()
     try:
         comment_query = self._restart_reconcile_comment_query()
         reserved = reconcile_reserved_unbound_jobs(store, comment_query=comment_query)
@@ -1243,7 +1260,12 @@ def _run_restart_reconcile(self) -> dict[str, Any] | None:
         evidence["status"] = "error"
         evidence["reserved_unbound_error"] = str(error)
         self._reset_reconcile_store_after_error()
+    finally:
+        if sacct_wait_sink is not None:
+            reserved_delta_ms = (time.monotonic_ns() - reserved_call_start_ns) / 1_000_000.0
+            sacct_wait_sink(reserved_delta_ms)
 
+    inflight_call_start_ns = time.monotonic_ns()
     try:
         sacct_query = self._restart_reconcile_sacct_query()
         inflight = reconcile_inflight_jobs(store, sacct_query=sacct_query)
@@ -1263,6 +1285,10 @@ def _run_restart_reconcile(self) -> dict[str, Any] | None:
         evidence["status"] = "error"
         evidence["inflight_error"] = str(error)
         self._reset_reconcile_store_after_error()
+    finally:
+        if sacct_wait_sink is not None:
+            inflight_delta_ms = (time.monotonic_ns() - inflight_call_start_ns) / 1_000_000.0
+            sacct_wait_sink(inflight_delta_ms)
     return evidence
 
 

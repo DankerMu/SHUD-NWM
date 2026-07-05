@@ -194,10 +194,14 @@ class ProductionScheduler:
             workspace_root=_scheduler.Path(self.config.workspace_root),
         )
 
-    def _run_restart_reconcile(self) -> dict[str, _scheduler.Any] | None:
+    def _run_restart_reconcile(
+        self,
+        *,
+        sacct_wait_sink: _scheduler.Callable[[float], None] | None = None,
+    ) -> dict[str, _scheduler.Any] | None:
         from services.orchestrator import scheduler_runtime
 
-        return scheduler_runtime._run_restart_reconcile(self)
+        return scheduler_runtime._run_restart_reconcile(self, sacct_wait_sink=sacct_wait_sink)
 
     def _reset_reconcile_store_after_error(self) -> None:
         from services.orchestrator import scheduler_runtime

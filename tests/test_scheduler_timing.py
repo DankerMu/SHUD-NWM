@@ -99,3 +99,40 @@ def test_pass_slurm_wait_is_zero_without_intervals() -> None:
     pass_block = evidence["pass"]
     assert pass_block["slurm_wait_ms"] == pytest.approx(0.0, abs=1e-6)
     assert pass_block["python_time_ms"] == pytest.approx(pass_block["total_wall_ms"], abs=5.0)
+
+
+def test_finalize_evidence_backfills_pass_finished_at() -> None:
+    """``finalize_evidence`` MUST backfill ``pass_finished_at`` when called inside ``pass_span``.
+
+    Regression for PR #871 Phase 4.5 C1: SUB-2 wiring populates
+    ``evidence["timing"] = collector.finalize_evidence(status)`` at every
+    ``SchedulerPassResult`` return site, and every such call happens INSIDE
+    the ``with collector.pass_span():`` block so the pass-span ``finally``
+    hasn't yet run — ``_pass_finished_at`` is still ``None``. Without the
+    backfill, every on-disk evidence artifact carries
+    ``timing.pass.pass_finished_at: null``.
+
+    Contract: ``finalize_evidence`` sets ``_pass_finished_at`` to a UTC
+    ISO-8601 string ending in ``"Z"`` when it is ``None`` at call time,
+    and the returned block's ``pass.pass_finished_at`` reflects that value.
+    """
+
+    timing = SchedulerPassTiming(pass_id="scheduler_test_deadbeef03ab", level="stage")
+    with timing.pass_span():
+        # Simulate the SUB-2 return-site pattern: finalize INSIDE pass_span,
+        # WITHOUT waiting for pass_span.__exit__ (which is what would normally
+        # populate _pass_finished_at).
+        assert timing._pass_finished_at is None, (
+            "test setup: pass_span.finally has not yet run"
+        )
+        evidence = timing.finalize_evidence(status="preflight_blocked")
+
+    pass_block = evidence["pass"]
+    finished_at = pass_block["pass_finished_at"]
+    assert isinstance(finished_at, str) and finished_at.endswith("Z"), (
+        f"pass.pass_finished_at={finished_at!r} did not backfill to a "
+        "non-empty ISO-8601 UTC string; downstream evidence artifacts would "
+        "carry null for the pass finish timestamp when the timing block is "
+        "populated inside pass_span (SUB-2 return-site pattern)."
+    )
+    assert pass_block["status"] == "preflight_blocked"

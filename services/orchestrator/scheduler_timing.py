@@ -339,8 +339,20 @@ class SchedulerPassTiming:
         Invariants are checked with a ±5 ms tolerance; violations are
         appended as diagnostic ``invariant_violations`` entries rather than
         raised so instrumentation can never crash the scheduler.
+
+        Idempotent w.r.t. ``_pass_finished_at``: callers may invoke
+        ``finalize_evidence`` from inside ``pass_span`` (before the
+        ``pass_span`` ``finally`` fires) — SUB-2 does exactly this so the
+        finalised ``timing:`` block is written to the on-disk evidence
+        artifact BEFORE ``pass_span.__exit__``. Backfill the timestamp here
+        if the pass_span finally has not yet run so ``pass.pass_finished_at``
+        never serialises as ``null``. The ``pass_span`` finally still fires
+        later; re-assigning is safe (the second value is close enough that
+        no consumer distinguishes them).
         """
 
+        if self._pass_finished_at is None:
+            self._pass_finished_at = self._now_iso()
         total_wall_ms = self._ms_from_pass_entry()
         total_cpu_ms = max(0, int((time.process_time() - self._cpu_start) * 1000))
         slurm_wait_ms = _union_ms(self._slurm_wait_intervals)
