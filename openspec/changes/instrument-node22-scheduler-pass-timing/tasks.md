@@ -57,16 +57,16 @@
 
 ## 7. Retention unit tests (module: `tests`)
 
-- [ ] 7.1 `tests/test_scheduler_evidence_retention.py::test_age_based_deletion_under_cap` — synthetic dir with mixed ages, size under cap; only files older than retention-days deleted; receipt records each deletion.
-- [ ] 7.2 `test_size_based_eviction_after_age` — synthetic dir over cap after age pass; oldest-first deletion until under cap; receipt records age-pass and size-pass sets separately.
-- [ ] 7.3 `test_in_flight_write_skipped` — file with sibling `.tmp` never deleted; receipt records `skipped: in-flight`.
-- [ ] 7.4 `test_safety_window_skipped` — file with mtime < 1h never deleted; receipt records `skipped: safety-window`.
-- [ ] 7.5 `test_foreign_file_untouched` — `notes.txt` in evidence root not touched; receipt records `skipped: unrecognised`.
-- [ ] 7.6 `test_empty_pass_still_emits_receipt` — no eligible file; receipt still written with `deleted_count: 0`.
-- [ ] 7.7 `test_pre_execution_json_subject_to_age_pass` — `scheduler_<pass_id>.pre_execution.json` older than retention-days and without sibling `.tmp` is deleted; both it and the sibling `<pass_id>.json` appear in `deleted_paths`.
-- [ ] 7.8 `test_receipt_files_have_longer_window` — `retention/retention-<old>.json` receipt older than 180 days is deleted during the receipt-specific pass; current run's receipt records the deletion under `receipt_pass` with resolved `policy.receipt_retention_days=180`; receipts younger than 180 days are preserved regardless of the scheduler-evidence age pass.
-- [ ] 7.9 `test_evidence_write_error_json_is_out_of_scope` — `evidence_write_error.json` in evidence root is never deleted regardless of age; receipt records the path under `skipped_paths_by_reason.unrecognised`.
-- [ ] 7.10 `test_retention_creates_receipt_subdir_on_first_run` — evidence root exists but `retention/` subdirectory does not; retention script creates the subdirectory and writes the receipt successfully with no `FileNotFoundError`.
+- [x] 7.1 `tests/test_scheduler_evidence_retention.py::test_age_based_deletion_under_cap` — synthetic dir with mixed ages, size under cap; only files older than retention-days deleted; receipt records each deletion.
+- [x] 7.2 `test_size_based_eviction_after_age` — synthetic dir over cap after age pass; oldest-first deletion until under cap; receipt records age-pass and size-pass sets separately.
+- [x] 7.3 `test_in_flight_write_skipped` — file with sibling `.tmp` never deleted; receipt records `skipped: in-flight`.
+- [x] 7.4 `test_safety_window_skipped` — file with mtime < 1h never deleted; receipt records `skipped: safety-window`.
+- [x] 7.5 `test_foreign_file_untouched` — `notes.txt` in evidence root not touched; receipt records `skipped: unrecognised`.
+- [x] 7.6 `test_empty_pass_still_emits_receipt` — no eligible file; receipt still written with `deleted_count: 0`.
+- [x] 7.7 `test_pre_execution_json_subject_to_age_pass` — `scheduler_<pass_id>.pre_execution.json` older than retention-days and without sibling `.tmp` is deleted; both it and the sibling `<pass_id>.json` appear in `deleted_paths`.
+- [x] 7.8 `test_receipt_files_have_longer_window` — `retention/retention-<old>.json` receipt older than 180 days is deleted during the receipt-specific pass; current run's receipt records the deletion under `receipt_pass` with resolved `policy.receipt_retention_days=180`; receipts younger than 180 days are preserved regardless of the scheduler-evidence age pass.
+- [x] 7.9 `test_evidence_write_error_json_is_out_of_scope` — `evidence_write_error.json` in evidence root is never deleted regardless of age; receipt records the path under `skipped_paths_by_reason.unrecognised`.
+- [x] 7.10 `test_retention_creates_receipt_subdir_on_first_run` — evidence root exists but `retention/` subdirectory does not; retention script creates the subdirectory and writes the receipt successfully with no `FileNotFoundError`.
 
 ## 8. Local verification gate
 
