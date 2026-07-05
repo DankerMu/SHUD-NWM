@@ -3896,6 +3896,80 @@ def test_file_orchestration_journal_new_write_advances_beyond_latest_only_replay
     assert state["pipeline_status"] == "running"
 
 
+def test_file_orchestration_journal_new_write_advances_beyond_alias_replay_sequence(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    stale_job = _active_job(cycle_time)
+    stale_job.update(
+        {
+            "job_id": f"job_cycle_ifs_{cycle_stamp}_forecast",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:forecast",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "ifs",
+            "status": "failed",
+            "slurm_job_id": "9009",
+            "submitted_at": "2026-06-28T00:01:00Z",
+            "finished_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:10:00Z",
+        }
+    )
+    latest = _latest_view(source_id="ifs", cycle_time=cycle_time, jobs=[stale_job])
+    latest["forcing_version"] = None
+    latest["replay"]["latest_sequence"] = 10
+    _write_json(journal_root / "latest/ifs/2026062800/model_a.json", latest)
+    _write_jsonl(
+        journal_root / "journal/ifs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="ifs",
+                cycle_time=cycle_time,
+                payload=stale_job,
+                sequence=10,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    new_job = dict(stale_job)
+    new_job.update(
+        {
+            "source_id": "IFS",
+            "status": "running",
+            "slurm_job_id": "3011",
+            "finished_at": None,
+            "error_code": None,
+            "error_message": None,
+        }
+    )
+
+    written = repository.upsert_pipeline_job(new_job)
+
+    journal_records = [
+        json.loads(line)
+        for line in (journal_root / "journal/IFS/2026062800.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    latest_after = json.loads((journal_root / "latest/IFS/2026062800/model_a.json").read_text(encoding="utf-8"))
+    direct_after = json.loads((journal_root / f"pipeline-jobs/{stale_job['job_id']}.json").read_text(encoding="utf-8"))
+    state = _candidate_state(repository, source_id="IFS", cycle_time=cycle_time)
+
+    assert written["status"] == "running"
+    assert journal_records[-1]["sequence"] == 11
+    assert latest_after["replay"]["latest_sequence"] == 11
+    assert latest_after["pipeline_jobs"][0]["source_id"] == "IFS"
+    assert latest_after["pipeline_jobs"][0]["status"] == "running"
+    assert direct_after["sequence"] == 11
+    assert direct_after["payload"]["status"] == "running"
+    assert repository.get_pipeline_job(stale_job["job_id"])["status"] == "running"
+    assert state is not None
+    assert state["pipeline_jobs"][0]["source_id"] == "IFS"
+    assert state["pipeline_jobs"][0]["status"] == "running"
+    assert state["pipeline_status"] == "running"
+
+
 def test_file_orchestration_journal_candidate_state_includes_run_manifest_package_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

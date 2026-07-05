@@ -2228,6 +2228,7 @@ class FileOrchestrationJournalRepository:
         row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
+        row = {**row, "source_id": source_id}
         if exclusive_direct and self._pipeline_job_conflicts_unlocked(row):
             return None
         sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
@@ -2444,21 +2445,42 @@ class FileOrchestrationJournalRepository:
             return self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
 
     def _next_sequence_unlocked(self, *, source_id: str, cycle_time: datetime) -> int:
-        records = self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time))
-        sequences = [_optional_replay_sequence(record) or 0 for record in records]
-        sequences.extend(self._latest_replay_sequences_unlocked(source_id=source_id, cycle_time=cycle_time))
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        cycle_segment = format_cycle_time(cycle_time)
+        source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
+        sequences: list[int] = []
+        for source_segment in source_segments:
+            for surface in ("journal", "pipeline-events"):
+                records = self._read_jsonl(self.root / surface / source_segment / f"{cycle_segment}.jsonl")
+                sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+        sequences.extend(
+            self._latest_replay_sequences_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                source_segments=source_segments,
+            )
+        )
         return max(sequences, default=0) + 1
 
-    def _latest_replay_sequences_unlocked(self, *, source_id: str, cycle_time: datetime) -> list[int]:
+    def _latest_replay_sequences_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        source_segments: tuple[str, ...] | None = None,
+    ) -> list[int]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
+        if source_segments is None:
+            source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
-        for path in self._latest_paths(_safe_segment(source_id), format_cycle_time(cycle_time), model_id=None):
-            payload = self._read_optional_json(path)
-            if payload is None:
-                continue
-            _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
-            _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
-            sequences.append(_latest_replay_sequence(payload) or 0)
+        for source_segment in source_segments:
+            for path in self._latest_paths(source_segment, format_cycle_time(cycle_time), model_id=None):
+                payload = self._read_optional_json(path)
+                if payload is None:
+                    continue
+                _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
+                _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
+                sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
 
     def _next_event_id_unlocked(
