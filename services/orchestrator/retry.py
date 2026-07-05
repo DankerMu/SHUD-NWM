@@ -85,11 +85,17 @@ _DB_FREE_SELECTOR_FIELDS = (
     "scheduler_state_index",
 )
 _DB_FREE_REQUIRED_SELECTOR_FIELDS = (
+    "scheduler_allowed_roots",
     "scheduler_registry_backend",
     "scheduler_registry_manifest",
     "scheduler_canonical_readiness_backend",
     "scheduler_canonical_readiness_index",
     "scheduler_state_index_backend",
+    "scheduler_state_index",
+)
+_DB_FREE_PATH_SELECTOR_FIELDS = (
+    "scheduler_registry_manifest",
+    "scheduler_canonical_readiness_index",
     "scheduler_state_index",
 )
 _DB_FREE_RUNTIME_FIELDS = (_DB_FREE_REQUIRED_FIELD, *_DB_FREE_SELECTOR_FIELDS)
@@ -1495,6 +1501,71 @@ def _candidate_batch_db_free_required(candidate_batch: _RuntimeRootCandidateBatc
     )
 
 
+def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path, ...], list[dict[str, str]]]:
+    roots: list[Path] = []
+    rejected: list[dict[str, str]] = []
+    for raw_root in value.split(os.pathsep):
+        text = raw_root.strip()
+        if not text:
+            continue
+        reason = secret_manifest_value_reason(text)
+        if reason is not None:
+            rejected.append(_runtime_root_rejection("scheduler_allowed_roots", source, reason, text))
+            continue
+        if _URI_STYLE_RE.match(text):
+            rejected.append(
+                _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_uri", text)
+            )
+            continue
+        root = Path(text).expanduser()
+        if not root.is_absolute():
+            rejected.append(
+                _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_relative", text)
+            )
+            continue
+        try:
+            resolved = root.resolve(strict=False)
+        except OSError:
+            rejected.append(
+                _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text)
+            )
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots), rejected
+
+
+def _db_free_selector_path_rejection(
+    selector_field: str,
+    source: str,
+    value: str,
+    *,
+    allowed_roots: tuple[Path, ...],
+) -> dict[str, str] | None:
+    if not allowed_roots:
+        return _runtime_root_rejection(selector_field, source, "db_free_allowed_roots_missing", value)
+    if _URI_STYLE_RE.match(value):
+        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_uri", value)
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_relative", value)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+    if not any(_path_is_relative_to(resolved, root) for root in allowed_roots):
+        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_outside_allowed_roots", value)
+    return None
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _resolve_db_free_runtime_candidate(
     source: str,
     candidate: Mapping[str, Any],
@@ -1503,6 +1574,7 @@ def _resolve_db_free_runtime_candidate(
     rejected: list[dict[str, str]] = []
     secret_rejected = False
     unsafe_rejected = False
+    allowed_roots: tuple[Path, ...] = ()
 
     for selector_field in _DB_FREE_SELECTOR_FIELDS:
         value = _runtime_root_value(candidate.get(selector_field))
@@ -1521,6 +1593,21 @@ def _resolve_db_free_runtime_candidate(
         if selector_field not in _DB_FREE_BACKEND_FIELDS and _DB_LIKE_SELECTOR_RE.match(value):
             rejected.append(_runtime_root_rejection(selector_field, source, "db_like_selector_value", value))
             continue
+        if selector_field == "scheduler_allowed_roots":
+            allowed_roots, roots_rejections = _db_free_selector_allowed_roots(source, value)
+            rejected.extend(roots_rejections)
+            if not allowed_roots:
+                continue
+        if selector_field in _DB_FREE_PATH_SELECTOR_FIELDS:
+            rejection = _db_free_selector_path_rejection(
+                selector_field,
+                source,
+                value,
+                allowed_roots=allowed_roots,
+            )
+            if rejection is not None:
+                rejected.append(rejection)
+                continue
         resolved[selector_field] = (value, source)
 
     missing = [field for field in _DB_FREE_REQUIRED_SELECTOR_FIELDS if field not in resolved]

@@ -471,11 +471,13 @@ def test_automatic_forecast_retry_preserves_db_free_runtime_contract(
         assert submitted.payload["job_id"] == "slurm_auto_retry"
         assert manifest["scheduler_db_free_required"] == "true"
         assert manifest["scheduler_registry_backend"] == "file"
-        assert manifest["scheduler_registry_manifest"] == "/srv/nhms/state/registry.json"
+        assert manifest["scheduler_registry_manifest"] == "/srv/nhms/object-store/scheduler/registry/manifest-last.json"
         assert manifest["scheduler_canonical_readiness_backend"] == "file"
-        assert manifest["scheduler_canonical_readiness_index"] == "/srv/nhms/state/canonical-readiness.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
         assert manifest["scheduler_state_index_backend"] == "file"
-        assert manifest["scheduler_state_index"] == "/srv/nhms/state/scheduler-state.json"
+        assert manifest["scheduler_state_index"] == "/srv/nhms/object-store/scheduler/state-index/index-last.json"
         assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
         assert manifest["previous_job_id"] == failed.job_id
         assert manifest["pipeline_job_id"] == retry_job.job_id
@@ -483,6 +485,66 @@ def test_automatic_forecast_retry_preserves_db_free_runtime_contract(
         assert manifest["retry_count"] == 1
         assert manifest["source_id"] == "gfs"
         assert manifest["cycle_time"] == "2026062912"
+        assert "DATABASE_URL" not in json.dumps(manifest)
+        evidence = submitted.runtime_root_resolution
+        assert evidence is not None
+        assert evidence["db_free_runtime"]["required"] is True
+        assert evidence["db_free_runtime"]["missing"] == []
+
+
+def test_automatic_forcing_retry_preserves_db_free_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with _store() as store:
+        failed = _create_job(
+            store,
+            job_id="job_cycle_gfs_2026062912_forcing_model_a_forcing",
+            run_id="cycle_gfs_2026062912_forcing_model_a",
+            error_code="NODE_FAILURE",
+            retry_count=0,
+            cycle_id="gfs_2026062912",
+            job_type="produce_forcing_array",
+            stage="forcing",
+        )
+        _insert_submission_event(store, failed, _db_free_retry_contract())
+        service = RetryService(store, RetryConfig(max_retries=3))
+        retry_job = service.schedule_auto_retry(failed)
+        gateway = _RecordingGateway(job_id="slurm_auto_forcing_retry")
+
+        submitted = service._submit_retry_job(
+            _RetrySubmissionJob(
+                job_id=retry_job.job_id,
+                run_id=retry_job.run_id,
+                cycle_id=retry_job.cycle_id,
+                job_type=retry_job.job_type,
+                model_id=retry_job.model_id,
+                stage=retry_job.stage,
+                retry_count=retry_job.retry_count,
+                previous_job_id=failed.job_id,
+                manual_retry_marker=False,
+            ),
+            gateway,
+        )
+
+        manifest = gateway.submissions[0].manifest
+        assert submitted.payload["job_id"] == "slurm_auto_forcing_retry"
+        assert manifest["job_type"] == "produce_forcing_array"
+        assert manifest["scheduler_db_free_required"] == "true"
+        assert manifest["scheduler_registry_backend"] == "file"
+        assert manifest["scheduler_registry_manifest"] == "/srv/nhms/object-store/scheduler/registry/manifest-last.json"
+        assert manifest["scheduler_canonical_readiness_backend"] == "file"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
+        assert manifest["scheduler_state_index_backend"] == "file"
+        assert manifest["scheduler_state_index"] == "/srv/nhms/object-store/scheduler/state-index/index-last.json"
+        assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
+        assert manifest["previous_job_id"] == failed.job_id
+        assert manifest["pipeline_job_id"] == retry_job.job_id
+        assert manifest["manual_retry_marker"] is False
+        assert manifest["retry_count"] == 1
         assert "DATABASE_URL" not in json.dumps(manifest)
         evidence = submitted.runtime_root_resolution
         assert evidence is not None
@@ -521,11 +583,13 @@ def test_retry_db_free_runtime_rejects_db_backed_selector_and_falls_back_to_envi
         manifest = gateway.submissions[0].manifest
         assert retry.status == "submitted"
         assert manifest["scheduler_registry_backend"] == "file"
-        assert manifest["scheduler_registry_manifest"] == "/env/nhms/state/registry.json"
+        assert manifest["scheduler_registry_manifest"] == "/env/nhms/object-store/scheduler/registry/manifest-last.json"
         assert manifest["scheduler_canonical_readiness_backend"] == "file"
-        assert manifest["scheduler_canonical_readiness_index"] == "/env/nhms/state/canonical-readiness.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
         assert manifest["scheduler_state_index_backend"] == "file"
-        assert manifest["scheduler_state_index"] == "/env/nhms/state/scheduler-state.json"
+        assert manifest["scheduler_state_index"] == "/env/nhms/object-store/scheduler/state-index/index-last.json"
         assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
         assert "DATABASE_URL" not in json.dumps(manifest)
         evidence = _events(store)[-1].details["runtime_root_resolution"]
@@ -541,6 +605,62 @@ def test_retry_db_free_runtime_rejects_db_backed_selector_and_falls_back_to_envi
         assert any(
             item["field"] == "scheduler_canonical_readiness_backend"
             and item["reason"] == "db_free_backend_not_file"
+            for item in rejected
+        )
+
+
+def test_retry_db_free_runtime_rejects_file_selectors_outside_allowed_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    _set_db_free_retry_env(monkeypatch)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with _store() as store:
+        failed = _create_job(
+            store,
+            job_id="job_fcst_gfs_2026062912_model_a_forecast",
+            run_id="fcst_gfs_2026062912_model_a",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="gfs_2026062912",
+            job_type="run_shud_forecast_array",
+            stage="forecast",
+        )
+        bad_contract = {
+            **_db_free_retry_contract(),
+            "scheduler_registry_manifest": "/tmp/evil-registry.json",
+            "scheduler_canonical_readiness_index": "/tmp/evil-readiness.json",
+            "scheduler_state_index": "/tmp/evil-state.json",
+        }
+        _insert_submission_event(store, failed, bad_contract)
+        gateway = _RecordingGateway(job_id="slurm_retry_env_contract")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry(failed.run_id, gateway=gateway, trusted_internal=True)
+
+        manifest = gateway.submissions[0].manifest
+        assert retry.status == "submitted"
+        assert manifest["scheduler_registry_manifest"] == "/env/nhms/object-store/scheduler/registry/manifest-last.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
+        assert manifest["scheduler_state_index"] == "/env/nhms/object-store/scheduler/state-index/index-last.json"
+        assert "/tmp/evil" not in json.dumps(manifest)
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        rejected = evidence["rejected"]
+        assert any(
+            item["field"] == "scheduler_registry_manifest"
+            and item["reason"] == "db_free_selector_path_outside_allowed_roots"
+            for item in rejected
+        )
+        assert any(
+            item["field"] == "scheduler_canonical_readiness_index"
+            and item["reason"] == "db_free_selector_path_outside_allowed_roots"
+            for item in rejected
+        )
+        assert any(
+            item["field"] == "scheduler_state_index"
+            and item["reason"] == "db_free_selector_path_outside_allowed_roots"
             for item in rejected
         )
 
@@ -587,11 +707,13 @@ def test_manual_forecast_retry_preserves_db_free_runtime_contract(
         assert retry.slurm_job_id == "slurm_manual_retry"
         assert manifest["scheduler_db_free_required"] == "true"
         assert manifest["scheduler_registry_backend"] == "file"
-        assert manifest["scheduler_registry_manifest"] == "/srv/nhms/state/registry.json"
+        assert manifest["scheduler_registry_manifest"] == "/srv/nhms/object-store/scheduler/registry/manifest-last.json"
         assert manifest["scheduler_canonical_readiness_backend"] == "file"
-        assert manifest["scheduler_canonical_readiness_index"] == "/srv/nhms/state/canonical-readiness.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
         assert manifest["scheduler_state_index_backend"] == "file"
-        assert manifest["scheduler_state_index"] == "/srv/nhms/state/scheduler-state.json"
+        assert manifest["scheduler_state_index"] == "/srv/nhms/object-store/scheduler/state-index/index-last.json"
         assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
         assert manifest["previous_job_id"] == failed.job_id
         assert manifest["pipeline_job_id"] == retry.job_id
@@ -1879,11 +2001,11 @@ def _db_free_retry_contract() -> dict[str, Any]:
         "scheduler_db_free_required": "true",
         "scheduler_allowed_roots": "/srv/nhms/workspace:/srv/nhms/object-store",
         "scheduler_registry_backend": "file",
-        "scheduler_registry_manifest": "/srv/nhms/state/registry.json",
+        "scheduler_registry_manifest": "/srv/nhms/object-store/scheduler/registry/manifest-last.json",
         "scheduler_canonical_readiness_backend": "file",
-        "scheduler_canonical_readiness_index": "/srv/nhms/state/canonical-readiness.json",
+        "scheduler_canonical_readiness_index": "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json",
         "scheduler_state_index_backend": "file",
-        "scheduler_state_index": "/srv/nhms/state/scheduler-state.json",
+        "scheduler_state_index": "/srv/nhms/object-store/scheduler/state-index/index-last.json",
     }
 
 
@@ -1894,11 +2016,17 @@ def _set_db_free_retry_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "/env/nhms/workspace:/env/nhms/object-store")
     monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_BACKEND", "file")
-    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_MANIFEST", "/env/nhms/state/registry.json")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        "/env/nhms/object-store/scheduler/registry/manifest-last.json",
+    )
     monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "file")
-    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", "/env/nhms/state/canonical-readiness.json")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json",
+    )
     monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
-    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", "/env/nhms/state/scheduler-state.json")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", "/env/nhms/object-store/scheduler/state-index/index-last.json")
 
 
 def _clear_runtime_root_env(monkeypatch: pytest.MonkeyPatch) -> None:

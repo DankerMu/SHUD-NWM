@@ -370,7 +370,7 @@ def _terminal_evidence_matches_candidate(
     candidate: SchedulerCandidateLike,
     evidence: Mapping[str, Any],
 ) -> bool:
-    identity_seen = False
+    matched_identity_fields: set[str] = set()
     checks = (
         (
             "source_id",
@@ -395,11 +395,16 @@ def _terminal_evidence_matches_candidate(
         value = _first_terminal_identity_value(evidence, aliases)
         if value in (None, ""):
             continue
-        identity_seen = True
         actual_values = _terminal_identity_values(field_name, str(value))
         if actual_values.isdisjoint(expected_values):
             return False
-    return identity_seen
+        matched_identity_fields.add(field_name)
+    return (
+        "source_id" in matched_identity_fields
+        and bool({"cycle_id", "cycle_time"} & matched_identity_fields)
+        and "model_id" in matched_identity_fields
+        and bool({"run_id", "candidate_id"} & matched_identity_fields)
+    )
 
 
 def _first_terminal_identity_value(

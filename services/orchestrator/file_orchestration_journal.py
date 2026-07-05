@@ -357,7 +357,7 @@ class FileOrchestrationJournalRepository:
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
         self._cycle_rows_cache: dict[
-            tuple[str, str, str | None, str | None],
+            tuple[str, str, str | None, tuple[str, ...]],
             tuple[tuple[Any, ...] | None, _CycleRows],
         ] = {}
         self._direct_jobs_cycle_cache: dict[
@@ -1331,12 +1331,12 @@ class FileOrchestrationJournalRepository:
     ) -> _CycleRows:
         rows = _CycleRows()
         source_id = _normalize_file_source_id(source_id, field="source_id")
-        source_segment = _cycle_read_source_segment(
+        source_segments = _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=source_segment_override,
         )
         cycle_segment = format_cycle_time(cycle_time)
-        cache_key = (source_id, cycle_segment, model_id, source_segment_override)
+        cache_key = (source_id, cycle_segment, model_id, source_segments)
         # Inside a locked write window the cycle flock excludes external
         # writers and the append hook keeps the cache coherent, so hits are
         # trusted as-is. Outside a window a hit must prove its source files
@@ -1346,7 +1346,7 @@ class FileOrchestrationJournalRepository:
         fingerprint = (
             None
             if in_write_window
-            else self._cycle_rows_source_fingerprint(source_segment=source_segment, cycle_segment=cycle_segment)
+            else self._cycle_rows_source_fingerprint(source_segments=source_segments, cycle_segment=cycle_segment)
         )
         cached = self._cycle_rows_cache.get(cache_key)
         if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
@@ -1359,34 +1359,35 @@ class FileOrchestrationJournalRepository:
         # model's rows. Only pipeline jobs (keyed by job_id, collapse-free)
         # are shared with the base rows so the pipeline-jobs directory is
         # scanned once per cycle instead of once per model.
-        latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
-        for path in latest_paths:
-            payload = self._read_optional_json(path)
-            if payload is not None:
-                self._apply_latest_view(
+        for source_segment in source_segments:
+            latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
+            for path in latest_paths:
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    self._apply_latest_view(
+                        rows,
+                        payload,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        expected_model_id=_safe_segment(path.stem),
+                    )
+            for record in self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"):
+                self._apply_journal_record(
                     rows,
-                    payload,
+                    record,
                     source_id=source_id,
                     cycle_time=cycle_time,
-                    expected_model_id=_safe_segment(path.stem),
+                    expected_model_id=model_id,
                 )
-        for record in self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"):
-            self._apply_journal_record(
-                rows,
-                record,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                expected_model_id=model_id,
-            )
-        for record in self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"):
-            self._apply_journal_record(
-                rows,
-                record,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                expected_record_type="pipeline_event",
-                expected_model_id=model_id,
-            )
+            for record in self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"):
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_record_type="pipeline_event",
+                    expected_model_id=model_id,
+                )
         for job in self._direct_pipeline_job_records_for_cycle_cached(
             source_id=source_id,
             cycle_time=cycle_time,
@@ -1434,7 +1435,7 @@ class FileOrchestrationJournalRepository:
     def _cycle_rows_source_fingerprint(
         self,
         *,
-        source_segment: str,
+        source_segments: tuple[str, ...],
         cycle_segment: str,
     ) -> tuple[Any, ...]:
         """Stat-level identity of every file that feeds `_cycle_rows`.
@@ -1445,30 +1446,49 @@ class FileOrchestrationJournalRepository:
         via rename — so a matching fingerprint proves a cached entry still
         reflects the on-disk state.
         """
-        latest_entries: list[tuple[str, tuple[int, int, int] | None]] = []
-        try:
-            with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
-                for entry in it:
-                    if entry.name.endswith(".json"):
-                        try:
-                            entry_stat = entry.stat(follow_symlinks=False)
-                            latest_entries.append(
-                                (entry.name, (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino))
-                            )
-                        except OSError:
-                            latest_entries.append((entry.name, None))
-        except OSError:
-            pass
+        latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
+        journal_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        event_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        for source_segment in source_segments:
+            try:
+                with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
+                    for entry in it:
+                        if entry.name.endswith(".json"):
+                            try:
+                                entry_stat = entry.stat(follow_symlinks=False)
+                                latest_entries.append(
+                                    (
+                                        source_segment,
+                                        entry.name,
+                                        (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+                                    )
+                                )
+                            except OSError:
+                                latest_entries.append((source_segment, entry.name, None))
+            except OSError:
+                pass
+            journal_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                )
+            )
+            event_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                )
+            )
         return (
-            _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
-            _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+            tuple(journal_signatures),
+            tuple(event_signatures),
             tuple(sorted(latest_entries)),
             _stat_signature(self.root / "pipeline-jobs"),
         )
 
     def _cache_cycle_rows(
         self,
-        cache_key: tuple[str, str, str | None, str | None],
+        cache_key: tuple[str, str, str | None, tuple[str, ...]],
         rows: _CycleRows,
         *,
         fingerprint: tuple[Any, ...] | None,
@@ -1858,7 +1878,9 @@ class FileOrchestrationJournalRepository:
 
         jobs: dict[str, dict[str, Any]] = {}
         budget = _RecordBudget(max(self.max_records, 1), "reconcile_pipeline_job_records")
-        for job in self._iter_recent_direct_pipeline_job_records(_file_reconcile_scan_limit()):
+        for job in self._iter_reconcile_direct_pipeline_job_records():
+            if not _job_needs_restart_reconcile(job):
+                continue
             budget.consume()
             _upsert_by_key(jobs, job, key="job_id")
         for path in self._iter_recent_reconcile_journal_paths(_file_reconcile_scan_limit()):
@@ -1875,8 +1897,31 @@ class FileOrchestrationJournalRepository:
             except FileOrchestrationJournalError:
                 continue
             for job in rows.pipeline_jobs.values():
+                if not _job_needs_restart_reconcile(job):
+                    continue
                 _upsert_by_key(jobs, job, key="job_id")
         yield from jobs.values()
+
+    def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+        try:
+            paths = sorted(
+                _iter_regular_json_files(
+                    self.root / "pipeline-jobs",
+                    root=self.root,
+                    max_files=self.max_files,
+                    max_depth=self.max_depth,
+                )
+            )
+        except FileOrchestrationJournalError:
+            return
+        for path in paths:
+            try:
+                expected_job_id = _safe_segment(path.stem)
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+            except FileOrchestrationJournalError:
+                continue
 
     def _iter_recent_direct_pipeline_job_records(self, limit: int) -> Iterable[dict[str, Any]]:
         for path in self._recent_files(self.root / "pipeline-jobs", suffix=".json", limit=limit):
@@ -3726,6 +3771,19 @@ def _file_journal_real_slurm_job_id(value: Any) -> bool:
     return bool(text and text.lower() != "local")
 
 
+def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or "")
+    if (
+        status == "reserved"
+        and job.get("slurm_job_id") in (None, "")
+        and job.get("idempotency_key") not in (None, "")
+    ):
+        return True
+    return status in {"pending", "queued", "submitted", "running"} and _file_journal_real_slurm_job_id(
+        job.get("slurm_job_id")
+    )
+
+
 def _file_retry_job_int(job: Any, field: str) -> int:
     value = _file_retry_job_value(job, field)
     try:
@@ -4680,6 +4738,21 @@ def _cycle_read_source_segment(*, source_id: str, source_segment_override: str |
             evidence={"expected": source_id, "actual": segment_source_id[:80]},
         )
     return source_segment
+
+
+def _cycle_read_source_segments(*, source_id: str, source_segment_override: str | None) -> tuple[str, ...]:
+    primary = _cycle_read_source_segment(
+        source_id=source_id,
+        source_segment_override=source_segment_override,
+    )
+    if source_segment_override is not None:
+        return (primary,)
+    segments = [primary]
+    for alias in (source_id.lower(), source_id.upper()):
+        segment = _safe_segment(alias)
+        if segment not in segments:
+            segments.append(segment)
+    return tuple(segments)
 
 
 def _required_source_id(row: Mapping[str, Any], field: str) -> str:

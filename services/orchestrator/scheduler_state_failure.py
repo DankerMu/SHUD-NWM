@@ -486,16 +486,19 @@ def _local_artifact_allowed_roots(candidate: SchedulerCandidateLike) -> tuple[Pa
     values: list[str] = []
     resource_profile = getattr(candidate, "resource_profile", {}) or {}
     if isinstance(resource_profile, Mapping):
-        for key in ("object_store_root", "workspace_root", "workspace_dir", "published_artifact_root"):
+        for key in (
+            "object_store_root",
+            "object_store_copyback_root",
+            "copyback_root",
+            "published_artifact_root",
+        ):
             value = resource_profile.get(key)
             if value not in (None, ""):
                 values.append(str(value))
-    for env_name in ("OBJECT_STORE_ROOT", "WORKSPACE_ROOT", "NHMS_PUBLISHED_ARTIFACT_ROOT"):
+    for env_name in ("OBJECT_STORE_ROOT", "NHMS_OBJECT_STORE_COPYBACK_ROOT", "NHMS_PUBLISHED_ARTIFACT_ROOT"):
         value = os.getenv(env_name)
         if value:
             values.append(value)
-    allowed = os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "")
-    values.extend(value for value in allowed.split(os.pathsep) if value.strip())
     roots: list[Path] = []
     seen: set[str] = set()
     for value in values:
