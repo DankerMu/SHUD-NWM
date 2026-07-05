@@ -5,6 +5,7 @@ Description=NHMS node-22 scheduler evidence retention
 Type=oneshot
 WorkingDirectory=/scratch/frd_muziyao/NWM
 EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env uv run python scripts/node22_scheduler_evidence_retention.py
 StandardOutput=journal
 StandardError=journal
