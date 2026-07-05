@@ -3260,11 +3260,77 @@ def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(
     } == {("gfs", "gfs"), ("IFS", "ifs")}
     assert Path("latest/ifs/2026062800/model_a.json") in read_paths
     assert Path("latest/IFS/2026062800/model_a.json") not in read_paths
-    assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "job_ifs_forecast"]
+    assert {(row["job_id"], row["source_id"]) for row in rows} == {
+        ("job_gfs_forecast", "gfs"),
+        ("job_ifs_forecast", "IFS"),
+    }
     assert {row["cycle_id"] for row in rows} == {
         cycle_id_for("gfs", cycle_time),
         cycle_id_for("ifs", cycle_time),
     }
+
+
+def test_file_orchestration_journal_list_stage_statuses_all_sources_reads_mixed_alias_history(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    latest_job = _active_job(cycle_time)
+    latest_job.update(
+        {
+            "job_id": "job_ifs_latest_download",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:download_source_cycle",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "IFS",
+            "stage": "download_source_cycle",
+        }
+    )
+    history_job = _active_job(cycle_time)
+    history_job.update(
+        {
+            "job_id": "job_ifs_history_forecast",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:forecast",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "ifs",
+            "stage": "forecast",
+            "slurm_job_id": "3002",
+            "submitted_at": "2026-06-28T00:02:00Z",
+        }
+    )
+    latest = _latest_view(source_id="IFS", cycle_time=cycle_time, jobs=[latest_job])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/IFS/2026062800/model_a.json", latest)
+    _write_jsonl(
+        journal_root / "journal/ifs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="ifs",
+                cycle_time=cycle_time,
+                payload=history_job,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert [
+        (source.source_id, source.source_segments)
+        for source in repository._cycle_source_discoveries(cycle_time=cycle_time)
+    ] == [("IFS", ("IFS", "ifs"))]
+
+    rows = repository.list_stage_statuses(
+        source_id=None,
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    rows_by_job_id = {row["job_id"]: row for row in rows}
+    assert set(rows_by_job_id) == {"job_ifs_latest_download", "job_ifs_history_forecast"}
+    assert {row["source_id"] for row in rows_by_job_id.values()} == {"IFS"}
+    assert {row["cycle_id"] for row in rows_by_job_id.values()} == {cycle_id_for("IFS", cycle_time)}
 
 
 def test_file_orchestration_journal_list_stage_statuses_preserves_db_stage_order(tmp_path: Path) -> None:

@@ -319,7 +319,11 @@ def _filter_cycle_rows_for_model(
 @dataclass(frozen=True)
 class _CycleSourceDiscovery:
     source_id: str
-    source_segment: str
+    source_segments: tuple[str, ...]
+
+    @property
+    def source_segment(self) -> str:
+        return self.source_segments[0]
 
 
 @dataclass
@@ -1223,7 +1227,7 @@ class FileOrchestrationJournalRepository:
                         source_id=source.source_id,
                         cycle_time=cycle_time,
                         model_id=model_id,
-                        source_segment_override=source.source_segment,
+                        source_segment_overrides=source.source_segments,
                     )
                 )
             statuses.sort(key=_db_compatible_stage_status_order_key)
@@ -1243,6 +1247,7 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
         source_segment_override: str | None = None,
+        source_segment_overrides: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         try:
@@ -1251,6 +1256,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=model_id,
                 source_segment_override=source_segment_override,
+                source_segment_overrides=source_segment_overrides,
             )
         except FileOrchestrationJournalError as error:
             return [_blocked_stage_status(error, source_id=source_id, cycle_time=cycle_time, model_id=model_id)]
@@ -1265,7 +1271,7 @@ class FileOrchestrationJournalRepository:
                     "job_type": job.get("job_type"),
                     "slurm_job_id": job.get("slurm_job_id"),
                     "model_id": job.get("model_id"),
-                    "source_id": job.get("source_id") or source_id,
+                    "source_id": source_id,
                     "submitted_at": job.get("submitted_at"),
                     "started_at": job.get("started_at"),
                     "finished_at": job.get("finished_at"),
@@ -1296,7 +1302,7 @@ class FileOrchestrationJournalRepository:
             parts = path.relative_to(self.root).parts
             if len(parts) == 4 and parts[0] == "latest" and parts[2] == cycle_segment:
                 source = _cycle_source_discovery_from_segment(parts[1])
-                sources.setdefault(source.source_id, source)
+                _merge_cycle_source_discovery(sources, source)
         for surface in ("journal", "pipeline-events"):
             for path in sorted(
                 _iter_jsonl_files(
@@ -1309,7 +1315,7 @@ class FileOrchestrationJournalRepository:
                 parts = path.relative_to(self.root).parts
                 if len(parts) == 3 and parts[0] == surface and Path(parts[2]).stem == cycle_segment:
                     source = _cycle_source_discovery_from_segment(parts[1])
-                    sources.setdefault(source.source_id, source)
+                    _merge_cycle_source_discovery(sources, source)
         file_source_ids = set(sources)
         for job in self._iter_direct_pipeline_job_records():
             if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
@@ -1317,9 +1323,9 @@ class FileOrchestrationJournalRepository:
                 if source_id not in file_source_ids:
                     sources.setdefault(
                         source_id,
-                        _CycleSourceDiscovery(source_id=source_id, source_segment=_safe_segment(source_id)),
+                        _CycleSourceDiscovery(source_id=source_id, source_segments=(_safe_segment(source_id),)),
                     )
-        return sorted(sources.values(), key=lambda source: (source.source_id, source.source_segment))
+        return sorted(sources.values(), key=lambda source: (source.source_id, source.source_segments))
 
     def _cycle_rows(
         self,
@@ -1328,12 +1334,14 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
         source_segment_override: str | None = None,
+        source_segment_overrides: tuple[str, ...] | None = None,
     ) -> _CycleRows:
         rows = _CycleRows()
         source_id = _normalize_file_source_id(source_id, field="source_id")
         source_segments = _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=source_segment_override,
+            source_segment_overrides=source_segment_overrides,
         )
         cycle_segment = format_cycle_time(cycle_time)
         cache_key = (source_id, cycle_segment, model_id, source_segments)
@@ -4750,7 +4758,25 @@ def _cycle_source_discovery_from_segment(source_segment: str) -> _CycleSourceDis
     source_segment = _safe_segment(source_segment)
     return _CycleSourceDiscovery(
         source_id=_normalize_file_source_id(source_segment, field="source_id"),
-        source_segment=source_segment,
+        source_segments=(source_segment,),
+    )
+
+
+def _merge_cycle_source_discovery(
+    sources: dict[str, _CycleSourceDiscovery],
+    source: _CycleSourceDiscovery,
+) -> None:
+    existing = sources.get(source.source_id)
+    if existing is None:
+        sources[source.source_id] = source
+        return
+    source_segments = list(existing.source_segments)
+    for source_segment in source.source_segments:
+        if source_segment not in source_segments:
+            source_segments.append(source_segment)
+    sources[source.source_id] = _CycleSourceDiscovery(
+        source_id=existing.source_id,
+        source_segments=tuple(source_segments),
     )
 
 
@@ -4768,7 +4794,24 @@ def _cycle_read_source_segment(*, source_id: str, source_segment_override: str |
     return source_segment
 
 
-def _cycle_read_source_segments(*, source_id: str, source_segment_override: str | None) -> tuple[str, ...]:
+def _cycle_read_source_segments(
+    *,
+    source_id: str,
+    source_segment_override: str | None,
+    source_segment_overrides: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    if source_segment_overrides is not None:
+        segments: list[str] = []
+        for source_segment_override_item in source_segment_overrides:
+            segment = _cycle_read_source_segment(
+                source_id=source_id,
+                source_segment_override=source_segment_override_item,
+            )
+            if segment not in segments:
+                segments.append(segment)
+        if not segments:
+            raise FileOrchestrationJournalError("file_journal_missing_identity", field="source_id")
+        return tuple(segments)
     primary = _cycle_read_source_segment(
         source_id=source_id,
         source_segment_override=source_segment_override,
