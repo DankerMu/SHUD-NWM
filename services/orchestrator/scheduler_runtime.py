@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -11,7 +12,10 @@ from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence_module
 from services.orchestrator.retention import RetentionConfig, run_retention
+from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
+
+_VALID_TIMING_LEVELS = frozenset({"pass", "stage", "candidate"})
 
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = _scheduler.RECONCILE_DB_CONNECT_TIMEOUT_SECONDS
 RECONCILE_DB_STATEMENT_TIMEOUT_MS = _scheduler.RECONCILE_DB_STATEMENT_TIMEOUT_MS
@@ -381,134 +385,144 @@ def _db_free_safe_lock_code(value: Any) -> str:
     return "[lock-payload]"
 
 
+def _attach_timing(
+    result: SchedulerPassResult,
+    collector: SchedulerPassTiming,
+    status: str,
+) -> SchedulerPassResult:
+    """Attach the finalised ``timing:`` block to a ``SchedulerPassResult``.
+
+    ``collector.finalize_evidence`` snapshots the pass-level union-of-intervals
+    plus per-stage / per-candidate records at call time; wrapping the block
+    under an explicit ``timing`` key keeps the evidence schema additive per
+    spec.md "Timing evidence is additive to existing scheduler evidence
+    schema" and mirrors the finalisation contract SUB-1 documented in its
+    Phase 4.5 C7 followup.
+    """
+
+    result.evidence["timing"] = collector.finalize_evidence(status)
+    return result
+
+
+def _restart_reconcile_with_timing(
+    self,
+    collector: SchedulerPassTiming,
+) -> dict[str, Any] | None:
+    """Invoke ``_run_restart_reconcile`` inside the ``restart_reconcile`` span.
+
+    The whole call — reserved-unbound reconcile + inflight reconcile — is
+    treated as one Slurm-wait span per design D2: ``_run_restart_reconcile``
+    dispatches ``sacct`` subprocess queries via the injected queriers, so the
+    wall-clock is dominated by subprocess-wait; python-side work is bounded
+    to dict assembly and is charged to ``slurm_wait_ms`` for simplicity.
+    ``python_time_ms`` is left at ``0`` per the SUB-1 followup note item 4
+    (span covers the ``sacct`` subprocess only).
+    """
+
+    span_start_monotonic_ns = time.monotonic_ns()
+    span_start_ms_from_pass_entry = collector._ms_from_pass_entry(span_start_monotonic_ns)
+    try:
+        return self._run_restart_reconcile()
+    finally:
+        span_end_monotonic_ns = time.monotonic_ns()
+        span_end_ms_from_pass_entry = collector._ms_from_pass_entry(span_end_monotonic_ns)
+        slurm_wait_ms = max(0.0, (span_end_monotonic_ns - span_start_monotonic_ns) / 1_000_000.0)
+        collector.record_restart_reconcile(
+            python_time_ms=0.0,
+            slurm_wait_ms=slurm_wait_ms,
+            span_start_ms_from_pass_entry=span_start_ms_from_pass_entry,
+            span_end_ms_from_pass_entry=span_end_ms_from_pass_entry,
+        )
+
+
 def run_once(self) -> SchedulerPassResult:
+    # Construct the SchedulerPassTiming collector as the FIRST statement of
+    # run_once — before root_preflight, before db_free_runtime_preflight,
+    # before NHMS_SCHEDULER_TIMING_LEVEL validation — so ``timing.pass`` is
+    # always populated even for the earliest-exit branches (spec.md
+    # "Pass-layer timing is always emitted"). ``pass_id`` is minted inline
+    # here so the collector carries the correct id from t=0; the same id
+    # feeds every downstream SchedulerPassResult return path.
     self._source_readiness_context_cache.clear()
     started_at = _now(self.config)
     pass_id = f"scheduler_{format_cycle_time(started_at)}_{_scheduler.uuid4().hex[:12]}"
-    db_free_required = bool(getattr(self.config, "db_free_required", False))
-    root_preflight = (
-        _scheduler_runtime_root_preflight(self.config)
-        if db_free_required
-        else _scheduler_lock_evidence_root_preflight(self.config)
-    )
-    if root_preflight["status"] == "blocked":
-        lock_payload = {
-            "acquired": False,
-            "contention": False,
-            "lock_path": str(self.config.lock_path),
-            "reason": "scheduler_root_preflight_blocked",
-        }
-        if db_free_required:
-            lock_payload["lock_type"] = "file"
-        evidence = self._base_evidence(pass_id, started_at)
-        evidence.update(
-            {
-                "status": "preflight_blocked",
-                "finished_at": _format_utc(_now(self.config)),
-                "lock": _db_free_lock_evidence(self.config, lock_payload),
-                "root_preflight": root_preflight,
-                "counts": _empty_counts(),
-                "candidates": [],
-                "blocked_candidates": [],
-                "skipped_candidates": [],
-                "duplicate_exclusions": list(self.config.source_exclusions),
-                "model_discovery": _empty_model_discovery(),
-                "source_cycles": [],
-                "model_run_evidence": [],
-                "slurm_cancellation_evidence": [],
-                "no_mutation_proof": _no_mutation_proof(),
-                "execution_boundary": "scheduler_root_preflight_blocked",
-            }
-        )
-        artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
-        return SchedulerPassResult(
-            pass_id=pass_id,
-            status="preflight_blocked",
-            evidence=evidence,
-            artifact_path=artifact_path,
-        )
-    db_free_preflight = self.config.db_free_runtime_preflight()
-    if db_free_preflight["status"] == "blocked":
-        evidence = self._base_evidence(pass_id, started_at)
-        evidence.update(
-            {
-                "status": "preflight_blocked",
-                "finished_at": _format_utc(_now(self.config)),
-                "lock": _db_free_lock_evidence(
-                    self.config,
-                    {
-                        "acquired": False,
-                        "contention": False,
-                        "lock_path": str(self.config.lock_path),
-                        "lock_type": "file" if self.config.db_free_required else None,
-                        "reason": "db_free_runtime_preflight_blocked",
-                    },
-                ),
-                "root_preflight": root_preflight,
-                "db_free_runtime": db_free_preflight,
-                "counts": _empty_counts(),
-                "candidates": [],
-                "blocked_candidates": [],
-                "skipped_candidates": [],
-                "duplicate_exclusions": list(self.config.source_exclusions),
-                "model_discovery": _empty_model_discovery(),
-                "source_cycles": [],
-                "model_run_evidence": [],
-                "slurm_cancellation_evidence": [],
-                "no_mutation_proof": _no_mutation_proof(),
-                "execution_boundary": "db_free_runtime_preflight_blocked",
-            }
-        )
-        artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
-        return SchedulerPassResult(
-            pass_id=pass_id,
-            status="preflight_blocked",
-            evidence=evidence,
-            artifact_path=artifact_path,
-        )
-    lock = self._build_scheduler_lease()
-    lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
-    lock_evidence = _db_free_lock_evidence(self.config, lock_result)
-    if not lock_result["acquired"]:
-        evidence = self._base_evidence(pass_id, started_at)
-        evidence.update(
-            {
-                "status": "lock_contended",
-                "finished_at": _format_utc(_now(self.config)),
-                "lock": lock_evidence,
-                "counts": _empty_counts(),
-                "candidates": [],
-                "blocked_candidates": [],
-                "model_discovery": _empty_model_discovery(),
-                "source_cycles": [],
-                "no_mutation_proof": _no_mutation_proof(),
-                "execution_boundary": "scheduler_lock_contended",
-            }
-        )
-        if self.config.db_free_required:
-            evidence["db_free_runtime"] = db_free_preflight
-        artifact_path = self._write_evidence(pass_id, evidence)
-        status = _evidence_status(evidence, "lock_contended")
-        return SchedulerPassResult(
-            pass_id=pass_id,
-            status=status,
-            evidence=evidence,
-            artifact_path=artifact_path,
-        )
-
-    heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
-    heartbeat.start()
-    try:
-        if not db_free_required:
-            root_preflight = _scheduler_runtime_root_preflight(self.config)
-        if not db_free_required and root_preflight["status"] == "blocked":
+    # Normalise per SUB-1 followup note item 2: strip + lower + fall back to
+    # ``"stage"`` for empty strings, matching scheduler_config.py:148 so the
+    # collector is never handed a hybrid value like ``""``.
+    timing_level_raw = getattr(self.config, "timing_level", "stage")
+    timing_level_normalised = str(timing_level_raw or "").strip().lower() or "stage"
+    collector = SchedulerPassTiming(pass_id=pass_id, level=timing_level_normalised)
+    self._scheduler_pass_timing = collector
+    # Enter pass_span immediately so pass_started_at / pass_finished_at are
+    # pinned on every exit path — including the fail-closed
+    # ``NHMS_SCHEDULER_TIMING_LEVEL`` validator below (Phase 7 P2 #2 + Phase
+    # 4.5 C4). Every ``return`` inside this ``with`` block first attaches
+    # the finalised ``timing:`` block via ``_attach_timing``.
+    with collector.pass_span():
+        # NHMS_SCHEDULER_TIMING_LEVEL validation is fail-closed at pass entry
+        # (D4). A recognised value passes through; an unrecognised value
+        # short-circuits to preflight_blocked with populated ``timing.pass``.
+        if timing_level_normalised not in _VALID_TIMING_LEVELS:
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
                 {
                     "status": "preflight_blocked",
                     "finished_at": _format_utc(finished_at),
-                    "lock": lock_evidence,
+                    "reason": "scheduler_timing_level_unrecognised",
+                    "scheduler_timing_level": timing_level_raw,
+                    "scheduler_timing_level_error": (
+                        "NHMS_SCHEDULER_TIMING_LEVEL must be one of "
+                        "pass|stage|candidate (case-insensitive); got "
+                        f"{timing_level_raw!r}."
+                    ),
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "skipped_candidates": [],
+                    "duplicate_exclusions": list(self.config.source_exclusions),
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "model_run_evidence": [],
+                    "slurm_cancellation_evidence": [],
+                    "no_mutation_proof": _no_mutation_proof(),
+                    "execution_boundary": "scheduler_timing_level_unrecognised",
+                }
+            )
+            artifact_path = self._write_prelock_blocked_evidence(
+                pass_id, evidence, {"status": "not_required"}
+            )
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status="preflight_blocked",
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                ),
+                collector,
+                "preflight_blocked",
+            )
+        db_free_required = bool(getattr(self.config, "db_free_required", False))
+        root_preflight = (
+            _scheduler_runtime_root_preflight(self.config)
+            if db_free_required
+            else _scheduler_lock_evidence_root_preflight(self.config)
+        )
+        if root_preflight["status"] == "blocked":
+            lock_payload = {
+                "acquired": False,
+                "contention": False,
+                "lock_path": str(self.config.lock_path),
+                "reason": "scheduler_root_preflight_blocked",
+            }
+            if db_free_required:
+                lock_payload["lock_type"] = "file"
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "preflight_blocked",
+                    "finished_at": _format_utc(_now(self.config)),
+                    "lock": _db_free_lock_evidence(self.config, lock_payload),
                     "root_preflight": root_preflight,
                     "counts": _empty_counts(),
                     "candidates": [],
@@ -523,35 +537,34 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "scheduler_root_preflight_blocked",
                 }
             )
-            artifact_path = self._write_evidence(pass_id, evidence)
-            status = _evidence_status(evidence, "preflight_blocked")
-            return SchedulerPassResult(
-                pass_id=pass_id,
-                status=status,
-                evidence=evidence,
-                artifact_path=artifact_path,
+            artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status="preflight_blocked",
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                ),
+                collector,
+                "preflight_blocked",
             )
-        # M24 §3A: before planning/submitting this pass, recover any jobs
-        # stuck in the submit-crash window (reserved-unbound) and refresh
-        # in-flight statuses from accounting. Comment-reconcile finds back a
-        # crashed cohort's slurm_job_id so we never re-submit an already
-        # in-flight cohort.
-        if self.config.db_free_required:
-            refresh_file_providers = getattr(self, "_refresh_db_free_file_providers", None)
-            if callable(refresh_file_providers):
-                refresh_file_providers()
-        restart_reconcile_evidence = self._run_restart_reconcile()
-        restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
-        models, model_evidence = self._discover_models()
-        registry_evidence = model_evidence.get("registry") if isinstance(model_evidence, Mapping) else None
-        if isinstance(registry_evidence, Mapping) and registry_evidence.get("status") == "blocked":
-            finished_at = _now(self.config)
+        db_free_preflight = self.config.db_free_runtime_preflight()
+        if db_free_preflight["status"] == "blocked":
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
                 {
                     "status": "preflight_blocked",
-                    "finished_at": _format_utc(finished_at),
-                    "lock": lock_evidence,
+                    "finished_at": _format_utc(_now(self.config)),
+                    "lock": _db_free_lock_evidence(
+                        self.config,
+                        {
+                            "acquired": False,
+                            "contention": False,
+                            "lock_path": str(self.config.lock_path),
+                            "lock_type": "file" if self.config.db_free_required else None,
+                            "reason": "db_free_runtime_preflight_blocked",
+                        },
+                    ),
                     "root_preflight": root_preflight,
                     "db_free_runtime": db_free_preflight,
                     "counts": _empty_counts(),
@@ -559,72 +572,595 @@ def run_once(self) -> SchedulerPassResult:
                     "blocked_candidates": [],
                     "skipped_candidates": [],
                     "duplicate_exclusions": list(self.config.source_exclusions),
-                    "model_discovery": model_evidence,
+                    "model_discovery": _empty_model_discovery(),
                     "source_cycles": [],
                     "model_run_evidence": [],
                     "slurm_cancellation_evidence": [],
                     "no_mutation_proof": _no_mutation_proof(),
-                    "execution_boundary": "db_free_registry_blocked",
+                    "execution_boundary": "db_free_runtime_preflight_blocked",
                 }
             )
-            artifact_path = self._write_evidence(pass_id, evidence)
-            status = _evidence_status(evidence, "preflight_blocked")
-            return SchedulerPassResult(
-                pass_id=pass_id,
-                status=status,
-                evidence=evidence,
-                artifact_path=artifact_path,
+            artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status="preflight_blocked",
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                ),
+                collector,
+                "preflight_blocked",
             )
-        cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
-        (
-            candidates,
-            blocked_candidates,
-            skipped_candidates,
-            candidate_duplicate_exclusions,
-            slurm_status_sync_evidence,
-        ) = self._build_candidates(models=models, cycles=cycles)
-        cancellation_evidence: list[dict[str, Any]] = []
-        pending_cancel_candidates = [
-            candidate for candidate in skipped_candidates if candidate.get("reason") == "cancel_requested_active_slurm"
-        ]
-        cancel_active_slurm_requested = (
-            self.config.cancel_active_slurm and not self.config.dry_run and bool(pending_cancel_candidates)
-        )
-        execution_evidence: list[dict[str, Any]] = []
-        submitted_count = 0
-        failed_count = 0
-        partial_count = 0
-        execution_boundary = "planning_only"
-        pass_status = "planned"
-        no_mutation_proof = _no_mutation_proof()
-        execution_write_proof = _execution_write_proof()
-        slurm_preflight_evidence: dict[str, Any] | None = None
-        evidence_reservation: dict[str, Any] = {"status": "not_required"}
-        pending_status_sync_candidates = [
-            candidate
-            for candidate in skipped_candidates
-            if candidate.get("reason") == "active_slurm_status_sync_deferred"
-        ]
-        slurm_status_sync_proof = _slurm_status_sync_proof(sync_required=bool(pending_status_sync_candidates))
-        slurm_cancellation_proof = _slurm_cancellation_proof()
-        mutation_candidate_count = (
-            len(candidates) + len(pending_cancel_candidates) + len(pending_status_sync_candidates)
-        )
-        # §4.2 lease: if the heartbeat reports our lease was taken over
-        # mid-pass, short-circuit BEFORE any submission/cancellation so we
-        # never race the new holder at the DB layer. The #290 DB reservation
-        # would still prevent a real double-submit, but executing a doomed
-        # pass wastes work and muddies evidence. Fall through to finally,
-        # which stops the heartbeat and token-CAS releases the lock (a no-op
-        # if it was already reclaimed).
-        if heartbeat.lost:
+        lock = self._build_scheduler_lease()
+        lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
+        lock_evidence = _db_free_lock_evidence(self.config, lock_result)
+        if not lock_result["acquired"]:
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "lock_contended",
+                    "finished_at": _format_utc(_now(self.config)),
+                    "lock": lock_evidence,
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "no_mutation_proof": _no_mutation_proof(),
+                    "execution_boundary": "scheduler_lock_contended",
+                }
+            )
+            if self.config.db_free_required:
+                evidence["db_free_runtime"] = db_free_preflight
+            artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "lock_contended")
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                ),
+                collector,
+                status,
+            )
+
+        heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
+        heartbeat.start()
+        try:
+            if not db_free_required:
+                root_preflight = _scheduler_runtime_root_preflight(self.config)
+            if not db_free_required and root_preflight["status"] == "blocked":
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "root_preflight": root_preflight,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "scheduler_root_preflight_blocked",
+                    }
+                )
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "preflight_blocked")
+                return _attach_timing(
+                    SchedulerPassResult(
+                        pass_id=pass_id,
+                        status=status,
+                        evidence=evidence,
+                        artifact_path=artifact_path,
+                    ),
+                    collector,
+                    status,
+                )
+            # M24 §3A: before planning/submitting this pass, recover any jobs
+            # stuck in the submit-crash window (reserved-unbound) and refresh
+            # in-flight statuses from accounting. Comment-reconcile finds back a
+            # crashed cohort's slurm_job_id so we never re-submit an already
+            # in-flight cohort.
+            if self.config.db_free_required:
+                refresh_file_providers = getattr(self, "_refresh_db_free_file_providers", None)
+                if callable(refresh_file_providers):
+                    refresh_file_providers()
+            # SUB-2 D2 semantic: wrap the whole restart_reconcile call in a
+            # slurm_wait span; the internals call ``sacct`` via injected
+            # queriers so the wall-clock is dominated by subprocess-wait.
+            restart_reconcile_evidence = _restart_reconcile_with_timing(self, collector)
+            restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
+            models, model_evidence = self._discover_models()
+            registry_evidence = model_evidence.get("registry") if isinstance(model_evidence, Mapping) else None
+            if isinstance(registry_evidence, Mapping) and registry_evidence.get("status") == "blocked":
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "root_preflight": root_preflight,
+                        "db_free_runtime": db_free_preflight,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": model_evidence,
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "db_free_registry_blocked",
+                    }
+                )
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "preflight_blocked")
+                return _attach_timing(
+                    SchedulerPassResult(
+                        pass_id=pass_id,
+                        status=status,
+                        evidence=evidence,
+                        artifact_path=artifact_path,
+                    ),
+                    collector,
+                    status,
+                )
+            cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
+            (
+                candidates,
+                blocked_candidates,
+                skipped_candidates,
+                candidate_duplicate_exclusions,
+                slurm_status_sync_evidence,
+            ) = self._build_candidates(models=models, cycles=cycles)
+            cancellation_evidence: list[dict[str, Any]] = []
+            pending_cancel_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "cancel_requested_active_slurm"
+            ]
+            cancel_active_slurm_requested = (
+                self.config.cancel_active_slurm and not self.config.dry_run and bool(pending_cancel_candidates)
+            )
+            execution_evidence: list[dict[str, Any]] = []
+            submitted_count = 0
+            failed_count = 0
+            partial_count = 0
+            execution_boundary = "planning_only"
+            pass_status = "planned"
+            no_mutation_proof = _no_mutation_proof()
+            execution_write_proof = _execution_write_proof()
+            slurm_preflight_evidence: dict[str, Any] | None = None
+            evidence_reservation: dict[str, Any] = {"status": "not_required"}
+            pending_status_sync_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "active_slurm_status_sync_deferred"
+            ]
+            slurm_status_sync_proof = _slurm_status_sync_proof(sync_required=bool(pending_status_sync_candidates))
+            slurm_cancellation_proof = _slurm_cancellation_proof()
+            mutation_candidate_count = (
+                len(candidates) + len(pending_cancel_candidates) + len(pending_status_sync_candidates)
+            )
+            # §4.2 lease: if the heartbeat reports our lease was taken over
+            # mid-pass, short-circuit BEFORE any submission/cancellation so we
+            # never race the new holder at the DB layer. The #290 DB reservation
+            # would still prevent a real double-submit, but executing a doomed
+            # pass wastes work and muddies evidence. Fall through to finally,
+            # which stops the heartbeat and token-CAS releases the lock (a no-op
+            # if it was already reclaimed).
+            if heartbeat.lost:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "lease_lost",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "lease_lost",
+                    }
+                )
+                if root_preflight["status"] != "not_required":
+                    evidence["root_preflight"] = root_preflight
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "lease_lost")
+                return _attach_timing(
+                    SchedulerPassResult(
+                        pass_id=pass_id,
+                        status=status,
+                        evidence=evidence,
+                        artifact_path=artifact_path,
+                    ),
+                    collector,
+                    status,
+                )
+            if not self.config.dry_run and mutation_candidate_count:
+                if evidence_reservation["status"] == "not_required":
+                    evidence_reservation = self._reserve_pre_execution_evidence(
+                        pass_id,
+                        started_at,
+                        mutation_candidate_count,
+                    )
+                if evidence_reservation["status"] == "blocked":
+                    execution_evidence = [
+                        _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in candidates
+                    ]
+                    execution_write_proof = _execution_write_proof_from_evidence(
+                        execution_evidence,
+                        reservation=evidence_reservation,
+                    )
+                    execution_evidence.extend(
+                        _sync_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_status_sync_candidates
+                    )
+                    cancellation_evidence = [
+                        _cancel_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_cancel_candidates
+                    ]
+                    execution_boundary = "evidence_preflight_blocked"
+                    pass_status = "preflight_blocked"
+                    slurm_status_sync_proof = _slurm_status_sync_proof(
+                        sync_required=bool(pending_status_sync_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
+                    slurm_cancellation_proof = _slurm_cancellation_proof(
+                        cancellation_required=bool(pending_cancel_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
+                else:
+                    db_free_journal_write_blocked = _db_free_journal_mutation_blocked(
+                        self.config,
+                        mutation_requested=bool(pending_status_sync_candidates) or cancel_active_slurm_requested,
+                        repository=self.active_repository,
+                    )
+                    db_free_journal_reservation = None
+                    if db_free_journal_write_blocked:
+                        db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
+                            self.config,
+                            len(pending_status_sync_candidates) + len(pending_cancel_candidates),
+                        )
+                        if pending_status_sync_candidates:
+                            execution_evidence.extend(
+                                _db_free_journal_write_blocked_sync_evidence(candidate, db_free_journal_reservation)
+                                for candidate in pending_status_sync_candidates
+                            )
+                            slurm_status_sync_proof = _slurm_status_sync_proof(
+                                sync_required=True,
+                                reservation=db_free_journal_reservation,
+                                blocked=True,
+                            )
+                            execution_boundary = "db_free_journal_write_blocked"
+                            pass_status = "preflight_blocked"
+                        if cancel_active_slurm_requested:
+                            cancellation_evidence = [
+                                _db_free_journal_write_blocked_cancel_evidence(candidate, db_free_journal_reservation)
+                                for candidate in pending_cancel_candidates
+                            ]
+                            slurm_cancellation_proof = _slurm_cancellation_proof(
+                                cancellation_required=True,
+                                reservation=db_free_journal_reservation,
+                                blocked=True,
+                            )
+                            execution_boundary = "db_free_journal_write_blocked"
+                            pass_status = "preflight_blocked"
+                    if pending_status_sync_candidates and not db_free_journal_write_blocked:
+                        (
+                            candidates,
+                            blocked_candidates,
+                            skipped_candidates,
+                            candidate_duplicate_exclusions,
+                            slurm_status_sync_evidence,
+                        ) = self._build_candidates(
+                            models=models,
+                            cycles=cycles,
+                            allow_slurm_status_sync=True,
+                        )
+                        pending_cancel_candidates = [
+                            candidate
+                            for candidate in skipped_candidates
+                            if candidate.get("reason") == "cancel_requested_active_slurm"
+                        ]
+                        cancel_active_slurm_requested = (
+                            self.config.cancel_active_slurm
+                            and not self.config.dry_run
+                            and bool(pending_cancel_candidates)
+                        )
+                    if not (db_free_journal_write_blocked and pending_status_sync_candidates):
+                        slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
+                            slurm_status_sync_evidence,
+                            reservation=evidence_reservation,
+                        )
+                    if _slurm_status_sync_failed(slurm_status_sync_proof):
+                        pass_status = "slurm_status_sync_failed"
+                        execution_boundary = "slurm_status_sync"
+                    else:
+                        if cancel_active_slurm_requested and not cancellation_evidence:
+                            cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                            slurm_cancellation_proof = _slurm_cancellation_proof_from_evidence(
+                                cancellation_evidence,
+                                reservation=evidence_reservation,
+                            )
+                        if candidates:
+                            if _db_free_journal_mutation_blocked(
+                                self.config,
+                                mutation_requested=bool(candidates),
+                                repository=self.active_repository,
+                            ):
+                                db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
+                                    self.config,
+                                    len(candidates),
+                                )
+                                execution_evidence.extend(
+                                    [
+                                        _candidate_evidence_write_blocked_evidence(
+                                            candidate,
+                                            db_free_journal_reservation,
+                                        )
+                                        for candidate in candidates
+                                    ]
+                                )
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=db_free_journal_reservation,
+                                )
+                                execution_boundary = "db_free_journal_write_blocked"
+                                pass_status = "preflight_blocked"
+                                no_mutation_proof = _no_mutation_proof()
+                            else:
+                                if self.forcing_producer is not None:
+                                    (
+                                        candidates,
+                                        forcing_blocked_candidates,
+                                        forcing_evidence,
+                                    ) = self._produce_forcing_for_candidates(candidates)
+                                    blocked_candidates.extend(forcing_blocked_candidates)
+                                    execution_evidence.extend(forcing_evidence)
+                            if candidates and not _db_free_journal_mutation_blocked(
+                                self.config,
+                                mutation_requested=bool(candidates),
+                                repository=self.active_repository,
+                            ):
+                                slurm_preflight = _slurm_preflight(self.config)
+                                if slurm_preflight["status"] != "not_required":
+                                    slurm_preflight_evidence = redact_payload(slurm_preflight)
+                                if slurm_preflight["status"] == "blocked":
+                                    execution_evidence.extend(
+                                        [
+                                            _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                            for candidate in candidates
+                                        ]
+                                    )
+                                    execution_write_proof = _execution_write_proof_from_evidence(
+                                        execution_evidence,
+                                        reservation=evidence_reservation,
+                                    )
+                                    execution_boundary = "slurm_preflight_blocked"
+                                    pass_status = "preflight_blocked"
+                                elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                                    execution_evidence.extend(
+                                        [
+                                            _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                            for candidate in candidates
+                                        ]
+                                    )
+                                    execution_write_proof = _execution_write_proof_from_evidence(
+                                        execution_evidence,
+                                        reservation=evidence_reservation,
+                                    )
+                                    execution_boundary = "preflight_blocked"
+                                    pass_status = "preflight_blocked"
+                                    no_mutation_proof = _no_mutation_proof()
+                                else:
+                                    execution_evidence.extend(self._execute_candidates(candidates))
+                                    execution_write_proof = _execution_write_proof_from_evidence(
+                                        execution_evidence,
+                                        reservation=evidence_reservation,
+                                    )
+                                    submitted_count = sum(
+                                        1 for item in execution_evidence if item.get("submitted") is True
+                                    )
+                                    execution_boundary = (
+                                        "slurm_gateway_orchestration"
+                                        if self.config.slurm_execution_enabled
+                                        else "production_orchestration"
+                                    )
+                if execution_evidence:
+                    pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                if cancellation_evidence and not execution_evidence:
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                elif cancellation_evidence and pass_status == "planned":
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                if (
+                    pass_status == "planned"
+                    and execution_boundary == "planning_only"
+                    and _slurm_status_sync_mutated(slurm_status_sync_proof)
+                ):
+                    pass_status = "slurm_status_synced"
+                    execution_boundary = "slurm_status_sync"
+                if pass_status == "planned" and not candidates and blocked_candidates:
+                    pass_status = _blocked_pass_status(blocked_candidates)
+                scheduler_mutation_proof = _scheduler_mutation_proof(
+                    execution_write_proof=execution_write_proof,
+                    slurm_status_sync_proof=slurm_status_sync_proof,
+                    slurm_cancellation_proof=slurm_cancellation_proof,
+                    restart_reconcile_proof=restart_reconcile_proof,
+                )
+                no_mutation_proof = {
+                    "adapter_download_called": False,
+                    "slurm_submit_called": scheduler_mutation_proof["slurm_submit_called"],
+                    "slurm_status_sync_called": slurm_status_sync_proof.get("sync_called") is True,
+                    "slurm_cancellation_called": slurm_cancellation_proof.get("cancel_called") is True,
+                    "shud_runtime_called": False,
+                    "hydro_result_table_writes": scheduler_mutation_proof["hydro_result_table_writes"],
+                    "met_result_table_writes": scheduler_mutation_proof["met_result_table_writes"],
+                    "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
+                    "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
+                }
+                if scheduler_mutation_proof.get("restart_reconcile_writes") is not False:
+                    no_mutation_proof["restart_reconcile_writes"] = scheduler_mutation_proof["restart_reconcile_writes"]
+                failed_count = _scheduler_failed_count_from_execution(execution_evidence)
+                partial_count = _scheduler_partial_count_from_execution(execution_evidence)
+            elif restart_reconcile_proof.get("mutation_occurred") is True:
+                no_mutation_proof = {
+                    **_no_mutation_proof(),
+                    "pipeline_status_writes": True,
+                    "pipeline_event_writes": restart_reconcile_proof.get("pipeline_event_writes") is True,
+                    "restart_reconcile_writes": True,
+                }
+                if execution_boundary == "planning_only":
+                    execution_boundary = "restart_reconcile"
+                if pass_status == "planned":
+                    pass_status = "restart_reconciled"
+            elif restart_reconcile_proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+                no_mutation_proof = {
+                    **_no_mutation_proof(),
+                    "pipeline_status_writes": restart_reconcile_proof.get(
+                        "pipeline_status_writes",
+                        UNKNOWN_AFTER_ATTEMPT,
+                    ),
+                    "pipeline_event_writes": restart_reconcile_proof.get(
+                        "pipeline_event_writes",
+                        UNKNOWN_AFTER_ATTEMPT,
+                    ),
+                    "restart_reconcile_writes": UNKNOWN_AFTER_ATTEMPT,
+                }
+                if execution_boundary == "planning_only":
+                    execution_boundary = "restart_reconcile"
+                if pass_status == "planned":
+                    pass_status = "restart_reconcile_unknown"
+            finished_at = _now(self.config)
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence["operator_filters"].update(model_evidence["operator_filters"])
+            evidence["filters"] = dict(evidence["operator_filters"])
+            duplicate_exclusions = [
+                *self.config.source_exclusions,
+                *[item for item in source_cycle_evidence if item.get("status") == "excluded"],
+                *candidate_duplicate_exclusions,
+            ]
+            total_candidate_count = len(candidates) + len(blocked_candidates) + len(skipped_candidates)
+            evidence.update(
+                {
+                    "status": pass_status,
+                    "finished_at": _format_utc(finished_at),
+                    "lock": lock_evidence,
+                    "model_discovery": model_evidence,
+                    "source_cycles": source_cycle_evidence,
+                    "candidates": [candidate.to_dict() for candidate in candidates],
+                    "blocked_candidates": [candidate.to_dict() for candidate in blocked_candidates],
+                    "skipped_candidates": skipped_candidates,
+                    "duplicate_exclusions": duplicate_exclusions,
+                    "counts": {
+                        "candidate_count": total_candidate_count,
+                        "blocked_candidate_count": len(blocked_candidates),
+                        "skipped_candidate_count": len(skipped_candidates),
+                        "selected_model_count": len(models),
+                        "source_cycle_count": len(cycles),
+                        "submitted_count": submitted_count,
+                        "failed_count": failed_count,
+                        "partial_count": partial_count,
+                        "slurm_status_sync_count": _slurm_status_sync_count(slurm_status_sync_proof),
+                        "slurm_status_sync_unknown_count": _slurm_status_sync_unknown_count(
+                            slurm_status_sync_proof,
+                        ),
+                        "slurm_cancelled_count": _slurm_cancelled_count(cancellation_evidence),
+                        "slurm_cancellation_blocked_count": _slurm_cancellation_blocked_count(
+                            cancellation_evidence,
+                        ),
+                        "slurm_cancellation_unknown_count": _slurm_cancellation_unknown_count(
+                            slurm_cancellation_proof,
+                        ),
+                    },
+                    "model_run_evidence": execution_evidence,
+                    "execution_write_proof": execution_write_proof,
+                    "slurm_cancellation_evidence": cancellation_evidence,
+                    "slurm_status_sync_proof": slurm_status_sync_proof,
+                    "slurm_cancellation_proof": slurm_cancellation_proof,
+                    "no_mutation_proof": no_mutation_proof,
+                    "execution_boundary": execution_boundary,
+                }
+            )
+            if restart_reconcile_evidence is not None:
+                evidence["restart_reconcile"] = restart_reconcile_evidence
+                evidence["restart_reconcile_proof"] = restart_reconcile_proof
+            overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
+            if overlap_receipt is not None:
+                # M24 §3A Evidence Floor: archive the overlapping-submit receipt
+                # into the durable pass artifact (not just memory) so
+                # "receipt shows overlapping submits" has on-disk proof.
+                evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
+            if slurm_preflight_evidence is not None:
+                evidence["slurm_preflight"] = slurm_preflight_evidence
+            if evidence_reservation["status"] != "not_required":
+                evidence["evidence_pre_execution"] = evidence_reservation
+            if root_preflight["status"] != "not_required":
+                evidence["root_preflight"] = root_preflight
+            if self.config.backfill_enabled:
+                evidence["backfill"] = {
+                    "enabled": True,
+                    "lookback_hours": self.config.lookback_hours,
+                    "audit": [item for item in source_cycle_evidence if item.get("type") == "backfill_audit"],
+                }
+            else:
+                evidence["backfill"] = {"enabled": False}
+            retention_force_reason = None
+            if evidence_reservation.get("status") == "blocked":
+                retention_force_reason = "evidence_preflight_blocked"
+            elif execution_boundary == "db_free_journal_write_blocked":
+                retention_force_reason = "db_free_journal_write_blocked"
+            evidence["retention"] = self._run_retention(
+                started_at,
+                force_dry_run_reason=retention_force_reason,
+            )
+            try:
+                artifact_path = self._write_evidence(pass_id, evidence)
+            except (OSError, RuntimeError, ValueError, SchedulerEvidenceWriteError) as error:
+                if evidence_reservation.get("status") != "blocked":
+                    raise
+                evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)
+                artifact_path = None
+            status = _evidence_status(evidence, pass_status)
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                ),
+                collector,
+                status,
+            )
+        except SchedulerResourceLimitError as error:
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
                 {
-                    "status": "lease_lost",
+                    "status": "resource_limit_blocked",
                     "finished_at": _format_utc(finished_at),
                     "lock": lock_evidence,
+                    "limit": {"reason": error.reason, **error.details},
                     "counts": _empty_counts(),
                     "candidates": [],
                     "blocked_candidates": [],
@@ -633,406 +1169,29 @@ def run_once(self) -> SchedulerPassResult:
                     "model_discovery": _empty_model_discovery(),
                     "source_cycles": [],
                     "no_mutation_proof": _no_mutation_proof(),
-                    "execution_boundary": "lease_lost",
+                    "execution_boundary": "planning_only",
                 }
             )
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
             artifact_path = self._write_evidence(pass_id, evidence)
-            status = _evidence_status(evidence, "lease_lost")
-            return SchedulerPassResult(
-                pass_id=pass_id,
-                status=status,
-                evidence=evidence,
-                artifact_path=artifact_path,
-            )
-        if not self.config.dry_run and mutation_candidate_count:
-            if evidence_reservation["status"] == "not_required":
-                evidence_reservation = self._reserve_pre_execution_evidence(
-                    pass_id,
-                    started_at,
-                    mutation_candidate_count,
-                )
-            if evidence_reservation["status"] == "blocked":
-                execution_evidence = [
-                    _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
-                    for candidate in candidates
-                ]
-                execution_write_proof = _execution_write_proof_from_evidence(
-                    execution_evidence,
-                    reservation=evidence_reservation,
-                )
-                execution_evidence.extend(
-                    _sync_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
-                    for candidate in pending_status_sync_candidates
-                )
-                cancellation_evidence = [
-                    _cancel_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
-                    for candidate in pending_cancel_candidates
-                ]
-                execution_boundary = "evidence_preflight_blocked"
-                pass_status = "preflight_blocked"
-                slurm_status_sync_proof = _slurm_status_sync_proof(
-                    sync_required=bool(pending_status_sync_candidates),
-                    reservation=evidence_reservation,
-                    blocked=True,
-                )
-                slurm_cancellation_proof = _slurm_cancellation_proof(
-                    cancellation_required=bool(pending_cancel_candidates),
-                    reservation=evidence_reservation,
-                    blocked=True,
-                )
-            else:
-                db_free_journal_write_blocked = _db_free_journal_mutation_blocked(
-                    self.config,
-                    mutation_requested=bool(pending_status_sync_candidates) or cancel_active_slurm_requested,
-                    repository=self.active_repository,
-                )
-                db_free_journal_reservation = None
-                if db_free_journal_write_blocked:
-                    db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
-                        self.config,
-                        len(pending_status_sync_candidates) + len(pending_cancel_candidates),
-                    )
-                    if pending_status_sync_candidates:
-                        execution_evidence.extend(
-                            _db_free_journal_write_blocked_sync_evidence(candidate, db_free_journal_reservation)
-                            for candidate in pending_status_sync_candidates
-                        )
-                        slurm_status_sync_proof = _slurm_status_sync_proof(
-                            sync_required=True,
-                            reservation=db_free_journal_reservation,
-                            blocked=True,
-                        )
-                        execution_boundary = "db_free_journal_write_blocked"
-                        pass_status = "preflight_blocked"
-                    if cancel_active_slurm_requested:
-                        cancellation_evidence = [
-                            _db_free_journal_write_blocked_cancel_evidence(candidate, db_free_journal_reservation)
-                            for candidate in pending_cancel_candidates
-                        ]
-                        slurm_cancellation_proof = _slurm_cancellation_proof(
-                            cancellation_required=True,
-                            reservation=db_free_journal_reservation,
-                            blocked=True,
-                        )
-                        execution_boundary = "db_free_journal_write_blocked"
-                        pass_status = "preflight_blocked"
-                if pending_status_sync_candidates and not db_free_journal_write_blocked:
-                    (
-                        candidates,
-                        blocked_candidates,
-                        skipped_candidates,
-                        candidate_duplicate_exclusions,
-                        slurm_status_sync_evidence,
-                    ) = self._build_candidates(
-                        models=models,
-                        cycles=cycles,
-                        allow_slurm_status_sync=True,
-                    )
-                    pending_cancel_candidates = [
-                        candidate
-                        for candidate in skipped_candidates
-                        if candidate.get("reason") == "cancel_requested_active_slurm"
-                    ]
-                    cancel_active_slurm_requested = (
-                        self.config.cancel_active_slurm and not self.config.dry_run and bool(pending_cancel_candidates)
-                    )
-                if not (db_free_journal_write_blocked and pending_status_sync_candidates):
-                    slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
-                        slurm_status_sync_evidence,
-                        reservation=evidence_reservation,
-                    )
-                if _slurm_status_sync_failed(slurm_status_sync_proof):
-                    pass_status = "slurm_status_sync_failed"
-                    execution_boundary = "slurm_status_sync"
-                else:
-                    if cancel_active_slurm_requested and not cancellation_evidence:
-                        cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
-                        slurm_cancellation_proof = _slurm_cancellation_proof_from_evidence(
-                            cancellation_evidence,
-                            reservation=evidence_reservation,
-                        )
-                    if candidates:
-                        if _db_free_journal_mutation_blocked(
-                            self.config,
-                            mutation_requested=bool(candidates),
-                            repository=self.active_repository,
-                        ):
-                            db_free_journal_reservation = _db_free_journal_write_blocked_reservation(
-                                self.config,
-                                len(candidates),
-                            )
-                            execution_evidence.extend(
-                                [
-                                    _candidate_evidence_write_blocked_evidence(candidate, db_free_journal_reservation)
-                                    for candidate in candidates
-                                ]
-                            )
-                            execution_write_proof = _execution_write_proof_from_evidence(
-                                execution_evidence,
-                                reservation=db_free_journal_reservation,
-                            )
-                            execution_boundary = "db_free_journal_write_blocked"
-                            pass_status = "preflight_blocked"
-                            no_mutation_proof = _no_mutation_proof()
-                        else:
-                            if self.forcing_producer is not None:
-                                (
-                                    candidates,
-                                    forcing_blocked_candidates,
-                                    forcing_evidence,
-                                ) = self._produce_forcing_for_candidates(candidates)
-                                blocked_candidates.extend(forcing_blocked_candidates)
-                                execution_evidence.extend(forcing_evidence)
-                        if candidates and not _db_free_journal_mutation_blocked(
-                            self.config,
-                            mutation_requested=bool(candidates),
-                            repository=self.active_repository,
-                        ):
-                            slurm_preflight = _slurm_preflight(self.config)
-                            if slurm_preflight["status"] != "not_required":
-                                slurm_preflight_evidence = redact_payload(slurm_preflight)
-                            if slurm_preflight["status"] == "blocked":
-                                execution_evidence.extend(
-                                    [
-                                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
-                                        for candidate in candidates
-                                    ]
-                                )
-                                execution_write_proof = _execution_write_proof_from_evidence(
-                                    execution_evidence,
-                                    reservation=evidence_reservation,
-                                )
-                                execution_boundary = "slurm_preflight_blocked"
-                                pass_status = "preflight_blocked"
-                            elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                                execution_evidence.extend(
-                                    [
-                                        _candidate_preflight_blocked_evidence(candidate, config=self.config)
-                                        for candidate in candidates
-                                    ]
-                                )
-                                execution_write_proof = _execution_write_proof_from_evidence(
-                                    execution_evidence,
-                                    reservation=evidence_reservation,
-                                )
-                                execution_boundary = "preflight_blocked"
-                                pass_status = "preflight_blocked"
-                                no_mutation_proof = _no_mutation_proof()
-                            else:
-                                execution_evidence.extend(self._execute_candidates(candidates))
-                                execution_write_proof = _execution_write_proof_from_evidence(
-                                    execution_evidence,
-                                    reservation=evidence_reservation,
-                                )
-                                submitted_count = sum(
-                                    1 for item in execution_evidence if item.get("submitted") is True
-                                )
-                                execution_boundary = (
-                                    "slurm_gateway_orchestration"
-                                    if self.config.slurm_execution_enabled
-                                    else "production_orchestration"
-                                )
-            if execution_evidence:
-                pass_status = _scheduler_pass_status_from_execution(execution_evidence)
-            if cancellation_evidence and not execution_evidence:
-                pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
-                execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
-            elif cancellation_evidence and pass_status == "planned":
-                pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
-                execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
-            if (
-                pass_status == "planned"
-                and execution_boundary == "planning_only"
-                and _slurm_status_sync_mutated(slurm_status_sync_proof)
-            ):
-                pass_status = "slurm_status_synced"
-                execution_boundary = "slurm_status_sync"
-            if pass_status == "planned" and not candidates and blocked_candidates:
-                pass_status = _blocked_pass_status(blocked_candidates)
-            scheduler_mutation_proof = _scheduler_mutation_proof(
-                execution_write_proof=execution_write_proof,
-                slurm_status_sync_proof=slurm_status_sync_proof,
-                slurm_cancellation_proof=slurm_cancellation_proof,
-                restart_reconcile_proof=restart_reconcile_proof,
-            )
-            no_mutation_proof = {
-                "adapter_download_called": False,
-                "slurm_submit_called": scheduler_mutation_proof["slurm_submit_called"],
-                "slurm_status_sync_called": slurm_status_sync_proof.get("sync_called") is True,
-                "slurm_cancellation_called": slurm_cancellation_proof.get("cancel_called") is True,
-                "shud_runtime_called": False,
-                "hydro_result_table_writes": scheduler_mutation_proof["hydro_result_table_writes"],
-                "met_result_table_writes": scheduler_mutation_proof["met_result_table_writes"],
-                "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
-                "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
-            }
-            if scheduler_mutation_proof.get("restart_reconcile_writes") is not False:
-                no_mutation_proof["restart_reconcile_writes"] = scheduler_mutation_proof["restart_reconcile_writes"]
-            failed_count = _scheduler_failed_count_from_execution(execution_evidence)
-            partial_count = _scheduler_partial_count_from_execution(execution_evidence)
-        elif restart_reconcile_proof.get("mutation_occurred") is True:
-            no_mutation_proof = {
-                **_no_mutation_proof(),
-                "pipeline_status_writes": True,
-                "pipeline_event_writes": restart_reconcile_proof.get("pipeline_event_writes") is True,
-                "restart_reconcile_writes": True,
-            }
-            if execution_boundary == "planning_only":
-                execution_boundary = "restart_reconcile"
-            if pass_status == "planned":
-                pass_status = "restart_reconciled"
-        elif restart_reconcile_proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
-            no_mutation_proof = {
-                **_no_mutation_proof(),
-                "pipeline_status_writes": restart_reconcile_proof.get(
-                    "pipeline_status_writes",
-                    UNKNOWN_AFTER_ATTEMPT,
+            status = _evidence_status(evidence, "resource_limit_blocked")
+            return _attach_timing(
+                SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
                 ),
-                "pipeline_event_writes": restart_reconcile_proof.get(
-                    "pipeline_event_writes",
-                    UNKNOWN_AFTER_ATTEMPT,
-                ),
-                "restart_reconcile_writes": UNKNOWN_AFTER_ATTEMPT,
-            }
-            if execution_boundary == "planning_only":
-                execution_boundary = "restart_reconcile"
-            if pass_status == "planned":
-                pass_status = "restart_reconcile_unknown"
-        finished_at = _now(self.config)
-        evidence = self._base_evidence(pass_id, started_at)
-        evidence["operator_filters"].update(model_evidence["operator_filters"])
-        evidence["filters"] = dict(evidence["operator_filters"])
-        duplicate_exclusions = [
-            *self.config.source_exclusions,
-            *[item for item in source_cycle_evidence if item.get("status") == "excluded"],
-            *candidate_duplicate_exclusions,
-        ]
-        total_candidate_count = len(candidates) + len(blocked_candidates) + len(skipped_candidates)
-        evidence.update(
-            {
-                "status": pass_status,
-                "finished_at": _format_utc(finished_at),
-                "lock": lock_evidence,
-                "model_discovery": model_evidence,
-                "source_cycles": source_cycle_evidence,
-                "candidates": [candidate.to_dict() for candidate in candidates],
-                "blocked_candidates": [candidate.to_dict() for candidate in blocked_candidates],
-                "skipped_candidates": skipped_candidates,
-                "duplicate_exclusions": duplicate_exclusions,
-                "counts": {
-                    "candidate_count": total_candidate_count,
-                    "blocked_candidate_count": len(blocked_candidates),
-                    "skipped_candidate_count": len(skipped_candidates),
-                    "selected_model_count": len(models),
-                    "source_cycle_count": len(cycles),
-                    "submitted_count": submitted_count,
-                    "failed_count": failed_count,
-                    "partial_count": partial_count,
-                    "slurm_status_sync_count": _slurm_status_sync_count(slurm_status_sync_proof),
-                    "slurm_status_sync_unknown_count": _slurm_status_sync_unknown_count(
-                        slurm_status_sync_proof,
-                    ),
-                    "slurm_cancelled_count": _slurm_cancelled_count(cancellation_evidence),
-                    "slurm_cancellation_blocked_count": _slurm_cancellation_blocked_count(
-                        cancellation_evidence,
-                    ),
-                    "slurm_cancellation_unknown_count": _slurm_cancellation_unknown_count(
-                        slurm_cancellation_proof,
-                    ),
-                },
-                "model_run_evidence": execution_evidence,
-                "execution_write_proof": execution_write_proof,
-                "slurm_cancellation_evidence": cancellation_evidence,
-                "slurm_status_sync_proof": slurm_status_sync_proof,
-                "slurm_cancellation_proof": slurm_cancellation_proof,
-                "no_mutation_proof": no_mutation_proof,
-                "execution_boundary": execution_boundary,
-            }
-        )
-        if restart_reconcile_evidence is not None:
-            evidence["restart_reconcile"] = restart_reconcile_evidence
-            evidence["restart_reconcile_proof"] = restart_reconcile_proof
-        overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
-        if overlap_receipt is not None:
-            # M24 §3A Evidence Floor: archive the overlapping-submit receipt
-            # into the durable pass artifact (not just memory) so
-            # "receipt shows overlapping submits" has on-disk proof.
-            evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
-        if slurm_preflight_evidence is not None:
-            evidence["slurm_preflight"] = slurm_preflight_evidence
-        if evidence_reservation["status"] != "not_required":
-            evidence["evidence_pre_execution"] = evidence_reservation
-        if root_preflight["status"] != "not_required":
-            evidence["root_preflight"] = root_preflight
-        if self.config.backfill_enabled:
-            evidence["backfill"] = {
-                "enabled": True,
-                "lookback_hours": self.config.lookback_hours,
-                "audit": [item for item in source_cycle_evidence if item.get("type") == "backfill_audit"],
-            }
-        else:
-            evidence["backfill"] = {"enabled": False}
-        retention_force_reason = None
-        if evidence_reservation.get("status") == "blocked":
-            retention_force_reason = "evidence_preflight_blocked"
-        elif execution_boundary == "db_free_journal_write_blocked":
-            retention_force_reason = "db_free_journal_write_blocked"
-        evidence["retention"] = self._run_retention(
-            started_at,
-            force_dry_run_reason=retention_force_reason,
-        )
-        try:
-            artifact_path = self._write_evidence(pass_id, evidence)
-        except (OSError, RuntimeError, ValueError, SchedulerEvidenceWriteError) as error:
-            if evidence_reservation.get("status") != "blocked":
-                raise
-            evidence["evidence_write_error"] = _evidence_write_error_payload(error, self.config)
-            artifact_path = None
-        status = _evidence_status(evidence, pass_status)
-        return SchedulerPassResult(
-            pass_id=pass_id,
-            status=status,
-            evidence=evidence,
-            artifact_path=artifact_path,
-        )
-    except SchedulerResourceLimitError as error:
-        finished_at = _now(self.config)
-        evidence = self._base_evidence(pass_id, started_at)
-        evidence.update(
-            {
-                "status": "resource_limit_blocked",
-                "finished_at": _format_utc(finished_at),
-                "lock": lock_evidence,
-                "limit": {"reason": error.reason, **error.details},
-                "counts": _empty_counts(),
-                "candidates": [],
-                "blocked_candidates": [],
-                "skipped_candidates": [],
-                "duplicate_exclusions": list(self.config.source_exclusions),
-                "model_discovery": _empty_model_discovery(),
-                "source_cycles": [],
-                "no_mutation_proof": _no_mutation_proof(),
-                "execution_boundary": "planning_only",
-            }
-        )
-        if root_preflight["status"] != "not_required":
-            evidence["root_preflight"] = root_preflight
-        artifact_path = self._write_evidence(pass_id, evidence)
-        status = _evidence_status(evidence, "resource_limit_blocked")
-        return SchedulerPassResult(
-            pass_id=pass_id,
-            status=status,
-            evidence=evidence,
-            artifact_path=artifact_path,
-        )
-    finally:
-        try:
-            heartbeat.stop()
-        except Exception:
-            pass
-        lock.release(pass_id=pass_id)
+                collector,
+                status,
+            )
+        finally:
+            try:
+                heartbeat.stop()
+            except Exception:
+                pass
+            lock.release(pass_id=pass_id)
 
 
 def _run_restart_reconcile(self) -> dict[str, Any] | None:

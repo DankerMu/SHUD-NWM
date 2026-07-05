@@ -118,6 +118,10 @@ class ProductionScheduler:
         self.sleep = sleep or _scheduler._sleep
         self._source_readiness_context_cache: dict[tuple[str, str, str], dict[str, _scheduler.Any]] = {}
         self._db_free_state_index_repository: _scheduler.FileStateSnapshotIndexRepository | None = None
+        # SUB-2 (#860): populated by ``run_once`` with the per-pass
+        # ``SchedulerPassTiming`` so SUB-3 / SUB-4 can call ``stage_span`` /
+        # ``candidate_span`` via ``SchedulerExecutionContext.timing``.
+        self._scheduler_pass_timing: _scheduler.Any | None = None
 
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
@@ -344,6 +348,10 @@ class ProductionScheduler:
             evidence_safe=_scheduler._evidence_safe,
             candidate_execution_evidence=_scheduler._candidate_execution_evidence,
             unknown_after_attempt=_scheduler.UNKNOWN_AFTER_ATTEMPT,
+            # SUB-2 wiring for scheduler-pass-timing-instrumentation (#860):
+            # ``run_once`` stashes the per-pass collector on ``self`` before
+            # dispatching execution; SUB-3 / SUB-4 read it from the context.
+            timing=getattr(self, "_scheduler_pass_timing", None),
         )
 
     def _set_last_submit_overlap_receipt(self, receipt: _scheduler.SubmitOverlapReceipt) -> None:
