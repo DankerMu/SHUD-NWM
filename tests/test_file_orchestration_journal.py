@@ -1700,6 +1700,85 @@ def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_p
     assert gateway.array_requests[0].manifest["tasks"] == tasks
 
 
+def test_file_journal_manual_retry_preserves_db_free_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://writer:secret@db.example/nhms")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast_db_free_failed")
+    repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+                "scheduler_db_free_required": "true",
+                "scheduler_allowed_roots": "/srv/nhms/workspace:/srv/nhms/object-store",
+                "scheduler_registry_backend": "file",
+                "scheduler_registry_manifest": "/srv/nhms/state/registry.json",
+                "scheduler_canonical_readiness_backend": "file",
+                "scheduler_canonical_readiness_index": "/srv/nhms/state/canonical-readiness.json",
+                "scheduler_state_index_backend": "file",
+                "scheduler_state_index": "/srv/nhms/state/scheduler-state.json",
+            }
+        },
+    )
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "permanently_failed",
+        error_code="NODE_FAILURE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7010", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry(record["run_id"], gateway, trusted_internal=True)
+
+    manifest = gateway.requests[0].manifest
+    assert retried.status == "submitted"
+    assert manifest["scheduler_db_free_required"] == "true"
+    assert manifest["scheduler_registry_backend"] == "file"
+    assert manifest["scheduler_registry_manifest"] == "/srv/nhms/state/registry.json"
+    assert manifest["scheduler_canonical_readiness_backend"] == "file"
+    assert manifest["scheduler_canonical_readiness_index"] == "/srv/nhms/state/canonical-readiness.json"
+    assert manifest["scheduler_state_index_backend"] == "file"
+    assert manifest["scheduler_state_index"] == "/srv/nhms/state/scheduler-state.json"
+    assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
+    assert manifest["previous_job_id"] == "job_forecast_db_free_failed"
+    assert manifest["pipeline_job_id"] == retried.job_id
+    assert manifest["manual_retry_marker"] is True
+    assert "DATABASE_URL" not in json.dumps(manifest)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    retry_event = next(event for event in state["pipeline_events"] if event["event_type"] == "retry")
+    submission_event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    assert retry_event["details"]["manual_retry_marker"] is True
+    assert retry_event["details"]["previous_job_id"] == "job_forecast_db_free_failed"
+    assert submission_event["details"]["runtime_root_resolution"]["db_free_runtime"]["required"] is True
+    assert submission_event["details"]["runtime_root_contract"]["scheduler_db_free_required"] == "true"
+
+
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
     tmp_path: Path,
 ) -> None:

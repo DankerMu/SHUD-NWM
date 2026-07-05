@@ -70,6 +70,47 @@ _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT = 32
 _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT = 64
 _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT = 16
 _URI_STYLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_DB_LIKE_SELECTOR_RE = re.compile(
+    r"^(?:postgres(?:ql)?|mysql|mariadb|sqlite|mssql|oracle)(?:[+:][A-Za-z0-9_.-]+)?://",
+    re.IGNORECASE,
+)
+_DB_FREE_REQUIRED_FIELD = "scheduler_db_free_required"
+_DB_FREE_SELECTOR_FIELDS = (
+    "scheduler_allowed_roots",
+    "scheduler_registry_backend",
+    "scheduler_registry_manifest",
+    "scheduler_canonical_readiness_backend",
+    "scheduler_canonical_readiness_index",
+    "scheduler_state_index_backend",
+    "scheduler_state_index",
+)
+_DB_FREE_REQUIRED_SELECTOR_FIELDS = (
+    "scheduler_registry_backend",
+    "scheduler_registry_manifest",
+    "scheduler_canonical_readiness_backend",
+    "scheduler_canonical_readiness_index",
+    "scheduler_state_index_backend",
+    "scheduler_state_index",
+)
+_DB_FREE_RUNTIME_FIELDS = (_DB_FREE_REQUIRED_FIELD, *_DB_FREE_SELECTOR_FIELDS)
+_DB_FREE_BACKEND_FIELDS = (
+    "scheduler_registry_backend",
+    "scheduler_canonical_readiness_backend",
+    "scheduler_state_index_backend",
+)
+_DB_FREE_ENV_SPECS = (
+    (_DB_FREE_REQUIRED_FIELD, ("NHMS_SCHEDULER_DB_FREE_REQUIRED",)),
+    ("scheduler_allowed_roots", ("NHMS_SCHEDULER_ALLOWED_ROOTS",)),
+    ("scheduler_registry_backend", ("NHMS_SCHEDULER_REGISTRY_BACKEND",)),
+    ("scheduler_registry_manifest", ("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST", "NHMS_SCHEDULER_REGISTRY_MANIFEST")),
+    ("scheduler_canonical_readiness_backend", ("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND",)),
+    (
+        "scheduler_canonical_readiness_index",
+        ("NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX", "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"),
+    ),
+    ("scheduler_state_index_backend", ("NHMS_SCHEDULER_STATE_INDEX_BACKEND",)),
+    ("scheduler_state_index", ("NHMS_SLURM_SCHEDULER_STATE_INDEX", "NHMS_SCHEDULER_STATE_INDEX")),
+)
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -221,6 +262,7 @@ class _RetrySubmissionJob:
     stage: str | None
     retry_count: int
     previous_job_id: str | None
+    manual_retry_marker: bool = True
 
 
 @dataclass(frozen=True)
@@ -625,29 +667,56 @@ class RetryService:
         )
 
     def _resolve_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> _RuntimeRootResolution | None:
-        if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
+        candidate_batch = self._retry_runtime_root_candidates(retry_job)
+        db_free_required = _candidate_batch_db_free_required(candidate_batch)
+        if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE and not db_free_required:
             return None
 
-        candidate_batch = self._retry_runtime_root_candidates(retry_job)
         rejected: list[dict[str, str]] = []
         rejected_total_count = 0
         best_resolved: dict[str, tuple[str, str]] = {}
         best_missing: list[str] = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
         secret_rejected = False
         unsafe_rejected = False
+        best_db_free_resolved: dict[str, tuple[str, str]] = {}
+        best_db_free_missing: list[str] = list(_DB_FREE_REQUIRED_SELECTOR_FIELDS) if db_free_required else []
 
         for candidate in candidate_batch.candidates:
             resolution = _resolve_runtime_root_candidate(candidate.source, candidate.value)
+            db_free_resolution = (
+                _resolve_db_free_runtime_candidate(candidate.source, candidate.value) if db_free_required else None
+            )
             rejected_total_count += len(resolution.rejected)
+            if db_free_resolution is not None:
+                rejected_total_count += len(db_free_resolution.rejected)
             if len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
                 remaining_rejections = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
                 rejected.extend(resolution.rejected[:remaining_rejections])
-            secret_rejected = secret_rejected or resolution.secret_rejected
-            unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
+            if db_free_resolution is not None and len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
+                remaining_rejections = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
+                rejected.extend(db_free_resolution.rejected[:remaining_rejections])
+            candidate_secret_rejected = resolution.secret_rejected
+            candidate_unsafe_rejected = resolution.unsafe_rejected
+            secret_rejected = secret_rejected or candidate_secret_rejected
+            unsafe_rejected = unsafe_rejected or candidate_unsafe_rejected
+            if db_free_resolution is not None:
+                candidate_secret_rejected = candidate_secret_rejected or db_free_resolution.secret_rejected
+                candidate_unsafe_rejected = candidate_unsafe_rejected or db_free_resolution.unsafe_rejected
+                secret_rejected = secret_rejected or db_free_resolution.secret_rejected
+                unsafe_rejected = unsafe_rejected or db_free_resolution.unsafe_rejected
             if len(resolution.resolved) > len(best_resolved):
                 best_resolved = resolution.resolved
                 best_missing = resolution.missing
-            if not resolution.complete or secret_rejected:
+            if db_free_resolution is not None and len(db_free_resolution.resolved) > len(best_db_free_resolved):
+                best_db_free_resolved = db_free_resolution.resolved
+                best_db_free_missing = db_free_resolution.missing
+            db_free_complete = db_free_resolution is None or db_free_resolution.complete
+            if (
+                not resolution.complete
+                or not db_free_complete
+                or candidate_secret_rejected
+                or candidate_unsafe_rejected
+            ):
                 continue
 
             evidence = _runtime_root_resolution_evidence(
@@ -657,8 +726,15 @@ class RetryService:
                 rejected=rejected,
                 rejected_total_count=rejected_total_count,
                 candidate_batch=candidate_batch,
+                db_free_resolved=db_free_resolution.resolved if db_free_resolution is not None else {},
+                db_free_missing=[] if db_free_resolution is not None else [],
+                db_free_required=db_free_required,
             )
             manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
+            if db_free_resolution is not None:
+                manifest_fields.update(
+                    {field: value for field, (value, _source) in db_free_resolution.resolved.items()}
+                )
             return _RuntimeRootResolution(manifest_fields=manifest_fields, evidence=evidence)
 
         evidence = _runtime_root_resolution_evidence(
@@ -668,28 +744,37 @@ class RetryService:
             rejected=rejected,
             rejected_total_count=rejected_total_count,
             candidate_batch=candidate_batch,
+            db_free_resolved=best_db_free_resolved,
+            db_free_missing=best_db_free_missing,
+            db_free_required=db_free_required,
         )
         if secret_rejected:
             raise _RetryRuntimeRootResolutionError(
                 RETRY_RUNTIME_ROOTS_SECRET_BEARING,
-                "Manual retry runtime-root evidence contains secret-bearing values.",
+                "Retry runtime-root evidence contains secret-bearing values.",
                 evidence,
             )
         if unsafe_rejected:
             raise _RetryRuntimeRootResolutionError(
                 RETRY_RUNTIME_ROOTS_UNSAFE,
-                "Manual retry runtime-root evidence contains unsafe local root values.",
+                "Retry runtime-root evidence contains unsafe local root values.",
                 evidence,
             )
         if best_missing:
             raise _RetryRuntimeRootResolutionError(
                 RETRY_RUNTIME_ROOTS_UNRESOLVED,
-                "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+                "Retry cannot resolve required object-store runtime roots.",
+                evidence,
+            )
+        if best_db_free_missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Retry cannot resolve required DB-free scheduler runtime selectors.",
                 evidence,
             )
         raise _RetryRuntimeRootResolutionError(
             RETRY_RUNTIME_ROOTS_UNRESOLVED,
-            "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+            "Retry cannot resolve required runtime roots.",
             evidence,
         )
 
@@ -1011,11 +1096,16 @@ def _retry_submission_manifest(
         "job_type": retry_job.job_type,
         "stage": retry_job.stage,
         "pipeline_job_id": retry_job.job_id,
+        "previous_job_id": retry_job.previous_job_id,
         "retry_count": retry_job.retry_count,
-        "manual_retry_marker": True,
+        "manual_retry_marker": retry_job.manual_retry_marker,
     }
     if runtime_root_fields:
         manifest.update(runtime_root_fields)
+    if _truthy_manifest_value(manifest.get(_DB_FREE_REQUIRED_FIELD)):
+        slurm_env = dict(manifest.get("slurm_env") or {})
+        slurm_env["NHMS_SHUD_DB_FREE"] = "true"
+        manifest["slurm_env"] = slurm_env
     cycle_identity = _source_cycle_identity(retry_job.cycle_id)
     if cycle_identity is not None:
         source_id, cycle_time = cycle_identity
@@ -1030,7 +1120,11 @@ def _source_cycle_identity(cycle_id: str | None) -> tuple[str, str] | None:
     match = re.fullmatch(r"(?P<source>[A-Za-z0-9]+)_(?P<cycle>[0-9]{10})", cycle_id)
     if match is None:
         return None
-    return normalize_source_id(match.group("source")), match.group("cycle")
+    try:
+        source_id = normalize_source_id(match.group("source"))
+    except ValueError:
+        return None
+    return source_id, match.group("cycle")
 
 
 def _coerce_gateway_payload(value: Any) -> dict[str, Any]:
@@ -1261,6 +1355,10 @@ def _runtime_root_env_candidate() -> dict[str, str]:
         candidate["published_artifact_uri_prefix"] = published_artifact_uri_prefix or "published://"
     elif published_artifact_uri_prefix is not None:
         candidate["published_artifact_uri_prefix"] = published_artifact_uri_prefix
+    for selector_field, env_names in _DB_FREE_ENV_SPECS:
+        value = _first_env_value(*env_names)
+        if value is not None:
+            candidate[selector_field] = value
     return candidate
 
 
@@ -1366,7 +1464,7 @@ def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[st
 
 
 def _has_runtime_root_field(value: Mapping[str, Any]) -> bool:
-    return any(field in value for field in _RUNTIME_ROOT_FIELDS)
+    return any(field in value for field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS))
 
 
 def _runtime_root_value(value: Any) -> str | None:
@@ -1374,6 +1472,65 @@ def _runtime_root_value(value: Any) -> str | None:
         return None
     text_value = str(value).strip()
     return text_value or None
+
+
+def _first_env_value(*names: str) -> str | None:
+    for name in names:
+        value = _runtime_root_value(os.getenv(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _truthy_manifest_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "required"}
+
+
+def _candidate_batch_db_free_required(candidate_batch: _RuntimeRootCandidateBatch) -> bool:
+    return any(
+        _truthy_manifest_value(candidate.value.get(_DB_FREE_REQUIRED_FIELD))
+        for candidate in candidate_batch.candidates
+    )
+
+
+def _resolve_db_free_runtime_candidate(
+    source: str,
+    candidate: Mapping[str, Any],
+) -> _RuntimeRootCandidateResolution:
+    resolved: dict[str, tuple[str, str]] = {_DB_FREE_REQUIRED_FIELD: ("true", f"{source}:db_free_required")}
+    rejected: list[dict[str, str]] = []
+    secret_rejected = False
+    unsafe_rejected = False
+
+    for selector_field in _DB_FREE_SELECTOR_FIELDS:
+        value = _runtime_root_value(candidate.get(selector_field))
+        if value is None and selector_field in _DB_FREE_BACKEND_FIELDS:
+            value = "file"
+        if value is None:
+            continue
+        secret_reason = secret_manifest_value_reason(value)
+        if secret_reason is not None:
+            secret_rejected = True
+            rejected.append(_runtime_root_rejection(selector_field, source, secret_reason, value))
+            continue
+        if selector_field in _DB_FREE_BACKEND_FIELDS and value.strip().lower() != "file":
+            rejected.append(_runtime_root_rejection(selector_field, source, "db_free_backend_not_file", value))
+            continue
+        if selector_field not in _DB_FREE_BACKEND_FIELDS and _DB_LIKE_SELECTOR_RE.match(value):
+            rejected.append(_runtime_root_rejection(selector_field, source, "db_like_selector_value", value))
+            continue
+        resolved[selector_field] = (value, source)
+
+    missing = [field for field in _DB_FREE_REQUIRED_SELECTOR_FIELDS if field not in resolved]
+    return _RuntimeRootCandidateResolution(
+        resolved=resolved,
+        missing=missing,
+        rejected=rejected,
+        secret_rejected=secret_rejected,
+        unsafe_rejected=unsafe_rejected,
+    )
 
 
 def _runtime_root_resolution_evidence(
@@ -1384,6 +1541,9 @@ def _runtime_root_resolution_evidence(
     rejected: list[dict[str, str]],
     rejected_total_count: int,
     candidate_batch: _RuntimeRootCandidateBatch,
+    db_free_resolved: Mapping[str, tuple[str, str]] | None = None,
+    db_free_missing: list[str] | None = None,
+    db_free_required: bool = False,
 ) -> dict[str, Any]:
     resolved_evidence = {}
     for root_field in _RUNTIME_ROOT_FIELDS:
@@ -1400,6 +1560,17 @@ def _runtime_root_resolution_evidence(
         resolved_evidence["object_store_root"]["same_as_workspace"] = (
             resolved["object_store_root"][0] == resolved["workspace_dir"][0]
         )
+    db_free_resolved_evidence = {}
+    for selector_field in _DB_FREE_RUNTIME_FIELDS:
+        item = (db_free_resolved or {}).get(selector_field)
+        if item is None:
+            continue
+        value, source = item
+        db_free_resolved_evidence[selector_field] = {
+            "present": True,
+            "source": _bounded_redacted_text(source),
+            "value": _bounded_redacted_text(value),
+        }
     rejected_omitted_count = max(rejected_total_count - len(rejected), 0)
     return _redacted_mapping(
         {
@@ -1410,6 +1581,12 @@ def _runtime_root_resolution_evidence(
             "required": list(_REQUIRED_RUNTIME_ROOT_FIELDS),
             "resolved": resolved_evidence,
             "missing": missing,
+            "db_free_runtime": {
+                "required": bool(db_free_required),
+                "resolved": db_free_resolved_evidence,
+                "missing": list(db_free_missing or []),
+                "slurm_env": {"NHMS_SHUD_DB_FREE": "true"} if db_free_required else {},
+            },
             "candidate_counts": {
                 "event_candidates_returned": candidate_batch.event_candidate_returned_count,
                 "event_candidates_total": candidate_batch.event_candidate_total_count,

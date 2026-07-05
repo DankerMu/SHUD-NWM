@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from services.orchestrator.retry import classify_failure
 from services.orchestrator.scheduler_state_common import (
@@ -41,6 +44,8 @@ from services.orchestrator.scheduler_state_types import (
     TRANSIENT_RETRY_REASON_CODES,
     SchedulerCandidateLike,
 )
+
+_COPYBACK_REQUIRED_RESTART_STAGES = {"copyback"}
 
 
 def _failed_stage(state: Mapping[str, Any]) -> str | None:
@@ -265,6 +270,277 @@ def _downstream_retry_evidence(
             "retry_limit": failure["retry_limit"],
         },
     }
+
+def _missing_upstream_forecast_artifact_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+    planned_retry: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(planned_retry, Mapping):
+        return None
+    restart_stage = _canonical_downstream_stage(
+        str(planned_retry.get("restart_stage") or planned_retry.get("restart_from_stage") or "")
+    )
+    if restart_stage is None:
+        return None
+
+    if restart_stage == "forecast":
+        forcing_uri = _first_artifact_uri(
+            state,
+            (
+                "forcing_package_uri",
+                "forcing_uri",
+                "package_uri",
+                "forcing_package_path",
+            ),
+        )
+        if forcing_uri in (None, ""):
+            return _artifact_blocker_evidence(
+                candidate,
+                base_evidence,
+                planned_retry,
+                reason="missing_forcing_package_uri",
+                error_code="FORCING_PACKAGE_URI_MISSING",
+                artifact_type="forcing_package_uri",
+                artifact_uri=None,
+                artifact_exists=False,
+            )
+        forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_uri)
+        if forcing_missing:
+            return _artifact_blocker_evidence(
+                candidate,
+                base_evidence,
+                planned_retry,
+                reason="missing_forcing_package_uri",
+                error_code="FORCING_PACKAGE_URI_MISSING",
+                artifact_type="forcing_package_uri",
+                artifact_uri=forcing_uri,
+                artifact_exists=False,
+                unsafe_reason=forcing_unsafe_reason,
+            )
+
+    copyback_uri = _first_artifact_uri(
+        state,
+        (
+            "copyback_source_uri",
+            "copyback_source",
+            "copyback_source_path",
+            "copyback_uri",
+        ),
+    )
+    copyback_required = restart_stage in _COPYBACK_REQUIRED_RESTART_STAGES or _copyback_source_required(state)
+    if copyback_uri not in (None, ""):
+        copyback_missing, copyback_unsafe_reason = _artifact_uri_missing_status(candidate, copyback_uri)
+    else:
+        copyback_missing, copyback_unsafe_reason = True, None
+    if copyback_uri not in (None, "") and copyback_missing:
+        return _artifact_blocker_evidence(
+            candidate,
+            base_evidence,
+            planned_retry,
+            reason="missing_copyback_source",
+            error_code="COPYBACK_SOURCE_MISSING",
+            artifact_type="copyback_source",
+            artifact_uri=copyback_uri,
+            artifact_exists=False,
+            unsafe_reason=copyback_unsafe_reason,
+        )
+    if copyback_uri in (None, "") and copyback_required:
+        return _artifact_blocker_evidence(
+            candidate,
+            base_evidence,
+            planned_retry,
+            reason="missing_copyback_source",
+            error_code="COPYBACK_SOURCE_MISSING",
+            artifact_type="copyback_source",
+            artifact_uri=None,
+            artifact_exists=False,
+        )
+    return None
+
+
+def _artifact_blocker_evidence(
+    candidate: SchedulerCandidateLike,
+    base_evidence: Mapping[str, Any],
+    planned_retry: Mapping[str, Any],
+    *,
+    reason: str,
+    error_code: str,
+    artifact_type: str,
+    artifact_uri: str | None,
+    artifact_exists: bool,
+    unsafe_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        **base_evidence,
+        "decision": "blocked_missing_upstream_artifact",
+        "reason": reason,
+        "error_code": error_code,
+        "classifier": "missing_upstream_artifact",
+        "restart_stage": planned_retry.get("restart_stage"),
+        "restart_from_stage": planned_retry.get("restart_from_stage"),
+        "native_shud_resubmitted": False,
+        "replacement_submitted": False,
+        "artifact_guard": {
+            "artifact_type": artifact_type,
+            "artifact_uri": _evidence_safe(artifact_uri),
+            "artifact_exists": artifact_exists,
+            "unsafe_reason": unsafe_reason,
+            "stable_classifier": error_code,
+            "planned_retry_decision": planned_retry.get("decision"),
+            "planned_retry_reason": planned_retry.get("reason"),
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": False,
+            "manual_retry_required": False,
+            "attempt": _planned_retry_policy_value(planned_retry, "attempt", default=0),
+            "retry_limit": _planned_retry_policy_value(planned_retry, "retry_limit", default=None),
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _first_artifact_uri(state: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+    for container in _artifact_state_containers(state):
+        for key in keys:
+            value = container.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _artifact_state_containers(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    containers: list[Mapping[str, Any]] = [state]
+    for key in (
+        "forecast_cycle",
+        "forcing_version",
+        "completed_stage_evidence",
+        "copyback_evidence",
+        "terminal_stage_evidence",
+        "artifact_guard",
+    ):
+        value = state.get(key)
+        if isinstance(value, Mapping):
+            containers.append(value)
+    for job in reversed(_state_jobs(state)):
+        containers.append(job)
+        details = job.get("details")
+        if isinstance(details, Mapping):
+            containers.append(details)
+    for event in reversed(_state_events(state)):
+        containers.append(event)
+        details = event.get("details")
+        if isinstance(details, Mapping):
+            containers.append(details)
+    return containers
+
+
+def _artifact_uri_is_missing(candidate: SchedulerCandidateLike, artifact_uri: str) -> bool:
+    return _artifact_uri_missing_status(candidate, artifact_uri)[0]
+
+
+def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri: str) -> tuple[bool, str | None]:
+    value = artifact_uri.strip()
+    if not value:
+        return True, None
+    if value.startswith("s3://") or not _looks_like_local_uri_or_path(value):
+        try:
+            return _object_manifest_is_missing(candidate, value), None
+        except (OSError, ValueError):
+            return True, None
+    try:
+        path = _local_artifact_path(value)
+        if path is None:
+            return True, "invalid_local_artifact_path"
+        if not _local_artifact_path_is_allowed(candidate, path):
+            return True, "local_artifact_path_outside_allowed_roots"
+        return not path.exists(), None
+    except (OSError, ValueError):
+        return True, "local_artifact_path_unresolvable"
+
+
+def _looks_like_local_uri_or_path(value: str) -> bool:
+    return value.startswith("file://") or value.startswith("/") or value.startswith("~")
+
+
+def _local_artifact_path(value: str) -> Path | None:
+    if value.startswith("file://"):
+        parsed = urlparse(value)
+        if parsed.scheme != "file":
+            return None
+        return Path(unquote(parsed.path)).expanduser()
+    return Path(value).expanduser()
+
+
+def _local_artifact_path_is_allowed(candidate: SchedulerCandidateLike, path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    roots = _local_artifact_allowed_roots(candidate)
+    return bool(roots) and any(_path_is_relative_to(resolved, root) for root in roots)
+
+
+def _local_artifact_allowed_roots(candidate: SchedulerCandidateLike) -> tuple[Path, ...]:
+    values: list[str] = []
+    resource_profile = getattr(candidate, "resource_profile", {}) or {}
+    if isinstance(resource_profile, Mapping):
+        for key in ("object_store_root", "workspace_root", "workspace_dir", "published_artifact_root"):
+            value = resource_profile.get(key)
+            if value not in (None, ""):
+                values.append(str(value))
+    for env_name in ("OBJECT_STORE_ROOT", "WORKSPACE_ROOT", "NHMS_PUBLISHED_ARTIFACT_ROOT"):
+        value = os.getenv(env_name)
+        if value:
+            values.append(value)
+    allowed = os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "")
+    values.extend(value for value in allowed.split(os.pathsep) if value.strip())
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for value in values:
+        text = value.strip()
+        if not text or "://" in text:
+            continue
+        try:
+            root = Path(text).expanduser().resolve(strict=False)
+        except (OSError, ValueError):
+            continue
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return tuple(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _copyback_source_required(state: Mapping[str, Any]) -> bool:
+    if state.get("copyback_source_required") is not None:
+        return bool(state.get("copyback_source_required"))
+    copyback_evidence = state.get("copyback_evidence")
+    if isinstance(copyback_evidence, Mapping) and copyback_evidence.get("source_required") is not None:
+        return bool(copyback_evidence.get("source_required"))
+    return False
+
+
+def _planned_retry_policy_value(
+    planned_retry: Mapping[str, Any],
+    key: str,
+    *,
+    default: Any,
+) -> Any:
+    retry_policy = planned_retry.get("retry_policy")
+    if isinstance(retry_policy, Mapping) and retry_policy.get(key) is not None:
+        return retry_policy.get(key)
+    return default
 
 def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
     if failure.get("limit_exhausted") is True:

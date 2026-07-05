@@ -5528,6 +5528,326 @@ def test_terminal_pipeline_success_overrides_stale_created_hydro_placeholder() -
     assert decision.evidence["terminal_status"] == "succeeded"
 
 
+def test_completed_forecast_cycle_copyback_skips_stale_created_hydro_without_submit(tmp_path: Path) -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    active_repository = RawCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": "created",
+            "pipeline_status": "created",
+            "forecast_cycle": {
+                "cycle_id": candidate.cycle_id,
+                "source_id": candidate.source_id,
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "complete",
+            },
+            "copyback_evidence": {
+                "stage": "copyback",
+                "status": "succeeded",
+                "source_id": candidate.source_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "run_id": candidate.run_id,
+                "candidate_id": candidate.candidate_id,
+                "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert skipped["reason"] == "terminal_completed_cycle"
+    assert skipped["state_evidence"]["decision"] == "skip_terminal"
+    assert skipped["state_evidence"]["terminal_source"] == "forecast_cycle"
+    assert orchestrator.calls == []
+
+
+def test_completed_forecast_cycle_copyback_identity_mismatch_does_not_skip(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    active_repository = RawCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": None,
+            "pipeline_status": None,
+            "forecast_cycle": {
+                "cycle_id": candidate.cycle_id,
+                "source_id": candidate.source_id,
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "complete",
+            },
+            "copyback_evidence": {
+                "stage": "copyback",
+                "status": "succeeded",
+                "source_id": candidate.source_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": "sibling_model",
+                "run_id": "fcst_gfs_2026052106_sibling_model",
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:sibling_model:forecast_gfs_deterministic",
+                "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_sibling_model/output/",
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+
+
+def test_live_pass_progress_guard_blocks_with_bounded_evidence_and_releases_lock(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        progress_guard_max_no_progress_steps=0,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "scheduler_progress_guard_blocked"
+    assert result.evidence["progress_guard"] == {
+        "status": "blocked",
+        "reason": "scheduler_progress_guard_blocked",
+        "max_no_progress_steps": 0,
+        "no_progress_steps": 0,
+        "bounded": True,
+    }
+    assert result.evidence["counts"]["candidate_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert not Path(config.lock_path).exists()
+
+
+def test_positive_progress_guard_blocks_consecutive_no_progress_and_releases_lock(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        progress_guard_max_no_progress_steps=1,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "resource_limit_blocked"
+    assert result.evidence["execution_boundary"] == "scheduler_progress_guard_blocked"
+    assert result.evidence["progress_guard"]["status"] == "blocked"
+    assert result.evidence["progress_guard"]["reason"] == "scheduler_progress_guard_blocked"
+    assert result.evidence["progress_guard"]["max_no_progress_steps"] == 1
+    assert result.evidence["progress_guard"]["no_progress_steps"] == 2
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert not Path(config.lock_path).exists()
+
+
+def test_missing_forcing_package_blocks_forecast_resume_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "forcing_package_uri": "forcing/gfs/2026052106/model_a/package.json",
+        "completed_stage_evidence": {
+            "stage": "forcing",
+            "status": "succeeded",
+            "restart_stage": "forecast",
+        },
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "missing_forcing_package_uri"
+    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert decision.evidence["classifier"] == "missing_upstream_artifact"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert decision.evidence["replacement_submitted"] is False
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert blocked["state_evidence"]["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize("failed_stage", ["parse", "publish"])
+def test_missing_copyback_source_blocks_downstream_resume_before_submission(
+    failed_stage: str,
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "failed",
+        "failed_stage": failed_stage,
+        "error_code": f"{failed_stage.upper()}_FAILED",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "copyback_source_required": True,
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "missing_copyback_source"
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_MISSING"
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_copyback_source"
+    assert orchestrator.calls == []
+
+
+def test_copyback_source_file_uri_outside_allowed_roots_blocks_even_when_file_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    allowed_root = tmp_path / "object-store"
+    allowed_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(allowed_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "failed",
+        "failed_stage": "parse",
+        "error_code": "PARSE_FAILED",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "copyback_source_uri": "file:///etc/passwd",
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "missing_copyback_source"
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_MISSING"
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
+
+
+def test_copyback_source_local_path_inside_allowed_roots_can_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "failed",
+        "failed_stage": "parse",
+        "error_code": "PARSE_FAILED",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "copyback_source_uri": str(copyback_source),
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_downstream_after_durable_shud"
+
+
 def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()
@@ -7405,7 +7725,9 @@ def test_db_free_prelock_evidence_root_outside_workspace_skips_artifact_write(
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
 
-    result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
+    result = ProductionScheduler.from_env(
+        ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"))
+    ).run_once()
     rendered = json.dumps(result.evidence, sort_keys=True)
 
     assert result.status == "preflight_blocked"
@@ -22228,6 +22550,58 @@ def test_concurrent_candidates_same_source_cycle_submits_basins_overlap(tmp_path
     receipt = scheduler._last_submit_overlap_receipt
     assert receipt.overlapping is True
     assert receipt.to_dict()["concurrent_submit_count"] == 2
+
+
+def test_concurrent_submit_bound_gt_one_dedupes_same_candidate_resubmit(tmp_path: Path) -> None:
+    class _CountingOrchestrator:
+        def __init__(self) -> None:
+            self.object_store = None
+            self.calls: list[dict[str, Any]] = []
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{source.lower()}_{stage.stage}",
+                    slurm_job_id=f"slurm_{source.lower()}_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    orchestrator = _CountingOrchestrator()
+    config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    candidate = _concurrency_candidate("gfs", "model_a", "basin_a")
+
+    evidence = scheduler._execute_candidates([candidate, candidate])
+
+    assert len(evidence) == 1
+    assert len(orchestrator.calls) == 1
+    assert _evidence_identity_order(evidence) == [
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_a",
+            "fcst_gfs_2026052106_model_a",
+        )
+    ]
+    receipt = scheduler._last_submit_overlap_receipt
+    assert receipt.to_dict()["concurrent_submit_count"] == 1
 
 
 def test_concurrent_submit_bound_one_keeps_sequential_evidence_order(tmp_path: Path) -> None:

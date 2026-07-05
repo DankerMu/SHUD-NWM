@@ -36,6 +36,8 @@ from services.orchestrator.chain_repository import (
 from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
 from services.orchestrator.retry import (
+    _DB_FREE_REQUIRED_SELECTOR_FIELDS,
+    _DB_FREE_RUNTIME_FIELDS,
     _REQUIRED_RUNTIME_ROOT_FIELDS,
     _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
     _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
@@ -56,9 +58,11 @@ from services.orchestrator.retry import (
     RetryNotFoundError,
     _attach_retry_runtime_root_contract,
     _attach_retry_runtime_root_resolution,
+    _candidate_batch_db_free_required,
     _event_details_is_manual_retry_submission,
     _has_runtime_root_field,
     _mapping_at,
+    _resolve_db_free_runtime_candidate,
     _resolve_runtime_root_candidate,
     _retry_submission_error_code,
     _retry_submission_manifest,
@@ -2964,26 +2968,53 @@ class FileJournalRetryService:
         )
 
     def _resolve_file_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> SimpleNamespace | None:
-        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE
         candidate_batch = self._file_retry_runtime_root_candidates(retry_job)
+        db_free_required = _candidate_batch_db_free_required(candidate_batch)
+        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE or db_free_required
         rejected: list[dict[str, str]] = []
         rejected_total_count = 0
         best_resolved: dict[str, tuple[str, str]] = {}
         best_missing = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
         secret_rejected = False
         unsafe_rejected = False
+        best_db_free_resolved: dict[str, tuple[str, str]] = {}
+        best_db_free_missing: list[str] = list(_DB_FREE_REQUIRED_SELECTOR_FIELDS) if db_free_required else []
         for candidate in candidate_batch.candidates:
             resolution = _resolve_runtime_root_candidate(candidate.source, candidate.value)
+            db_free_resolution = (
+                _resolve_db_free_runtime_candidate(candidate.source, candidate.value) if db_free_required else None
+            )
             rejected_total_count += len(resolution.rejected)
+            if db_free_resolution is not None:
+                rejected_total_count += len(db_free_resolution.rejected)
             if len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
                 remaining = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
                 rejected.extend(resolution.rejected[:remaining])
-            secret_rejected = secret_rejected or resolution.secret_rejected
-            unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
+            if db_free_resolution is not None and len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
+                remaining = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
+                rejected.extend(db_free_resolution.rejected[:remaining])
+            candidate_secret_rejected = resolution.secret_rejected
+            candidate_unsafe_rejected = resolution.unsafe_rejected
+            secret_rejected = secret_rejected or candidate_secret_rejected
+            unsafe_rejected = unsafe_rejected or candidate_unsafe_rejected
+            if db_free_resolution is not None:
+                candidate_secret_rejected = candidate_secret_rejected or db_free_resolution.secret_rejected
+                candidate_unsafe_rejected = candidate_unsafe_rejected or db_free_resolution.unsafe_rejected
+                secret_rejected = secret_rejected or db_free_resolution.secret_rejected
+                unsafe_rejected = unsafe_rejected or db_free_resolution.unsafe_rejected
             if len(resolution.resolved) > len(best_resolved):
                 best_resolved = resolution.resolved
                 best_missing = resolution.missing
-            if not resolution.complete or secret_rejected:
+            if db_free_resolution is not None and len(db_free_resolution.resolved) > len(best_db_free_resolved):
+                best_db_free_resolved = db_free_resolution.resolved
+                best_db_free_missing = db_free_resolution.missing
+            db_free_complete = db_free_resolution is None or db_free_resolution.complete
+            if (
+                not resolution.complete
+                or not db_free_complete
+                or candidate_secret_rejected
+                or candidate_unsafe_rejected
+            ):
                 continue
             evidence = _runtime_root_resolution_evidence(
                 retry_job,
@@ -2992,8 +3023,15 @@ class FileJournalRetryService:
                 rejected=rejected,
                 rejected_total_count=rejected_total_count,
                 candidate_batch=candidate_batch,
+                db_free_resolved=db_free_resolution.resolved if db_free_resolution is not None else {},
+                db_free_missing=[] if db_free_resolution is not None else [],
+                db_free_required=db_free_required,
             )
             manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
+            if db_free_resolution is not None:
+                manifest_fields.update(
+                    {field: value for field, (value, _source) in db_free_resolution.resolved.items()}
+                )
             return SimpleNamespace(manifest_fields=manifest_fields, evidence=evidence)
         if not runtime_roots_required:
             return None
@@ -3004,6 +3042,9 @@ class FileJournalRetryService:
             rejected=rejected,
             rejected_total_count=rejected_total_count,
             candidate_batch=candidate_batch,
+            db_free_resolved=best_db_free_resolved,
+            db_free_missing=best_db_free_missing,
+            db_free_required=db_free_required,
         )
         if secret_rejected:
             raise _RetryRuntimeRootResolutionError(
@@ -3017,9 +3058,21 @@ class FileJournalRetryService:
                 "Manual retry runtime-root evidence contains unsafe local root values.",
                 evidence,
             )
+        if best_missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Manual retry cannot resolve required object-store runtime roots.",
+                evidence,
+            )
+        if best_db_free_missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Manual retry cannot resolve required DB-free scheduler runtime selectors.",
+                evidence,
+            )
         raise _RetryRuntimeRootResolutionError(
             RETRY_RUNTIME_ROOTS_UNRESOLVED,
-            "Manual retry cannot resolve required object-store runtime roots.",
+            "Manual retry cannot resolve required runtime roots.",
             evidence,
         )
 
@@ -3440,7 +3493,7 @@ def _runtime_root_recovery_candidate_records(details: Mapping[str, Any]) -> list
 
 def _runtime_root_recovery_candidate_value(candidate: Mapping[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
-    for root_field in _RUNTIME_ROOT_FIELDS:
+    for root_field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS):
         if root_field not in candidate:
             continue
         value = _strip_internal_fields(candidate[root_field])
@@ -3716,7 +3769,7 @@ def _manual_retry_submission_failure_details(
 
 
 def _mapping_has_runtime_root_fields(value: Mapping[str, Any]) -> bool:
-    return any(field in value for field in _RUNTIME_ROOT_FIELDS)
+    return any(field in value for field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS))
 
 
 def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:

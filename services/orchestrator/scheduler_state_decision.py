@@ -13,6 +13,7 @@ from services.orchestrator.scheduler_state_failure import (
     _downstream_retry_evidence,
     _manual_retry_state_evidence,
     _missing_raw_manifest_repair_evidence,
+    _missing_upstream_forecast_artifact_evidence,
     _model_package_refresh_retry_evidence,
     _permanent_failure_evidence,
     _repaired_raw_manifest_downstream_retry_evidence,
@@ -32,7 +33,9 @@ from services.orchestrator.scheduler_state_rows import (
     _bounded_candidate_state,
     _candidate_state_has_identity_mismatch,
     _state_active_jobs,
+    _state_events,
     _state_has_only_unsubmitted_auto_retry_placeholders,
+    _state_jobs,
     _state_output_uri,
     _state_status,
 )
@@ -45,6 +48,7 @@ from services.orchestrator.scheduler_state_types import (
     CandidateStateDecision,
     SchedulerCandidateLike,
 )
+from workers.data_adapters.base import format_cycle_time
 
 
 def _candidate_state_decision(
@@ -85,6 +89,7 @@ def _candidate_state_decision(
         candidate,
         decision_state,
     )
+    completed_cycle_terminal = _completed_cycle_terminal_evidence(candidate, decision_state, evidence)
     stale_hydro_placeholder_superseded_by_auto_retry = False
     only_unsubmitted_auto_retry_placeholders = (
         pipeline_status in ACTIVE_PIPELINE_STATUSES
@@ -104,6 +109,11 @@ def _candidate_state_decision(
     )
     if terminal_pipeline_success_supersedes_hydro_placeholder:
         hydro_status = None
+    completed_cycle_terminal_supersedes_hydro_placeholder = (
+        completed_cycle_terminal is not None and hydro_status in {"created", "staged", "submitted"}
+    )
+    if completed_cycle_terminal_supersedes_hydro_placeholder:
+        hydro_status = None
     completed_stage_retry = _completed_upstream_stage_retry_evidence(candidate, decision_state, evidence)
     completed_stage_retry_supersedes_hydro_placeholder = (
         completed_stage_retry is not None
@@ -118,6 +128,7 @@ def _candidate_state_decision(
         (
             stale_hydro_placeholder_superseded_by_auto_retry
             or terminal_pipeline_success_supersedes_hydro_placeholder
+            or completed_cycle_terminal_supersedes_hydro_placeholder
             or completed_stage_retry_supersedes_hydro_placeholder
         )
         and active_truth is not None
@@ -184,6 +195,22 @@ def _candidate_state_decision(
             },
         )
 
+    if completed_cycle_terminal is not None:
+        return CandidateStateDecision("skip", "terminal_completed_cycle", completed_cycle_terminal)
+
+    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+        candidate,
+        decision_state,
+        evidence,
+        completed_stage_retry,
+    )
+    if missing_upstream_artifact is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(missing_upstream_artifact.get("reason") or "missing_upstream_artifact"),
+            missing_upstream_artifact,
+        )
+
     if completed_stage_retry is not None:
         return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 
@@ -210,6 +237,18 @@ def _candidate_state_decision(
         )
 
     downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)
+    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+        candidate,
+        decision_state,
+        evidence,
+        downstream_retry,
+    )
+    if missing_upstream_artifact is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(missing_upstream_artifact.get("reason") or "missing_upstream_artifact"),
+            missing_upstream_artifact,
+        )
     if downstream_retry is not None:
         return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
 
@@ -255,6 +294,153 @@ def _candidate_state_decision(
         )
 
     return None
+
+
+_COMPLETED_CYCLE_STATUSES = frozenset({"complete", "completed", "succeeded", "published", "done"})
+_TERMINAL_COPYBACK_STATUSES = frozenset({"complete", "completed", "succeeded", "published", "done"})
+_TERMINAL_STAGE_NAMES = frozenset({"parse", "state_save_qc", "publish", "copyback"})
+
+
+def _completed_cycle_terminal_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    forecast_cycle = state.get("forecast_cycle")
+    if not isinstance(forecast_cycle, Mapping):
+        return None
+    cycle_status = str(forecast_cycle.get("status") or forecast_cycle.get("cycle_status") or "").lower()
+    if cycle_status not in _COMPLETED_CYCLE_STATUSES:
+        return None
+    cycle_id = forecast_cycle.get("cycle_id")
+    if cycle_id not in (None, "") and str(cycle_id) != candidate.cycle_id:
+        return None
+    terminal_evidence = _terminal_stage_or_copyback_evidence(candidate, state)
+    if terminal_evidence is None:
+        return None
+    return {
+        **base_evidence,
+        "decision": "skip_terminal",
+        "terminal_source": "forecast_cycle",
+        "terminal_status": cycle_status,
+        "completed_forecast_cycle": _evidence_safe(dict(forecast_cycle)),
+        "terminal_stage_evidence": _evidence_safe(dict(terminal_evidence)),
+        "native_shud_resubmitted": False,
+        "replacement_submitted": False,
+    }
+
+
+def _terminal_stage_or_copyback_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    for key in ("copyback_evidence", "terminal_stage_evidence", "completed_stage_evidence"):
+        value = state.get(key)
+        if isinstance(value, Mapping) and _mapping_is_terminal_stage_or_copyback(value):
+            if not _terminal_evidence_matches_candidate(candidate, value):
+                continue
+            return value
+    for job in reversed(_state_jobs(state)):
+        if _mapping_is_terminal_stage_or_copyback(job):
+            if not _terminal_evidence_matches_candidate(candidate, job):
+                continue
+            return job
+    for event in reversed(_state_events(state)):
+        details = event.get("details")
+        if isinstance(details, Mapping) and _mapping_is_terminal_stage_or_copyback(details):
+            if not _terminal_evidence_matches_candidate(candidate, details):
+                continue
+            return details
+        if _mapping_is_terminal_stage_or_copyback(event):
+            if not _terminal_evidence_matches_candidate(candidate, event):
+                continue
+            return event
+    return None
+
+
+def _mapping_is_terminal_stage_or_copyback(value: Mapping[str, Any]) -> bool:
+    stage = str(value.get("stage") or value.get("job_type") or value.get("stage_name") or "").lower()
+    status = str(value.get("status") or value.get("pipeline_status") or value.get("status_to") or "").lower()
+    if stage == "" and any(key in value for key in ("copyback_source_uri", "copyback_source", "copyback_manifest_uri")):
+        stage = "copyback"
+    return stage in _TERMINAL_STAGE_NAMES and status in _TERMINAL_COPYBACK_STATUSES
+
+
+def _terminal_evidence_matches_candidate(
+    candidate: SchedulerCandidateLike,
+    evidence: Mapping[str, Any],
+) -> bool:
+    identity_seen = False
+    checks = (
+        (
+            "source_id",
+            _candidate_source_values(candidate),
+            (("source_id",), ("source",), ("identity", "source_id"), ("identity", "source")),
+        ),
+        ("cycle_id", {str(candidate.cycle_id)}, (("cycle_id",), ("identity", "cycle_id"))),
+        (
+            "cycle_time",
+            _candidate_cycle_time_values(candidate),
+            (("cycle_time",), ("cycle_time_utc",), ("identity", "cycle_time"), ("identity", "cycle_time_utc")),
+        ),
+        ("model_id", {str(candidate.model_id)}, (("model_id",), ("identity", "model_id"))),
+        (
+            "run_id",
+            {str(candidate.run_id)},
+            (("run_id",), ("hydro_run_id",), ("identity", "run_id"), ("identity", "hydro_run_id")),
+        ),
+        ("candidate_id", {str(candidate.candidate_id)}, (("candidate_id",), ("identity", "candidate_id"))),
+    )
+    for field_name, expected_values, aliases in checks:
+        value = _first_terminal_identity_value(evidence, aliases)
+        if value in (None, ""):
+            continue
+        identity_seen = True
+        actual_values = _terminal_identity_values(field_name, str(value))
+        if actual_values.isdisjoint(expected_values):
+            return False
+    return identity_seen
+
+
+def _first_terminal_identity_value(
+    payload: Mapping[str, Any],
+    aliases: tuple[tuple[str, ...], ...],
+) -> Any:
+    for path in aliases:
+        current: Any = payload
+        for key in path:
+            if not isinstance(current, Mapping) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current not in (None, ""):
+            return current
+    return None
+
+
+def _candidate_source_values(candidate: SchedulerCandidateLike) -> set[str]:
+    value = str(candidate.source_id)
+    return {value, value.lower(), value.upper()}
+
+
+def _candidate_cycle_time_values(candidate: SchedulerCandidateLike) -> set[str]:
+    compact = format_cycle_time(candidate.cycle_time_utc)
+    iso = candidate.cycle_time_utc.isoformat().replace("+00:00", "Z")
+    return {compact, iso, iso.replace("Z", "+00:00")}
+
+
+def _terminal_identity_values(field_name: str, value: str) -> set[str]:
+    text = value.strip()
+    if field_name == "source_id":
+        return {text, text.lower(), text.upper()}
+    if field_name == "cycle_time":
+        values = {text}
+        try:
+            values.add(format_cycle_time(text))
+        except (TypeError, ValueError):
+            pass
+        return values
+    return {text}
 
 def _candidate_repaired_state_audit_evidence(
     candidate: SchedulerCandidateLike,

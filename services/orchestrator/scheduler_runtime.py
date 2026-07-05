@@ -16,6 +16,7 @@ from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
 
 _VALID_TIMING_LEVELS = frozenset({"pass", "stage", "candidate"})
+_PROGRESS_GUARD_REASON = "scheduler_progress_guard_blocked"
 
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = _scheduler.RECONCILE_DB_CONNECT_TIMEOUT_SECONDS
 RECONCILE_DB_STATEMENT_TIMEOUT_MS = _scheduler.RECONCILE_DB_STATEMENT_TIMEOUT_MS
@@ -24,6 +25,84 @@ SchedulerEvidenceWriteError = _scheduler_evidence_module.SchedulerEvidenceWriteE
 SchedulerPassResult = _scheduler.SchedulerPassResult
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 UNKNOWN_AFTER_ATTEMPT = _scheduler_evidence_module.UNKNOWN_AFTER_ATTEMPT
+
+
+class _SchedulerProgressGuard:
+    def __init__(self, max_no_progress_steps: int) -> None:
+        self.max_no_progress_steps = max(int(max_no_progress_steps), 0)
+        self.no_progress_steps = 0
+        self.checkpoints: list[dict[str, Any]] = []
+
+    def checkpoint(self, phase: str, progressed: bool, details: Mapping[str, Any] | None = None) -> None:
+        if progressed:
+            self.no_progress_steps = 0
+        else:
+            self.no_progress_steps += 1
+        self.checkpoints.append(
+            {
+                "phase": phase,
+                "progressed": bool(progressed),
+                "no_progress_steps": self.no_progress_steps,
+                "details": dict(details or {}),
+            }
+        )
+        self.checkpoints = self.checkpoints[-16:]
+        if self.no_progress_steps > self.max_no_progress_steps:
+            raise SchedulerResourceLimitError(
+                _PROGRESS_GUARD_REASON,
+                {
+                    "progress_guard": self.evidence(status="blocked", blocked_phase=phase),
+                },
+            )
+
+    def evidence(self, *, status: str = "passed", blocked_phase: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "reason": _PROGRESS_GUARD_REASON if status == "blocked" else None,
+            "max_no_progress_steps": self.max_no_progress_steps,
+            "no_progress_steps": self.no_progress_steps,
+            "bounded": True,
+            "checkpoints": list(self.checkpoints),
+        }
+        if blocked_phase is not None:
+            payload["blocked_phase"] = blocked_phase
+        return payload
+
+
+def _restart_reconcile_progressed(proof: Mapping[str, Any]) -> bool:
+    return proof.get("mutation_occurred") is True or proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT
+
+
+def _model_discovery_blocked(model_evidence: Mapping[str, Any]) -> bool:
+    registry = model_evidence.get("registry") if isinstance(model_evidence, Mapping) else None
+    return isinstance(registry, Mapping) and registry.get("status") == "blocked"
+
+
+def _source_cycle_evidence_progressed(source_cycle_evidence: list[dict[str, Any]]) -> bool:
+    stable_statuses = {
+        "excluded",
+        "blocked",
+        "candidate_blocked",
+        "unavailable",
+        "not_selected",
+        "complete",
+        "gap",
+    }
+    return any(
+        str(item.get("status") or item.get("selection_status") or "") in stable_statuses
+        for item in source_cycle_evidence
+    )
+
+
+def _status_sync_or_cancel_progressed(
+    slurm_status_sync_proof: Mapping[str, Any],
+    cancellation_evidence: list[dict[str, Any]],
+) -> bool:
+    return (
+        _slurm_status_sync_count(slurm_status_sync_proof) > 0
+        or _slurm_status_sync_unknown_count(slurm_status_sync_proof) > 0
+        or bool(cancellation_evidence)
+    )
 
 
 def _LeaseHeartbeat(*args, **kwargs):
@@ -639,6 +718,47 @@ def run_once(self) -> SchedulerPassResult:
         heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
         heartbeat.start()
         try:
+            progress_guard_limit = max(int(getattr(self.config, "progress_guard_max_no_progress_steps", 256)), 0)
+            if progress_guard_limit == 0:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_evidence,
+                        "root_preflight": root_preflight,
+                        "db_free_runtime": db_free_preflight,
+                        "progress_guard": {
+                            "status": "blocked",
+                            "reason": "scheduler_progress_guard_blocked",
+                            "max_no_progress_steps": progress_guard_limit,
+                            "no_progress_steps": 0,
+                            "bounded": True,
+                        },
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "scheduler_progress_guard_blocked",
+                    }
+                )
+                status = _evidence_status(evidence, "preflight_blocked")
+                _finalize_timing_into_evidence(evidence, collector, status)
+                artifact_path = self._write_evidence(pass_id, evidence)
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
+            progress_guard = _SchedulerProgressGuard(progress_guard_limit)
             if not db_free_required:
                 root_preflight = _scheduler_runtime_root_preflight(self.config)
             if not db_free_required and root_preflight["status"] == "blocked":
@@ -686,7 +806,17 @@ def run_once(self) -> SchedulerPassResult:
             # queriers so the wall-clock is dominated by subprocess-wait.
             restart_reconcile_evidence = _restart_reconcile_with_timing(self, collector)
             restart_reconcile_proof = _restart_reconcile_proof(restart_reconcile_evidence)
+            progress_guard.checkpoint(
+                "reconcile",
+                _restart_reconcile_progressed(restart_reconcile_proof),
+                {"mutation_occurred": restart_reconcile_proof.get("mutation_occurred")},
+            )
             models, model_evidence = self._discover_models()
+            progress_guard.checkpoint(
+                "model_discovery",
+                bool(models) or _model_discovery_blocked(model_evidence),
+                {"selected_model_count": len(models)},
+            )
             registry_evidence = model_evidence.get("registry") if isinstance(model_evidence, Mapping) else None
             if isinstance(registry_evidence, Mapping) and registry_evidence.get("status") == "blocked":
                 finished_at = _now(self.config)
@@ -721,6 +851,11 @@ def run_once(self) -> SchedulerPassResult:
                     artifact_path=artifact_path,
                 )
             cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
+            progress_guard.checkpoint(
+                "cycle_discovery",
+                bool(cycles) or _source_cycle_evidence_progressed(source_cycle_evidence),
+                {"source_cycle_count": len(cycles), "evidence_count": len(source_cycle_evidence)},
+            )
             (
                 candidates,
                 blocked_candidates,
@@ -728,6 +863,15 @@ def run_once(self) -> SchedulerPassResult:
                 candidate_duplicate_exclusions,
                 slurm_status_sync_evidence,
             ) = self._build_candidates(models=models, cycles=cycles)
+            progress_guard.checkpoint(
+                "candidate_build",
+                bool(candidates or blocked_candidates or skipped_candidates or candidate_duplicate_exclusions),
+                {
+                    "candidate_count": len(candidates),
+                    "blocked_candidate_count": len(blocked_candidates),
+                    "skipped_candidate_count": len(skipped_candidates),
+                },
+            )
             cancellation_evidence: list[dict[str, Any]] = []
             pending_cancel_candidates = [
                 candidate
@@ -801,6 +945,11 @@ def run_once(self) -> SchedulerPassResult:
                         started_at,
                         mutation_candidate_count,
                     )
+                progress_guard.checkpoint(
+                    "evidence_reservation",
+                    evidence_reservation.get("status") in {"reserved", "blocked"},
+                    {"status": evidence_reservation.get("status")},
+                )
                 if evidence_reservation["status"] == "blocked":
                     execution_evidence = [
                         _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
@@ -878,6 +1027,20 @@ def run_once(self) -> SchedulerPassResult:
                             cycles=cycles,
                             allow_slurm_status_sync=True,
                         )
+                        progress_guard.checkpoint(
+                            "candidate_rebuild_after_status_sync",
+                            bool(
+                                candidates
+                                or blocked_candidates
+                                or skipped_candidates
+                                or candidate_duplicate_exclusions
+                                or slurm_status_sync_evidence
+                            ),
+                            {
+                                "candidate_count": len(candidates),
+                                "status_sync_evidence_count": len(slurm_status_sync_evidence),
+                            },
+                        )
                         pending_cancel_candidates = [
                             candidate
                             for candidate in skipped_candidates
@@ -903,6 +1066,14 @@ def run_once(self) -> SchedulerPassResult:
                                 cancellation_evidence,
                                 reservation=evidence_reservation,
                             )
+                        progress_guard.checkpoint(
+                            "status_sync_cancel",
+                            _status_sync_or_cancel_progressed(slurm_status_sync_proof, cancellation_evidence),
+                            {
+                                "status_sync_count": _slurm_status_sync_count(slurm_status_sync_proof),
+                                "cancel_evidence_count": len(cancellation_evidence),
+                            },
+                        )
                         if candidates:
                             if _db_free_journal_mutation_blocked(
                                 self.config,
@@ -938,6 +1109,14 @@ def run_once(self) -> SchedulerPassResult:
                                     ) = self._produce_forcing_for_candidates(candidates)
                                     blocked_candidates.extend(forcing_blocked_candidates)
                                     execution_evidence.extend(forcing_evidence)
+                                    progress_guard.checkpoint(
+                                        "forcing",
+                                        bool(forcing_evidence or forcing_blocked_candidates),
+                                        {
+                                            "forcing_evidence_count": len(forcing_evidence),
+                                            "forcing_blocked_count": len(forcing_blocked_candidates),
+                                        },
+                                    )
                             if candidates and not _db_free_journal_mutation_blocked(
                                 self.config,
                                 mutation_requested=bool(candidates),
@@ -975,6 +1154,11 @@ def run_once(self) -> SchedulerPassResult:
                                     no_mutation_proof = _no_mutation_proof()
                                 else:
                                     execution_evidence.extend(self._execute_candidates(candidates))
+                                    progress_guard.checkpoint(
+                                        "submission",
+                                        bool(execution_evidence),
+                                        {"execution_evidence_count": len(execution_evidence)},
+                                    )
                                     execution_write_proof = _execution_write_proof_from_evidence(
                                         execution_evidence,
                                         reservation=evidence_reservation,
@@ -1102,6 +1286,10 @@ def run_once(self) -> SchedulerPassResult:
                     "slurm_cancellation_proof": slurm_cancellation_proof,
                     "no_mutation_proof": no_mutation_proof,
                     "execution_boundary": execution_boundary,
+                    "progress_guard": {
+                        **progress_guard.evidence(status="passed"),
+                        "no_work_safe_state_only": total_candidate_count == 0 and submitted_count == 0,
+                    },
                 }
             )
             if restart_reconcile_evidence is not None:
@@ -1178,6 +1366,10 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "planning_only",
                 }
             )
+            progress_guard_evidence = error.details.get("progress_guard")
+            if isinstance(progress_guard_evidence, Mapping):
+                evidence["progress_guard"] = dict(progress_guard_evidence)
+                evidence["execution_boundary"] = _PROGRESS_GUARD_REASON
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
             status = _evidence_status(evidence, "resource_limit_blocked")
