@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from services.orchestrator import source_cycle_raw_manifest
+from services.orchestrator.scheduler_timing import set_current_scheduler_pass_timing
 
 
 class SchedulerExecutionCandidate(Protocol):
@@ -248,8 +249,47 @@ def execute_candidate_cohort(
     *,
     orchestration_run_id: str | None,
 ) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
+    # SUB-3 (#861) Phase 6.5 refactor: the cohort-scope ``stage_span`` opened
+    # here previously used ``stage_name = orchestration_run_id or "full"``
+    # (outside spec's canonical five-entry ``_FORECAST_STAGE_ORDER`` domain)
+    # and stashed the collector + active span on ``orchestrator`` — a shared
+    # ``ForecastOrchestrator`` instance is reused across ``ThreadPoolExecutor``
+    # workers when ``concurrent_submit_bound > 1``, so those stashes raced
+    # (empirically 27-35% test flake on ``test_multi_candidate_restart_...`` +
+    # ``test_backfill_selects_global_oldest_cycle_...``).
+    #
+    # The correct wiring is: open one ``stage_span`` per pipeline stage
+    # (``convert``, ``forcing``, ``forecast``, ``parse``, ``state_save_qc``)
+    # inside ``chain_forecast_execution._run_cycle_chain`` — one canonical
+    # record per (source_id, cycle_id, stage_name) tuple as spec.md §"Stage-
+    # layer timing" requires. Downstream reads the collector via a
+    # ``contextvars.ContextVar`` bound here (per-thread, not shared) rather
+    # than an orchestrator attribute stash that raced across concurrent
+    # cohort workers.
     orchestrator = context.orchestrator_for(source_id)
+    with set_current_scheduler_pass_timing(context.timing):
+        return _execute_candidate_cohort_impl(
+            context,
+            source_id,
+            cycle_time,
+            cycle_id,
+            cycle_candidates,
+            orchestration_run_id=orchestration_run_id,
+            orchestrator=orchestrator,
+        )
+
+
+def _execute_candidate_cohort_impl(
+    context: SchedulerExecutionContext,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+    cycle_candidates: Sequence[SchedulerExecutionCandidate],
+    *,
+    orchestration_run_id: str | None,
+    orchestrator: Any,
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
     basins: list[dict[str, Any]] = []
     submitted_candidates: list[SchedulerExecutionCandidate] = []
     candidate_output_uris: dict[str, str] = {}
