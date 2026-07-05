@@ -2451,7 +2451,10 @@ class FileOrchestrationJournalRepository:
         sequences: list[int] = []
         for source_segment in source_segments:
             for surface in ("journal", "pipeline-events"):
-                records = self._read_jsonl(self.root / surface / source_segment / f"{cycle_segment}.jsonl")
+                path = self.root / surface / source_segment / f"{cycle_segment}.jsonl"
+                if not self._sequence_regular_file_exists(path):
+                    continue
+                records = self._read_jsonl(path)
                 sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
         sequences.extend(
             self._latest_replay_sequences_unlocked(
@@ -2473,8 +2476,11 @@ class FileOrchestrationJournalRepository:
         if source_segments is None:
             source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
+        cycle_segment = format_cycle_time(cycle_time)
         for source_segment in source_segments:
-            for path in self._latest_paths(source_segment, format_cycle_time(cycle_time), model_id=None):
+            if not self._sequence_directory_exists(self.root / "latest" / source_segment / cycle_segment):
+                continue
+            for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
                 payload = self._read_optional_json(path)
                 if payload is None:
                     continue
@@ -2482,6 +2488,32 @@ class FileOrchestrationJournalRepository:
                 _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
                 sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
+
+    def _sequence_regular_file_exists(self, path: Path) -> bool:
+        try:
+            mode = os.stat(path, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(path, self.root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        return stat.S_ISREG(mode)
+
+    def _sequence_directory_exists(self, path: Path) -> bool:
+        try:
+            mode = os.stat(path, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(path, self.root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        return stat.S_ISDIR(mode)
 
     def _next_event_id_unlocked(
         self,
