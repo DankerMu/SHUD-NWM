@@ -64,6 +64,7 @@ _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "duplicate_exclusions",
     "readiness_interpretation",
     "execution_mode",
+    "timing",
 )
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})
 

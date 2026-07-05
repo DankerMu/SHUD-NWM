@@ -76,6 +76,15 @@ class SchedulerExecutionContext:
     evidence_safe: Callable[[Any], Any]
     candidate_execution_evidence: Callable[..., list[dict[str, Any]]]
     unknown_after_attempt: str
+    # SUB-2 wiring for scheduler-pass-timing-instrumentation (#860): SUB-3
+    # (scheduler_execution stage spans) and SUB-4 (chain_forecast_execution
+    # candidate spans) consume the per-pass ``SchedulerPassTiming`` via this
+    # attribute. Typed ``Any`` so this module does not import the collector
+    # (avoids a cycle with ``scheduler_runtime`` on some import paths).
+    # ``None`` at construction preserves back-compat for callers that build a
+    # context without an active pass (e.g. unit-test fixtures for helpers
+    # here that never reach a real ``run_once``).
+    timing: Any | None = None
 
 
 def produce_forcing_for_candidates(
