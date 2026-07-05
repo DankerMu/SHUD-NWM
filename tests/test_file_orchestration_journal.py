@@ -1269,6 +1269,70 @@ def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(t
     assert after - before <= 4
 
 
+def test_safe_fs_missing_child_read_closes_intermediate_parent_fds(tmp_path: Path) -> None:
+    root = tmp_path / "journal"
+    (root / "latest").mkdir(parents=True)
+
+    before = _open_fd_count_or_skip()
+    for _ in range(40):
+        with pytest.raises(FileNotFoundError):
+            safe_fs.read_bytes_limited_no_follow(
+                root / "latest" / "missing_source" / "2026062800" / "model_a.json",
+                max_bytes=32,
+                containment_root=root,
+            )
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
+
+
+def test_file_orchestration_journal_cycle_rows_missing_alias_reads_close_parent_fds(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root, max_files=128)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_records = []
+    for index in range(16):
+        model_id = f"model_{index}"
+        _write_json(
+            journal_root / "latest" / "gfs" / cycle_segment / f"{model_id}.json",
+            _latest_view(source_id="gfs", cycle_time=cycle_time, model_id=model_id, jobs=[]),
+        )
+        job = _pipeline_reservation_record(
+            cycle_time,
+            job_id=f"job_cycle_gfs_{cycle_segment}_{model_id}_forcing",
+            status="pending",
+        )
+        job.update(
+            {
+                "cycle_id": f"gfs_{cycle_segment}",
+                "job_type": "produce_forcing_array",
+                "model_id": model_id,
+                "run_id": f"cycle_gfs_{cycle_segment}_{model_id}",
+                "slurm_job_id": str(6000 + index),
+                "stage": "forcing",
+            }
+        )
+        journal_records.append(
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=job,
+                model_id=model_id,
+                sequence=index + 1,
+            )
+        )
+    _write_jsonl(journal_root / "journal" / "gfs" / f"{cycle_segment}.jsonl", journal_records)
+
+    before = _open_fd_count_or_skip()
+    for index in range(16):
+        repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=f"model_{index}")
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
+
+
 def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_records(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
