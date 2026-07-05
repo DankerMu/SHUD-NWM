@@ -83,6 +83,10 @@ uv run nhms-pipeline plan-production \
   --workspace-root "$WORKSPACE_ROOT"
 ```
 
+### Timing evidence & stdout volume
+
+生产 scheduler 每 pass 的 evidence JSON 顶层新增 `timing:` 块，包含 `pass`（总 wall / CPU / python-time / slurm-wait / status，恒定写入）、`stages`（每 stage 的 `dispatch_ms` 与直接测量的 `slurm_wait_ms`）、`candidates`（每 basin 的 sub-phase 分解，仅在 `NHMS_SCHEDULER_TIMING_LEVEL=candidate` 时出现）与 `restart_reconcile`（`sacct` 子进程 wall/CPU 拆分，`stage` 及以上级别恒定出现）。`NHMS_SCHEDULER_TIMING_LEVEL` 按 `pass ≤ stage ≤ candidate` 三级门控 stdout 数据量：`pass` 级只发 pass 边界的单行 JSON，`stage` 级追加每 stage 起止的单行 JSON，`candidate` 级不额外写 stdout —— candidate 记录只落 evidence，永不进入 journald。journald 由 `nhms-compute-scheduler.service` 自动捕获 stdout，用 `journalctl --user -u nhms-compute-scheduler.service -f | jq -c 'select(.phase|test("^pass:|^stage:"))'` 即可跟随实时 phase transition，而不必尾随 NFS 上的 evidence artefact。
+
 ## #214 evidence boundary
 
 Issue #214 的 MVP smoke/evidence 索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。本文中的 GFS/IFS `2026052100`、`2026052106` 结果属于 qhh diagnostic/reproduction evidence；它们证明记录周期可以完成 qhh 脚本链路，但不能替代 `nhms-pipeline plan-production` 的 formal scheduler evidence，也不能替代 target-env final production readiness。
