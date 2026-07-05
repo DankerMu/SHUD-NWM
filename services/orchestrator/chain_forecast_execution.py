@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,20 @@ from services.orchestrator.scheduler_timing import (
     current_stage_span,
     set_current_stage_span,
 )
+
+
+@contextmanager
+def _null_candidate_span() -> Any:
+    """No-op stand-in for ``SchedulerPassTiming.candidate_span``.
+
+    Used by SUB-4 (#862) inside ``_submit_and_wait`` when no scheduler-pass
+    collector is bound (``trigger_forecast`` from CLI / unit-test paths).
+    Yields a throwaway dict so the branchless per-sub-phase writes below
+    stay uniform; nothing is retained. A fresh context manager is minted
+    per invocation so nested / repeated ``_submit_and_wait`` calls are safe.
+    """
+
+    yield {}
 
 # SUB-3 (#861): canonical five-entry ``stage_name`` domain per spec.md §
 # "Stage-layer timing" — mirrors ``chain_repository_state._FORECAST_STAGE_ORDER``.
@@ -615,163 +630,206 @@ def _submit_and_wait(
 ) -> StageRunResult:
     self._before_stage_submit(stage, context)
 
-    manifest = self._build_stage_submission_manifest(stage, context)
-    payload = {
-        "run_id": context.run_id,
-        "model_id": context.model_id,
-        "job_type": stage.job_type,
-        "manifest": self._slurm_submission_manifest(manifest),
-    }
-    # SUB-3 (#861): direct-measure the Slurm-boundary wall-clock at every
-    # dispatch site. ``collector`` + ``stage_span`` come from the
-    # ``ContextVar`` slots bound in ``scheduler_execution.execute_candidate_cohort``
-    # (collector) and ``_run_cycle_chain`` per pipeline-stage iteration
-    # (stage_span). ContextVar keeps this per-worker-thread safe under
-    # ``concurrent_submit_bound > 1`` — the previous
-    # ``getattr(self, "_scheduler_pass_timing", ...)`` + attribute stash raced
-    # because a shared ``ForecastOrchestrator`` may serve multiple
-    # ``ThreadPoolExecutor`` workers. Both slots are ``None`` in the
-    # ``trigger_forecast`` path from CLI / unit-test fixtures that never enter
-    # a scheduler pass, in which case the timing wrap is a no-op. Spec.md
-    # "python-time and slurm-wait attribution is direct-measured, never
-    # inferred": both ``submit_job`` and ``_poll_until_terminal`` MUST be
-    # wrapped so ``slurm_wait_ms`` is a measurement, not an inference by
-    # subtraction (also covers the already-terminal-on-submit fast path
-    # at L568-572 because ``submit_job`` is wrapped regardless of branch).
+    # SUB-4 (#862): open a per-candidate span so the four dispatch sub-phases
+    # (``build_stage_manifest_ms``, ``submit_sbatch_ms``, ``poll_until_terminal_ms``,
+    # ``post_stage_hook_ms``) attach to a persistent record when the collector
+    # level is ``candidate``. ``candidate_span`` yields a throwaway dict below
+    # level ``candidate`` so callers can populate fields unconditionally.
+    # ``collector`` is ``None`` from CLI / unit-test paths that never enter a
+    # scheduler pass — in that case we skip opening a span and use a local dict
+    # (the writes are effectively free and simplify branchless code below).
     collector = current_scheduler_pass_timing()
     stage_span = current_stage_span()
-    ns_before_submit = time.monotonic_ns()
-    try:
-        submitted = self.slurm_client.submit_job(payload)
-    finally:
-        # Attribute submit wall-clock unconditionally in a ``finally`` so
-        # a raised ``submit_job`` (gateway timeout, transport error) still
-        # accounts for the wall it actually consumed on the Slurm side.
-        if collector is not None and stage_span is not None:
-            ns_after_submit = time.monotonic_ns()
-            stage_span.add_slurm_wait_interval(
-                collector._ms_from_pass_entry(ns_before_submit),
-                collector._ms_from_pass_entry(ns_after_submit),
-            )
-    slurm_job_id = str(submitted["job_id"])
-    pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
-    log_publication = self._display_log_publication_for_stage(
-        source_id=context.source_id,
-        cycle_time=context.cycle_time,
-        run_id=context.run_id,
-        job_id=pipeline_job_id,
-        stage=stage.stage,
-    )
-    current_status = _status_from_gateway_job(submitted)
-    submitted_log_uri = log_publication.advertised_uri
-    submitted_publish_attempt: DisplayLogPublicationAttempt | None = None
-    if current_status in TERMINAL_JOB_STATUSES:
-        submitted_publish_attempt = self._try_publish_log_for_advertise(slurm_job_id, log_publication)
-        submitted_log_uri = submitted_publish_attempt.advertised_uri
-        if submitted_log_uri:
-            submitted["log_uri"] = submitted_log_uri
-    pipeline_record = self.repository.upsert_pipeline_job(
-        {
-            "job_id": pipeline_job_id,
-            "run_id": context.run_id,
-            "cycle_id": context.cycle_id,
-            "job_type": stage.job_type,
-            "slurm_job_id": slurm_job_id,
-            "model_id": context.model_id,
-            "status": current_status,
-            "stage": stage.stage,
-            "submitted_at": _parse_gateway_time(submitted.get("submitted_at")),
-            "started_at": _parse_gateway_time(submitted.get("started_at")),
-            "finished_at": _parse_gateway_time(submitted.get("finished_at")),
-            "exit_code": submitted.get("exit_code"),
-            "error_code": submitted.get("error_code"),
-            "error_message": submitted.get("error_message"),
-            "log_uri": submitted_log_uri,
-        }
-    )
-    entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
-    self.repository.insert_pipeline_event(
-        entity_type=entity_type,
-        entity_id=entity_id,
-        event_type="status_change",
-        status_from=None,
-        status_to=current_status,
-        message=f"{stage.stage} submitted to Slurm Gateway as {slurm_job_id}",
-        details=_safe_pipeline_event_details(
-            {
-                "stage": stage.stage,
-                "slurm_job_id": slurm_job_id,
-                "slurm": {
-                    "job_id": slurm_job_id,
-                    "state": current_status,
-                    "exit_code": submitted.get("exit_code"),
-                    "log_uri": submitted_log_uri,
-                    "accounting": _slurm_accounting_from_payload(submitted),
-                    "resource_metrics": _resource_metrics_from_payload(submitted),
-                },
-            }
-        ),
-    )
-    if first_stage:
-        self.repository.update_hydro_run_status(context.run_id, "submitted", slurm_job_id=slurm_job_id)
-
-    if current_status in TERMINAL_JOB_STATUSES:
-        # Fast path (spec.md L172-176): submit_job returned terminal, so the
-        # ~100 ms of Slurm wall the test scenario attributes lives entirely
-        # inside the submit wrap above; ``_poll_until_terminal`` is never
-        # called and no additional interval is added here.
-        terminal_observation = TerminalJobObservation(
-            job=submitted,
-            publication_attempt=submitted_publish_attempt,
+    if collector is not None:
+        _candidate_cm = collector.candidate_span(
+            stage.stage,
+            model_id=context.model_id,
+            basin=context.basin_id,
+            source_id=context.source_id,
         )
     else:
-        ns_before_poll = time.monotonic_ns()
+        _candidate_cm = _null_candidate_span()
+    with _candidate_cm as candidate_record:
+        ns_before_build = time.monotonic_ns()
+        manifest = self._build_stage_submission_manifest(stage, context)
+        candidate_record["build_stage_manifest_ms"] = (
+            time.monotonic_ns() - ns_before_build
+        ) / 1_000_000.0
+        payload = {
+            "run_id": context.run_id,
+            "model_id": context.model_id,
+            "job_type": stage.job_type,
+            "manifest": self._slurm_submission_manifest(manifest),
+        }
+        # SUB-3 (#861): direct-measure the Slurm-boundary wall-clock at every
+        # dispatch site. ``collector`` + ``stage_span`` come from the
+        # ``ContextVar`` slots bound in ``scheduler_execution.execute_candidate_cohort``
+        # (collector) and ``_run_cycle_chain`` per pipeline-stage iteration
+        # (stage_span). ContextVar keeps this per-worker-thread safe under
+        # ``concurrent_submit_bound > 1`` — the previous
+        # ``getattr(self, "_scheduler_pass_timing", ...)`` + attribute stash raced
+        # because a shared ``ForecastOrchestrator`` may serve multiple
+        # ``ThreadPoolExecutor`` workers. Both slots are ``None`` in the
+        # ``trigger_forecast`` path from CLI / unit-test fixtures that never enter
+        # a scheduler pass, in which case the timing wrap is a no-op. Spec.md
+        # "python-time and slurm-wait attribution is direct-measured, never
+        # inferred": both ``submit_job`` and ``_poll_until_terminal`` MUST be
+        # wrapped so ``slurm_wait_ms`` is a measurement, not an inference by
+        # subtraction (also covers the already-terminal-on-submit fast path
+        # at L568-572 because ``submit_job`` is wrapped regardless of branch).
+        # SUB-4 (#862) reuses the same ``ns_before_submit`` / ``ns_after_submit``
+        # bookends to also record ``submit_sbatch_ms`` on the candidate record.
+        ns_before_submit = time.monotonic_ns()
         try:
-            terminal_observation = self._poll_until_terminal(
-                stage=stage,
-                context=context,
-                pipeline_job_id=pipeline_job_id,
-                initial_job=submitted,
-                initial_status=str(pipeline_record["status"]),
-                log_publication=log_publication,
-            )
+            submitted = self.slurm_client.submit_job(payload)
         finally:
-            # Same rationale as the submit wrap: even if poll raises after
-            # sleeping in ``time.sleep``, the wall-clock consumed on the
-            # Slurm side is real and must be attributed.
+            # Attribute submit wall-clock unconditionally in a ``finally`` so
+            # a raised ``submit_job`` (gateway timeout, transport error) still
+            # accounts for the wall it actually consumed on the Slurm side.
+            ns_after_submit = time.monotonic_ns()
+            candidate_record["submit_sbatch_ms"] = (
+                ns_after_submit - ns_before_submit
+            ) / 1_000_000.0
             if collector is not None and stage_span is not None:
-                ns_after_poll = time.monotonic_ns()
                 stage_span.add_slurm_wait_interval(
-                    collector._ms_from_pass_entry(ns_before_poll),
-                    collector._ms_from_pass_entry(ns_after_poll),
+                    collector._ms_from_pass_entry(ns_before_submit),
+                    collector._ms_from_pass_entry(ns_after_submit),
                 )
-    terminal = terminal_observation.job
-    publication_attempt = terminal_observation.publication_attempt
-    log_uri = str(terminal.get("log_uri") or "")
-    if not log_uri:
-        if publication_attempt is None:
-            publication_attempt = self._try_publish_log_for_advertise(slurm_job_id, log_publication)
-        log_uri = str(publication_attempt.advertised_uri or "")
+        slurm_job_id = str(submitted["job_id"])
+        pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
+        log_publication = self._display_log_publication_for_stage(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            run_id=context.run_id,
+            job_id=pipeline_job_id,
+            stage=stage.stage,
+        )
+        current_status = _status_from_gateway_job(submitted)
+        submitted_log_uri = log_publication.advertised_uri
+        submitted_publish_attempt: DisplayLogPublicationAttempt | None = None
+        if current_status in TERMINAL_JOB_STATUSES:
+            submitted_publish_attempt = self._try_publish_log_for_advertise(slurm_job_id, log_publication)
+            submitted_log_uri = submitted_publish_attempt.advertised_uri
+            if submitted_log_uri:
+                submitted["log_uri"] = submitted_log_uri
+        pipeline_record = self.repository.upsert_pipeline_job(
+            {
+                "job_id": pipeline_job_id,
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "job_type": stage.job_type,
+                "slurm_job_id": slurm_job_id,
+                "model_id": context.model_id,
+                "status": current_status,
+                "stage": stage.stage,
+                "submitted_at": _parse_gateway_time(submitted.get("submitted_at")),
+                "started_at": _parse_gateway_time(submitted.get("started_at")),
+                "finished_at": _parse_gateway_time(submitted.get("finished_at")),
+                "exit_code": submitted.get("exit_code"),
+                "error_code": submitted.get("error_code"),
+                "error_message": submitted.get("error_message"),
+                "log_uri": submitted_log_uri,
+            }
+        )
+        entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
+        self.repository.insert_pipeline_event(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            event_type="status_change",
+            status_from=None,
+            status_to=current_status,
+            message=f"{stage.stage} submitted to Slurm Gateway as {slurm_job_id}",
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": stage.stage,
+                    "slurm_job_id": slurm_job_id,
+                    "slurm": {
+                        "job_id": slurm_job_id,
+                        "state": current_status,
+                        "exit_code": submitted.get("exit_code"),
+                        "log_uri": submitted_log_uri,
+                        "accounting": _slurm_accounting_from_payload(submitted),
+                        "resource_metrics": _resource_metrics_from_payload(submitted),
+                    },
+                }
+            ),
+        )
+        if first_stage:
+            self.repository.update_hydro_run_status(context.run_id, "submitted", slurm_job_id=slurm_job_id)
 
-    if terminal["status"] == "succeeded":
-        self._after_stage_success(stage, context, terminal)
-    else:
-        self._after_stage_failure(stage, context, terminal)
-    self._raise_publish_error_after_durable_update(publication_attempt)
+        if current_status in TERMINAL_JOB_STATUSES:
+            # Fast path (spec.md L172-176): submit_job returned terminal, so the
+            # ~100 ms of Slurm wall the test scenario attributes lives entirely
+            # inside the submit wrap above; ``_poll_until_terminal`` is never
+            # called and no additional interval is added here.
+            # SUB-4 (#862): ``poll_until_terminal_ms`` is ``0`` on the fast path.
+            candidate_record["poll_until_terminal_ms"] = 0.0
+            terminal_observation = TerminalJobObservation(
+                job=submitted,
+                publication_attempt=submitted_publish_attempt,
+            )
+        else:
+            ns_before_poll = time.monotonic_ns()
+            try:
+                terminal_observation = self._poll_until_terminal(
+                    stage=stage,
+                    context=context,
+                    pipeline_job_id=pipeline_job_id,
+                    initial_job=submitted,
+                    initial_status=str(pipeline_record["status"]),
+                    log_publication=log_publication,
+                )
+            finally:
+                # Same rationale as the submit wrap: even if poll raises after
+                # sleeping in ``time.sleep``, the wall-clock consumed on the
+                # Slurm side is real and must be attributed.
+                # SUB-4 (#862) reuses the same ``ns_before_poll`` / ``ns_after_poll``
+                # bookends to also record ``poll_until_terminal_ms`` on the
+                # candidate record.
+                ns_after_poll = time.monotonic_ns()
+                candidate_record["poll_until_terminal_ms"] = (
+                    ns_after_poll - ns_before_poll
+                ) / 1_000_000.0
+                if collector is not None and stage_span is not None:
+                    stage_span.add_slurm_wait_interval(
+                        collector._ms_from_pass_entry(ns_before_poll),
+                        collector._ms_from_pass_entry(ns_after_poll),
+                    )
+        terminal = terminal_observation.job
+        publication_attempt = terminal_observation.publication_attempt
+        log_uri = str(terminal.get("log_uri") or "")
+        if not log_uri:
+            if publication_attempt is None:
+                publication_attempt = self._try_publish_log_for_advertise(slurm_job_id, log_publication)
+            log_uri = str(publication_attempt.advertised_uri or "")
 
-    return StageRunResult(
-        stage=stage.stage,
-        job_type=stage.job_type,
-        pipeline_job_id=pipeline_job_id,
-        slurm_job_id=slurm_job_id,
-        status=str(terminal["status"]),
-        exit_code=terminal.get("exit_code"),
-        error_code=terminal.get("error_code"),
-        error_message=terminal.get("error_message"),
-        log_uri=log_uri,
-        accounting=_slurm_accounting_from_payload(terminal),
-        task_results=(),
-    )
+        # SUB-4 (#862): time the post-stage hook (whichever branch runs);
+        # ``try/finally`` so a raising hook still attributes its wall-clock.
+        ns_before_hook = time.monotonic_ns()
+        try:
+            if terminal["status"] == "succeeded":
+                self._after_stage_success(stage, context, terminal)
+            else:
+                self._after_stage_failure(stage, context, terminal)
+        finally:
+            candidate_record["post_stage_hook_ms"] = (
+                time.monotonic_ns() - ns_before_hook
+            ) / 1_000_000.0
+        self._raise_publish_error_after_durable_update(publication_attempt)
+
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id=slurm_job_id,
+            status=str(terminal["status"]),
+            exit_code=terminal.get("exit_code"),
+            error_code=terminal.get("error_code"),
+            error_message=terminal.get("error_message"),
+            log_uri=log_uri,
+            accounting=_slurm_accounting_from_payload(terminal),
+            task_results=(),
+        )
 
 
 def _build_stage_submission_manifest(

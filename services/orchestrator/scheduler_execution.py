@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -289,12 +290,27 @@ def _execute_candidate_cohort_impl(
     orchestration_run_id: str | None,
     orchestrator: Any,
 ) -> list[dict[str, Any]]:
+    # SUB-4 (#862): per-basin / per-cohort sub-phase timing accumulator.
+    #
+    # Keyed on ``candidate.candidate_id`` for both loops (loop 1 populates the
+    # ``output_uri_lookup_ms`` + ``basin_manifest_build_ms`` fields for every
+    # ``candidate_output_uris``-eligible basin; loop 2 populates the three
+    # remaining per-basin fields for every basin that survives the Slurm
+    # preflight). ``basin_ms`` is a plain ``dict[str, float]`` — timing
+    # collector fan-out via ``attribute_per_basin_fields`` after
+    # ``orchestrate_cycle`` returns is a no-op below level ``candidate``,
+    # so measuring unconditionally here is safe (adds ~ns per basin) and
+    # keeps the code path branchless.
+    per_basin_ms: dict[str, dict[str, float]] = {}
     evidence: list[dict[str, Any]] = []
     basins: list[dict[str, Any]] = []
     submitted_candidates: list[SchedulerExecutionCandidate] = []
     candidate_output_uris: dict[str, str] = {}
     for candidate in cycle_candidates:
+        basin_ms = per_basin_ms.setdefault(candidate.candidate_id, {})
+        _ns_before = time.monotonic_ns()
         output_uri = context.candidate_output_uri(candidate, getattr(orchestrator, "object_store", None))
+        basin_ms["output_uri_lookup_ms"] = (time.monotonic_ns() - _ns_before) / 1_000_000.0
         if output_uri is None:
             evidence.append(
                 {
@@ -322,6 +338,7 @@ def _execute_candidate_cohort_impl(
             continue
         candidate_output_uris[candidate.candidate_id] = output_uri
         submitted_candidates.append(candidate)
+        _ns_before = time.monotonic_ns()
         basin_manifest = context.candidate_basin_manifest(
             candidate,
             output_uri=output_uri,
@@ -329,15 +346,19 @@ def _execute_candidate_cohort_impl(
         )
         if context.config.slurm_execution_enabled and context.config.slurm_env:
             basin_manifest["slurm_env"] = dict(context.config.slurm_env)
+        basin_ms["basin_manifest_build_ms"] = (time.monotonic_ns() - _ns_before) / 1_000_000.0
         basins.append(basin_manifest)
     if not basins:
         return evidence
     if context.config.slurm_execution_enabled:
         safe_pairs: list[tuple[SchedulerExecutionCandidate, dict[str, Any]]] = []
         for candidate, basin_manifest in zip(submitted_candidates, basins, strict=True):
+            basin_ms = per_basin_ms.setdefault(candidate.candidate_id, {})
             env_value = basin_manifest.get("slurm_env") or {}
             if env_value:
+                _ns_before = time.monotonic_ns()
                 env_check, env_blockers = context.slurm_env_check(env_value)
+                basin_ms["slurm_env_check_ms"] = (time.monotonic_ns() - _ns_before) / 1_000_000.0
                 if env_blockers:
                     evidence.append(
                         context.candidate_slurm_preflight_blocked_evidence(
@@ -351,11 +372,17 @@ def _execute_candidate_cohort_impl(
                         )
                     )
                     continue
+            else:
+                basin_ms["slurm_env_check_ms"] = 0.0
+            _ns_before = time.monotonic_ns()
             findings = context.secret_manifest_findings(basin_manifest, "manifest")
+            basin_ms["secret_manifest_scan_ms"] = (time.monotonic_ns() - _ns_before) / 1_000_000.0
             if findings:
                 evidence.append(context.candidate_secret_manifest_blocked_evidence(candidate, findings=findings))
                 continue
+            _ns_before = time.monotonic_ns()
             resource_profile_blockers = context.slurm_resource_profile_blockers(candidate.resource_profile)
+            basin_ms["resource_profile_check_ms"] = (time.monotonic_ns() - _ns_before) / 1_000_000.0
             if resource_profile_blockers:
                 evidence.append(
                     context.candidate_slurm_preflight_blocked_evidence(
@@ -374,9 +401,19 @@ def _execute_candidate_cohort_impl(
         basins = [basin_manifest for _candidate, basin_manifest in safe_pairs]
         if not basins:
             return evidence
+    # SUB-4 (#862): per-cohort measurements attributed as equal share to every
+    # surviving basin. ``stage_raw_input_ms`` and ``orchestrator_dispatch_ms``
+    # are cohort-scope wall-clock; dividing by ``basin_count`` and writing the
+    # share into each surviving basin's dict is the spec's accounting simplifier
+    # (tasks.md §2.4).
+    basin_count = max(len(submitted_candidates), 1)
+    _ns_before = time.monotonic_ns()
     try:
         evidence.extend(_stage_nfs_raw_inputs_for_candidates(submitted_candidates))
     except Exception as error:
+        stage_raw_input_ms_share = ((time.monotonic_ns() - _ns_before) / 1_000_000.0) / basin_count
+        for candidate in submitted_candidates:
+            per_basin_ms.setdefault(candidate.candidate_id, {})["stage_raw_input_ms"] = stage_raw_input_ms_share
         safe_error_message = context.evidence_safe(str(error))
         for candidate in submitted_candidates:
             output_uri = candidate_output_uris.get(candidate.candidate_id)
@@ -402,10 +439,24 @@ def _execute_candidate_cohort_impl(
                     "qhh_script_invoked": False,
                 }
             )
+        # Fan-out is a no-op below level ``candidate``. Also a no-op when
+        # ``candidate_span`` never fired for this basin (raw-input staging
+        # failed before ``orchestrate_cycle`` — no candidate records exist
+        # for this basin). Safe to invoke unconditionally.
+        _fan_out_per_basin_ms(context, submitted_candidates, per_basin_ms)
         return evidence
+    stage_raw_input_ms_share = ((time.monotonic_ns() - _ns_before) / 1_000_000.0) / basin_count
+    for candidate in submitted_candidates:
+        per_basin_ms.setdefault(candidate.candidate_id, {})["stage_raw_input_ms"] = stage_raw_input_ms_share
+    _ns_before = time.monotonic_ns()
     try:
         result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
     except Exception as error:
+        orchestrator_dispatch_ms_share = ((time.monotonic_ns() - _ns_before) / 1_000_000.0) / basin_count
+        for candidate in submitted_candidates:
+            per_basin_ms.setdefault(candidate.candidate_id, {})["orchestrator_dispatch_ms"] = (
+                orchestrator_dispatch_ms_share
+            )
         safe_error_message = context.evidence_safe(getattr(error, "message", str(error)))
         error_code = str(getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"))
         for candidate in submitted_candidates:
@@ -448,7 +499,13 @@ def _execute_candidate_cohort_impl(
                     ],
                 }
             )
+        _fan_out_per_basin_ms(context, submitted_candidates, per_basin_ms)
         return evidence
+    orchestrator_dispatch_ms_share = ((time.monotonic_ns() - _ns_before) / 1_000_000.0) / basin_count
+    for candidate in submitted_candidates:
+        per_basin_ms.setdefault(candidate.candidate_id, {})["orchestrator_dispatch_ms"] = (
+            orchestrator_dispatch_ms_share
+        )
     evidence.extend(
         context.candidate_execution_evidence(
             result,
@@ -456,7 +513,38 @@ def _execute_candidate_cohort_impl(
             output_uris=candidate_output_uris,
         )
     )
+    # SUB-4 (#862): fan per-basin + per-cohort sub-phase timings onto every
+    # candidate record ``_submit_and_wait`` created under ``orchestrate_cycle``.
+    # ``attribute_per_basin_fields`` is a no-op when the collector level is
+    # below ``candidate`` (no candidate records exist to update).
+    _fan_out_per_basin_ms(context, submitted_candidates, per_basin_ms)
     return evidence
+
+
+def _fan_out_per_basin_ms(
+    context: SchedulerExecutionContext,
+    submitted_candidates: Sequence[SchedulerExecutionCandidate],
+    per_basin_ms: Mapping[str, Mapping[str, float]],
+) -> None:
+    """Attribute accumulated per-basin ``*_ms`` fields onto every candidate
+    record already created under ``orchestrate_cycle`` for this cohort.
+
+    The collector method is a no-op below level ``candidate`` so this call
+    is safe to invoke unconditionally after ``execute_candidate_cohort``.
+    """
+
+    collector = context.timing
+    if collector is None:
+        return
+    for candidate in submitted_candidates:
+        fields = per_basin_ms.get(candidate.candidate_id)
+        if not fields:
+            continue
+        collector.attribute_per_basin_fields(
+            basin=candidate.basin_id,
+            source_id=candidate.source_id,
+            fields=dict(fields),
+        )
 
 
 def _stage_nfs_raw_inputs_for_candidates(candidates: Sequence[SchedulerExecutionCandidate]) -> list[dict[str, Any]]:
