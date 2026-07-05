@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NHMS node-22 scheduler evidence retention daily
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=nhms-scheduler-evidence-retention.service
+
+[Install]
+WantedBy=default.target
