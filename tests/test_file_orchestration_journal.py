@@ -47,6 +47,16 @@ def _write_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
     )
 
 
+def _open_fd_count_or_skip() -> int:
+    for fd_dir in (Path("/proc/self/fd"), Path("/dev/fd")):
+        try:
+            if fd_dir.exists():
+                return len(os.listdir(fd_dir))
+        except OSError:
+            continue
+    pytest.skip("open fd directory is not available on this platform")
+
+
 def _candidate_state(
     repository: FileOrchestrationJournalRepository,
     *,
@@ -1225,6 +1235,38 @@ def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
     inflight = repository.query_inflight_jobs()
 
     assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
+
+
+def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root, max_files=64)
+    for index in range(16):
+        cycle_time = _dt(f"2026-06-28T{index % 10:02d}:00:00Z")
+        job = _pipeline_reservation_record(
+            cycle_time,
+            job_id=f"job_reconcile_fd_stability_{index}",
+            status="pending",
+        )
+        job["slurm_job_id"] = str(5000 + index)
+        _write_jsonl(
+            journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}_{index}.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=job,
+                    sequence=index + 1,
+                )
+            ],
+        )
+
+    before = _open_fd_count_or_skip()
+    for _ in range(40):
+        assert list(repository._iter_recent_reconcile_journal_paths(8))
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
 
 
 def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_records(

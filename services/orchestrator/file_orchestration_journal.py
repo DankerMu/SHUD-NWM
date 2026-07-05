@@ -1977,20 +1977,31 @@ class FileOrchestrationJournalRepository:
             return
         discovered: list[tuple[int, str, Path]] = []
         root = self.root.resolve(strict=False)
-        try:
-            iterator = directory.rglob(f"*{suffix}")
-        except OSError:
+        if suffix == ".jsonl":
+            iterator = _iter_jsonl_files(
+                directory,
+                root=self.root,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        elif suffix == ".json":
+            iterator = _iter_regular_json_files(
+                directory,
+                root=self.root,
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        else:
             return
-        for path in iterator:
-            if len(discovered) >= max(self.max_files, 1):
-                break
+        try:
+            paths = list(iterator)
+        except (FileOrchestrationJournalError, OSError):
+            return
+        for path in paths:
             try:
-                if path.is_symlink() or not path.is_file():
-                    continue
                 resolved = path.resolve(strict=False)
                 rel = resolved.relative_to(root)
-                if len(rel.parts) > self.max_depth:
-                    continue
                 stat_result = path.stat()
             except (OSError, ValueError):
                 continue
