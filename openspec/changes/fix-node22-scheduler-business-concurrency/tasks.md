@@ -47,9 +47,9 @@
   `uv run pytest -q <focused scheduler/retry/reconcile tests>`;
   `uv run ruff check .`;
   `openspec validate fix-node22-scheduler-business-concurrency --strict --no-interactive`.
-- [ ] 4.3 Run risk-adaptive review and final gap sweep on the implementation.
-- [ ] 4.4 Push, open PR, wait for required CI, and post evidence bundle.
-- [ ] 4.5 On node-22, pull merged/latest code, remove one-at-a-time emergency
+- [x] 4.3 Run risk-adaptive review and final gap sweep on the implementation.
+- [x] 4.4 Push, open PR, wait for required CI, and post evidence bundle.
+- [x] 4.5 On node-22, pull merged/latest code, remove one-at-a-time emergency
   override, restart `nhms-compute-scheduler.service`/timer with concurrent bound
   greater than `1`, and capture live business evidence with at least two
   eligible candidates or array tasks: service env, pass id, candidate/task
