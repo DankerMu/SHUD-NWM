@@ -271,6 +271,70 @@ def _downstream_retry_evidence(
         },
     }
 
+_DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES = {"parse", "state_save_qc", "publish", "copyback"}
+_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES = {
+    "NODE_FAILURE",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "SLURM_TIMEOUT",
+    "STATE_SAVE_QC_TASK_FAILED",
+    "PARSE_TASK_FAILED",
+    "PUBLISH_TASK_FAILED",
+}
+
+
+def _missing_forecast_output_recompute_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _state_has_failure_signal(state):
+        return None
+    if _durable_shud_output_exists(state):
+        return None
+    failed_stage = _canonical_downstream_stage(_failed_stage(state))
+    if failed_stage not in _DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES:
+        return None
+    failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
+    reason_code = str(failure.get("reason_code") or "").upper()
+    if reason_code not in _MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES and reason_code not in TRANSIENT_RETRY_REASON_CODES:
+        return None
+    return {
+        **base_evidence,
+        "decision": "retry_missing_forecast_output",
+        "reason": "recompute_forecast_after_missing_output",
+        "stage": failed_stage,
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "native_shud_resubmitted": True,
+        "durable_shud_output_reused": False,
+        "force_native_shud_rerun": True,
+        "missing_upstream": {
+            "artifact_type": "forecast_output",
+            "durable_shud_output_exists": False,
+            "failed_downstream_stage": failed_stage,
+        },
+        "failure": {
+            **failure,
+            "classifier": "missing_forecast_output_recompute",
+            "retryable": True,
+            "permanent": False,
+            "limit_exhausted": False,
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+            "override_reason": "missing_forecast_output_recompute",
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
 def _missing_upstream_forecast_artifact_evidence(
     candidate: SchedulerCandidateLike,
     state: Mapping[str, Any],
