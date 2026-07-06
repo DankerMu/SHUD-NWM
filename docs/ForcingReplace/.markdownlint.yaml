@@ -1,0 +1,29 @@
+# Scoped lint config for the direct-grid migration source-of-truth docs (epic #886).
+# These files are cited byte-exactly (path + section numbers, e.g. §6.1, §7.2, appendix A)
+# by openspec/changes/cmfd-direct-grid-platform-readiness and issues #886-#895; keep the
+# authored content intact instead of reflowing it to satisfy stylistic rules.
+# Self-contained copy of the repo root .markdownlint.yaml plus three doc-local disables.
+default: true
+
+# Doc-local disables:
+MD013: false # authored source has >300-char prose lines; do not reflow cited content
+MD025: false # source-of-truth uses one top-level heading per numbered section
+MD028: false # blockquote groups separated by blank lines are intentional in the guide
+MD040: false # ASCII file-relationship diagrams use bare fences in the authored guide
+
+# Inherited from repo root .markdownlint.yaml:
+MD024:
+  siblings_only: true
+
+MD033:
+  allowed_elements:
+    - br
+    - sup
+    - sub
+
+MD060: false
+MD036: false
+MD009: false
+MD012: false
+MD029: false
+MD032: false
