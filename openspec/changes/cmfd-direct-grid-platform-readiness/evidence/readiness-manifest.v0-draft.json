@@ -1,0 +1,179 @@
+{
+  "manifest_version": "v0-draft",
+  "created_utc": "2026-07-06T16:18:12Z",
+  "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+  "forcing_producer_version": "m2.1",
+  "forcing_producer_limits": {
+    "max_station_count": {
+      "default": 10000,
+      "override": null,
+      "effective": 10000,
+      "env_var": "FORCING_MAX_STATION_COUNT"
+    },
+    "max_timestep_count": {
+      "default": 10000,
+      "override": null,
+      "effective": 10000,
+      "env_var": "FORCING_MAX_TIMESTEP_COUNT"
+    },
+    "max_timeseries_row_count": {
+      "default": 10000000,
+      "override": null,
+      "effective": 10000000,
+      "env_var": "FORCING_MAX_TIMESERIES_ROW_COUNT"
+    },
+    "max_manifest_bytes": {
+      "default": 33554432,
+      "override": null,
+      "effective": 33554432,
+      "env_var": "FORCING_MAX_MANIFEST_BYTES"
+    }
+  },
+  "canonical_converter_versions": {
+    "gfs": "m1.4",
+    "ifs": "m4.1",
+    "era5": "m2.0"
+  },
+  "shud_runtime_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+  "shud_executable": "shud_omp",
+  "shud_runtime_staging_limits": {
+    "MAX_DIRECT_GRID_TSD_FORC_BYTES": 8388608,
+    "MAX_DIRECT_GRID_FORCING_CSV_BYTES": 8388608,
+    "MAX_DIRECT_GRID_SP_ATT_BYTES": 33554432,
+    "MAX_DIRECT_GRID_TSD_FORC_LINES": 250000,
+    "MAX_DIRECT_GRID_FORCING_CSV_LINES": 250000,
+    "MAX_DIRECT_GRID_SP_ATT_LINES": 2000000,
+    "MAX_DIRECT_GRID_STAGING_LINE_BYTES": 65536
+  },
+  "db_schema_migration_repo_head": "000042",
+  "db_schema_migration_version": "000040",
+  "schema_identity_status": "unresolved-mismatch-blocking",
+  "schema_identity_note": "node-27 active primary PG (127.0.0.1:55432, db=nhms) reports max applied version 000040_display_ready_succeeded_status_index.sql, applied 2026-06-30T04:40:41Z UTC; repo head is 000042_drop_redundant_river_selected_identity_lookup_idx.sql. Migrations 000041 and 000042 are unapplied on the live deployment. Per design.md 'Where the readiness manifest lives and its schema' and spec 'Missing required identity blocks readiness', this mismatch leaves the schema identity unresolved and blocks any P0.2 evidence run on this pinned set. Task 1.1 records the mismatch surfaced in this draft; final blocking gate is enforced by task 1.3 completeness check.",
+  "proj_crs_database_version": {
+    "proj_version": "9.5.1",
+    "proj_db_metadata": {
+      "DATABASE.LAYOUT.VERSION.MAJOR": "1",
+      "DATABASE.LAYOUT.VERSION.MINOR": "4",
+      "EPSG.DATE": "2024-11-05",
+      "EPSG.VERSION": "v11.022",
+      "ESRI.DATE": "2024-11-04",
+      "ESRI.VERSION": "ArcGIS Pro 3.4",
+      "IGNF.DATE": "2019-05-24",
+      "IGNF.SOURCE": "https://raw.githubusercontent.com/rouault/proj-resources/master/IGNF.v3.1.0.xml",
+      "IGNF.VERSION": "3.1.0",
+      "NKG.DATE": "2024-04-02",
+      "NKG.SOURCE": "https://github.com/NordicGeodesy/NordicTransformations",
+      "NKG.VERSION": "1.0.1",
+      "PROJ.VERSION": "9.5.1",
+      "PROJ_DATA.VERSION": "1.20"
+    }
+  },
+  "mapping_builder_algorithm_version": "nearest_cell_barycenter_geodesic_v1",
+  "source_locations": {
+    "manifest_version": {
+      "file": "openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v0-draft.json",
+      "line_or_range": "self:manifest_version",
+      "command": "in-file assertion; matches committed filename version segment 'v0-draft'",
+      "timestamp": "2026-07-06T16:18:12Z",
+      "host": "local"
+    },
+    "created_utc": {
+      "file": "openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v0-draft.json",
+      "line_or_range": "self:created_utc",
+      "command": "date -u +%Y-%m-%dT%H:%M:%SZ",
+      "timestamp": "2026-07-06T16:18:12Z",
+      "host": "local"
+    },
+    "baseline_commit": {
+      "file": ".git/HEAD (repository root)",
+      "line_or_range": "HEAD @ feat/issue-887-cmfd-direct-grid-platform-readiness (branched off master)",
+      "command": "git rev-parse HEAD",
+      "timestamp": "2026-07-06T16:16:20Z",
+      "host": "local"
+    },
+    "forcing_producer_version": {
+      "file": "workers/forcing_producer/producer.py",
+      "line_or_range": "311 (ForcingProducerConfig.producer_version default)",
+      "command": "grep -n 'producer_version' workers/forcing_producer/producer.py",
+      "timestamp": "2026-07-06T16:12:00Z",
+      "host": "local"
+    },
+    "forcing_producer_limits": {
+      "file": "workers/forcing_producer/producer.py",
+      "line_or_range": "318-324 (max_station_count / max_timestep_count / max_timeseries_row_count / max_manifest_bytes defaults + env-override wiring via _env_int)",
+      "command": "printenv FORCING_MAX_STATION_COUNT FORCING_MAX_TIMESTEP_COUNT FORCING_MAX_TIMESERIES_ROW_COUNT FORCING_MAX_MANIFEST_BYTES on both local and node-27 (both returned empty; overrides=null; effective==default)",
+      "timestamp": "2026-07-06T16:17:00Z",
+      "host": "local + node-27 (nwm@210.77.77.27:32099)"
+    },
+    "canonical_converter_versions": {
+      "file": "workers/canonical_converter/converter.py",
+      "line_or_range": "243 (gfs CanonicalConverterConfig.converter_version='m1.4'), 261 (ERA5CanonicalConverterConfig.converter_version='m2.0'), 275 (IFSCanonicalConverterConfig.converter_version='m4.1')",
+      "command": "grep -n 'converter_version' workers/canonical_converter/converter.py",
+      "timestamp": "2026-07-06T16:12:00Z",
+      "host": "local"
+    },
+    "shud_runtime_commit": {
+      "file": ".git/HEAD (this repo IS the shud_runtime host per proposal.md Impact -> workers/shud_runtime/runtime.py)",
+      "line_or_range": "HEAD @ feat/issue-887-cmfd-direct-grid-platform-readiness",
+      "command": "git rev-parse HEAD",
+      "timestamp": "2026-07-06T16:16:20Z",
+      "host": "local"
+    },
+    "shud_executable": {
+      "file": "workers/shud_runtime/runtime.py",
+      "line_or_range": "74 (SHUDRuntimeConfig.shud_executable default 'shud_omp')",
+      "command": "grep -n 'shud_executable' workers/shud_runtime/runtime.py",
+      "timestamp": "2026-07-06T16:12:00Z",
+      "host": "local"
+    },
+    "shud_runtime_staging_limits": {
+      "file": "workers/shud_runtime/runtime.py",
+      "line_or_range": "52-58 (seven MAX_DIRECT_GRID_* constants; MAX_PACKAGE_MANIFEST_BYTES at line 51 is a non-direct-grid PRCP-manifest read cap and is explicitly excluded per proposal.md Impact + tasks.md 1.1 line-range note + sub-issue #887 body note)",
+      "command": "grep -n 'MAX_DIRECT_GRID_' workers/shud_runtime/runtime.py",
+      "timestamp": "2026-07-06T16:12:00Z",
+      "host": "local"
+    },
+    "db_schema_migration_repo_head": {
+      "file": "db/migrations/",
+      "line_or_range": "highest-numbered file: 000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+      "command": "ls db/migrations/ | sort | tail -1",
+      "timestamp": "2026-07-06T16:12:00Z",
+      "host": "local"
+    },
+    "db_schema_migration_version": {
+      "file": "node-27 active primary PG public.schema_migrations table (127.0.0.1:55432 db=nhms role=nhms)",
+      "line_or_range": "MAX(version) row applied 2026-06-30T04:40:41.967732Z UTC",
+      "command": "ssh -p 32099 nwm@210.77.77.27 -> uv run --with psycopg[binary] python -> psycopg.connect('postgresql://nhms:<REDACTED>@127.0.0.1:55432/nhms') -> SELECT MAX(version) FROM public.schema_migrations",
+      "timestamp": "2026-07-06T16:18:09Z",
+      "host": "node-27 (nwm@210.77.77.27:32099)"
+    },
+    "schema_identity_status": {
+      "file": "openspec/changes/cmfd-direct-grid-platform-readiness/design.md",
+      "line_or_range": "'Where the readiness manifest lives and its schema' -> db_schema_migration_repo_head vs db_schema_migration_version paragraph; spec 'Missing required identity blocks readiness'",
+      "command": "diff db_schema_migration_repo_head=000042 vs db_schema_migration_version=000040",
+      "timestamp": "2026-07-06T16:18:12Z",
+      "host": "local"
+    },
+    "schema_identity_note": {
+      "file": "openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v0-draft.json",
+      "line_or_range": "self:schema_identity_note",
+      "command": "narrative summary of node-27 live query result vs repo head",
+      "timestamp": "2026-07-06T16:18:12Z",
+      "host": "local"
+    },
+    "proj_crs_database_version": {
+      "file": "deployment host PROJ installation: /home/nwm/NWM/.venv/lib/python3.11/site-packages/pyproj/proj_dir/share/proj/proj.db",
+      "line_or_range": "sqlite metadata table (all rows)",
+      "command": "ssh -p 32099 nwm@210.77.77.27 -> bash -lc 'uv run python -c \"import pyproj, sqlite3, os; print(pyproj.proj_version_str); ddir=pyproj.datadir.get_data_dir(); dbpath=os.path.join(ddir, \\\"proj.db\\\"); conn=sqlite3.connect(dbpath); print(dict(conn.execute(\\\"SELECT key,value FROM metadata ORDER BY key\\\")))\"'",
+      "timestamp": "2026-07-06T16:18:09Z",
+      "host": "node-27 (nwm@210.77.77.27:32099)"
+    },
+    "mapping_builder_algorithm_version": {
+      "file": "docs/ForcingReplace/CMFD 建模资产向 IFSGFS Direct-Grid 的安全迁移.md",
+      "line_or_range": "section 6.1 (declared authority per design.md 'Where the readiness manifest lives and its schema' -> mapping_builder_algorithm_version bullet; no in-repo mapping-builder implementation exists yet — the forcing-mapping-asset-build change will land the in-repo source)",
+      "command": "spec-declared authority; identifier 'nearest_cell_barycenter_geodesic_v1' is the fixed declared value in design.md + tasks.md 1.1 + platform-release-pinning spec 'Component versions trace to authoritative sources'",
+      "timestamp": "2026-07-06T16:18:12Z",
+      "host": "local"
+    }
+  }
+}
