@@ -20723,6 +20723,103 @@ def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_befo
     assert "latest" not in json.dumps(blocked["state_evidence"], sort_keys=True).lower()
 
 
+@pytest.mark.parametrize(
+    ("case_name", "forcing_package_uri"),
+    [
+        ("s3_missing", "s3://nhms/forcing/gfs/2026052106/model_a/package.json"),
+        ("absent_uri", None),
+    ],
+)
+def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_before_submission(
+    monkeypatch: Any,
+    tmp_path: Path,
+    case_name: str,
+    forcing_package_uri: str | None,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / f"db-free-local-root-{case_name}")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
+    cycle_segment = format_cycle_time(cycle_time)
+    cycle_id = cycle_id_for("gfs", cycle_time)
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_segment}_model_a_forcing",
+            "run_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "candidate_id": f"cycle_gfs_{cycle_segment}_model_a",
+            "cycle_id": cycle_id,
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": "gfs",
+            "model_id": "model_a",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "status": "succeeded",
+            "slurm_job_id": "6102",
+            "retry_count": 1,
+            "created_at": _format_iso_z(generated_at - timedelta(minutes=20)),
+            "updated_at": _format_iso_z(generated_at - timedelta(minutes=10)),
+        }
+    )
+    if forcing_package_uri is not None:
+        forcing_payload = {
+            "forcing_version_id": f"forc_gfs_{cycle_segment}_model_a",
+            "forcing_package_uri": forcing_package_uri,
+            "source_id": "gfs",
+            "cycle_time": _format_iso_z(cycle_time),
+            "model_id": "model_a",
+            "max_lead_hours": 168,
+        }
+        forcing_record = {
+            "schema_version": file_orchestration_journal_module.FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+            "record_type": "forcing_version",
+            "source_id": "gfs",
+            "cycle_time": _format_iso_z(cycle_time),
+            "model_id": "model_a",
+            "payload": forcing_payload,
+        }
+        forcing_path = journal_root / "forcing" / "gfs" / cycle_segment / "model_a.json"
+        forcing_path.parent.mkdir(parents=True, exist_ok=True)
+        forcing_path.write_text(json.dumps(forcing_record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, dry_run=False),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state_evidence = blocked["state_evidence"]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert blocked["reason"] == "missing_forcing_package_uri"
+    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert state_evidence["classifier"] == "missing_upstream_artifact"
+    assert state_evidence["artifact_guard"]["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert "NODE_FAILURE" not in json.dumps(state_evidence, sort_keys=True)
+    assert orchestrator.calls == []
+
+
 def test_db_free_strict_warm_start_refreshes_file_state_index_between_passes(
     monkeypatch: Any,
     tmp_path: Path,
