@@ -11419,6 +11419,84 @@ def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path)
     assert state["retry_policy"]["manual_retry_required"] is False
 
 
+def test_downstream_qc_failure_without_forecast_output_recomputes_forecast(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    store = LocalObjectStore(object_store_root, object_store_prefix="s3://nhms")
+    forcing_package_uri = store.write_bytes_atomic(
+        "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+        b'{"schema_version":"test.forcing_package.v1"}',
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "failed",
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "state_save_qc",
+            "error_code": "NODE_FAILURE",
+            "error_message": "state_save_qc failed before any forecast output was durable.",
+            "retry_count": 3,
+            "retry_limit": 3,
+            "durable_shud_output_exists": False,
+            "forcing_version": {
+                "forcing_version_id": "forc_gfs_2026052106_model_a",
+                "package_uri": forcing_package_uri,
+            },
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                    "run_id": "cycle_gfs_2026052106_forecast_model_a",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "run_shud_forecast_array",
+                    "status": "reservation_lost",
+                    "stage": "forecast",
+                    "error_code": "SLURM_RESERVATION_LOST",
+                    "updated_at": "2026-05-21T06:20:00Z",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast_model_a_state_save_qc_retry_3",
+                    "run_id": "cycle_gfs_2026052106_forecast_model_a",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "save_state_snapshot_array",
+                    "status": "permanently_failed",
+                    "stage": "state_save_qc",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 3,
+                    "updated_at": "2026-05-21T06:45:00Z",
+                },
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    state = submitted_basin["state_evidence"]
+    assert state["decision"] == "retry_missing_forecast_output"
+    assert state["reason"] == "recompute_forecast_after_missing_output"
+    assert state["restart_stage"] == "forecast"
+    assert submitted_basin["restart_stage"] == "forecast"
+    assert state["failure"]["classifier"] == "missing_forecast_output_recompute"
+    assert state["failure"]["retryable"] is True
+    assert state["retry_policy"]["automatic_retry_allowed"] is True
+    assert state["retry_policy"]["override_reason"] == "missing_forecast_output_recompute"
+
+
 def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(

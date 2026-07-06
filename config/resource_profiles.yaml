@@ -3,11 +3,11 @@ resource_profiles:
     partition: compute
     nodes: 1
     ntasks: 1
-    cpus_per_task: 32
-    memory_gb: 128
+    cpus_per_task: 4
+    memory_gb: 8
     walltime: "06:00:00"
-    max_concurrent: 4
-    shud_threads: 32
+    max_concurrent: 32
+    shud_threads: 4
   overrides:
     yangtze_shud_v12:
       cpus_per_task: 64

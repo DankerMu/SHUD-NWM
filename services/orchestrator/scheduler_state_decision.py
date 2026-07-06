@@ -12,6 +12,7 @@ from services.orchestrator.scheduler_state_failure import (
     _completed_upstream_stage_retry_evidence,
     _downstream_retry_evidence,
     _manual_retry_state_evidence,
+    _missing_forecast_output_recompute_evidence,
     _missing_raw_manifest_repair_evidence,
     _missing_upstream_forecast_artifact_evidence,
     _model_package_refresh_retry_evidence,
@@ -251,6 +252,30 @@ def _candidate_state_decision(
         )
     if downstream_retry is not None:
         return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
+
+    missing_forecast_output_recompute = _missing_forecast_output_recompute_evidence(
+        candidate,
+        decision_state,
+        evidence,
+    )
+    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+        candidate,
+        decision_state,
+        evidence,
+        missing_forecast_output_recompute,
+    )
+    if missing_upstream_artifact is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(missing_upstream_artifact.get("reason") or "missing_upstream_artifact"),
+            missing_upstream_artifact,
+        )
+    if missing_forecast_output_recompute is not None:
+        return CandidateStateDecision(
+            "retry",
+            "recompute_forecast_after_missing_output",
+            missing_forecast_output_recompute,
+        )
 
     manifest_repair = _missing_raw_manifest_repair_evidence(candidate, decision_state, evidence)
     if manifest_repair is not None:
