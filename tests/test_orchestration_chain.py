@@ -10280,6 +10280,60 @@ def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path
     assert client.submissions[0]["stage"] == "convert"
 
 
+def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path: Path) -> None:
+    """A missing-output retry must not resume a stale reservation_lost forecast."""
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    old_job = store.create_job(
+        job_id="job_cycle_gfs_2026050100_forecast_model_0_forecast",
+        run_id="cycle_gfs_2026050100_forecast_model_0",
+        cycle_id="gfs_2026050100",
+        job_type="run_shud_forecast_array",
+        slurm_job_id=None,
+        model_id="model_0",
+        stage="forecast",
+        status="reservation_lost",
+        idempotency_key="cycle_gfs_2026050100_forecast_model_0:forecast",
+    )
+    old_job.error_code = "SLURM_RESERVATION_LOST"
+    store.session.add(old_job)
+    store.session.commit()
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = "cycle_gfs_2026050100_forecast_model_0"
+    basins[0]["restart_stage"] = "forecast"
+    basins[0]["state_evidence"] = {
+        "decision": "retry_missing_forecast_output",
+        "restart_stage": "forecast",
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "override_reason": "missing_forecast_output_recompute",
+        },
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    retry_job_id = "job_cycle_gfs_2026050100_forecast_model_0_forecast_retry_1"
+    assert result.status == "complete"
+    assert result.stages[0].pipeline_job_id == retry_job_id
+    persisted_old_job = store.get_job("job_cycle_gfs_2026050100_forecast_model_0_forecast")
+    assert persisted_old_job is not None
+    assert persisted_old_job.status == "reservation_lost"
+    retry_job = repository.jobs[retry_job_id]
+    assert retry_job["status"] == "succeeded"
+    assert retry_job["slurm_job_id"] == "2001"
+    assert retry_job["idempotency_key"] == "cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
+    assert client.submissions[0]["stage"] == "forecast"
+    assert (
+        client.submissions[0]["manifest"]["comment"]
+        == "nhms_idem:cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
+    )
+
+
 def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
     context = CycleOrchestrationContext(
         source_id="gfs",
@@ -10315,6 +10369,15 @@ def test_auto_manifest_repair_resubmits_terminal_restart_stages() -> None:
     assert not ForecastOrchestrator._terminal_stage_needs_manual_retry(
         context,
         {"stage": "forecast", "status": "succeeded"},
+    )
+
+    context.active_basins[0]["state_evidence"] = {
+        "decision": "retry_missing_forecast_output",
+        "restart_stage": "forecast",
+    }
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context,
+        {"stage": "forecast", "status": "reservation_lost"},
     )
 
 

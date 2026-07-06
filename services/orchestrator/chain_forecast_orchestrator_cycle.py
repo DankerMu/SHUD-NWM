@@ -3,6 +3,7 @@ from __future__ import annotations
 from services.orchestrator import chain as _chain
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
+    "retry_missing_forecast_output",
     "retry_strict_warm_start_terminal_init_state_mismatch",
     "retry_strict_warm_start_terminal_run_manifest_missing",
     "retry_terminal_run_manifest_missing",
