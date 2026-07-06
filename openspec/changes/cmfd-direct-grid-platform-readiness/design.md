@@ -129,7 +129,7 @@ Surfaces:
 - Evidence/audit/readiness: `openspec/changes/cmfd-direct-grid-platform-readiness/evidence/` (manifest + `.sha256` + 1.3 completeness-check output + 2.1-2.6 run/smoke/execution/capacity records + 2.7 evidence index + §3 audit report + §4 assembled package).
 
 Regression rows:
-- Draft manifest carries every P0.1 identity with non-empty values and complete `source_locations` mapping → completeness check reports 4/4 fields resolved, §2/§3 tasks unblocked on this pinned set.
+- Draft manifest carries every P0.1 identity with non-empty values and complete `source_locations` mapping → completeness check reports every enumerated P0.1 identity field resolved (per §Where the readiness manifest lives), §2/§3 tasks unblocked on this pinned set.
 - Manifest omits `shud_solver_submodule_commit` (only outer `shud_openmp_outer_commit` present) → completeness check FAILs; §2/§3 evidence tasks blocked; readiness not certifiable.
 - `db_schema_migration_repo_head` != `db_schema_migration_version` (node-27 live) → baseline schema identity unresolved; mismatch recorded as blocking; no §2 evidence runs on this pinned set.
 - `.sp.att FORC` values fall outside the staged `.tsd.forc` `ID` set on the node-22 minimal-basin run → execution rejected with stable staging error; evidence set invalidated for this baseline.

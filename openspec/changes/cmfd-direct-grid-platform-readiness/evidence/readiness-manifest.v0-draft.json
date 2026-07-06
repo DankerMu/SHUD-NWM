@@ -47,7 +47,7 @@
   },
   "db_schema_migration_repo_head": "000042",
   "db_schema_migration_version": "000040",
-  "schema_identity_status": "unresolved-mismatch-blocking",
+  "schema_identity_status": "unresolved",
   "schema_identity_note": "node-27 active primary PG (127.0.0.1:55432, db=nhms) reports max applied version 000040_display_ready_succeeded_status_index.sql, applied 2026-06-30T04:40:41Z UTC; repo head is 000042_drop_redundant_river_selected_identity_lookup_idx.sql. Migrations 000041 and 000042 are unapplied on the live deployment. Per design.md 'Where the readiness manifest lives and its schema' and spec 'Missing required identity blocks readiness', this mismatch leaves the schema identity unresolved and blocks any P0.2 evidence run on this pinned set. Task 1.1 records the mismatch surfaced in this draft; final blocking gate is enforced by task 1.3 completeness check.",
   "proj_crs_database_version": {
     "proj_version": "9.5.1",
@@ -86,8 +86,8 @@
     },
     "baseline_commit": {
       "file": ".git/HEAD (repository root)",
-      "line_or_range": "HEAD @ feat/issue-887-cmfd-direct-grid-platform-readiness (branched off master)",
-      "command": "git rev-parse HEAD",
+      "line_or_range": "fixed SHA 5e518c151375b798c29ee3cafb3260413ac8905f (SHUD-NWM master head at 2026-07-06T16:16:20Z, before manifest commit); tree equivalence with current PR HEAD can be verified by 'git diff 5e518c151375b798c29ee3cafb3260413ac8905f..HEAD -- workers/ apps/ services/ packages/ db/ schemas/' returning empty output",
+      "command": "git rev-parse 5e518c151375b798c29ee3cafb3260413ac8905f^{commit}",
       "timestamp": "2026-07-06T16:16:20Z",
       "host": "local"
     },
@@ -114,8 +114,8 @@
     },
     "shud_runtime_commit": {
       "file": ".git/HEAD (this repo IS the shud_runtime host per proposal.md Impact -> workers/shud_runtime/runtime.py)",
-      "line_or_range": "HEAD @ feat/issue-887-cmfd-direct-grid-platform-readiness",
-      "command": "git rev-parse HEAD",
+      "line_or_range": "fixed SHA 5e518c151375b798c29ee3cafb3260413ac8905f (SHUD-NWM master head at 2026-07-06T16:16:20Z, before manifest commit); tree equivalence with current PR HEAD can be verified by 'git diff 5e518c151375b798c29ee3cafb3260413ac8905f..HEAD -- workers/ apps/ services/ packages/ db/ schemas/' returning empty output",
+      "command": "git rev-parse 5e518c151375b798c29ee3cafb3260413ac8905f^{commit}",
       "timestamp": "2026-07-06T16:16:20Z",
       "host": "local"
     },
