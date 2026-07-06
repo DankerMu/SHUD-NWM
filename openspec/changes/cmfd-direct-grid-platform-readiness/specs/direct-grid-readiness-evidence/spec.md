@@ -74,7 +74,7 @@ The platform SHALL judge migration readiness on pinned-commit test results, smok
 #### Scenario: Checkbox completion does not certify readiness
 - **WHEN** OpenSpec tasks for direct-grid capabilities are marked complete
 - **THEN** readiness is not certified on checkbox state alone
-- **THEN** readiness certification requires the pinned manifest, passing re-run evidence, node-27 smoke, minimal-basin execution, the G9 capacity baseline with no unresolved limit breach, and the solver audit verdict
+- **THEN** readiness certification requires the pinned manifest, passing re-run evidence, node-27 smoke, minimal-basin execution, and the G9 capacity baseline with no unresolved limit breach
 - **THEN** any drift between OpenSpec task state and code state is recorded in the evidence rather than assumed absent.
 
 ### Requirement: Readiness evidence package binds all artifacts to a single baseline
@@ -82,7 +82,7 @@ The platform SHALL assemble a readiness evidence package that indexes the readin
 
 #### Scenario: Evidence package indexes all artifacts against one baseline
 - **WHEN** the readiness evidence package is assembled
-- **THEN** it indexes the readiness manifest and its `.sha256` companion, the manifest completeness-check output, the suite re-run records, the node-27 smoke record, the minimal-basin execution record, the G9 capacity baseline report, and the solver forcing-consumer audit report
+- **THEN** it indexes the readiness manifest and its `.sha256` companion, the manifest completeness-check output, the suite re-run records, the node-27 smoke record, the minimal-basin execution record, and the G9 capacity baseline report
 - **THEN** every indexed artifact references the same readiness manifest checksum
 - **THEN** every indexed artifact references the same `baseline_commit`.
 

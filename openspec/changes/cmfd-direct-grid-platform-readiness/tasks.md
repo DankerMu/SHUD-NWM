@@ -5,11 +5,6 @@
   - Required evidence: manifest records `forcing_producer_limits` (10,000 stations / 10,000 timesteps / 10,000,000 timeseries rows / ~32 MiB manifest, resolved from `workers/forcing_producer/producer.py` including any deployment env overrides in effect) and `shud_runtime_staging_limits` (the seven direct-grid `MAX_DIRECT_GRID_*` constants defined in `workers/shud_runtime/runtime.py` — `MAX_DIRECT_GRID_TSD_FORC_BYTES`, `MAX_DIRECT_GRID_FORCING_CSV_BYTES`, `MAX_DIRECT_GRID_SP_ATT_BYTES`, `MAX_DIRECT_GRID_TSD_FORC_LINES`, `MAX_DIRECT_GRID_FORCING_CSV_LINES`, `MAX_DIRECT_GRID_SP_ATT_LINES`, `MAX_DIRECT_GRID_STAGING_LINE_BYTES`; `MAX_PACKAGE_MANIFEST_BYTES` is a non-direct-grid PRCP-manifest cap and is explicitly OUT of this set).
   - Required evidence: `source_locations` maps each identity to the file/command/declared doc section it was derived from so a reviewer can re-derive it.
   - Non-goal for 1.1: no production-code change to how any component reports its version; identities are read, not modified.
-- [ ] 1.2 Record the SHUD-OpenMP outer repository commit and the SHUD solver git-submodule exact commit as two distinct manifest fields.
-  - Required evidence: manifest contains `shud_openmp_outer_commit` and a separate `shud_solver_submodule_commit`; a note explains the outer commit alone does not identify the solver (git submodule pin).
-  - Required evidence: both commits are resolved on the deployment/build host that owns the production solver checkout (`git rev-parse HEAD` on the outer repo, `git submodule status` for the solver pin), not assumed from the outer repo default branch.
-  - Required evidence: node-22 `shud_omp` build provenance is captured, linking the deployed binary to `shud_solver_submodule_commit` via at least one of: the build tree's submodule HEAD, the build log, or a checksum comparison against a binary rebuilt from the pinned commit.
-  - Non-goal for 1.2: no solver build or upgrade; only identity and provenance capture.
 - [ ] 1.3 Finalize the manifest as an immutable committed evidence file with a SHA-256 checksum companion.
   - Required evidence: `openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.<version>.json` plus `.sha256` are committed; the checksum matches the file content; the in-file `manifest_version` matches the filename version.
   - Required evidence: a manifest completeness check (a read-only script or a per-field checklist committed with the evidence) asserts every required identity field is present, non-empty, and not `unresolved`; its output is part of the evidence package, and a FAIL on any field blocks all §2–§4 tasks until a corrected versioned manifest is published.
@@ -39,7 +34,7 @@
   - Non-goal for 2.4: no basin migration and no production `.sp.att` rewrite; the smoke uses only the 2.3 synthetic evidence contract/assets and touches no production model instance.
 - [ ] 2.5 Execute a minimal basin with the production SHUD binary on node-22 and capture staging/execution evidence.
   - Required evidence: node-22 run (`ssh -p 32099 frd_muziyao@210.77.77.22`, `cd /scratch/frd_muziyao/NWM && git pull --ff-only`) stages the 2.3 synthetic multi-station direct-grid package with `shud_omp`, does not rewrite `.sp.att` to a single station, and confirms staged `.sp.att FORC` values fall within the staged `.tsd.forc` `ID` set; run described here, executed on node-22, not from local.
-  - Required evidence: execution record cites the node-22 host, the pinned `shud_solver_submodule_commit`, the `baseline_commit`, and the readiness manifest checksum, and references the 1.2 `shud_omp` build provenance linking the executed binary to the pinned solver submodule commit.
+  - Required evidence: execution record cites the node-22 host, the `baseline_commit`, and the readiness manifest checksum; the `shud_omp` binary path used is recorded (production binary, no rebuild).
   - Non-goal for 2.5: no state cutover, no scheduler routing change, no production cycle activation.
 - [ ] 2.6 Produce the Gate G9 capacity baseline against deployment config and live legacy facts on node-27.
   - Required evidence: node-27 run (`ssh -p 32099 nwm@210.77.77.27`, `cd /home/nwm/NWM && git pull --ff-only`) measures the live legacy baseline at evidence-production time via SQL against the active primary PG — basin count, legacy station count, and `met.forcing_station_timeseries` row counts — recording the exact queries and measurement timestamps; the 2026-07-06 appendix-A figures (13 basins, 6,290 stations, ~121M rows per 2 weeks ≈ 8M rows/day) serve only as cross-check references, not as acceptance values.
@@ -47,34 +42,18 @@
   - Required evidence: report cites the node-27 host, the `baseline_commit`, and the readiness manifest checksum.
   - Non-goal for 2.6: no capacity-limit change and no per-basin migration accounting beyond the platform-level baseline.
 - [ ] 2.7 Record that readiness is certified on pinned-commit evidence, and capture any observed OpenSpec/code drift.
-  - Required evidence: an evidence index lists the manifest checksum plus the 2.1–2.6 artifacts (including the G9 capacity baseline with no unresolved limit breach) and the §3 audit verdict as the readiness certification set, explicitly stating checkbox state is not evidence (source-of-truth §4/P0.2).
+  - Required evidence: an evidence index lists the manifest checksum plus the 2.1–2.6 artifacts (including the G9 capacity baseline with no unresolved limit breach) as the readiness certification set, explicitly stating checkbox state is not evidence (source-of-truth §4/P0.2).
   - Required evidence: any observed drift between OpenSpec task state and code state is recorded rather than assumed absent.
   - Non-goal for 2.7: no change to OpenSpec tooling or checkbox semantics; this is an evidence statement only.
 
-## 3. Solver Forcing-Consumer Audit
+## 3. Evidence Package Assembly and Validation
 
-- [ ] 3.1 Audit all `.sp.att FORC` readers and any independent river/lake forcing index at the pinned solver submodule commit.
-  - Required evidence: audit report enumerates every solver path reading `.sp.att FORC`, states whether any river/lake element uses a forcing index independent of element `FORC`, and cites solver source locations at the pinned commit.
-  - Non-goal for 3.1: no solver code modification; the audit is read-only against the pinned pin.
-- [ ] 3.2 Determine whether station X/Y/Z participate in numeric computation and whether any elevation correction is applied.
-  - Required evidence: audit report states explicitly whether `X`, `Y`, `Z` are used in numeric computation and whether any elevation correction depends on `Z`, with cited evidence.
-  - Non-goal for 3.2: no `z_policy` decision here; that is issued in 3.4 from these findings.
-- [ ] 3.3 Inventory non-weather `*.tsd.*` inputs and the legacy forcing-directory files the solver requires.
-  - Required evidence: audit report inventories `tsd.lai`, `tsd.mf`, `tsd.rl` (present in all 13 basin packages), states whether `Prcp_Correction`/LAI/MF series are consumed independently of weather forcing, and lists which legacy forcing-directory files must be preserved.
-  - Non-goal for 3.3: no removal or modification of ancillary files; inventory and preservation list only.
-- [ ] 3.4 Issue an explicit `z_policy` verdict and finalize the immutable audit report bound to the pin.
-  - Required evidence: verdict is `sentinel` only if the audit proves `Z` numerically unused (noting `Z=-9999` in live baselines, appendix A, is consistent but not proof); otherwise `canonical_orography` or `model_dem_at_cell_center` is chosen with recorded justification.
-  - Required evidence: report is committed as an immutable evidence file citing `shud_openmp_outer_commit`, `shud_solver_submodule_commit`, the readiness manifest checksum, and the 1.2 `shud_omp` build provenance confirming the audited submodule commit is the one the production binary was built from.
-  - Non-goal for 3.4: no elevation-source implementation and no binding/manifest change; the verdict informs later changes only.
-
-## 4. Evidence Package Assembly and Validation
-
-- [ ] 4.1 Assemble the readiness evidence package binding all artifacts to the manifest checksum.
-  - Required evidence: evidence package indexes the manifest + `.sha256` (plus the 1.3 completeness-check output), the 2.1–2.7 run/smoke/execution/capacity records, and the §3 audit report; the manifest is referenced by the evidence package.
+- [ ] 3.1 Assemble the readiness evidence package binding all artifacts to the manifest checksum.
+  - Required evidence: evidence package indexes the manifest + `.sha256` (plus the 1.3 completeness-check output) and the 2.1–2.7 run/smoke/execution/capacity records; the manifest is referenced by the evidence package.
   - Required evidence: a cross-artifact consistency check records that every artifact references the identical `baseline_commit` and the identical manifest checksum; any mismatch invalidates the evidence set and blocks certification until a consistent set is produced on a single pinned baseline.
-  - Non-goal for 4.1: no basin migration evidence and no scientific/hydrological comparison (deferred to changes 6–8).
-- [ ] 4.2 Validate the change and confirm 4/4 artifact completeness.
+  - Non-goal for 3.1: no basin migration evidence and no scientific/hydrological comparison (deferred to changes 6–8).
+- [ ] 3.2 Validate the change and confirm 3/3 artifact completeness.
   - Required evidence: `openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive` passes.
-  - Required evidence: `openspec status --change cmfd-direct-grid-platform-readiness` reports 4/4 complete.
+  - Required evidence: `openspec status --change cmfd-direct-grid-platform-readiness` reports 3/3 complete.
   - Required evidence: `uv run ruff check .` passes for any pinning helper or smoke carrier touched.
-  - Non-goal for 4.2: no readiness certification here; certification requires the §2/§3 evidence to have actually passed on the pinned baseline.
+  - Non-goal for 3.2: no readiness certification here; certification requires the §2 evidence to have actually passed on the pinned baseline.

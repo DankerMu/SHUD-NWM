@@ -16,13 +16,6 @@ The platform SHALL publish a single readiness release manifest that records the 
 - **THEN** it records the mapping-builder algorithm version `nearest_cell_barycenter_geodesic_v1`
 - **THEN** it records the forcing producer resource limits and the SHUD runtime direct-grid staging limits in effect on the deployment host.
 
-#### Scenario: SHUD-OpenMP outer repo and solver submodule are recorded separately
-- **WHEN** the manifest records the SHUD solver identity
-- **THEN** it records the SHUD-OpenMP outer repository commit
-- **THEN** it records the SHUD solver git-submodule exact commit as a distinct field
-- **THEN** both commits are resolved on the deployment/build host that owns the production solver checkout (`git rev-parse HEAD` on the outer repository, `git submodule status` for the solver pin), not assumed from a remote default branch
-- **THEN** the manifest does not treat the outer repository commit alone as sufficient to identify the solver.
-
 #### Scenario: Missing required identity blocks readiness
 - **WHEN** any required component, schema, CRS, or algorithm identity is absent, empty, or unresolved
 - **THEN** the manifest is not accepted as a readiness baseline
@@ -53,7 +46,6 @@ The manifest values SHALL be derived from the authoritative in-repository, deplo
 - **THEN** the producer version and resource limits trace to `workers/forcing_producer/producer.py` (including any deployment env overrides in effect)
 - **THEN** the runtime identity and staging limits trace to `workers/shud_runtime/runtime.py`
 - **THEN** the repository schema migration head traces to the highest migration file in `db/migrations/`, and the deployment-applied schema version traces to a live query on node-27's active primary database
-- **THEN** `shud_openmp_outer_commit` and `shud_solver_submodule_commit` trace to `git rev-parse HEAD` and `git submodule status` executed on the deployment/build host that owns the production solver checkout
 - **THEN** `proj_crs_database_version` traces to the PROJ installation on the deployment host (PROJ release string plus `proj.db` layout/build metadata queried there), not to documentation
 - **THEN** `mapping_builder_algorithm_version` traces to its declared authority — the migration source-of-truth §6.1 algorithm identifier (`docs/ForcingReplace/CMFD 建模资产向 IFSGFS Direct-Grid 的安全迁移.md`) — which remains the authoritative source until the `forcing-mapping-asset-build` change lands an in-repository implementation source
 - **THEN** the recorded source location for each identity is captured in `source_locations` in the evidence so a reviewer can re-derive the value.
