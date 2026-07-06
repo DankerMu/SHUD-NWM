@@ -222,7 +222,9 @@ def _execution_units(
         ),
     ):
         cycle_id = context.cycle_id_for(source_id, cycle_time)
-        for cohort_key, cohort_candidates in context.restart_compatible_candidate_cohorts(cycle_candidates):
+        for cohort_key, cohort_candidates in context.restart_compatible_candidate_cohorts(
+            _unique_execution_candidates(cycle_candidates)
+        ):
             for execution_candidates, cohort_run_id in context.candidate_execution_cohorts(
                 source_id,
                 cycle_time,
@@ -239,6 +241,27 @@ def _execution_units(
                     )
                 )
     return units
+
+
+def _unique_execution_candidates(
+    candidates: Sequence[SchedulerExecutionCandidate],
+) -> list[SchedulerExecutionCandidate]:
+    unique: list[SchedulerExecutionCandidate] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for candidate in candidates:
+        key = (
+            str(candidate.source_id),
+            str(candidate.cycle_id),
+            str(candidate.model_id),
+            str(candidate.basin_id),
+            str(getattr(candidate, "run_id", "")),
+            str(candidate.candidate_id),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
 
 
 def execute_candidate_cohort(

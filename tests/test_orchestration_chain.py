@@ -6417,13 +6417,17 @@ def test_psycopg_candidate_state_source_cycle_multihop_retry_repairs_failed_ance
     assert successful_retry_job["repairs_job_ids"] == [original_job_id, failed_retry_job_id]
 
 
-def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -> None:
+def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage(tmp_path: Path) -> None:
     from services.orchestrator.chain_repository_state import candidate_state_from_rows
     from services.orchestrator.scheduler_state_decision import _candidate_state_decision
 
     failed_job_id = "job_cycle_gfs_2026050100_forcing_model_b_forcing_retry_1"
     retry_job_id = "cycle_gfs_2026050100_forcing_model_b_retry_2"
     cycle_time = _dt("2026-05-01T00:00:00Z")
+    object_store_root = tmp_path / "object-store"
+    forcing_package = object_store_root / "forcing" / "gfs" / "2026050100" / "basin_b" / "model_b" / "package.json"
+    forcing_package.parent.mkdir(parents=True)
+    forcing_package.write_text("{}", encoding="utf-8")
     state = candidate_state_from_rows(
         source_id="gfs",
         cycle_time=cycle_time,
@@ -6432,7 +6436,10 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -
         forcing_version_id="forc_gfs_2026050100_model_b",
         candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
         hydro_run=None,
-        forcing_version=None,
+        forcing_version={
+            "forcing_version_id": "forc_gfs_2026050100_model_b",
+            "forcing_package_uri": str(forcing_package),
+        },
         forecast_cycle={
             "cycle_id": "gfs_2026050100",
             "source_id": "gfs",
@@ -6545,7 +6552,7 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage() -
         basin_version_id="basin_v1",
         river_network_version_id="river_v1",
         scenario_id="forecast_gfs_deterministic",
-        resource_profile={},
+        resource_profile={"object_store_root": str(object_store_root)},
         run_id="fcst_gfs_2026050100_model_b",
         forcing_version_id="forc_gfs_2026050100_model_b",
     )

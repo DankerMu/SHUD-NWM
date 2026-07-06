@@ -731,14 +731,56 @@ If a Slurm job fails because `/ghdc` is missing, runtime roots are wrong. Fix
 the compute-side workspace/object-store config rather than moving display paths
 into sbatch runtime.
 
-### 8.5 Heihe 底图和 DB 范围混用
+### 8.5 Node-22 scheduler stuck after missing forcing artifact
+
+Symptoms:
+
+- `nhms-compute-scheduler.service` consumes CPU with no new Slurm job and no
+  advancing file-journal evidence.
+- Reconcile records `SLURM_RECONCILE_UNVERIFIED` for a Slurm job that `sacct`
+  reports terminal.
+- A previously completed cycle/basin is selected again because an older
+  `hydro_run.status` row still says `created`.
+- Forecast retry fails as a generic runtime/node failure while stderr shows a
+  missing `forcing_package_uri` object-store tree.
+
+Safe online mitigation:
+
+1. Keep node-22 compute-only. Do not reconnect the archived local PostgreSQL
+   `:55433`.
+2. Restore the missing forcing package from preserved workspace products only
+   when the preserved files match the affected source/cycle/model identity.
+   Copy both the staging object-store path and shared NFS copyback root, then
+   verify file count and `forcing_package.json` checksum from node-22 and
+   node-27 views.
+3. Clear only stale scheduler locks whose PID is dead or whose live pass was
+   intentionally stopped; preserve the stale-lock evidence JSON.
+4. Restart scheduler from the latest merged code, not by hand-editing journal
+   rows as a normal operating path.
+
+Business-readiness receipt after fix:
+
+- `nhms-compute-scheduler.service` and timer run with
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, no `DATABASE_URL`, and
+  `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` greater than `1`.
+- The emergency one-at-a-time override is removed or disabled.
+- The receipt includes at least two eligible candidates or array tasks; a
+  no-work pass proves safe daemon behavior but does not prove business
+  operation.
+- Slurm evidence binds terminal status to submitted manifest/task/stdout or
+  file-journal identity. Generic job names such as `nhms_forecast` alone are not
+  sufficient to mark success.
+- Scheduler evidence shows duplicate-free file-journal progress and lock release
+  after the pass.
+
+### 8.6 Heihe 底图和 DB 范围混用
 
 Current DB registered Heihe data uses `/home/ghdc/nwm/Basins/...` on node-27.
 Older static basemap scripts may have used repository-local fixtures with a
 smaller extent. For live display and ingest, use the node-27 Basins source of
 truth.
 
-### 8.6 Heihe 河段两层模型
+### 8.7 Heihe 河段两层模型
 
 Heihe DB river network has GIS display segments and SHUD output segments.
 `hydro.river_timeseries.q_down` attaches directly to SHUD output segments.

@@ -23,6 +23,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, Mapping
 
 from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
@@ -84,6 +85,15 @@ class SacctRecord:
     job_name: str
     exit_code: str | None = None
     comment: str | None = None
+    run_id: str | None = None
+    model_id: str | None = None
+    stage: str | None = None
+    pipeline_job_id: str | None = None
+    array_task_id: int | str | None = None
+    task_id: int | str | None = None
+    submitted_manifest: Mapping[str, Any] | None = None
+    stdout_identity: Mapping[str, Any] | None = None
+    file_journal_identity: Mapping[str, Any] | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -96,8 +106,9 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
     """Build a sacct querier that shells out to the real ``sacct`` binary.
 
     Uses ``--parsable2 --noheader`` with the same field shape the gateway uses
-    elsewhere (``JobID|JobName|State|ExitCode``), and returns the master job's
-    record (the row whose ``JobID`` has no ``_<task>``/``.<step>`` suffix).
+    elsewhere (``JobID|JobName|State|ExitCode``), and returns the exact target
+    row. For master jobs this is the master row; for array tasks this is the
+    ``<master>_<task>`` row.
     """
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
@@ -232,8 +243,10 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
-    """Parse the master job row (JobID without ``_``/``.`` suffix) from sacct."""
+    """Parse the exact master or array-task job row from sacct."""
 
+    target_job_id = str(slurm_job_id)
+    target_is_array_task = "_" in target_job_id
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -242,17 +255,24 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
         if len(fields) < 3:
             continue
         job_id = fields[0]
-        # Skip array task rows (12345_0) and job step rows (12345.batch).
-        if "_" in job_id or "." in job_id:
+        # Skip job step rows (12345.batch / 12345_3.batch).
+        if "." in job_id:
             continue
-        if job_id != str(slurm_job_id):
+        # Master queries keep the historical master-row behavior. Array-task
+        # queries must return the exact task row instead of being skipped.
+        if not target_is_array_task and "_" in job_id:
             continue
+        if job_id != target_job_id:
+            continue
+        task_id = job_id.split("_", 1)[1] if "_" in job_id else None
         return SacctRecord(
             slurm_job_id=job_id,
             job_name=fields[1],
             raw_state=fields[2],
             exit_code=fields[3] if len(fields) > 3 else None,
             comment=fields[4].strip() if len(fields) > 4 else None,
+            task_id=task_id,
+            array_task_id=task_id,
         )
     return None
 
@@ -275,7 +295,18 @@ def _expected_job_name_token(stage: str | None, job_type: str | None) -> str | N
     return f"nhms_{token}"
 
 
-def _identity_matches(record: SacctRecord, expected_token: str | None) -> bool:
+_GENERIC_ARRAY_JOB_NAMES = frozenset({"nhms_forecast", "nhms_forcing"})
+_FORECAST_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast_array", "run_shud_forecast"})
+_FORCING_STAGE_ALIASES = frozenset({"forcing", "produce_forcing", "forcing_package"})
+
+
+def _identity_matches(
+    record: SacctRecord,
+    expected_token: str | None,
+    job: Any | None = None,
+    *,
+    require_durable_identity: bool = True,
+) -> bool:
     """Confirm the accounting row belongs to the recorded candidate.
 
     When the durable row gives a stage/job_type, the sacct ``JobName`` must carry
@@ -288,7 +319,111 @@ def _identity_matches(record: SacctRecord, expected_token: str | None) -> bool:
     # conservative and judge unverified (do not accept, do not resubmit).
     if expected_token is None:
         return False
-    return record.job_name.strip() == expected_token
+    job_name = record.job_name.strip()
+    generic_job_name = job_name in _GENERIC_ARRAY_JOB_NAMES
+    expected_stage_token = expected_token.removeprefix("nhms_")
+    job_stage_token = job_name.removeprefix("nhms_")
+    if job_name != expected_token and not (generic_job_name and _stages_match(job_stage_token, expected_stage_token)):
+        return False
+    if generic_job_name and require_durable_identity:
+        return job is not None and _record_has_durable_identity_proof(record, job)
+    return True
+
+
+def _record_has_durable_identity_proof(record: SacctRecord, job: Any) -> bool:
+    for identity in _record_identity_mappings(record):
+        if _identity_mapping_matches_job(identity, job):
+            return True
+    return False
+
+
+def _record_identity_mappings(record: SacctRecord) -> list[Mapping[str, Any]]:
+    mappings: list[Mapping[str, Any]] = []
+    direct = {
+        "run_id": record.run_id,
+        "model_id": record.model_id,
+        "stage": record.stage,
+        "pipeline_job_id": record.pipeline_job_id,
+        "array_task_id": record.array_task_id,
+        "task_id": record.task_id,
+    }
+    if any(value not in (None, "") for value in direct.values()):
+        mappings.append(direct)
+    for value in (record.submitted_manifest, record.stdout_identity, record.file_journal_identity):
+        if isinstance(value, Mapping):
+            mappings.append(value)
+    return mappings
+
+
+def _identity_mapping_matches_job(identity: Mapping[str, Any], job: Any) -> bool:
+    proof = False
+    expected_job_id = str(getattr(job, "job_id", "") or "")
+    expected_run_id = str(getattr(job, "run_id", "") or "")
+    expected_model_id = str(getattr(job, "model_id", "") or "")
+    expected_stage = str(getattr(job, "stage", None) or getattr(job, "job_type", "") or "")
+    expected_task_id = getattr(job, "array_task_id", None)
+
+    actual_job_id = _identity_text(identity, "pipeline_job_id", "job_id")
+    if actual_job_id:
+        if actual_job_id != expected_job_id:
+            return False
+        proof = True
+
+    actual_run_id = _identity_text(identity, "run_id")
+    if actual_run_id:
+        if expected_run_id and actual_run_id != expected_run_id:
+            return False
+        proof = True
+
+    actual_model_id = _identity_text(identity, "model_id")
+    if actual_model_id and expected_model_id and actual_model_id != expected_model_id:
+        return False
+
+    actual_stage = _identity_text(identity, "stage", "job_type", "stage_name")
+    if actual_stage and not _stages_match(actual_stage, expected_stage):
+        return False
+
+    if expected_task_id not in (None, ""):
+        actual_task_id = _identity_text(identity, "array_task_id", "task_id", "original_task_id")
+        if actual_task_id != str(expected_task_id):
+            return False
+        proof = True
+
+    return proof
+
+
+def _identity_text(identity: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = identity.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _stages_match(actual: str | None, expected: str | None) -> bool:
+    if not actual or not expected:
+        return False
+    actual_value = actual.strip()
+    expected_value = expected.strip()
+    if actual_value == expected_value:
+        return True
+    return _stage_family(actual_value) is not None and _stage_family(actual_value) == _stage_family(expected_value)
+
+
+def _stage_family(value: str) -> str | None:
+    if value in _FORECAST_STAGE_ALIASES:
+        return "forecast"
+    if value in _FORCING_STAGE_ALIASES:
+        return "forcing"
+    return None
+
+
+def _sacct_query_job_id(job: Any) -> str:
+    slurm_job_id = str(getattr(job, "slurm_job_id", "") or "")
+    array_task_id = getattr(job, "array_task_id", None)
+    if not slurm_job_id or "_" in slurm_job_id or array_task_id in (None, ""):
+        return slurm_job_id
+    return f"{slurm_job_id}_{array_task_id}"
 
 
 def reconcile_inflight_jobs(
@@ -310,17 +445,13 @@ def reconcile_inflight_jobs(
         if not slurm_job_id:
             continue
 
+        query_slurm_job_id = _sacct_query_job_id(job)
         try:
-            record = sacct_query(str(slurm_job_id))
+            record = sacct_query(query_slurm_job_id)
         except ReconcileQueryUnavailable as error:
-            # Transient query failure (sacct timed out / non-zero exit): we did
-            # NOT confirm anything. Leave the durable status untouched and let a
-            # later reconcile pass retry. This path never resubmits, so the only
-            # harm of a misread would be a wrong terminal verdict — we avoid even
-            # that by recording a typed, non-terminal outcome.
             LOGGER.warning(
                 "reconcile inflight query unavailable for %s: %s",
-                slurm_job_id,
+                query_slurm_job_id,
                 error,
             )
             outcomes.append(
@@ -333,8 +464,16 @@ def reconcile_inflight_jobs(
             )
             continue
         expected_token = _expected_job_name_token(job.stage, job.job_type)
+        normalized = _normalize_slurm_state(record.raw_state) if record is not None else None
+        slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED) if normalized is not None else None
+        requires_durable_identity = slurm_status in TERMINAL_STATUSES
 
-        if record is None or not _identity_matches(record, expected_token):
+        if record is None or not _identity_matches(
+            record,
+            expected_token,
+            job,
+            require_durable_identity=requires_durable_identity,
+        ):
             # Cannot prove this is our candidate: mark typed, do NOT resubmit.
             store.update_job_status(
                 job.job_id,
@@ -355,8 +494,7 @@ def reconcile_inflight_jobs(
             )
             continue
 
-        normalized = _normalize_slurm_state(record.raw_state)
-        slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED)
+        slurm_status = slurm_status or SlurmJobStatus.FAILED
 
         if slurm_status in TERMINAL_STATUSES:
             error_code = (

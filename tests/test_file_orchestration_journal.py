@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
@@ -44,6 +45,16 @@ def _write_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
         "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _open_fd_count_or_skip() -> int:
+    for fd_dir in (Path("/proc/self/fd"), Path("/dev/fd")):
+        try:
+            if fd_dir.exists():
+                return len(os.listdir(fd_dir))
+        except OSError:
+            continue
+    pytest.skip("open fd directory is not available on this platform")
 
 
 def _candidate_state(
@@ -493,6 +504,68 @@ def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths
     forcing = repository.find_forcing_context(source_id="GFS", cycle_time=cycle_time, model_id="model_a")
     assert forcing.forcing_version_id == "forc_gfs_2026062800_model_a"
     assert forcing.max_lead_hours == 9
+
+
+def test_file_orchestration_journal_source_scoped_read_handles_lowercase_ifs_history(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    active_job = _active_job(cycle_time)
+    active_job.update(
+        {
+            "job_id": f"job_cycle_ifs_{cycle_stamp}_forecast",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:forecast",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "IFS",
+        }
+    )
+    latest = _latest_view(source_id="IFS", cycle_time=cycle_time, hydro_status=None, jobs=[active_job])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/ifs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="IFS", cycle_time=cycle_time, model_id="model_a") is True
+    active = repository.active_slurm_jobs(source_id="IFS", cycle_time=cycle_time, model_id="model_a")
+    assert active[0]["source_id"] == "IFS"
+    assert active[0]["slurm_job_id"] == "3001"
+    state = _candidate_state(repository, source_id="IFS", cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "queued"
+    assert state["pipeline_jobs"][0]["source_id"] == "IFS"
+
+
+def test_file_orchestration_journal_source_scoped_completed_read_handles_lowercase_era5_history(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    terminal_job = _active_job(cycle_time)
+    terminal_job.update(
+        {
+            "job_id": f"job_cycle_era5_{cycle_stamp}_state_save_qc",
+            "idempotency_key": f"cycle_era5_{cycle_stamp}:state_save_qc",
+            "run_id": f"fcst_era5_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("ERA5", cycle_time),
+            "source_id": "ERA5",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    latest = _latest_view(source_id="ERA5", cycle_time=cycle_time, hydro_status=None, jobs=[terminal_job])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/era5/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="ERA5", cycle_time=cycle_time, model_id="model_a") is True
+    state = _candidate_state(repository, source_id="ERA5", cycle_time=cycle_time)
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
+    assert state["pipeline_jobs"][0]["source_id"] == "ERA5"
 
 
 def test_file_orchestration_journal_accepted_row_source_alias_matches_canonical_callers(tmp_path: Path) -> None:
@@ -1140,6 +1213,205 @@ def test_file_orchestration_journal_exposes_restart_reconcile_store_interface(
     assert repository.query_reserved_unbound_jobs() == []
 
 
+def test_file_orchestration_journal_reconcile_scan_skips_bad_journal_path(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    pending_bound = _pipeline_reservation_record(
+        cycle_time,
+        job_id="job_reconcile_pending_after_bad_path",
+        status="pending",
+    )
+    pending_bound["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_pending_after_bad_path"
+    pending_bound["slurm_job_id"] = "3003"
+    repository.upsert_pipeline_job(pending_bound)
+
+    bad_path = journal_root / "journal" / "not_a_source" / "bad_cycle.jsonl"
+    bad_path.parent.mkdir(parents=True)
+    bad_path.write_text('{"record_type":"pipeline_job","job_id":"bad"}\n', encoding="utf-8")
+
+    inflight = repository.query_inflight_jobs()
+
+    assert {job.job_id for job in inflight} == {"job_reconcile_pending_after_bad_path"}
+
+
+def test_file_orchestration_journal_recent_reconcile_scan_closes_directory_fds(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root, max_files=64)
+    for index in range(16):
+        cycle_time = _dt(f"2026-06-28T{index % 10:02d}:00:00Z")
+        job = _pipeline_reservation_record(
+            cycle_time,
+            job_id=f"job_reconcile_fd_stability_{index}",
+            status="pending",
+        )
+        job["slurm_job_id"] = str(5000 + index)
+        _write_jsonl(
+            journal_root / "journal" / "gfs" / f"{format_cycle_time(cycle_time)}_{index}.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=job,
+                    sequence=index + 1,
+                )
+            ],
+        )
+
+    before = _open_fd_count_or_skip()
+    for _ in range(40):
+        assert list(repository._iter_recent_reconcile_journal_paths(8))
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
+
+
+def test_safe_fs_missing_child_read_closes_intermediate_parent_fds(tmp_path: Path) -> None:
+    root = tmp_path / "journal"
+    (root / "latest").mkdir(parents=True)
+
+    before = _open_fd_count_or_skip()
+    for _ in range(40):
+        with pytest.raises(FileNotFoundError):
+            safe_fs.read_bytes_limited_no_follow(
+                root / "latest" / "missing_source" / "2026062800" / "model_a.json",
+                max_bytes=32,
+                containment_root=root,
+            )
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
+
+
+def test_file_orchestration_journal_cycle_rows_missing_alias_reads_close_parent_fds(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root, max_files=128)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    journal_records = []
+    for index in range(16):
+        model_id = f"model_{index}"
+        _write_json(
+            journal_root / "latest" / "gfs" / cycle_segment / f"{model_id}.json",
+            _latest_view(source_id="gfs", cycle_time=cycle_time, model_id=model_id, jobs=[]),
+        )
+        job = _pipeline_reservation_record(
+            cycle_time,
+            job_id=f"job_cycle_gfs_{cycle_segment}_{model_id}_forcing",
+            status="pending",
+        )
+        job.update(
+            {
+                "cycle_id": f"gfs_{cycle_segment}",
+                "job_type": "produce_forcing_array",
+                "model_id": model_id,
+                "run_id": f"cycle_gfs_{cycle_segment}_{model_id}",
+                "slurm_job_id": str(6000 + index),
+                "stage": "forcing",
+            }
+        )
+        journal_records.append(
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                payload=job,
+                model_id=model_id,
+                sequence=index + 1,
+            )
+        )
+    _write_jsonl(journal_root / "journal" / "gfs" / f"{cycle_segment}.jsonl", journal_records)
+
+    before = _open_fd_count_or_skip()
+    for index in range(16):
+        repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=f"model_{index}")
+    after = _open_fd_count_or_skip()
+
+    assert after - before <= 4
+
+
+def test_file_orchestration_journal_reconcile_direct_scan_keeps_old_active_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    old_reserved = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_old_reserved")
+    old_reserved["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_old_reserved"
+    old_inflight = _pipeline_reservation_record(
+        cycle_time,
+        job_id="job_reconcile_old_inflight",
+        status="running",
+    )
+    old_inflight["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_old_inflight"
+    old_inflight["slurm_job_id"] = "3999"
+    repository.upsert_pipeline_job(old_reserved)
+    repository.upsert_pipeline_job(old_inflight)
+    for index in range(5):
+        newer = _pipeline_reservation_record(
+            _dt(f"2026-06-28T0{index + 1}:00:00Z"),
+            job_id=f"job_reconcile_newer_terminal_{index}",
+            status="succeeded",
+        )
+        newer["idempotency_key"] = f"gfs:gfs_202606280{index + 1}:basin_a:terminal_{index}"
+        newer["slurm_job_id"] = str(4100 + index)
+        repository.upsert_pipeline_job(newer)
+
+    reserved = repository.query_reserved_unbound_jobs()
+    inflight = repository.query_inflight_jobs()
+
+    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved"]
+    assert [job.job_id for job in inflight] == ["job_reconcile_old_inflight"]
+
+
+def test_file_orchestration_journal_reconcile_direct_scan_skips_bad_entry_and_keeps_old_active_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NHMS_FILE_RECONCILE_SCAN_LIMIT", "1")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    old_reserved = _pipeline_reservation_record(cycle_time, job_id="job_reconcile_old_reserved_after_bad_direct")
+    old_reserved["idempotency_key"] = "gfs:gfs_2026062800:basin_a:forecast_old_reserved_after_bad_direct"
+    repository.upsert_pipeline_job(old_reserved)
+    os.utime(journal_root / "journal/gfs/2026062800.jsonl", (1, 1))
+
+    for index in range(3):
+        terminal_cycle_time = _dt(f"2026-06-28T0{index + 1}:00:00Z")
+        terminal = _pipeline_reservation_record(
+            terminal_cycle_time,
+            job_id=f"job_reconcile_newer_terminal_after_bad_direct_{index}",
+            status="succeeded",
+        )
+        terminal["idempotency_key"] = f"gfs:gfs_202606280{index + 1}:basin_a:terminal_after_bad_direct_{index}"
+        terminal["slurm_job_id"] = str(4200 + index)
+        terminal_journal_path = journal_root / f"journal/gfs/{format_cycle_time(terminal_cycle_time)}.jsonl"
+        _write_jsonl(
+            terminal_journal_path,
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=terminal_cycle_time,
+                    payload=terminal,
+                )
+            ],
+        )
+        os.utime(terminal_journal_path, (10 + index, 10 + index))
+
+    bad_direct_path = journal_root / "pipeline-jobs/unrelated bad direct.json"
+    bad_direct_path.write_text("{not-json", encoding="utf-8")
+
+    reserved = repository.query_reserved_unbound_jobs()
+
+    assert [job.job_id for job in reserved] == ["job_reconcile_old_reserved_after_bad_direct"]
+
+
 def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -1698,6 +1970,182 @@ def test_file_journal_manual_retry_uses_array_endpoint_for_array_job_types(tmp_p
     assert gateway.array_requests
     assert gateway.array_requests[0].resolved_job_type() == "produce_forcing_array"
     assert gateway.array_requests[0].manifest["tasks"] == tasks
+
+
+def test_file_journal_manual_retry_preserves_db_free_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://writer:secret@db.example/nhms")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast_db_free_failed")
+    repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+                "scheduler_db_free_required": "true",
+                "scheduler_allowed_roots": "/srv/nhms/workspace:/srv/nhms/object-store",
+                "scheduler_registry_backend": "file",
+                "scheduler_registry_manifest": "/srv/nhms/object-store/scheduler/registry/manifest-last.json",
+                "scheduler_canonical_readiness_backend": "file",
+                "scheduler_canonical_readiness_index": (
+                    "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+                ),
+                "scheduler_state_index_backend": "file",
+                "scheduler_state_index": "/srv/nhms/object-store/scheduler/state-index/index-last.json",
+            }
+        },
+    )
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "permanently_failed",
+        error_code="NODE_FAILURE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7010", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry(record["run_id"], gateway, trusted_internal=True)
+
+    manifest = gateway.requests[0].manifest
+    assert retried.status == "submitted"
+    assert manifest["scheduler_db_free_required"] == "true"
+    assert manifest["scheduler_registry_backend"] == "file"
+    assert manifest["scheduler_registry_manifest"] == "/srv/nhms/object-store/scheduler/registry/manifest-last.json"
+    assert manifest["scheduler_canonical_readiness_backend"] == "file"
+    assert manifest["scheduler_canonical_readiness_index"] == (
+        "/srv/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+    )
+    assert manifest["scheduler_state_index_backend"] == "file"
+    assert manifest["scheduler_state_index"] == "/srv/nhms/object-store/scheduler/state-index/index-last.json"
+    assert manifest["slurm_env"] == {"NHMS_SHUD_DB_FREE": "true"}
+    assert manifest["previous_job_id"] == "job_forecast_db_free_failed"
+    assert manifest["pipeline_job_id"] == retried.job_id
+    assert manifest["manual_retry_marker"] is True
+    assert "DATABASE_URL" not in json.dumps(manifest)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    retry_event = next(event for event in state["pipeline_events"] if event["event_type"] == "retry")
+    submission_event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    assert retry_event["details"]["manual_retry_marker"] is True
+    assert retry_event["details"]["previous_job_id"] == "job_forecast_db_free_failed"
+    assert submission_event["details"]["runtime_root_resolution"]["db_free_runtime"]["required"] is True
+    assert submission_event["details"]["runtime_root_contract"]["scheduler_db_free_required"] == "true"
+
+
+def test_file_journal_retry_rejects_db_free_selectors_outside_allowed_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    monkeypatch.setenv("WORKSPACE_ROOT", "/env/nhms/workspace")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", "/env/nhms/object-store")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://env-nhms-prod")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", "/env/nhms/workspace:/env/nhms/object-store")
+    monkeypatch.setenv("NHMS_SCHEDULER_REGISTRY_BACKEND", "file")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+        "/env/nhms/object-store/scheduler/registry/manifest-last.json",
+    )
+    monkeypatch.setenv("NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "file")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX",
+        "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json",
+    )
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_STATE_INDEX",
+        "/env/nhms/object-store/scheduler/state-index/index-last.json",
+    )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast_db_free_failed")
+    repository.reserve_pipeline_job(record)
+    repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=record["job_id"],
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={
+            "runtime_root_contract": {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+                "scheduler_db_free_required": "true",
+                "scheduler_allowed_roots": "/srv/nhms/workspace:/srv/nhms/object-store",
+                "scheduler_registry_backend": "file",
+                "scheduler_registry_manifest": "/tmp/evil-registry.json",
+                "scheduler_canonical_readiness_backend": "file",
+                "scheduler_canonical_readiness_index": "/tmp/evil-readiness.json",
+                "scheduler_state_index_backend": "file",
+                "scheduler_state_index": "/tmp/evil-state.json",
+            }
+        },
+    )
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "permanently_failed",
+        error_code="NODE_FAILURE",
+        finished_at=cycle_time,
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7011", "status": "submitted"}
+
+    gateway = Gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    retried = service.attempt_manual_retry(record["run_id"], gateway, trusted_internal=True)
+
+    manifest = gateway.requests[0].manifest
+    assert retried.status == "submitted"
+    assert manifest["scheduler_registry_manifest"] == "/env/nhms/object-store/scheduler/registry/manifest-last.json"
+    assert manifest["scheduler_canonical_readiness_index"] == (
+        "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+    )
+    assert manifest["scheduler_state_index"] == "/env/nhms/object-store/scheduler/state-index/index-last.json"
+    assert "/tmp/evil" not in json.dumps(manifest)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    submission_event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
+    )
+    rejected = submission_event["details"]["runtime_root_resolution"]["rejected"]
+    assert any(
+        item["field"] == "scheduler_registry_manifest"
+        and item["reason"] == "db_free_selector_path_outside_allowed_roots"
+        for item in rejected
+    )
 
 
 def test_file_journal_retry_service_reuses_submission_failed_retry_and_clears_stale_fields(
@@ -2918,11 +3366,77 @@ def test_file_orchestration_journal_list_stage_statuses_all_sources_for_cycle(
     } == {("gfs", "gfs"), ("IFS", "ifs")}
     assert Path("latest/ifs/2026062800/model_a.json") in read_paths
     assert Path("latest/IFS/2026062800/model_a.json") not in read_paths
-    assert [row["job_id"] for row in rows] == ["job_gfs_forecast", "job_ifs_forecast"]
+    assert {(row["job_id"], row["source_id"]) for row in rows} == {
+        ("job_gfs_forecast", "gfs"),
+        ("job_ifs_forecast", "IFS"),
+    }
     assert {row["cycle_id"] for row in rows} == {
         cycle_id_for("gfs", cycle_time),
         cycle_id_for("ifs", cycle_time),
     }
+
+
+def test_file_orchestration_journal_list_stage_statuses_all_sources_reads_mixed_alias_history(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    latest_job = _active_job(cycle_time)
+    latest_job.update(
+        {
+            "job_id": "job_ifs_latest_download",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:download_source_cycle",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "IFS",
+            "stage": "download_source_cycle",
+        }
+    )
+    history_job = _active_job(cycle_time)
+    history_job.update(
+        {
+            "job_id": "job_ifs_history_forecast",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:forecast",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "ifs",
+            "stage": "forecast",
+            "slurm_job_id": "3002",
+            "submitted_at": "2026-06-28T00:02:00Z",
+        }
+    )
+    latest = _latest_view(source_id="IFS", cycle_time=cycle_time, jobs=[latest_job])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/IFS/2026062800/model_a.json", latest)
+    _write_jsonl(
+        journal_root / "journal/ifs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="ifs",
+                cycle_time=cycle_time,
+                payload=history_job,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert [
+        (source.source_id, source.source_segments)
+        for source in repository._cycle_source_discoveries(cycle_time=cycle_time)
+    ] == [("IFS", ("IFS", "ifs"))]
+
+    rows = repository.list_stage_statuses(
+        source_id=None,
+        cycle_time=cycle_time,
+        model_id="model_a",
+    )
+
+    rows_by_job_id = {row["job_id"]: row for row in rows}
+    assert set(rows_by_job_id) == {"job_ifs_latest_download", "job_ifs_history_forecast"}
+    assert {row["source_id"] for row in rows_by_job_id.values()} == {"IFS"}
+    assert {row["cycle_id"] for row in rows_by_job_id.values()} == {cycle_id_for("IFS", cycle_time)}
 
 
 def test_file_orchestration_journal_list_stage_statuses_preserves_db_stage_order(tmp_path: Path) -> None:
@@ -3484,6 +3998,80 @@ def test_file_orchestration_journal_new_write_advances_beyond_latest_only_replay
     assert direct_after["payload"]["status"] == "running"
     assert repository.get_pipeline_job(latest_job["job_id"])["status"] == "running"
     assert state is not None
+    assert state["pipeline_jobs"][0]["status"] == "running"
+    assert state["pipeline_status"] == "running"
+
+
+def test_file_orchestration_journal_new_write_advances_beyond_alias_replay_sequence(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    stale_job = _active_job(cycle_time)
+    stale_job.update(
+        {
+            "job_id": f"job_cycle_ifs_{cycle_stamp}_forecast",
+            "idempotency_key": f"cycle_ifs_{cycle_stamp}:forecast",
+            "run_id": f"fcst_ifs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("IFS", cycle_time),
+            "source_id": "ifs",
+            "status": "failed",
+            "slurm_job_id": "9009",
+            "submitted_at": "2026-06-28T00:01:00Z",
+            "finished_at": "2026-06-28T00:10:00Z",
+            "updated_at": "2026-06-28T00:10:00Z",
+        }
+    )
+    latest = _latest_view(source_id="ifs", cycle_time=cycle_time, jobs=[stale_job])
+    latest["forcing_version"] = None
+    latest["replay"]["latest_sequence"] = 10
+    _write_json(journal_root / "latest/ifs/2026062800/model_a.json", latest)
+    _write_jsonl(
+        journal_root / "journal/ifs/2026062800.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="ifs",
+                cycle_time=cycle_time,
+                payload=stale_job,
+                sequence=10,
+            )
+        ],
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    new_job = dict(stale_job)
+    new_job.update(
+        {
+            "source_id": "IFS",
+            "status": "running",
+            "slurm_job_id": "3011",
+            "finished_at": None,
+            "error_code": None,
+            "error_message": None,
+        }
+    )
+
+    written = repository.upsert_pipeline_job(new_job)
+
+    journal_records = [
+        json.loads(line)
+        for line in (journal_root / "journal/IFS/2026062800.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    latest_after = json.loads((journal_root / "latest/IFS/2026062800/model_a.json").read_text(encoding="utf-8"))
+    direct_after = json.loads((journal_root / f"pipeline-jobs/{stale_job['job_id']}.json").read_text(encoding="utf-8"))
+    state = _candidate_state(repository, source_id="IFS", cycle_time=cycle_time)
+
+    assert written["status"] == "running"
+    assert journal_records[-1]["sequence"] == 11
+    assert latest_after["replay"]["latest_sequence"] == 11
+    assert latest_after["pipeline_jobs"][0]["source_id"] == "IFS"
+    assert latest_after["pipeline_jobs"][0]["status"] == "running"
+    assert direct_after["sequence"] == 11
+    assert direct_after["payload"]["status"] == "running"
+    assert repository.get_pipeline_job(stale_job["job_id"])["status"] == "running"
+    assert state is not None
+    assert state["pipeline_jobs"][0]["source_id"] == "IFS"
     assert state["pipeline_jobs"][0]["status"] == "running"
     assert state["pipeline_status"] == "running"
 

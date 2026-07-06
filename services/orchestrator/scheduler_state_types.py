@@ -31,7 +31,7 @@ DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
-DOWNSTREAM_RESTART_STAGES = ("convert", "forcing", "forecast", "parse", "state_save_qc")
+DOWNSTREAM_RESTART_STAGES = ("convert", "forcing", "forecast", "parse", "state_save_qc", "publish", "copyback")
 DOWNSTREAM_STAGE_ALIASES = {
     "convert": "convert",
     "convert_canonical": "convert",
@@ -50,6 +50,8 @@ DOWNSTREAM_STAGE_ALIASES = {
     "save_state_snapshot_array": "state_save_qc",
     "publish": "publish",
     "publish_tiles": "publish",
+    "copyback": "copyback",
+    "run_tree_copyback": "copyback",
 }
 NATIVE_SHUD_STAGE_ALIASES = {"forecast", "run_shud_forecast", "forecast_run", "analysis_run"}
 TRANSIENT_RETRY_REASON_CODES = {

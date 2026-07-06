@@ -36,6 +36,8 @@ from services.orchestrator.chain_repository import (
 from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
 from services.orchestrator.retry import (
+    _DB_FREE_REQUIRED_SELECTOR_FIELDS,
+    _DB_FREE_RUNTIME_FIELDS,
     _REQUIRED_RUNTIME_ROOT_FIELDS,
     _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
     _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
@@ -56,9 +58,11 @@ from services.orchestrator.retry import (
     RetryNotFoundError,
     _attach_retry_runtime_root_contract,
     _attach_retry_runtime_root_resolution,
+    _candidate_batch_db_free_required,
     _event_details_is_manual_retry_submission,
     _has_runtime_root_field,
     _mapping_at,
+    _resolve_db_free_runtime_candidate,
     _resolve_runtime_root_candidate,
     _retry_submission_error_code,
     _retry_submission_manifest,
@@ -96,6 +100,8 @@ MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 MAX_FILE_JOURNAL_READ_CACHE_ENTRIES = 4096
 MAX_FILE_JOURNAL_READ_CACHE_BYTES = 64 * 1024 * 1024
+FILE_RECONCILE_SCAN_LIMIT_ENV = "NHMS_FILE_RECONCILE_SCAN_LIMIT"
+DEFAULT_FILE_RECONCILE_SCAN_LIMIT = 512
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_RECORDS + 1
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
@@ -313,7 +319,11 @@ def _filter_cycle_rows_for_model(
 @dataclass(frozen=True)
 class _CycleSourceDiscovery:
     source_id: str
-    source_segment: str
+    source_segments: tuple[str, ...]
+
+    @property
+    def source_segment(self) -> str:
+        return self.source_segments[0]
 
 
 @dataclass
@@ -351,7 +361,7 @@ class FileOrchestrationJournalRepository:
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
         self._cycle_rows_cache: dict[
-            tuple[str, str, str | None, str | None],
+            tuple[str, str, str | None, tuple[str, ...]],
             tuple[tuple[Any, ...] | None, _CycleRows],
         ] = {}
         self._direct_jobs_cycle_cache: dict[
@@ -620,7 +630,7 @@ class FileOrchestrationJournalRepository:
     def query_reserved_unbound_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
-            for job in self._iter_pipeline_job_records()
+            for job in self._iter_reconcile_pipeline_job_records()
             if str(job.get("status") or "") == "reserved"
             and job.get("slurm_job_id") in (None, "")
             and job.get("idempotency_key") not in (None, "")
@@ -631,7 +641,7 @@ class FileOrchestrationJournalRepository:
     def query_inflight_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
-            for job in self._iter_pipeline_job_records()
+            for job in self._iter_reconcile_pipeline_job_records()
             if str(job.get("status") or "") in {"pending", "queued", "submitted", "running"}
             and _file_journal_real_slurm_job_id(job.get("slurm_job_id"))
         ]
@@ -1217,7 +1227,7 @@ class FileOrchestrationJournalRepository:
                         source_id=source.source_id,
                         cycle_time=cycle_time,
                         model_id=model_id,
-                        source_segment_override=source.source_segment,
+                        source_segment_overrides=source.source_segments,
                     )
                 )
             statuses.sort(key=_db_compatible_stage_status_order_key)
@@ -1237,6 +1247,7 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
         source_segment_override: str | None = None,
+        source_segment_overrides: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         try:
@@ -1245,6 +1256,7 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=model_id,
                 source_segment_override=source_segment_override,
+                source_segment_overrides=source_segment_overrides,
             )
         except FileOrchestrationJournalError as error:
             return [_blocked_stage_status(error, source_id=source_id, cycle_time=cycle_time, model_id=model_id)]
@@ -1259,7 +1271,7 @@ class FileOrchestrationJournalRepository:
                     "job_type": job.get("job_type"),
                     "slurm_job_id": job.get("slurm_job_id"),
                     "model_id": job.get("model_id"),
-                    "source_id": job.get("source_id") or source_id,
+                    "source_id": source_id,
                     "submitted_at": job.get("submitted_at"),
                     "started_at": job.get("started_at"),
                     "finished_at": job.get("finished_at"),
@@ -1290,7 +1302,7 @@ class FileOrchestrationJournalRepository:
             parts = path.relative_to(self.root).parts
             if len(parts) == 4 and parts[0] == "latest" and parts[2] == cycle_segment:
                 source = _cycle_source_discovery_from_segment(parts[1])
-                sources.setdefault(source.source_id, source)
+                _merge_cycle_source_discovery(sources, source)
         for surface in ("journal", "pipeline-events"):
             for path in sorted(
                 _iter_jsonl_files(
@@ -1303,7 +1315,7 @@ class FileOrchestrationJournalRepository:
                 parts = path.relative_to(self.root).parts
                 if len(parts) == 3 and parts[0] == surface and Path(parts[2]).stem == cycle_segment:
                     source = _cycle_source_discovery_from_segment(parts[1])
-                    sources.setdefault(source.source_id, source)
+                    _merge_cycle_source_discovery(sources, source)
         file_source_ids = set(sources)
         for job in self._iter_direct_pipeline_job_records():
             if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
@@ -1311,9 +1323,9 @@ class FileOrchestrationJournalRepository:
                 if source_id not in file_source_ids:
                     sources.setdefault(
                         source_id,
-                        _CycleSourceDiscovery(source_id=source_id, source_segment=_safe_segment(source_id)),
+                        _CycleSourceDiscovery(source_id=source_id, source_segments=(_safe_segment(source_id),)),
                     )
-        return sorted(sources.values(), key=lambda source: (source.source_id, source.source_segment))
+        return sorted(sources.values(), key=lambda source: (source.source_id, source.source_segments))
 
     def _cycle_rows(
         self,
@@ -1322,15 +1334,17 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         model_id: str | None,
         source_segment_override: str | None = None,
+        source_segment_overrides: tuple[str, ...] | None = None,
     ) -> _CycleRows:
         rows = _CycleRows()
         source_id = _normalize_file_source_id(source_id, field="source_id")
-        source_segment = _cycle_read_source_segment(
+        source_segments = _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=source_segment_override,
+            source_segment_overrides=source_segment_overrides,
         )
         cycle_segment = format_cycle_time(cycle_time)
-        cache_key = (source_id, cycle_segment, model_id, source_segment_override)
+        cache_key = (source_id, cycle_segment, model_id, source_segments)
         # Inside a locked write window the cycle flock excludes external
         # writers and the append hook keeps the cache coherent, so hits are
         # trusted as-is. Outside a window a hit must prove its source files
@@ -1340,7 +1354,7 @@ class FileOrchestrationJournalRepository:
         fingerprint = (
             None
             if in_write_window
-            else self._cycle_rows_source_fingerprint(source_segment=source_segment, cycle_segment=cycle_segment)
+            else self._cycle_rows_source_fingerprint(source_segments=source_segments, cycle_segment=cycle_segment)
         )
         cached = self._cycle_rows_cache.get(cache_key)
         if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
@@ -1353,34 +1367,35 @@ class FileOrchestrationJournalRepository:
         # model's rows. Only pipeline jobs (keyed by job_id, collapse-free)
         # are shared with the base rows so the pipeline-jobs directory is
         # scanned once per cycle instead of once per model.
-        latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
-        for path in latest_paths:
-            payload = self._read_optional_json(path)
-            if payload is not None:
-                self._apply_latest_view(
+        for source_segment in source_segments:
+            latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
+            for path in latest_paths:
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    self._apply_latest_view(
+                        rows,
+                        payload,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        expected_model_id=_safe_segment(path.stem),
+                    )
+            for record in self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"):
+                self._apply_journal_record(
                     rows,
-                    payload,
+                    record,
                     source_id=source_id,
                     cycle_time=cycle_time,
-                    expected_model_id=_safe_segment(path.stem),
+                    expected_model_id=model_id,
                 )
-        for record in self._read_jsonl(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"):
-            self._apply_journal_record(
-                rows,
-                record,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                expected_model_id=model_id,
-            )
-        for record in self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"):
-            self._apply_journal_record(
-                rows,
-                record,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                expected_record_type="pipeline_event",
-                expected_model_id=model_id,
-            )
+            for record in self._read_jsonl(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"):
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_record_type="pipeline_event",
+                    expected_model_id=model_id,
+                )
         for job in self._direct_pipeline_job_records_for_cycle_cached(
             source_id=source_id,
             cycle_time=cycle_time,
@@ -1428,7 +1443,7 @@ class FileOrchestrationJournalRepository:
     def _cycle_rows_source_fingerprint(
         self,
         *,
-        source_segment: str,
+        source_segments: tuple[str, ...],
         cycle_segment: str,
     ) -> tuple[Any, ...]:
         """Stat-level identity of every file that feeds `_cycle_rows`.
@@ -1439,30 +1454,49 @@ class FileOrchestrationJournalRepository:
         via rename — so a matching fingerprint proves a cached entry still
         reflects the on-disk state.
         """
-        latest_entries: list[tuple[str, tuple[int, int, int] | None]] = []
-        try:
-            with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
-                for entry in it:
-                    if entry.name.endswith(".json"):
-                        try:
-                            entry_stat = entry.stat(follow_symlinks=False)
-                            latest_entries.append(
-                                (entry.name, (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino))
-                            )
-                        except OSError:
-                            latest_entries.append((entry.name, None))
-        except OSError:
-            pass
+        latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
+        journal_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        event_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        for source_segment in source_segments:
+            try:
+                with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
+                    for entry in it:
+                        if entry.name.endswith(".json"):
+                            try:
+                                entry_stat = entry.stat(follow_symlinks=False)
+                                latest_entries.append(
+                                    (
+                                        source_segment,
+                                        entry.name,
+                                        (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+                                    )
+                                )
+                            except OSError:
+                                latest_entries.append((source_segment, entry.name, None))
+            except OSError:
+                pass
+            journal_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
+                )
+            )
+            event_signatures.append(
+                (
+                    source_segment,
+                    _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+                )
+            )
         return (
-            _stat_signature(self.root / "journal" / source_segment / f"{cycle_segment}.jsonl"),
-            _stat_signature(self.root / "pipeline-events" / source_segment / f"{cycle_segment}.jsonl"),
+            tuple(journal_signatures),
+            tuple(event_signatures),
             tuple(sorted(latest_entries)),
             _stat_signature(self.root / "pipeline-jobs"),
         )
 
     def _cache_cycle_rows(
         self,
-        cache_key: tuple[str, str, str | None, str | None],
+        cache_key: tuple[str, str, str | None, tuple[str, ...]],
         rows: _CycleRows,
         *,
         fingerprint: tuple[Any, ...] | None,
@@ -1839,6 +1873,142 @@ class FileOrchestrationJournalRepository:
                 _insert_missing_by_key(jobs, job, key="job_id")
         yield from jobs.values()
 
+    def _iter_reconcile_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+        """Bounded restart-reconcile scan for DB-free file journals.
+
+        The full read surface intentionally reconstructs historical state from
+        every latest/journal/direct file. Restart reconcile runs at the top of
+        every live scheduler pass, so it must not recursively validate the whole
+        journal tree before the progress guard can trip. Scan recent direct job
+        records and recent journal files only; candidate-scoped reads still use
+        the full identity-bound surfaces later in the pass.
+        """
+
+        jobs: dict[str, dict[str, Any]] = {}
+        budget = _RecordBudget(max(self.max_records, 1), "reconcile_pipeline_job_records")
+        for job in self._iter_reconcile_direct_pipeline_job_records():
+            if not _job_needs_restart_reconcile(job):
+                continue
+            budget.consume()
+            _upsert_by_key(jobs, job, key="job_id")
+        for path in self._iter_recent_reconcile_journal_paths(_file_reconcile_scan_limit()):
+            try:
+                source_id, cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
+                records = self._read_jsonl(path)
+            except FileOrchestrationJournalError:
+                continue
+            rows = _CycleRows()
+            try:
+                for record in records:
+                    budget.consume()
+                    self._apply_journal_record(rows, record, source_id=source_id, cycle_time=cycle_time)
+            except FileOrchestrationJournalError:
+                continue
+            for job in rows.pipeline_jobs.values():
+                if not _job_needs_restart_reconcile(job):
+                    continue
+                _upsert_by_key(jobs, job, key="job_id")
+        yield from jobs.values()
+
+    def _iter_reconcile_direct_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
+        for path in self._iter_reconcile_direct_pipeline_job_paths():
+            try:
+                expected_job_id = _safe_segment(path.stem)
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+            except FileOrchestrationJournalError:
+                continue
+
+    def _iter_reconcile_direct_pipeline_job_paths(self) -> Iterable[Path]:
+        directory = self.root / "pipeline-jobs"
+        if self.max_files <= 0 or self.max_depth < 0:
+            return
+        try:
+            directory_mode = stat_no_follow(directory, containment_root=self.root).st_mode
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError):
+            return
+        if not stat.S_ISDIR(directory_mode):
+            return
+        try:
+            entry_names = list_directory_no_follow_limited(
+                directory,
+                containment_root=self.root,
+                max_entries=self.max_files,
+            )
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError):
+            return
+        if len(entry_names) > self.max_files:
+            return
+        for entry_name in sorted(entry_names):
+            if not entry_name.endswith(".json"):
+                continue
+            if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
+                continue
+            path = directory / entry_name
+            try:
+                mode = stat_no_follow(path, containment_root=self.root).st_mode
+            except FileNotFoundError:
+                continue
+            except (OSError, SafeFilesystemError):
+                continue
+            if stat.S_ISREG(mode):
+                yield path
+
+    def _iter_recent_direct_pipeline_job_records(self, limit: int) -> Iterable[dict[str, Any]]:
+        for path in self._recent_files(self.root / "pipeline-jobs", suffix=".json", limit=limit):
+            try:
+                expected_job_id = _safe_segment(path.stem)
+                payload = self._read_optional_json(path)
+                if payload is not None:
+                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
+            except FileOrchestrationJournalError:
+                continue
+
+    def _iter_recent_reconcile_journal_paths(self, limit: int) -> Iterable[Path]:
+        yield from self._recent_files(self.root / "journal", suffix=".jsonl", limit=limit)
+
+    def _recent_files(self, directory: Path, *, suffix: str, limit: int) -> Iterable[Path]:
+        if limit <= 0 or not directory.exists():
+            return
+        discovered: list[tuple[int, str, Path]] = []
+        root = self.root.resolve(strict=False)
+        if suffix == ".jsonl":
+            iterator = _iter_jsonl_files(
+                directory,
+                root=self.root,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        elif suffix == ".json":
+            iterator = _iter_regular_json_files(
+                directory,
+                root=self.root,
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        else:
+            return
+        try:
+            paths = list(iterator)
+        except (FileOrchestrationJournalError, OSError):
+            return
+        for path in paths:
+            try:
+                resolved = path.resolve(strict=False)
+                rel = resolved.relative_to(root)
+                stat_result = path.stat()
+            except (OSError, ValueError):
+                continue
+            discovered.append((stat_result.st_mtime_ns, str(rel), path))
+        for _mtime, _rel, path in sorted(discovered, reverse=True)[:limit]:
+            yield path
+
     def _model_context(self, model_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "models" / f"{_safe_segment(model_id)}.json")
         if payload is not None:
@@ -2069,6 +2239,7 @@ class FileOrchestrationJournalRepository:
         row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
+        row = {**row, "source_id": source_id}
         if exclusive_direct and self._pipeline_job_conflicts_unlocked(row):
             return None
         sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
@@ -2285,22 +2456,75 @@ class FileOrchestrationJournalRepository:
             return self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
 
     def _next_sequence_unlocked(self, *, source_id: str, cycle_time: datetime) -> int:
-        records = self._read_jsonl(self._journal_path(source_id=source_id, cycle_time=cycle_time))
-        sequences = [_optional_replay_sequence(record) or 0 for record in records]
-        sequences.extend(self._latest_replay_sequences_unlocked(source_id=source_id, cycle_time=cycle_time))
+        source_id = _normalize_file_source_id(source_id, field="source_id")
+        cycle_segment = format_cycle_time(cycle_time)
+        source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
+        sequences: list[int] = []
+        for source_segment in source_segments:
+            for surface in ("journal", "pipeline-events"):
+                path = self.root / surface / source_segment / f"{cycle_segment}.jsonl"
+                if not self._sequence_regular_file_exists(path):
+                    continue
+                records = self._read_jsonl(path)
+                sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+        sequences.extend(
+            self._latest_replay_sequences_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                source_segments=source_segments,
+            )
+        )
         return max(sequences, default=0) + 1
 
-    def _latest_replay_sequences_unlocked(self, *, source_id: str, cycle_time: datetime) -> list[int]:
+    def _latest_replay_sequences_unlocked(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        source_segments: tuple[str, ...] | None = None,
+    ) -> list[int]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
+        if source_segments is None:
+            source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
-        for path in self._latest_paths(_safe_segment(source_id), format_cycle_time(cycle_time), model_id=None):
-            payload = self._read_optional_json(path)
-            if payload is None:
+        cycle_segment = format_cycle_time(cycle_time)
+        for source_segment in source_segments:
+            if not self._sequence_directory_exists(self.root / "latest" / source_segment / cycle_segment):
                 continue
-            _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
-            _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
-            sequences.append(_latest_replay_sequence(payload) or 0)
+            for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
+                payload = self._read_optional_json(path)
+                if payload is None:
+                    continue
+                _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
+                _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
+                sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
+
+    def _sequence_regular_file_exists(self, path: Path) -> bool:
+        try:
+            mode = os.stat(path, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(path, self.root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        return stat.S_ISREG(mode)
+
+    def _sequence_directory_exists(self, path: Path) -> bool:
+        try:
+            mode = os.stat(path, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(path, self.root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        return stat.S_ISDIR(mode)
 
     def _next_event_id_unlocked(
         self,
@@ -2547,6 +2771,14 @@ def _file_lock_guard_mode() -> str:
     if value in {"atomic", "none", "off", "disabled"}:
         return "atomic"
     raise SafeFilesystemError(f"Unsupported {FILE_LOCK_GUARD_MODE_ENV}: {value}")
+
+
+def _file_reconcile_scan_limit() -> int:
+    value = os.getenv(FILE_RECONCILE_SCAN_LIMIT_ENV)
+    try:
+        return max(int(value), 1) if value not in (None, "") else DEFAULT_FILE_RECONCILE_SCAN_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_FILE_RECONCILE_SCAN_LIMIT
 
 
 class FileJournalRetryService:
@@ -2964,26 +3196,53 @@ class FileJournalRetryService:
         )
 
     def _resolve_file_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> SimpleNamespace | None:
-        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE
         candidate_batch = self._file_retry_runtime_root_candidates(retry_job)
+        db_free_required = _candidate_batch_db_free_required(candidate_batch)
+        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE or db_free_required
         rejected: list[dict[str, str]] = []
         rejected_total_count = 0
         best_resolved: dict[str, tuple[str, str]] = {}
         best_missing = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
         secret_rejected = False
         unsafe_rejected = False
+        best_db_free_resolved: dict[str, tuple[str, str]] = {}
+        best_db_free_missing: list[str] = list(_DB_FREE_REQUIRED_SELECTOR_FIELDS) if db_free_required else []
         for candidate in candidate_batch.candidates:
             resolution = _resolve_runtime_root_candidate(candidate.source, candidate.value)
+            db_free_resolution = (
+                _resolve_db_free_runtime_candidate(candidate.source, candidate.value) if db_free_required else None
+            )
             rejected_total_count += len(resolution.rejected)
+            if db_free_resolution is not None:
+                rejected_total_count += len(db_free_resolution.rejected)
             if len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
                 remaining = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
                 rejected.extend(resolution.rejected[:remaining])
-            secret_rejected = secret_rejected or resolution.secret_rejected
-            unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
+            if db_free_resolution is not None and len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
+                remaining = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
+                rejected.extend(db_free_resolution.rejected[:remaining])
+            candidate_secret_rejected = resolution.secret_rejected
+            candidate_unsafe_rejected = resolution.unsafe_rejected
+            secret_rejected = secret_rejected or candidate_secret_rejected
+            unsafe_rejected = unsafe_rejected or candidate_unsafe_rejected
+            if db_free_resolution is not None:
+                candidate_secret_rejected = candidate_secret_rejected or db_free_resolution.secret_rejected
+                candidate_unsafe_rejected = candidate_unsafe_rejected or db_free_resolution.unsafe_rejected
+                secret_rejected = secret_rejected or db_free_resolution.secret_rejected
+                unsafe_rejected = unsafe_rejected or db_free_resolution.unsafe_rejected
             if len(resolution.resolved) > len(best_resolved):
                 best_resolved = resolution.resolved
                 best_missing = resolution.missing
-            if not resolution.complete or secret_rejected:
+            if db_free_resolution is not None and len(db_free_resolution.resolved) > len(best_db_free_resolved):
+                best_db_free_resolved = db_free_resolution.resolved
+                best_db_free_missing = db_free_resolution.missing
+            db_free_complete = db_free_resolution is None or db_free_resolution.complete
+            if (
+                not resolution.complete
+                or not db_free_complete
+                or candidate_secret_rejected
+                or candidate_unsafe_rejected
+            ):
                 continue
             evidence = _runtime_root_resolution_evidence(
                 retry_job,
@@ -2992,8 +3251,15 @@ class FileJournalRetryService:
                 rejected=rejected,
                 rejected_total_count=rejected_total_count,
                 candidate_batch=candidate_batch,
+                db_free_resolved=db_free_resolution.resolved if db_free_resolution is not None else {},
+                db_free_missing=[] if db_free_resolution is not None else [],
+                db_free_required=db_free_required,
             )
             manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
+            if db_free_resolution is not None:
+                manifest_fields.update(
+                    {field: value for field, (value, _source) in db_free_resolution.resolved.items()}
+                )
             return SimpleNamespace(manifest_fields=manifest_fields, evidence=evidence)
         if not runtime_roots_required:
             return None
@@ -3004,6 +3270,9 @@ class FileJournalRetryService:
             rejected=rejected,
             rejected_total_count=rejected_total_count,
             candidate_batch=candidate_batch,
+            db_free_resolved=best_db_free_resolved,
+            db_free_missing=best_db_free_missing,
+            db_free_required=db_free_required,
         )
         if secret_rejected:
             raise _RetryRuntimeRootResolutionError(
@@ -3017,9 +3286,21 @@ class FileJournalRetryService:
                 "Manual retry runtime-root evidence contains unsafe local root values.",
                 evidence,
             )
+        if best_missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Manual retry cannot resolve required object-store runtime roots.",
+                evidence,
+            )
+        if best_db_free_missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Manual retry cannot resolve required DB-free scheduler runtime selectors.",
+                evidence,
+            )
         raise _RetryRuntimeRootResolutionError(
             RETRY_RUNTIME_ROOTS_UNRESOLVED,
-            "Manual retry cannot resolve required object-store runtime roots.",
+            "Manual retry cannot resolve required runtime roots.",
             evidence,
         )
 
@@ -3440,7 +3721,7 @@ def _runtime_root_recovery_candidate_records(details: Mapping[str, Any]) -> list
 
 def _runtime_root_recovery_candidate_value(candidate: Mapping[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
-    for root_field in _RUNTIME_ROOT_FIELDS:
+    for root_field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS):
         if root_field not in candidate:
             continue
         value = _strip_internal_fields(candidate[root_field])
@@ -3591,6 +3872,19 @@ def _file_journal_real_slurm_job_id(value: Any) -> bool:
     return bool(text and text.lower() != "local")
 
 
+def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or "")
+    if (
+        status == "reserved"
+        and job.get("slurm_job_id") in (None, "")
+        and job.get("idempotency_key") not in (None, "")
+    ):
+        return True
+    return status in {"pending", "queued", "submitted", "running"} and _file_journal_real_slurm_job_id(
+        job.get("slurm_job_id")
+    )
+
+
 def _file_retry_job_int(job: Any, field: str) -> int:
     value = _file_retry_job_value(job, field)
     try:
@@ -3716,7 +4010,7 @@ def _manual_retry_submission_failure_details(
 
 
 def _mapping_has_runtime_root_fields(value: Mapping[str, Any]) -> bool:
-    return any(field in value for field in _RUNTIME_ROOT_FIELDS)
+    return any(field in value for field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS))
 
 
 def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -4529,7 +4823,25 @@ def _cycle_source_discovery_from_segment(source_segment: str) -> _CycleSourceDis
     source_segment = _safe_segment(source_segment)
     return _CycleSourceDiscovery(
         source_id=_normalize_file_source_id(source_segment, field="source_id"),
-        source_segment=source_segment,
+        source_segments=(source_segment,),
+    )
+
+
+def _merge_cycle_source_discovery(
+    sources: dict[str, _CycleSourceDiscovery],
+    source: _CycleSourceDiscovery,
+) -> None:
+    existing = sources.get(source.source_id)
+    if existing is None:
+        sources[source.source_id] = source
+        return
+    source_segments = list(existing.source_segments)
+    for source_segment in source.source_segments:
+        if source_segment not in source_segments:
+            source_segments.append(source_segment)
+    sources[source.source_id] = _CycleSourceDiscovery(
+        source_id=existing.source_id,
+        source_segments=tuple(source_segments),
     )
 
 
@@ -4545,6 +4857,38 @@ def _cycle_read_source_segment(*, source_id: str, source_segment_override: str |
             evidence={"expected": source_id, "actual": segment_source_id[:80]},
         )
     return source_segment
+
+
+def _cycle_read_source_segments(
+    *,
+    source_id: str,
+    source_segment_override: str | None,
+    source_segment_overrides: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    if source_segment_overrides is not None:
+        segments: list[str] = []
+        for source_segment_override_item in source_segment_overrides:
+            segment = _cycle_read_source_segment(
+                source_id=source_id,
+                source_segment_override=source_segment_override_item,
+            )
+            if segment not in segments:
+                segments.append(segment)
+        if not segments:
+            raise FileOrchestrationJournalError("file_journal_missing_identity", field="source_id")
+        return tuple(segments)
+    primary = _cycle_read_source_segment(
+        source_id=source_id,
+        source_segment_override=source_segment_override,
+    )
+    if source_segment_override is not None:
+        return (primary,)
+    segments = [primary]
+    for alias in (source_id.lower(), source_id.upper()):
+        segment = _safe_segment(alias)
+        if segment not in segments:
+            segments.append(segment)
+    return tuple(segments)
 
 
 def _required_source_id(row: Mapping[str, Any], field: str) -> str:

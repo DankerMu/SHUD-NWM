@@ -418,8 +418,12 @@ def _open_parent_dir(
             fd = next_fd
         if fd == root_fd:
             return os.dup(root_fd), parent
-        return fd, parent
+        parent_fd = fd
+        fd = -1
+        return parent_fd, parent
     finally:
+        if fd != -1 and fd != root_fd:
+            os.close(fd)
         os.close(root_fd)
 
 

@@ -130,8 +130,9 @@ def _make_inflight_job(
     status: str = "running",
     run_id: str = "run_1",
     model_id: str = "model_1",
+    array_task_id: int | None = None,
 ) -> None:
-    store.create_job(
+    job = store.create_job(
         job_id=job_id,
         run_id=run_id,
         cycle_id="cycle_1",
@@ -141,6 +142,10 @@ def _make_inflight_job(
         stage=stage,
         status=status,
     )
+    if array_task_id is not None:
+        job.array_task_id = array_task_id
+        store.session.add(job)
+        store.session.commit()
 
 
 def _fake_sacct(records: dict[str, SacctRecord | None]):
@@ -222,6 +227,193 @@ def test_reconcile_verifies_candidate_identity_via_sacct() -> None:
     mismatch = store.get_job("job_mismatch")
     assert mismatch.status == RECONCILE_UNVERIFIED_STATUS
     assert mismatch.error_code == "SLURM_RECONCILE_UNVERIFIED"
+
+
+def test_reconcile_generic_array_job_name_requires_manifest_task_identity() -> None:
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_forecast_task_3",
+        slurm_job_id="2103",
+        stage="forecast",
+        run_id="fcst_gfs_2026062912_model_a",
+        model_id="model_a",
+        array_task_id=3,
+    )
+    _make_inflight_job(
+        store,
+        job_id="job_forecast_no_identity",
+        slurm_job_id="2104",
+        stage="forecast",
+        run_id="fcst_gfs_2026062912_model_b",
+        model_id="model_b",
+        array_task_id=4,
+    )
+
+    sacct = _fake_sacct(
+        {
+            "2103_3": SacctRecord(
+                slurm_job_id="2103_3",
+                raw_state="COMPLETED",
+                job_name="nhms_forecast",
+                exit_code="0:0",
+                submitted_manifest={
+                    "pipeline_job_id": "job_forecast_task_3",
+                    "run_id": "fcst_gfs_2026062912_model_a",
+                    "model_id": "model_a",
+                    "stage": "run_shud_forecast_array",
+                    "array_task_id": 3,
+                },
+                stdout_identity={
+                    "run_id": "fcst_gfs_2026062912_model_a",
+                    "model_id": "model_a",
+                    "stage": "forecast",
+                    "task_id": 3,
+                },
+            ),
+            "2104_4": SacctRecord(
+                slurm_job_id="2104_4",
+                raw_state="COMPLETED",
+                job_name="nhms_forecast",
+                exit_code="0:0",
+            ),
+        }
+    )
+
+    outcomes = reconcile_inflight_jobs(store, sacct_query=sacct)
+
+    assert {outcome.job_id: outcome.action for outcome in outcomes} == {
+        "job_forecast_task_3": "terminal",
+        "job_forecast_no_identity": "unverified",
+    }
+    assert store.get_job("job_forecast_task_3").status == "succeeded"
+    assert store.get_job("job_forecast_no_identity").status == RECONCILE_UNVERIFIED_STATUS
+
+
+def test_reconcile_generic_terminal_comment_only_is_unverified() -> None:
+    from services.orchestrator.reservation import slurm_comment_for
+
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_forecast_comment_only",
+        slurm_job_id="2105",
+        stage="forecast",
+        run_id="fcst_gfs_2026062912_model_a",
+        model_id="model_a",
+        array_task_id=3,
+    )
+    job = store.get_job("job_forecast_comment_only")
+    job.idempotency_key = "gfs:gfs_2026062912:basin_a:forecast"
+    store.session.add(job)
+    store.session.commit()
+    sacct = _fake_sacct(
+        {
+            "2105_3": SacctRecord(
+                slurm_job_id="2105_3",
+                raw_state="COMPLETED",
+                job_name="nhms_forecast",
+                exit_code="0:0",
+                comment=slurm_comment_for(job.idempotency_key),
+            ),
+        }
+    )
+
+    outcomes = reconcile_inflight_jobs(store, sacct_query=sacct)
+
+    assert outcomes[0].action == "unverified"
+    assert store.get_job("job_forecast_comment_only").status == RECONCILE_UNVERIFIED_STATUS
+
+
+def test_reconcile_queries_array_task_when_durable_row_has_task_id() -> None:
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_precise_task_3",
+        slurm_job_id="12345",
+        stage="run_shud_forecast_array",
+        array_task_id=3,
+    )
+    queried: list[str] = []
+
+    def sacct(slurm_job_id: str) -> SacctRecord | None:
+        queried.append(slurm_job_id)
+        if slurm_job_id == "12345_3":
+            return SacctRecord(
+                slurm_job_id="12345_3",
+                raw_state="COMPLETED",
+                job_name="nhms_run_shud_forecast_array",
+                exit_code="0:0",
+                task_id=3,
+                array_task_id=3,
+            )
+        return None
+
+    outcomes = reconcile_inflight_jobs(store, sacct_query=sacct)
+
+    assert queried == ["12345_3"]
+    assert outcomes[0].action == "terminal"
+    assert store.get_job("job_precise_task_3").status == "succeeded"
+
+
+def test_reconcile_generic_array_task_row_accepts_exact_task_identity() -> None:
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_generic_task_3",
+        slurm_job_id="12346",
+        stage="forecast",
+        run_id="fcst_gfs_2026062912_model_a",
+        model_id="model_a",
+        array_task_id=3,
+    )
+    queried: list[str] = []
+
+    def sacct(slurm_job_id: str) -> SacctRecord | None:
+        queried.append(slurm_job_id)
+        if slurm_job_id == "12346_3":
+            return SacctRecord(
+                slurm_job_id="12346_3",
+                raw_state="COMPLETED",
+                job_name="nhms_forecast",
+                exit_code="0:0",
+                task_id=3,
+                array_task_id=3,
+            )
+        return None
+
+    outcomes = reconcile_inflight_jobs(store, sacct_query=sacct)
+
+    assert queried == ["12346_3"]
+    assert outcomes[0].action == "terminal"
+    assert store.get_job("job_generic_task_3").status == "succeeded"
+
+
+def test_reconcile_legacy_non_db_free_precise_job_name_remains_compatible() -> None:
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_legacy_non_db_free",
+        slurm_job_id="2110",
+        stage="run_shud_forecast_array",
+        run_id="legacy_run_1",
+        model_id="legacy_model",
+    )
+    sacct = _fake_sacct(
+        {
+            "2110": SacctRecord(
+                slurm_job_id="2110",
+                raw_state="COMPLETED",
+                job_name="nhms_run_shud_forecast_array",
+                exit_code="0:0",
+            ),
+        }
+    )
+
+    outcomes = reconcile_inflight_jobs(store, sacct_query=sacct)
+
+    assert outcomes[0].action == "terminal"
+    assert store.get_job("job_legacy_non_db_free").status == "succeeded"
 
 
 def test_reconcile_unknown_to_accounting_is_unverified_not_resubmitted() -> None:
@@ -1501,6 +1693,25 @@ def test_parse_comment_sacct_rows_no_match_returns_none() -> None:
     )
 
     assert _parse_comment_sacct_rows(stdout, "nhms_idem:K") is None
+
+
+def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:
+    from services.orchestrator.reconcile import _parse_master_sacct_row
+
+    stdout = (
+        "12345|nhms_run_shud_forecast_array|COMPLETED|0:0|master-comment\n"
+        "12345_2|nhms_run_shud_forecast_array|FAILED|1:0|task-2\n"
+        "12345_3|nhms_run_shud_forecast_array|COMPLETED|0:0|task-3\n"
+        "12345_3.batch|batch|COMPLETED|0:0|task-3\n"
+    )
+
+    record = _parse_master_sacct_row(stdout, "12345_3")
+
+    assert record is not None
+    assert record.slurm_job_id == "12345_3"
+    assert record.task_id == "3"
+    assert record.array_task_id == "3"
+    assert record.raw_state == "COMPLETED"
 
 
 # --- FINDING-1: cached reconcile session rollback on crash recovery ------------
