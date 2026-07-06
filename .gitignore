@@ -38,6 +38,9 @@ minio-data/
 .nhms-runs/
 .nhms-workspace/
 .nhms-object-store/
+
+# Subagent-workflow session-local review artifacts (persistent record lives in docs/review-loop-log.jsonl)
+.workplans/
 /artifacts/
 !services/artifacts/
 !services/artifacts/*.py
