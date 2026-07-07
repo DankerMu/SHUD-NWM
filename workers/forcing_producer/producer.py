@@ -13,6 +13,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AbstractSet, Any, Protocol
 
+from packages.common.grid_signature import (
+    _json_bytes,
+    _json_default,
+)
+from packages.common.grid_signature import (
+    grid_signature_hash as _grid_signature_hash,
+)
+from packages.common.grid_signature import (
+    grid_signature_tuples as _grid_signature,
+)
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
@@ -2590,16 +2600,6 @@ def _quality_flags_manifest(
     }
 
 
-def _json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")
-
-
-def _json_default(value: Any) -> str:
-    if isinstance(value, datetime):
-        return _format_time(value)
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable.")
-
-
 def _valid_station(station: MetStation) -> bool:
     return (
         math.isfinite(station.longitude)
@@ -2637,17 +2637,6 @@ def _validate_grid_points(grid_points: Sequence[GridPoint], canonical_product_id
                 f"Canonical product {canonical_product_id} has grid coordinates outside geographic bounds "
                 f"for grid cell {point.grid_cell_id}."
             )
-
-
-def _grid_signature(grid_points: Sequence[GridPoint]) -> tuple[tuple[str, float, float], ...]:
-    return tuple(
-        (point.grid_cell_id, round(float(point.longitude), 12), round(float(point.latitude), 12))
-        for point in grid_points
-    )
-
-
-def _grid_signature_hash(grid_points: Sequence[GridPoint]) -> str:
-    return sha256_bytes(_json_bytes({"grid_points": _grid_signature(grid_points)}))
 
 
 def _format_grid_signatures(signatures: Mapping[tuple[str, str], str]) -> dict[str, str]:
