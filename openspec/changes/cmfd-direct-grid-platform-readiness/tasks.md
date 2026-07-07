@@ -9,7 +9,7 @@
   - Required evidence: `openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.<version>.json` plus `.sha256` are committed; the checksum matches the file content; the in-file `manifest_version` matches the filename version.
   - Required evidence: a manifest completeness check (a read-only script or a per-field checklist committed with the evidence) asserts every required identity field is present, non-empty, and not `unresolved`; its output is part of the evidence package, and a FAIL on any field blocks all §2–§4 tasks until a corrected versioned manifest is published.
   - Required evidence: `openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive` passes.
-  - Non-goal for 1.3: no in-place edits after publication; changes require a new versioned manifest.
+  - Non-goal for 1.3: no in-place edits AFTER `§3.1` certification; post-certification changes require a new versioned manifest. Pre-`§3.1` in-place amendments within the same unmerged PR are permitted per design.md §"Pre-certification manifest errata clause" (each amendment documented as a numbered errata paragraph with the sha transition + pass-log binder rebase).
 
 ## 2. Direct-Grid Readiness Evidence
 

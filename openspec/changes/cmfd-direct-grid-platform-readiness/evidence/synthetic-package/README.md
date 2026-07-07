@@ -135,8 +135,10 @@ Columns: `Precip / Temp / RH / Wind / RN`.
 `.tsd.forc` ID column: `{1, 2, 3}`
 Subset holds (equality in this synth). This is exactly the runtime
 `DIRECT_GRID_FORCING_OWNERSHIP_RANGE` gate at
-`workers/shud_runtime/runtime.py:2205-2270`; the 2.4 smoke asserts it directly
-by parsing both files.
+`workers/shud_runtime/runtime.py:2205-2213` (`_validate_direct_grid_sp_att_forcing_ids`
+validator, raise at :2210); the reader helper `_read_sp_att_forcing_ids` at
+:2216-2274 supplies the FORC id set that the validator checks against. The
+2.4 smoke asserts the invariant directly by parsing both files.
 
 ### 4.2 `binding_checksum` — self-referential SHA-256 (verification recipe)
 

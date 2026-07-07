@@ -16,7 +16,14 @@
 #   to openspec/** (this change's own fixture + evidence) and docs/** (module +
 #   run-manifest schema doc rename shud_omp -> shud, plus other unrelated
 #   docs/appendices adjustments that touch no manifest identity).
-# git rev-parse HEAD (code carrier): 907b30099398cbcc244ab51b022ddcf19c7a789e
+# git rev-parse HEAD (code carrier at CAPTURE TIME 2026-07-07T09:27:02Z): 907b30099398cbcc244ab51b022ddcf19c7a789e
+# NOTE: post-capture Round-2 (834fd253) + Round-3 (a63e1545) + Round-4 commits
+#       on the same PR branch are documentation-only errata under §"Pre-certification
+#       manifest errata clause" (design.md); each subsequent commit's
+#       `git diff 5e518c15..<sha> -- workers/ apps/ services/ packages/ db/ schemas/`
+#       remains empty, preserving the code_carrier_sha invariant. A downstream
+#       auditor at any future HEAD SHA may re-verify the tree-equivalence attest
+#       against the pinned baseline_commit 5e518c15 to confirm identity-path stability.
 
 ## §2.5 execution recipe (reproducible)
 # 1. ssh -p 32099 frd_muziyao@210.77.77.22
@@ -34,8 +41,11 @@
 #    SHUD_BINARY=/scratch/frd_muziyao/NWM/SHUD/shud \
 #    python3 /scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/stage-2.5-node22.py
 # The script is committed at the path above; SHUD_BINARY is the script's own
-# argument name (it is not a runtime code path env). All output below
-# captured verbatim from that invocation.
+# argument name (it is not a runtime code path env). Numerical values below
+# (element counts, unique-FORC sets, byte sizes, ldd output, banner rc) are
+# captured verbatim from that invocation; D-section headings and per-CHECK
+# narrative commentary are reformatted for reviewer clarity around the
+# verbatim values.
 
 ## D1. Production SHUD binary identity (§2.5 required-evidence bullet 2)
 # shud binary path        : /scratch/frd_muziyao/NWM/SHUD/shud
@@ -75,9 +85,11 @@
 #          `compute.example:129` placeholder value from the deployed value
 #          (Phase 6.5 re-review found the round-2 text still read as if the
 #          deployed value could be sourced from compute.example, which it
-#          cannot). Two uncommitted scratchpad carriers from rounds 1-2 —
-#          `register-synth-p02.sql` (§2.3) and `stage-2.5-node22.py` (§2.5) —
-#          are now committed under `openspec/changes/<change>/evidence/`.
+#          cannot). Round-3 also first-commits the previously-uncommitted
+#          scratchpad carrier `register-synth-p02.sql` (§2.3) under
+#          `openspec/changes/<change>/evidence/`; the §2.5 driver
+#          `stage-2.5-node22.py` was already committed in Round-2 at 834fd253
+#          and is only re-touched (D4/D5 line-reference metadata) in Round-3.
 #          D4/D5 runtime.py line citations corrected: `_forcing_declares_direct_grid`
 #          is invoked at :591 (definition at :685), not :588 (which is the
 #          local `is_direct_grid = (` assignment). The
@@ -264,8 +276,11 @@
 #   + D2 (ldd runtime library resolution) + binder header line 2
 #   (code_carrier_sha) + TREE-EQUIVALENCE ATTEST at header — DISCHARGED.
 # Non-goal (no state cutover, no scheduler routing change, no production
-#   cycle activation): §2.5 touches no scheduler / no state manager /
-#   no production cycle — DISCHARGED.
+#   cycle activation, and no end-to-end SHUD simulation of the synth
+#   basin): §2.5 touches no scheduler / no state manager / no production
+#   cycle; end-to-end simulation is scope-deferred per D8 above and
+#   spec-code-drift-log.md drift entry 2. All 4 non-goal components —
+#   DISCHARGED.
 
 ## §2.5 STAGING VALIDATION SUMMARY
 # CHECK-1  binding-manifest.forcing_mapping_mode = 'direct_grid'    PASS

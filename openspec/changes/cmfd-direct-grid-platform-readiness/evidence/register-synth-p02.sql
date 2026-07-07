@@ -10,7 +10,7 @@ BEGIN
   IF (SELECT count(*) FROM core.model_instance) != 13 THEN
     RAISE EXCEPTION 'PRECHECK FAIL: expected 13 pre-existing model_instance rows, got %', (SELECT count(*) FROM core.model_instance);
   END IF;
-  IF (SELECT count(*) FROM core.model_instance WHERE model_id LIKE 'model__evidence%%') > 0 THEN
+  IF (SELECT count(*) FROM core.model_instance WHERE model_id LIKE 'model__evidence%') > 0 THEN
     RAISE EXCEPTION 'PRECHECK FAIL: evidence model_instance already exists (rerun?)';
   END IF;
 END $$;
