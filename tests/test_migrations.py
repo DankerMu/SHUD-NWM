@@ -17,6 +17,8 @@ EXPECTED_TABLES = {
     "met.data_source",
     "met.forecast_cycle",
     "met.canonical_met_product",
+    "met.canonical_grid_snapshot",
+    "met.canonical_grid_cell",
     "met.met_station",
     "met.interp_weight",
     "met.forcing_version",
