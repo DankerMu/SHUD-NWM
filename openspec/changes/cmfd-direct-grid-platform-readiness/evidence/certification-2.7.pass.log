@@ -1,0 +1,50 @@
+# captured at 2026-07-07T13:11:03Z host=local bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=7e7c759815f3082c0b1d538af27b01486ac04843
+# task: cmfd-direct-grid-platform-readiness §2.7 certification statement + drift record + evidence-set enumeration
+# generator: openspec/changes/cmfd-direct-grid-platform-readiness/evidence/assemble-evidence-index.py
+
+## C1. Certification statement (design.md §"Why checkbox state is not evidence")
+Readiness for the cmfd-direct-grid-platform-readiness change is CERTIFIED on the pinned-commit evidence set enumerated in C2 below, NOT on OpenSpec checkbox state. Per design.md §"Why checkbox state is not evidence" and specs/direct-grid-readiness-evidence/spec.md Requirement "Readiness is judged on pinned-commit evidence not checkbox state", a checked box in tasks.md means "a task was marked done" — it does NOT mean "the pinned release passes". This receipt explicitly records that certification requires the pinned manifest, passing re-run evidence, the node-27 smoke, the node-22 minimal-basin staging execution, and the G9 capacity baseline with no unresolved limit breach. Any future audit against this change MUST verify the C2 artifact set on the pinned baseline, not the tasks.md checkbox state.
+
+## C2. Certification evidence set
+Pinned baseline_commit  = 5e518c151375b798c29ee3cafb3260413ac8905f
+Pinned manifest_sha256  = bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+The following artifacts constitute the readiness certification set. Every pass log carries the binder header (line 1 = captured_utc/host/baseline_commit/manifest_sha256; line 2 = optional code_carrier_sha for post-baseline carriers). The evidence-index.v1.json record enumerates each artifact's sha256 + binder + optional code_carrier_sha. The cross-artifact-consistency-3.1.pass.log records the per-artifact identity and tree-equivalence verdict.
+
+### C2.1 Manifest + companion
+  * readiness-manifest.v1.json  sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+  * readiness-manifest.v1.json.sha256  sha256=77ee84c13e074280ce06cabe708a2291597ef10c9033c4eceb6203d09e46f660
+
+### C2.2 §1.3 manifest completeness gate
+  * check_manifest_completeness.v1.pass.log  sha256=0e41b1e107f881383e2e71f09d119619b98caf8276f14ff93106115826a2c0ad
+
+### C2.3 §2.1-§2.6 pass logs
+  * §2.1 pytest-2.1.node-27.pass.log  sha256=cda4177b0ee324f21c875edae1ca13038ff2d98a825ff38fc92792a356ffafd5  code_carrier_sha=(omitted)
+  * §2.2 pytest-2.2.node-27.pass.log  sha256=2a9fbe2c49cf24a9d8d994261fa56d81bcb5b6ae8ddee40ab1b8d080bdf8647f  code_carrier_sha=(omitted)
+  * §2.3 db-registration-2.3.node-27.pass.log  sha256=e8c3559f54843c0c47ecca51c67b8c58b9314f8301597fd38bbabfebdeeb3401  code_carrier_sha=(omitted)
+  * §2.4 smoke-2.4.node-27.pass.log  sha256=7736dd199c4f31612f7e9adba418a45f7f46aec35cab08f359bbfba5749e1f0b  code_carrier_sha=915e77ad0d066bfebe3ed6b4c50f663e48a94577
+  * §2.5 staging-2.5.node-22.pass.log  sha256=c956d89fb271bc9e3040d3e1da71c6370e3e7a0cb10553f166163f2aef81ca5e  code_carrier_sha=907b30099398cbcc244ab51b022ddcf19c7a789e
+  * §2.6 capacity-2.6.node-27.pass.log  sha256=096418d830cef93954a2174c15a99571e3d15cf46e26ce4e29e80d0adf8a7459  code_carrier_sha=652f03344cab1bd4451c285c69753ea4b3dcddf3
+
+### C2.4 §2.3 synthetic package binders
+  * synthetic-package/README.md  sha256=fdd4d0a99c4c6bfb863b2fcda8e394fc2aa7429fec3329d01bf2b4048246b662
+  * synthetic-package/package/package.manifest.sha256  sha256=159c77c2b56fa740998d62a7a6542bc8c7953ff97d9fda4bbe7e0cfe1156896e  aggregate=0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5  package.manifest
+
+### C2.5 §2.7 drift record
+  * spec-code-drift-log.md  sha256=a9c80a06129dd689903b8cb00b633adf45e50694c51ef72923c2565aafdab70d
+
+## C3. Drift record (spec-code-drift-log.md)
+The following spec-vs-code drift entries were observed during PR review and are recorded in spec-code-drift-log.md rather than assumed absent (per specs/direct-grid-readiness-evidence/spec.md Scenario "Checkbox completion does not certify readiness" clause "any drift between OpenSpec task state and code state is recorded in the evidence rather than assumed absent"):
+
+  * Drift entry 1: shud-runtime spec says `shud`, code default at workers/shud_runtime/runtime.py:74/85/95 says `shud_omp`. Reconciled at the deployment envelope via SHUD_EXECUTABLE env override (deployed binary sha256=ef2f6181..., per staging-2.5.node-22.pass.log D1). Follow-up change proposed to flip the Python default; deferred as out of Epic #886 readiness-gate scope.
+  * Drift entry 2: Minimal-basin-execution spec scenario narrowed in-PR from "SHALL execute end-to-end" to "SHALL stage and record production binary identity" because the §2.3 synthetic package is a direct-grid CONTRACT fixture (.sp.att + .tsd.forc + station CSVs + binding-manifest) — not a full SHUD project. End-to-end simulation requires either a full-tree synth basin or an operator-staged small real basin and is deferred to a follow-up change.
+
+## C4. G9 capacity-limit breach verdict
+capacity-2.6.node-27.pass.log D7 records verdict = NO BREACH: the live legacy baseline (13 basins / 6,290 stations / ~121M rows per 2 weeks) fits within all pinned producer + runtime staging limits. 0 unresolved capacity-limit breaches; §2.7 certification precondition "no unresolved limit breach" is satisfied.
+
+## C5. Non-goal reaffirmation
+Per tasks.md §2.7 non-goal: this receipt makes no change to OpenSpec tooling or checkbox semantics. It is an evidence statement only. Per §1.3 non-goal (post-§3.1): the readiness manifest v1 is NOT amended by this driver — its checksum remains bbbc4143... The §3.1 cross-artifact consistency check is the certification gate; post-§3.1 manifest immutability is absolute per design.md §"How evidence is bound to commits".
+
+## Verdict
+PASS — readiness for cmfd-direct-grid-platform-readiness is certified on the pinned-commit evidence set enumerated above. Checkbox state is not treated as evidence.
+PASS

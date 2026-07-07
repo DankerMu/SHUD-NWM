@@ -1,0 +1,151 @@
+{
+  "index_schema_version": "v1",
+  "index_created_utc": "2026-07-07T13:11:02Z",
+  "pinned_baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+  "pinned_manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf",
+  "index_generator_head_sha": "7e7c759815f3082c0b1d538af27b01486ac04843",
+  "tree_equivalence_paths": [
+    "workers/",
+    "apps/",
+    "services/",
+    "packages/",
+    "db/",
+    "schemas/"
+  ],
+  "grandfathered_missing_code_carrier": {
+    "log": "db-registration-2.3.node-27.pass.log",
+    "retro_attester": "smoke-2.4.node-27.pass.log",
+    "note": "\u00a72.3 D3 was captured before the code_carrier_sha binder line was contracted (\u00a72.4 Round-1 fix, per design.md \u00a7\"How evidence is bound to commits\" scope note). Its retro-attest lives in the sibling \u00a72.4 smoke log which carries the same code_carrier_sha and asserts empty tree-diff on manifest-identity paths. Indexer records the linkage and permits the missing line."
+  },
+  "artifacts": [
+    {
+      "key": "manifest",
+      "filename": "readiness-manifest.v1.json",
+      "sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf",
+      "bytes": 11352
+    },
+    {
+      "key": "manifest_sha256",
+      "filename": "readiness-manifest.v1.json.sha256",
+      "sha256": "77ee84c13e074280ce06cabe708a2291597ef10c9033c4eceb6203d09e46f660",
+      "bytes": 93
+    },
+    {
+      "key": "check_manifest_completeness",
+      "filename": "check_manifest_completeness.v1.pass.log",
+      "sha256": "0e41b1e107f881383e2e71f09d119619b98caf8276f14ff93106115826a2c0ad",
+      "bytes": 198,
+      "binder": {
+        "captured_utc": "2026-07-07T00:53:45Z",
+        "host": "local",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": null,
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "pytest_2_1",
+      "filename": "pytest-2.1.node-27.pass.log",
+      "sha256": "cda4177b0ee324f21c875edae1ca13038ff2d98a825ff38fc92792a356ffafd5",
+      "bytes": 1371,
+      "binder": {
+        "captured_utc": "2026-07-07T01:06:37Z",
+        "host": "node-27",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": null,
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "pytest_2_2",
+      "filename": "pytest-2.2.node-27.pass.log",
+      "sha256": "2a9fbe2c49cf24a9d8d994261fa56d81bcb5b6ae8ddee40ab1b8d080bdf8647f",
+      "bytes": 1734,
+      "binder": {
+        "captured_utc": "2026-07-07T01:07:24Z",
+        "host": "node-27",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": null,
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "db_registration_2_3",
+      "filename": "db-registration-2.3.node-27.pass.log",
+      "sha256": "e8c3559f54843c0c47ecca51c67b8c58b9314f8301597fd38bbabfebdeeb3401",
+      "bytes": 13610,
+      "binder": {
+        "captured_utc": "2026-07-07T02:04:17Z",
+        "host": "node-27",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": null,
+      "grandfathered_missing_code_carrier": true
+    },
+    {
+      "key": "smoke_2_4",
+      "filename": "smoke-2.4.node-27.pass.log",
+      "sha256": "7736dd199c4f31612f7e9adba418a45f7f46aec35cab08f359bbfba5749e1f0b",
+      "bytes": 30130,
+      "binder": {
+        "captured_utc": "2026-07-07T03:13:20Z",
+        "host": "node-27",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": "915e77ad0d066bfebe3ed6b4c50f663e48a94577",
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "staging_2_5",
+      "filename": "staging-2.5.node-22.pass.log",
+      "sha256": "c956d89fb271bc9e3040d3e1da71c6370e3e7a0cb10553f166163f2aef81ca5e",
+      "bytes": 19519,
+      "binder": {
+        "captured_utc": "2026-07-07T09:27:02Z",
+        "host": "node-22",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": "907b30099398cbcc244ab51b022ddcf19c7a789e",
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "capacity_2_6",
+      "filename": "capacity-2.6.node-27.pass.log",
+      "sha256": "096418d830cef93954a2174c15a99571e3d15cf46e26ce4e29e80d0adf8a7459",
+      "bytes": 17660,
+      "binder": {
+        "captured_utc": "2026-07-07T12:53:01Z",
+        "host": "node-27",
+        "baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
+        "manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf"
+      },
+      "code_carrier_sha": "652f03344cab1bd4451c285c69753ea4b3dcddf3",
+      "grandfathered_missing_code_carrier": false
+    },
+    {
+      "key": "spec_code_drift_log",
+      "filename": "spec-code-drift-log.md",
+      "sha256": "a9c80a06129dd689903b8cb00b633adf45e50694c51ef72923c2565aafdab70d",
+      "bytes": 8697
+    },
+    {
+      "key": "synthetic_package_readme",
+      "filename": "synthetic-package/README.md",
+      "sha256": "fdd4d0a99c4c6bfb863b2fcda8e394fc2aa7429fec3329d01bf2b4048246b662",
+      "bytes": 12941
+    },
+    {
+      "key": "synthetic_package_aggregate_sha256",
+      "filename": "synthetic-package/package/package.manifest.sha256",
+      "sha256": "159c77c2b56fa740998d62a7a6542bc8c7953ff97d9fda4bbe7e0cfe1156896e",
+      "bytes": 83,
+      "recorded_aggregate": "0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5  package.manifest"
+    }
+  ]
+}

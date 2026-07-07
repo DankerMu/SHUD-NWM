@@ -1,0 +1,25 @@
+# captured at 2026-07-07T13:11:03Z host=local bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=7e7c759815f3082c0b1d538af27b01486ac04843
+# task: cmfd-direct-grid-platform-readiness §3.1 cross-artifact consistency check
+# generator: openspec/changes/cmfd-direct-grid-platform-readiness/evidence/assemble-evidence-index.py
+# scope: parses every §1.3/§2.1-§2.6 pass log's binder header lines (1 = captured/host/baseline/manifest; 2 = optional code_carrier_sha) and asserts:
+#   (1) baseline_commit identity across all indexed pass logs
+#   (2) manifest_sha256 identity across all indexed pass logs
+#   (3) when code_carrier_sha is present and != baseline_commit, empty tree-diff on manifest-identity paths
+#       (workers/ apps/ services/ packages/ db/ schemas/)
+#   (4) grandfather clause: db-registration-2.3.node-27.pass.log missing line-2 is covered by smoke-2.4.node-27.pass.log retro-attest sharing the same code_carrier_sha; the driver re-verifies the retro-attest tree-diff live rather than trusting the string reference.
+
+## Per-artifact consistency table
+filename | captured_utc | host | baseline_match | manifest_match | code_carrier_sha | tree_equivalence
+------------------------------------------------------------------------------------------------------
+check_manifest_completeness.v1.pass.log | 2026-07-07T00:53:45Z | local | True | True | (omitted) | code_carrier_sha omitted (carrier == baseline_commit)
+pytest-2.1.node-27.pass.log | 2026-07-07T01:06:37Z | node-27 | True | True | (omitted) | code_carrier_sha omitted (carrier == baseline_commit)
+pytest-2.2.node-27.pass.log | 2026-07-07T01:07:24Z | node-27 | True | True | (omitted) | code_carrier_sha omitted (carrier == baseline_commit)
+db-registration-2.3.node-27.pass.log | 2026-07-07T02:04:17Z | node-27 | True | True | (omitted) | grandfathered — retro-attest via smoke-2.4.node-27.pass.log (carrier=915e77ad), tree-diff empty on manifest-identity paths
+smoke-2.4.node-27.pass.log | 2026-07-07T03:13:20Z | node-27 | True | True | 915e77ad0d066bfebe3ed6b4c50f663e48a94577 | tree-diff empty on manifest-identity paths for baseline..915e77ad
+staging-2.5.node-22.pass.log | 2026-07-07T09:27:02Z | node-22 | True | True | 907b30099398cbcc244ab51b022ddcf19c7a789e | tree-diff empty on manifest-identity paths for baseline..907b3009
+capacity-2.6.node-27.pass.log | 2026-07-07T12:53:01Z | node-27 | True | True | 652f03344cab1bd4451c285c69753ea4b3dcddf3 | tree-diff empty on manifest-identity paths for baseline..652f0334
+
+## Verdict
+PASS — all 7 indexed pass logs reference the pinned baseline_commit (5e518c151375b798c29ee3cafb3260413ac8905f) and the pinned manifest_sha256 (bbbc4143d228dc36...). Every pass log that records a code_carrier_sha distinct from baseline was verified to have empty tree-diff on manifest-identity paths. The db-registration-2.3.node-27.pass.log missing line-2 is covered by the smoke-2.4.node-27.pass.log retro-attest (indexer re-verified the retro-attester's tree-equivalence live at generation time).
+PASS

@@ -41,19 +41,19 @@
   - Required evidence: report estimates DB rows as `station_count × timestep_count × output_variable_count`, evaluated against producer limits 10,000 stations / 10,000 timesteps / 10,000,000 rows / ~32 MiB manifest (`workers/forcing_producer/producer.py`) and the seven `MAX_DIRECT_GRID_*` runtime staging byte/line limits pinned in the manifest (`MAX_PACKAGE_MANIFEST_BYTES` explicitly excluded), recording the deployment config values actually used; the expected ~5x used-cell reduction is reported; any limit breach is flagged as a blocker for a separate capacity change.
   - Required evidence: report cites the node-27 host, the `baseline_commit`, and the readiness manifest checksum. When the actual `git rev-parse HEAD` at run time differs from the pinned `baseline_commit`, the report additionally cites `code_carrier_sha` and asserts empty tree-diff `git diff <baseline_commit>..<code_carrier_sha> -- workers/ apps/ services/ packages/ db/ schemas/` per design.md §"How evidence is bound to commits".
   - Non-goal for 2.6: no capacity-limit change and no per-basin migration accounting beyond the platform-level baseline.
-- [ ] 2.7 Record that readiness is certified on pinned-commit evidence, and capture any observed OpenSpec/code drift.
+- [x] 2.7 Record that readiness is certified on pinned-commit evidence, and capture any observed OpenSpec/code drift.
   - Required evidence: an evidence index lists the manifest checksum plus the 2.1–2.6 artifacts (including the G9 capacity baseline with no unresolved limit breach) as the readiness certification set, explicitly stating checkbox state is not evidence (source-of-truth §4/P0.2).
   - Required evidence: any observed drift between OpenSpec task state and code state is recorded rather than assumed absent.
   - Non-goal for 2.7: no change to OpenSpec tooling or checkbox semantics; this is an evidence statement only.
 
 ## 3. Evidence Package Assembly and Validation
 
-- [ ] 3.1 Assemble the readiness evidence package binding all artifacts to the manifest checksum.
+- [x] 3.1 Assemble the readiness evidence package binding all artifacts to the manifest checksum.
   - Required evidence: evidence package indexes the manifest + `.sha256` (plus the 1.3 completeness-check output) and the 2.1–2.7 run/smoke/execution/capacity records; the manifest is referenced by the evidence package.
   - Required evidence: a cross-artifact consistency check records that every artifact references the identical `baseline_commit` and the identical manifest checksum; any mismatch invalidates the evidence set and blocks certification until a consistent set is produced on a single pinned baseline.
   - Required evidence: the same cross-artifact consistency check ALSO parses each artifact's optional second header line `# code_carrier_sha=<40-hex>` if present; when `code_carrier_sha ≠ baseline_commit` it asserts `git diff <baseline_commit>..<code_carrier_sha> -- workers/ apps/ services/ packages/ db/ schemas/` returns empty (no manifest-identity path drift). A non-empty diff invalidates the artifact and blocks certification. Artifacts captured before the `code_carrier_sha` contract landed (e.g. `db-registration-2.3.node-27.pass.log`) are grandfathered by the sibling `smoke-2.4.node-27.pass.log` retro-attest sharing the same `code_carrier_sha`; the indexer MUST record the retro-attest linkage and MUST NOT block certification on the missing second line.
   - Non-goal for 3.1: no basin migration evidence and no scientific/hydrological comparison (deferred to changes 6–8).
-- [ ] 3.2 Validate the change and confirm 3/3 artifact completeness.
+- [x] 3.2 Validate the change and confirm 3/3 artifact completeness.
   - Required evidence: `openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive` passes.
   - Required evidence: `openspec status --change cmfd-direct-grid-platform-readiness` reports 3/3 complete.
   - Required evidence: `uv run ruff check .` passes for any pinning helper or smoke carrier touched.
