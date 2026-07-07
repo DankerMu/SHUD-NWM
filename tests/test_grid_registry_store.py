@@ -114,12 +114,15 @@ def test_delete_cell_always_raises_immutability_error() -> None:
         "bbox_north",
         "bbox_west",
         "bbox_east",
+        # native_resolution is in IDENTITY_FIELDS and enforced by SUB-2
+        # Trigger B; parametrize covers all fields the store rejects.
+        "native_resolution",
     ],
 )
 def test_update_identity_field_always_raises_immutability_error(field: str) -> None:
-    """The 6 identity field-groups enumerated by spec.md:96 MUST all reject
-    mutation at the store API layer. The store never touches the DB for
-    these calls."""
+    """The identity field-groups enumerated by spec.md:96 (and the store's
+    IDENTITY_FIELDS frozenset) MUST all reject mutation at the store API
+    layer. The store never touches the DB for these calls."""
     store = PsycopgGridRegistryStore(database_url="postgres://never-touched")
     snapshot_id = uuid.uuid4()
     with pytest.raises(RegistryImmutabilityError) as excinfo:
@@ -152,6 +155,197 @@ def test_checksum_error_carries_structured_attributes() -> None:
     assert error.expected_hash == "deadbeef"
     assert error.actual_hash == "cafefeed"
     assert error.uri == "s3://nhms/canonical/x/grid.json"
+
+
+# -----------------------------------------------------------------------------
+# Static write-boundary validations: these MUST reject before any DB touch, so
+# the tests point the store at a URL that would fail if any connection were
+# opened. No integration marker; they always run.
+# -----------------------------------------------------------------------------
+
+
+_DUMMY_URL = "postgres://never-touched"
+_STATIC_HEX_CHECKSUM = "a" * 64
+
+
+def _static_snapshot(**overrides: Any) -> CanonicalGridSnapshot:
+    """Static-test helper: minimal, valid snapshot with overrides. All fields
+    used are irrelevant beyond the validation being exercised — the store
+    MUST reject at the write boundary before any DB connection is attempted."""
+    defaults: dict[str, Any] = {
+        "grid_snapshot_id": None,
+        "canonical_grid_key": "static_key",
+        "source_id": "IFS",
+        "grid_id": "static_grid",
+        "grid_signature": "static-sig",
+        "grid_definition_uri": "s3://nhms/canonical/static/grid.json",
+        "grid_definition_checksum": _STATIC_HEX_CHECKSUM,
+        "longitude_convention": "[-180,180)",
+        "latitude_order": "descending",
+        "flatten_order": "y_major_lat_then_lon",
+        "native_resolution": 0.25,
+        "bbox_south": 8.0,
+        "bbox_north": 64.0,
+        "bbox_west": 63.0,
+        "bbox_east": 145.0,
+        "converter_version": "converter-v1",
+        "valid_from": datetime(2026, 1, 1, tzinfo=UTC),
+        "valid_to": None,
+        "applicable_source_ids": ("IFS",),
+        "superseded_at": None,
+    }
+    defaults.update(overrides)
+    return CanonicalGridSnapshot(**defaults)
+
+
+def _static_cells(count: int) -> list[CanonicalGridCell]:
+    return [
+        CanonicalGridCell(
+            grid_cell_id=str(index),
+            longitude=63.0 + 0.25 * index,
+            latitude=8.0,
+            canonical_ordinal=index + 1,
+        )
+        for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ordinals", "gap"),
+    [
+        # Missing "3" in the middle: gap must name the SMALLEST offending
+        # value across missing + out-of-range. Missing 3, out-of-range 4;
+        # 3 < 4 so gap == 3 (Fix C1 regression coverage).
+        ([1, 2, 4], 3),
+        # Starts below 1: out-of-range value 0 is smallest offender.
+        ([0, 1, 2], 0),
+        # Extra beyond N=4: missing 4, out-of-range 5; 4 < 5 so gap == 4.
+        ([1, 2, 3, 5], 4),
+    ],
+)
+def test_non_contiguous_ordinals_static_gap_priority(
+    ordinals: list[int], gap: int
+) -> None:
+    """Static coverage of the gap-priority rule: report the smallest offending
+    value across BOTH missing and out-of-range sets. Runs without a DB so a
+    regression on gap-priority is caught locally, not only on node-27."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot()
+    cells = [
+        CanonicalGridCell(
+            grid_cell_id=str(idx),
+            longitude=63.0 + 0.25 * idx,
+            latitude=8.0,
+            canonical_ordinal=ordinal,
+        )
+        for idx, ordinal in enumerate(ordinals)
+    ]
+    with pytest.raises(RegistryContiguityError) as excinfo:
+        store.insert_snapshot(snapshot, cells)
+    assert excinfo.value.gap == gap
+
+
+def test_duplicate_ordinal_rejected_and_names_duplicate() -> None:
+    """Duplicates are the true bug when present; ``.gap`` MUST name the
+    SMALLEST duplicated ordinal (not the downstream "missing" ordinal). For
+    [1, 2, 2, 3] the duplicate is 2 — the misleading old behavior would have
+    reported gap=4 (the "missing" ordinal implied by dedup)."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot()
+    cells = [
+        CanonicalGridCell(
+            grid_cell_id=str(idx),
+            longitude=63.0 + 0.25 * idx,
+            latitude=8.0,
+            canonical_ordinal=ordinal,
+        )
+        for idx, ordinal in enumerate([1, 2, 2, 3])
+    ]
+    with pytest.raises(RegistryContiguityError) as excinfo:
+        store.insert_snapshot(snapshot, cells)
+    assert excinfo.value.gap == 2
+
+
+def test_empty_cells_rejected_before_db_touch() -> None:
+    """``insert_snapshot`` with an empty cells sequence MUST raise
+    ``RegistryStoreError`` BEFORE opening any DB connection. Otherwise a
+    garbage-but-immutable snapshot row with zero cells would be registered
+    (spec.md scenario "Snapshot has ≥1 cell row"). The dummy URL guarantees
+    the test would fail with a connection error if the guard were absent."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot()
+    with pytest.raises(RegistryStoreError, match="at least one cell row"):
+        store.insert_snapshot(snapshot, [])
+
+
+def test_insert_snapshot_rejects_preset_superseded_at() -> None:
+    """A born-superseded snapshot would be silently filtered by SUB-9
+    lifecycle queries. The store MUST reject ``superseded_at != None`` on
+    insert, BEFORE any DB touch, so callers use ``supersede()`` instead."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot(
+        superseded_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    with pytest.raises(RegistryStoreError, match="superseded_at must be None"):
+        store.insert_snapshot(snapshot, _static_cells(2))
+
+
+def test_insert_snapshot_rejects_invalid_hex_checksum() -> None:
+    """``grid_definition_checksum`` MUST be a 64-character hex string.
+    Non-hex characters, wrong length, or non-string types are rejected at
+    the write boundary; the store never touches the DB with a malformed
+    checksum."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    # Non-hex characters.
+    with pytest.raises(RegistryStoreError, match="64-character hex string"):
+        store.insert_snapshot(
+            _static_snapshot(grid_definition_checksum="not-hex-abcxyz-" * 5),
+            _static_cells(2),
+        )
+    # Wrong length (8 chars).
+    with pytest.raises(RegistryStoreError, match="64-character hex string"):
+        store.insert_snapshot(
+            _static_snapshot(grid_definition_checksum="deadbeef"),
+            _static_cells(2),
+        )
+
+
+def test_insert_snapshot_rejects_naive_valid_from() -> None:
+    """A naive ``valid_from`` would bind ambiguously in Postgres session TZ
+    (not guaranteed UTC). The store MUST reject at the write boundary."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot(
+        valid_from=datetime(2026, 1, 1),  # naive
+    )
+    with pytest.raises(RegistryStoreError, match="valid_from must be tz-aware"):
+        store.insert_snapshot(snapshot, _static_cells(2))
+
+
+def test_insert_snapshot_rejects_naive_valid_to() -> None:
+    """A naive ``valid_to`` gets the same rejection as valid_from."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    snapshot = _static_snapshot(
+        valid_to=datetime(2027, 1, 1),  # naive
+    )
+    with pytest.raises(RegistryStoreError, match="valid_to must be tz-aware"):
+        store.insert_snapshot(snapshot, _static_cells(2))
+
+
+def test_supersede_rejects_none_ts() -> None:
+    """``supersede`` with ``None`` MUST raise ``RegistryStoreError`` before
+    touching the DB. Un-supersession is not a permitted lifecycle event; the
+    append-only marker can be re-set to a different timestamp but never
+    cleared to NULL through this API."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    with pytest.raises(RegistryStoreError, match="non-null timestamp"):
+        store.supersede(uuid.uuid4(), None)  # type: ignore[arg-type]
+
+
+def test_supersede_rejects_naive_timestamp() -> None:
+    """``supersede`` with a naive timestamp MUST raise before any DB touch."""
+    store = PsycopgGridRegistryStore(database_url=_DUMMY_URL)
+    with pytest.raises(RegistryStoreError, match="superseded_at must be tz-aware"):
+        store.supersede(uuid.uuid4(), datetime(2026, 6, 1, 12, 0))
 
 
 # -----------------------------------------------------------------------------
@@ -196,6 +390,11 @@ def _seed_normalized_data_sources(database_url: str) -> None:
         connection.close()
 
 
+# Valid 64-char hex checksum used as the default for fixtures that don't need
+# a real content-derived hash. Insertion path validates 64-hex + lowercases.
+_DEFAULT_HEX_CHECKSUM = "a" * 64
+
+
 def _make_snapshot(
     *,
     canonical_grid_key: str,
@@ -203,7 +402,7 @@ def _make_snapshot(
     grid_id: str = "grid_a",
     grid_signature: str = "sig-a",
     grid_definition_uri: str = "s3://nhms/canonical/a/grid.json",
-    grid_definition_checksum: str = "checksum-a",
+    grid_definition_checksum: str = _DEFAULT_HEX_CHECKSUM,
     applicable_source_ids: tuple[str, ...] = ("IFS",),
 ) -> CanonicalGridSnapshot:
     """Construct a fully-populated CanonicalGridSnapshot for tests."""
@@ -350,12 +549,15 @@ def test_round_trip_identity_preserves_all_fields(migrated_database: str) -> Non
 @pytest.mark.parametrize(
     ("ordinals", "gap"),
     [
-        # Missing "3" in the middle: expected {1,2,3}, actual {1,2,4}.
+        # Missing 3, out-of-range 4 (n=3): min({3} | {4}) == 3.
         ([1, 2, 4], 3),
-        # Starts below 1 (0-based ordinals): out-of-range value 0.
+        # Missing 3, out-of-range 0 (n=3): min({3} | {0}) == 0.
         ([0, 1, 2], 0),
-        # Extra beyond N=4 (expected {1,2,3,4}, actual has 5 which is > N).
-        ([1, 2, 3, 5], 5),
+        # Missing 4, out-of-range 5 (n=4): min({4} | {5}) == 4.
+        # (Old behavior reported 5 by prioritizing out-of-range first; the
+        # fix reports the smallest offending value across BOTH sets so the
+        # missing 4 is named.)
+        ([1, 2, 3, 5], 4),
     ],
 )
 def test_non_contiguous_ordinals_rejected_and_no_rows_written(
@@ -454,7 +656,7 @@ def test_delete_snapshot_via_store_api_rejected_and_row_unchanged(
         grid_id=f"{RUN_PREFIX}_grid_delsnap",
         grid_signature=f"{RUN_PREFIX}-sig-delsnap",
         grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/delsnap/grid.json",
-        grid_definition_checksum="deadbeef",
+        grid_definition_checksum="d" * 64,
     )
     snapshot_id = store.insert_snapshot(snapshot, _make_cells(2))
     row_before = _fetch_snapshot_row(migrated_database, snapshot_id)
@@ -482,7 +684,7 @@ def test_delete_cell_via_store_api_rejected_and_row_unchanged(
         grid_id=f"{RUN_PREFIX}_grid_delcell",
         grid_signature=f"{RUN_PREFIX}-sig-delcell",
         grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/delcell/grid.json",
-        grid_definition_checksum="deadbeef",
+        grid_definition_checksum="e" * 64,
     )
     snapshot_id = store.insert_snapshot(snapshot, _make_cells(3))
 
@@ -505,21 +707,28 @@ def test_delete_cell_via_store_api_rejected_and_row_unchanged(
         ("grid_definition_checksum", "mutated-checksum"),
         ("bbox_south", 999.0),
         ("canonical_grid_key", "mutated-key"),
+        # SUB-2 Trigger B enforces native_resolution immutability; the store
+        # surface mirrors it. Baseline snapshot uses 0.25; mutation-target
+        # 0.5 is different — the rejection must fire before touching the DB.
+        ("native_resolution", 0.5),
     ],
 )
 def test_update_identity_field_rejected_and_row_unchanged(
     migrated_database: str, field: str, new_value: Any
 ) -> None:
-    """For each of the 5 non-cell identity fields the store's
+    """For each of the non-cell identity fields the store's
     ``update_identity_field`` MUST raise before touching the DB. The DB row
     is byte-identical to the inserted value on read-back."""
     store = PsycopgGridRegistryStore(database_url=migrated_database)
+    # Build a distinct 64-hex checksum per parametrize case so failure
+    # attribution stays crisp; content-derived hash isn't needed here.
+    field_hash = sha256_bytes(field.encode("utf-8"))
     snapshot = _make_snapshot(
         canonical_grid_key=f"{RUN_PREFIX}_key_upd_{field}",
         grid_id=f"{RUN_PREFIX}_grid_upd_{field}",
         grid_signature=f"{RUN_PREFIX}-sig-upd-{field}",
         grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/upd-{field}/grid.json",
-        grid_definition_checksum=f"chksum-{field}",
+        grid_definition_checksum=field_hash,
     )
     snapshot_id = store.insert_snapshot(snapshot, _make_cells(2))
     row_before = _fetch_snapshot_row(migrated_database, snapshot_id)
@@ -601,7 +810,7 @@ def test_supersede_permitted_write(migrated_database: str) -> None:
         grid_id=f"{RUN_PREFIX}_grid_supersede",
         grid_signature=f"{RUN_PREFIX}-sig-supersede",
         grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/supersede/grid.json",
-        grid_definition_checksum="deadbeef",
+        grid_definition_checksum="f" * 64,
     )
     snapshot_id = store.insert_snapshot(snapshot, _make_cells(2))
 
@@ -630,7 +839,7 @@ def test_extend_applicable_source_ids_preserves_order_and_dedupes(
         grid_id=f"{RUN_PREFIX}_grid_extend",
         grid_signature=f"{RUN_PREFIX}-sig-extend",
         grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/extend/grid.json",
-        grid_definition_checksum="deadbeef",
+        grid_definition_checksum="1" * 64,
         applicable_source_ids=("IFS",),
     )
     snapshot_id = store.insert_snapshot(snapshot, _make_cells(2))
@@ -657,3 +866,121 @@ def test_extend_applicable_source_ids_preserves_order_and_dedupes(
         store.extend_applicable_source_ids(snapshot_id, ["unknown_source"])
     row = _fetch_snapshot_row(migrated_database, snapshot_id)
     assert row["applicable_source_ids"] == ["IFS", "gfs", "ERA5"]
+
+
+@pytest.mark.integration
+def test_insert_snapshot_normalizes_source_ids_on_write(migrated_database: str) -> None:
+    """Both ``source_id`` and every entry of ``applicable_source_ids`` MUST
+    be normalized on write. This test uses lowercased inputs (``"ifs"``,
+    ``("ifs", "era5")``) that DIFFER from the normalized form so a future
+    refactor that removes ``normalize_source_id`` from ``insert_snapshot``
+    would be caught here (the round-trip test alone uses pre-normalized
+    inputs so the normalization write-boundary would go untested)."""
+    store = PsycopgGridRegistryStore(database_url=migrated_database)
+    content = b"normalize-on-write proof grid"
+    checksum = sha256_bytes(content)
+    inserted = _make_snapshot(
+        canonical_grid_key=f"{RUN_PREFIX}_key_normalize",
+        source_id="ifs",  # will normalize to "IFS"
+        grid_id=f"{RUN_PREFIX}_grid_normalize",
+        grid_signature=f"{RUN_PREFIX}-sig-normalize",
+        grid_definition_uri=f"s3://nhms/canonical/{RUN_PREFIX}/normalize/grid.json",
+        grid_definition_checksum=checksum,
+        # Mixed case: "ifs" -> "IFS", "era5" -> "ERA5".
+        applicable_source_ids=("ifs", "era5"),
+    )
+    snapshot_id = store.insert_snapshot(inserted, _make_cells(3))
+
+    def reader(uri: str) -> bytes:
+        assert uri == inserted.grid_definition_uri
+        return content
+
+    loaded, _cells = store.load_snapshot(snapshot_id, object_reader=reader)
+    assert loaded.source_id == "IFS"
+    assert list(loaded.applicable_source_ids) == ["IFS", "ERA5"]
+
+
+@pytest.mark.integration
+def test_load_snapshot_accepts_uppercase_stored_checksum(
+    migrated_database: str,
+) -> None:
+    """Legacy tooling may write uppercase hex directly. The store's insert
+    path lowercases on write (`_normalize_checksum`), so a fresh row's
+    checksum is always lowercase — but if a row already exists with
+    uppercase hex (bypassing this store), ``load_snapshot`` MUST still
+    match a content-derived (lowercase) hash by comparing case-insensitively.
+
+    We prove this by writing an uppercase hex row via raw SQL (bypassing
+    ``insert_snapshot``), then loading via the store with matching content:
+    the load succeeds (no ``RegistryChecksumError``).
+    """
+    content = b"legacy-uppercase-checksum-round-trip"
+    lowercase_hash = sha256_bytes(content)
+    uppercase_hash = lowercase_hash.upper()
+
+    # Insert a snapshot row directly with uppercase checksum, bypassing the
+    # store's write-boundary normalization.
+    snapshot_id = uuid.uuid4()
+    canonical_key = f"{RUN_PREFIX}_key_upper_checksum"
+    uri = f"s3://nhms/canonical/{RUN_PREFIX}/upper-checksum/grid.json"
+    connection = psycopg2.connect(migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.canonical_grid_snapshot (
+                    grid_snapshot_id, canonical_grid_key, source_id, grid_id,
+                    grid_signature, grid_definition_uri, grid_definition_checksum,
+                    longitude_convention, latitude_order, flatten_order,
+                    native_resolution, bbox_south, bbox_north, bbox_west,
+                    bbox_east, converter_version, valid_from, valid_to,
+                    applicable_source_ids
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    str(snapshot_id),
+                    canonical_key,
+                    "IFS",
+                    f"{RUN_PREFIX}_grid_upper_checksum",
+                    f"{RUN_PREFIX}-sig-upper-checksum",
+                    uri,
+                    uppercase_hash,  # legacy uppercase hex
+                    "[-180,180)",
+                    "descending",
+                    "y_major_lat_then_lon",
+                    0.25, 8.0, 64.0, 63.0, 145.0,
+                    "converter-v1",
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    None,
+                    ["IFS"],
+                ),
+            )
+            # One cell row to satisfy the DB / iteration contract.
+            cursor.execute(
+                """
+                INSERT INTO met.canonical_grid_cell (
+                    grid_snapshot_id, grid_cell_id, longitude, latitude,
+                    canonical_ordinal
+                ) VALUES (%s, %s, %s, %s, %s)
+                """,
+                (str(snapshot_id), "0", 63.0, 8.0, 1),
+            )
+    finally:
+        connection.close()
+
+    store = PsycopgGridRegistryStore(database_url=migrated_database)
+
+    def reader(read_uri: str) -> bytes:
+        assert read_uri == uri
+        return content
+
+    loaded, _cells = store.load_snapshot(snapshot_id, object_reader=reader)
+    assert loaded.grid_snapshot_id == snapshot_id
+    # The stored value is uppercase; the store didn't rewrite it.
+    assert loaded.grid_definition_checksum == uppercase_hash
+    # Content-derived hash is lowercase, but comparison succeeded via
+    # case-insensitive compare — no RegistryChecksumError was raised.

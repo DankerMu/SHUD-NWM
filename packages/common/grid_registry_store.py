@@ -26,11 +26,21 @@ The design intentionally does NOT expose lifecycle decision logic:
 * Idempotency of ``supersede`` is a SUB-9 concern.
 * Deciding whether ``extend_applicable_source_ids`` is permitted is a SUB-8
   concern (this module only exposes the primitive).
+
+Errors: the store surfaces its own rejections through the
+``RegistryStoreError`` hierarchy. One boundary error class is intentionally
+NOT wrapped: ``ValueError`` raised by ``normalize_source_id`` (from
+``packages.common.source_identity``) propagates raw, matching the
+established sibling convention in ``packages.common.met_store``
+(``met_store.py:63`` calls ``normalize_source_id`` and lets ``ValueError``
+propagate). Callers who want a single ``except`` surface must catch both
+``RegistryStoreError`` and ``ValueError``.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,6 +49,8 @@ from uuid import UUID
 
 from packages.common.object_store import sha256_bytes
 from packages.common.source_identity import normalize_source_id
+
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 
 
 class RegistryStoreError(RuntimeError):
@@ -72,7 +84,14 @@ class RegistryContiguityError(RegistryStoreError):
 
     The DB ``UNIQUE(grid_snapshot_id, canonical_ordinal)`` constraint alone
     cannot enforce contiguity (spec.md:41-45); the store validates it before
-    opening the transaction and raises with the offending gap named.
+    opening the transaction and raises with the offending value named in
+    ``.gap``. Priority for ``.gap`` selection:
+
+    * If duplicates are present, ``.gap`` names the SMALLEST duplicated
+      ordinal (the true bug when duplicates exist).
+    * Otherwise ``.gap`` names the SMALLEST offending value across BOTH
+      missing integers in ``1..N`` AND out-of-range values (below 1 or
+      above N).
     """
 
     def __init__(self, *, expected: list[int], actual: list[int], gap: int) -> None:
@@ -81,8 +100,8 @@ class RegistryContiguityError(RegistryStoreError):
         self.gap = gap
         super().__init__(
             f"canonical_ordinal contiguity violation: expected {expected}, "
-            f"got {actual}; smallest missing ordinal (or out-of-range value) "
-            f"is {gap}."
+            f"got {actual}; smallest offending ordinal (duplicate, missing, "
+            f"or out-of-range) is {gap}."
         )
 
 
@@ -129,6 +148,42 @@ def default_database_url() -> str:
             "DATABASE_URL is required for grid-registry database operations."
         )
     return database_url
+
+
+def _require_tz_aware(value: datetime | None, field_name: str) -> datetime | None:
+    """Reject naive ``datetime`` values so writes bind unambiguous UTC.
+
+    Postgres ``TIMESTAMPTZ`` interprets a naive datetime bind in the session
+    timezone, which is not guaranteed to be UTC. Rejecting naive values at
+    the write boundary matches the strictness expected of registry lifecycle
+    timestamps (spec.md scenario "Timestamps are wall-clock UTC").
+    Sibling coercion patterns (`state_manager._ensure_utc`,
+    `object_store_forcing._ensure_utc`) accept naive by treating it as UTC;
+    the registry chooses the stricter reject-on-naive stance for symmetry
+    with the append-only immutability guarantees.
+    """
+    if value is not None and value.tzinfo is None:
+        raise RegistryStoreError(
+            f"{field_name} must be tz-aware datetime; got naive value {value!r}."
+        )
+    return value
+
+
+def _normalize_checksum(checksum: str) -> str:
+    """Validate a SHA-256 hex checksum and return its lowercase form.
+
+    ``sha256_bytes`` emits lowercase hex; snapshot checksums MUST be a valid
+    64-character hex string so equality comparisons on ``load_snapshot`` are
+    case-insensitive by construction. Any legacy tool that wrote uppercase
+    hex would still round-trip cleanly because the stored value is always
+    lowercased on write.
+    """
+    if not isinstance(checksum, str) or _HEX64.fullmatch(checksum) is None:
+        raise RegistryStoreError(
+            f"grid_definition_checksum must be a 64-character hex string; "
+            f"got {checksum!r}."
+        )
+    return checksum.lower()
 
 
 @dataclass(frozen=True)
@@ -182,23 +237,42 @@ class CanonicalGridCell:
 def _validate_ordinal_contiguity(cells: Sequence[CanonicalGridCell]) -> None:
     """Raise ``RegistryContiguityError`` if the ordinals are not ``1..N``.
 
-    The gap reported is the smallest offending value: either the smallest
-    missing integer in ``1..N`` or the first out-of-range ordinal encountered.
+    The gap reported is the smallest offending value across BOTH the missing
+    integers in ``1..N`` AND the out-of-range values (below 1 or above N).
+    Duplicates are detected first and the smallest duplicated ordinal is
+    reported in ``.gap`` — this names the true bug rather than the downstream
+    missing ordinal a duplicate would otherwise imply.
     """
+    if not cells:
+        raise RegistryStoreError(
+            "snapshot must have at least one cell row (got cells=[])"
+        )
     n = len(cells)
     expected = list(range(1, n + 1))
     actual = sorted(int(cell.canonical_ordinal) for cell in cells)
     if actual == expected:
         return
+    # Duplicates are the true bug when present; naming the "missing" ordinal
+    # would misdirect the caller. Detect first, before comparing to expected.
+    if len(set(actual)) != len(actual):
+        seen: set[int] = set()
+        duplicates: set[int] = set()
+        for value in actual:
+            if value in seen:
+                duplicates.add(value)
+            else:
+                seen.add(value)
+        raise RegistryContiguityError(
+            expected=expected, actual=actual, gap=min(duplicates)
+        )
     expected_set = set(expected)
-    # Prefer naming an out-of-range value (below 1 or above N) if present,
-    # otherwise the smallest missing ordinal in expected.
-    out_of_range = [value for value in actual if value < 1 or value > n]
-    if out_of_range:
-        gap = min(out_of_range)
-    else:
-        missing = expected_set - set(actual)
-        gap = min(missing)
+    # Report the smallest offending value across BOTH sets (missing +
+    # out-of-range) so `[1, 2, 4]` (n=3) names the missing 3, not the
+    # out-of-range 4.
+    missing = expected_set - set(actual)
+    out_of_range = {value for value in actual if value < 1 or value > n}
+    offending = missing | out_of_range
+    gap = min(offending)
     raise RegistryContiguityError(expected=expected, actual=actual, gap=gap)
 
 
@@ -219,10 +293,22 @@ class PsycopgGridRegistryStore:
     ) -> UUID:
         """Insert one snapshot and its ordered cells atomically.
 
-        The snapshot's ``source_id`` is normalized via
-        ``normalize_source_id`` before writing. ``canonical_ordinal``
-        contiguity is validated BEFORE opening the transaction so a bad
-        request never touches the DB.
+        Write-boundary validations, in order (all before any DB touch):
+
+        * ``superseded_at`` must be ``None`` on insert (use ``supersede()``
+          post-registration to mark supersession — a born-superseded row
+          would be silently filtered by SUB-9 lifecycle queries).
+        * ``valid_from`` and ``valid_to`` must be tz-aware ``datetime``
+          values so Postgres ``TIMESTAMPTZ`` binds unambiguous UTC.
+        * ``grid_definition_checksum`` must be a valid 64-character hex
+          string; it is normalized to lowercase before writing.
+        * The ordered cells' ``canonical_ordinal`` set must be the
+          contiguous integer sequence ``1..N`` with no duplicates.
+
+        The snapshot's ``source_id`` and each ``applicable_source_ids``
+        entry are normalized via ``normalize_source_id`` before writing;
+        ``ValueError`` from that helper propagates raw (matching the
+        established sibling convention in ``met_store``).
 
         On any mid-write DB error the entire transaction rolls back; zero
         rows remain for the (possibly auto-generated) ``grid_snapshot_id``.
@@ -230,6 +316,18 @@ class PsycopgGridRegistryStore:
         Returns the ``grid_snapshot_id`` (fetched back from the DB if the
         caller passed ``None`` and the DB generated one).
         """
+        if snapshot.superseded_at is not None:
+            raise RegistryStoreError(
+                "superseded_at must be None on insert; use supersede() "
+                "post-registration for supersession."
+            )
+        _require_tz_aware(snapshot.valid_from, "valid_from")
+        _require_tz_aware(snapshot.valid_to, "valid_to")
+        # Defense-in-depth: if a future refactor stops rejecting non-None
+        # superseded_at on insert, this line still ensures the timestamp is
+        # tz-aware.
+        _require_tz_aware(snapshot.superseded_at, "superseded_at")
+        normalized_checksum = _normalize_checksum(snapshot.grid_definition_checksum)
         _validate_ordinal_contiguity(cells)
         normalized_source = normalize_source_id(snapshot.source_id)
         normalized_applicable = tuple(
@@ -283,7 +381,7 @@ class PsycopgGridRegistryStore:
                             snapshot.grid_id,
                             snapshot.grid_signature,
                             snapshot.grid_definition_uri,
-                            snapshot.grid_definition_checksum,
+                            normalized_checksum,
                             snapshot.longitude_convention,
                             snapshot.latitude_order,
                             snapshot.flatten_order,
@@ -336,7 +434,7 @@ class PsycopgGridRegistryStore:
                             snapshot.grid_id,
                             snapshot.grid_signature,
                             snapshot.grid_definition_uri,
-                            snapshot.grid_definition_checksum,
+                            normalized_checksum,
                             snapshot.longitude_convention,
                             snapshot.latitude_order,
                             snapshot.flatten_order,
@@ -511,9 +609,12 @@ class PsycopgGridRegistryStore:
 
         # Checksum-verify AFTER we have the snapshot row. If the object bytes
         # drift, we fail closed before handing anything back to the caller.
+        # Case-insensitive compare (`sha256_bytes` returns lowercase; the
+        # store lowercases on write via `_normalize_checksum`, but a legacy
+        # tool may have written uppercase hex directly — we still accept it).
         content = object_reader(snapshot.grid_definition_uri)
         actual_hash = sha256_bytes(content)
-        if actual_hash != snapshot.grid_definition_checksum:
+        if actual_hash.lower() != snapshot.grid_definition_checksum.lower():
             raise RegistryChecksumError(
                 expected_hash=snapshot.grid_definition_checksum,
                 actual_hash=actual_hash,
@@ -527,7 +628,22 @@ class PsycopgGridRegistryStore:
         SUB-9 owns idempotency (whether a re-supersede is a no-op or an error);
         the store only exposes the primitive. SUB-2 migration Trigger B
         explicitly allows ``superseded_at`` UPDATEs.
+
+        ``superseded_at`` MUST be a tz-aware, non-null ``datetime``:
+
+        * ``None`` is rejected — un-supersession is not a permitted lifecycle
+          event (spec treats ``superseded_at`` as an append-only lifecycle
+          marker; the row can be RE-superseded to a different ts, but not
+          cleared to NULL through this API).
+        * Naive datetimes are rejected — Postgres ``TIMESTAMPTZ`` binds a
+          naive value in the session TZ, which is not guaranteed to be UTC.
         """
+        if superseded_at is None:
+            raise RegistryStoreError(
+                "supersede requires a non-null timestamp; un-supersession is "
+                "not a permitted lifecycle event."
+            )
+        _require_tz_aware(superseded_at, "superseded_at")
         try:
             import psycopg2
         except ImportError as error:
