@@ -13,11 +13,11 @@
 
 ## 2. Direct-Grid Readiness Evidence
 
-- [ ] 2.1 Re-run the direct-grid contract/producer/exact-cell/standard-package/runtime-staging/out-of-range-negative/idempotency suites on the pinned commit and capture pass evidence bound to the manifest checksum.
+- [x] 2.1 Re-run the direct-grid contract/producer/exact-cell/standard-package/runtime-staging/out-of-range-negative/idempotency suites on the pinned commit and capture pass evidence bound to the manifest checksum.
   - Required evidence: node-27 run (`ssh -p 32099 nwm@210.77.77.27`, `cd /home/nwm/NWM && git pull --ff-only` to the pinned `baseline_commit`) executes `uv run pytest -q tests/test_direct_grid_e2e.py tests/test_forcing_producer.py tests/test_shud_runtime.py` and passes; suites run on the node-27 deployment host per CLAUDE.md backend-pytest oracle routing and source-of-truth §4/P0.2 (re-execution on the actually deployed release), not from local.
   - Required evidence: the run record cites the node-27 host, the `baseline_commit`, and the readiness manifest checksum; no test is skipped, deleted, or weakened.
   - Non-goal for 2.1: no new production test behavior; existing suites are executed as-is on the pinned baseline.
-- [ ] 2.2 Re-run the DB migration tests on the pinned schema version.
+- [x] 2.2 Re-run the DB migration tests on the pinned schema version.
   - Required evidence: node-27 run (same host routing as 2.1) executes `uv run pytest -q tests/test_migrations.py` and passes; the run record cites the node-27 host, the `baseline_commit`, the readiness manifest checksum, and the pinned `db_schema_migration_version` / `db_schema_migration_repo_head`.
   - Required evidence: the record notes that `tests/test_migrations.py` is a static SQL-file check against `db/migrations/`; verification that node-27's live applied migration version equals the manifest pin is produced by the 2.4 smoke, not by this suite.
   - Non-goal for 2.2: no schema change and no new migration authored in this change.

@@ -1,0 +1,18 @@
+# captured at 2026-07-07T01:06:37Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8
+# task: cmfd-direct-grid-platform-readiness §2.1 pinned-commit re-run
+# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
+# git rev-parse HEAD: 5e518c151375b798c29ee3cafb3260413ac8905f
+# env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
+# suites: tests/test_direct_grid_e2e.py tests/test_forcing_producer.py tests/test_shud_runtime.py
+# invocation: uv run pytest -q tests/test_direct_grid_e2e.py tests/test_forcing_producer.py tests/test_shud_runtime.py
+# result: 396 passed, 1 warning in 33.74s
+# skip-audit: git diff master -- tests/ empty at pinned baseline; no test skipped, deleted, or weakened
+# coverage-map (per direct-grid-readiness-evidence spec):
+#   contract              -> tests/test_direct_grid_e2e.py
+#   producer              -> tests/test_forcing_producer.py
+#   exact-cell            -> tests/test_forcing_producer.py
+#   standard-package      -> tests/test_direct_grid_e2e.py
+#   runtime-staging       -> tests/test_shud_runtime.py
+#   out-of-range-negative -> tests/test_forcing_producer.py + tests/test_shud_runtime.py
+#   idempotency           -> tests/test_forcing_producer.py + tests/test_direct_grid_e2e.py
+PASS
