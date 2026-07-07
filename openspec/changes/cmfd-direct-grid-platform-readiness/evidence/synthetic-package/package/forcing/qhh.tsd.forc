@@ -1,0 +1,6 @@
+3 20260707
+shud
+ID	Lon	Lat	X	Y	Z	Filename
+1	100.0	30.0	1	1	100	station-001.csv
+2	100.5	30.0	2	1	150	station-002.csv
+3	100.0	30.5	1	2	200	station-003.csv
