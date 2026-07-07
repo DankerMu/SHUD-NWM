@@ -5,17 +5,25 @@ enforces the following FAIL classes:
 
 1. Missing top-level required key.
 2. null / literal ``"unresolved"`` / empty string, list, or dict at ANY depth
-   (recursive scan across nested containers).
+   (recursive scan across nested containers). The ONLY exemption is
+   ``forcing_producer_limits.<limit>.override``, which may be null to
+   encode "no deployment env override in effect" per tasks.md 1.1 line 5
+   ("any deployment env overrides in effect" -> override=null == none in
+   effect). No other ``override`` key anywhere is exempt.
 3. Filename ``manifest_version`` segment does not match manifest's
    ``manifest_version`` value (filename ``readiness-manifest.<seg>.json``).
-4. Missing (or extraneous) required sub-key inside a structured identity
-   block (canonical converter versions, forcing producer limits, SHUD
-   runtime staging limits, PROJ CRS metadata, source_locations entries).
+4. Missing required sub-key inside a structured identity block. For
+   ``canonical_converter_versions`` the pinned set {gfs, ifs, era5} MUST be
+   present as non-empty strings; additional converter kinds are permitted
+   but MUST also be non-empty strings. For SHUD runtime staging limits,
+   forcing producer limits, PROJ CRS metadata, and source_locations
+   entries, the required keyset is enforced as documented per-block below.
 5. ``schema_identity_status`` value not in the accepted set (``{"resolved"}``).
-6. Cross-check disagreement between ``db_schema_migration_repo_head`` and
-   ``db_schema_migration_version`` versus ``schema_identity_status``
-   (equal -> must be resolved; unequal -> must be unresolved, which the
-   top-level ``unresolved`` FAIL then catches).
+6. Given ``schema_identity_status == "resolved"`` (already enforced by
+   class 5), ``db_schema_migration_repo_head`` MUST equal
+   ``db_schema_migration_version``. If they disagree, the manifest is
+   internally inconsistent (status claims resolved but the pins don't
+   match) and the gate fails.
 
 Read-only. stdlib-only. Exit 0 with ``PASS`` on success; exit 1 with
 ``FAIL:<key>:<reason>`` on the first failure.
@@ -75,10 +83,10 @@ SOURCE_LOCATION_REQUIRED_KEYS = frozenset({"host"})
 
 SCHEMA_IDENTITY_ACCEPTED = frozenset({"resolved"})
 
-# override is permitted to be null inside forcing_producer_limits sub-blocks;
-# it explicitly encodes "no deployment env override in effect". The recursive
-# nullish scan skips this exact leaf coordinate.
-NULLABLE_LEAF_KEYS = frozenset({"override"})
+# Path-anchored null exemption: only forcing_producer_limits.<limit>.override
+# may be null (documented "no deployment env override in effect"). Every
+# other ``override`` key anywhere else in the manifest is NOT exempt.
+FORCING_PRODUCER_LIMITS_KEY = "forcing_producer_limits"
 
 FILENAME_VERSION_RE = re.compile(r"^readiness-manifest\.(?P<seg>[^.]+)\.json$")
 
@@ -88,13 +96,25 @@ def fail(key: str, reason: str) -> None:
     sys.exit(1)
 
 
+def _is_permitted_null(path: str, key: str) -> bool:
+    """Return True iff ``path.key`` is exempt from the null-value gate.
+
+    Only ``forcing_producer_limits.<any-limit>.override`` may be null
+    (means "no env-override in effect", per tasks.md 1.1 line 5). Any
+    other ``override`` key, anywhere else in the manifest, is NOT exempt.
+    """
+    if key != "override":
+        return False
+    parts = path.split(".") if path else []
+    return len(parts) >= 2 and parts[0] == FORCING_PRODUCER_LIMITS_KEY
+
+
 def scan_nullish(node: object, path: str) -> None:
     """Recursively assert that no leaf/container in ``node`` is null,
     the literal string ``"unresolved"``, or an empty string/list/dict.
 
-    ``NULLABLE_LEAF_KEYS`` (currently ``{"override"}``) is exempted so the
-    forcing-producer-limits ``override: null`` (documented "no env override
-    in effect") does not falsely trip the gate.
+    The only null exemption is ``forcing_producer_limits.<limit>.override``
+    (see ``_is_permitted_null``). No other ``override`` leaf is exempt.
     """
     if node is None:
         fail(path, "value is null")
@@ -109,12 +129,10 @@ def scan_nullish(node: object, path: str) -> None:
             fail(path, "value is empty dict")
         for k, v in node.items():
             child_path = f"{path}.{k}" if path else k
-            if k in NULLABLE_LEAF_KEYS:
-                # override may legitimately be null; skip nullish scan for
-                # this exact leaf but still recurse if it happens to carry
-                # nested structure (it won't, but be defensive).
-                if v is None:
-                    continue
+            if v is None and _is_permitted_null(path, k):
+                # forcing_producer_limits.<limit>.override may legitimately
+                # be null; skip nullish scan for this exact leaf coordinate.
+                continue
             scan_nullish(v, child_path)
         return
     if isinstance(node, list):
@@ -187,19 +205,22 @@ def main() -> None:
         )
 
     # FAIL class 4: required sub-key structure inside identity blocks.
-    require_exact_keyset(
+    # canonical_converter_versions MUST contain gfs/ifs/era5 (additive:
+    # extra converter kinds are permitted but MUST also be non-empty
+    # strings). Every entry is validated for shape and non-emptiness.
+    require_min_keyset(
         manifest["canonical_converter_versions"],
         "canonical_converter_versions",
         REQUIRED_CANONICAL_CONVERTER_KEYS,
     )
-    # Each value must be a non-empty string (already scanned nullish, but
-    # also assert the type explicitly so numbers/objects don't slip in).
     for lang, value in manifest["canonical_converter_versions"].items():
+        entry_key = f"canonical_converter_versions.{lang}"
         if not isinstance(value, str):
-            fail(
-                f"canonical_converter_versions.{lang}",
-                f"expected string, got {type(value).__name__}",
-            )
+            fail(entry_key, f"expected string, got {type(value).__name__}")
+        # Recursive nullish scan covers pinned keys (walked from the top),
+        # but extras must also be non-empty strings. scan_nullish handles
+        # both empty-string and null cases with a proper FAIL path.
+        scan_nullish(value, entry_key)
 
     require_exact_keyset(
         manifest["shud_runtime_staging_limits"],
@@ -269,22 +290,18 @@ def main() -> None:
             f"value {status!r} not in accepted set {sorted(SCHEMA_IDENTITY_ACCEPTED)}",
         )
 
-    # FAIL class 6: repo_head vs deployment version must agree with status.
+    # FAIL class 6: internal consistency between the two migration pins.
+    # Class 5 already required schema_identity_status == "resolved", so at
+    # this point repo_head MUST equal version — otherwise the manifest is
+    # internally inconsistent (status claims resolved but the pins disagree).
     repo_head = manifest["db_schema_migration_repo_head"]
     version = manifest["db_schema_migration_version"]
-    if repo_head == version:
-        if status != "resolved":
-            fail(
-                "schema_identity_status",
-                f"repo_head==version=={repo_head!r} but status={status!r} (expected 'resolved')",
-            )
-    else:
-        # If repo_head != version, status MUST be 'unresolved' — which the
-        # top-level nullish/unresolved scan already blocks. Assert the
-        # inconsistency explicitly so the failure key is unambiguous.
+    if repo_head != version:
         fail(
             "schema_identity_status",
-            f"repo_head={repo_head!r} != version={version!r}; identity is unresolved and blocks readiness",
+            f"schema_identity_status='resolved' but "
+            f"db_schema_migration_repo_head={repo_head!r} != db_schema_migration_version={version!r}; "
+            f"manifest is internally inconsistent",
         )
 
     print("PASS")
