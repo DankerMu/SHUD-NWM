@@ -27,6 +27,12 @@
 -- acceptance values — §2.6 accepts what the SQL below returns at run time.
 
 \echo ===== §2.6 G9 Capacity Baseline (node-27, live SQL) =====
+
+\echo ---- Guard verify (SHOW read-back of the psql -c preamble SETs; mirrors _run_live_sql) ----
+SHOW default_transaction_read_only;
+SHOW statement_timeout;
+
+\echo
 \echo audit UTC:
 SELECT now() AT TIME ZONE 'UTC' AS audit_utc;
 

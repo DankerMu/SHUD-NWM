@@ -60,9 +60,11 @@ on the first breach.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -101,7 +103,8 @@ STATION_COUNT_ESTIMATE_PER_BASIN = 6_290
 # Conservative upper-bound bytes/station for producer JSON manifest. First-pass
 # estimator anchor: appendix-A does not enumerate manifest sizes, and §2.4
 # materializes a real 3-station manifest, so 2 KiB/station is a safe upper
-# bound (≈12.6 MiB total at 6290 stations, ≈38% of 32 MiB cap).
+# bound (≈12.29 MiB total at 6290 stations = 12,881,920 B / 1 MiB ≈ 12.29,
+# ≈38% of 32 MiB cap; matches D4 pass log output).
 PER_STATION_MANIFEST_BYTES_ESTIMATE = 2048
 
 # Typical single-cycle timestep count (appendix-A cited example:
@@ -109,10 +112,12 @@ PER_STATION_MANIFEST_BYTES_ESTIMATE = 2048
 # Used as the "typical" timestep in D4 formula evaluation. Not a code-pinned
 # constant — the pinned constant is FORCING_MAX_TIMESTEP_COUNT.
 #
-# Production forecast horizon (services/orchestrator/scheduler_adapters.py:200-203):
+# Production forecast horizon derived from services/orchestrator/scheduler_adapters.py:200-203:
 #   forecast_start_hour = 0, forecast_step_hours = 3, forecast_end_hour = 168
-# yields range(0, 169, 3) = 57 timesteps per production cycle. No
-# _FORECAST_END_HOUR env override exists in infra/env/* at capture time.
+# yields range(0, 169, 3) = 57 timesteps per production cycle. D4' below emits
+# a grep verifying no _FORECAST_END_HOUR / _FORECAST_STEP_HOURS override present
+# in any infra/env/*.env file at code-carrier commit (grep evidence captured
+# on the running host, not a universal claim).
 PRODUCTION_FORECAST_START_HOUR = 0
 PRODUCTION_FORECAST_STEP_HOURS = 3
 PRODUCTION_FORECAST_END_HOUR = 168
@@ -129,6 +134,59 @@ def _log(section: str, message: str) -> None:
 def _fail(constraint: str, reason: str) -> None:
     print(f"FAIL:{constraint}:{reason}")
     sys.exit(1)
+
+
+def _git_head_sha(script_dir: Path) -> str:
+    """Return git rev-parse HEAD from the script's directory, or '<40-hex>' on failure.
+
+    Used to auto-populate the code_carrier_sha line in the pass log binder header
+    so the operator does not need to hand-splice a sha after run. Guarded with a
+    5s timeout + shape validation so a broken git state (detached HEAD without a
+    sha, unusual repo layout) falls back to the manual-splice placeholder.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        sha = result.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha
+        return "<40-hex>"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return "<40-hex>"
+
+
+def _q3_source_line_range() -> str:
+    """Auto-derive the Q3 SQL block's line range inside _run_live_sql source.
+
+    Returns '<START>-<END>' where <START> is the first line of the Q3 SELECT
+    statement (matched by `SELECT count(*),`) and <END> is the closing paren
+    of the `cur.execute(` call wrapping it. Falls back to '<unknown>' if the
+    pattern is not found (e.g. after a large refactor); the pass log will
+    surface the fallback string so the drift is visible rather than silent.
+    """
+    try:
+        source_lines, start_line = inspect.getsourcelines(_run_live_sql)
+    except (OSError, TypeError):
+        return "<unknown>"
+    q3_start: int | None = None
+    q3_end: int | None = None
+    for offset, line in enumerate(source_lines):
+        stripped = line.strip()
+        if q3_start is None and stripped.startswith("SELECT count(*),"):
+            q3_start = start_line + offset
+        elif q3_start is not None and stripped == '"""':
+            # end of the SQL triple-quoted string; next line is the closing paren
+            q3_end = start_line + offset + 1
+            break
+    if q3_start is None or q3_end is None:
+        return "<unknown>"
+    return f"{q3_start}-{q3_end}"
 
 
 def _load_manifest(manifest_path: Path) -> tuple[dict[str, Any], str]:
@@ -152,23 +210,52 @@ def _load_manifest(manifest_path: Path) -> tuple[dict[str, Any], str]:
     return json.loads(raw.decode("utf-8")), recomputed
 
 
+# libpq prose form redaction: psycopg2 also emits multi-word prose describing
+# the failing connection target and role, unrelated to key=value DSN fragments.
+# Cover both shapes so the pass log never leaks the DB host / port / user.
+_PROSE_HOST_RE = re.compile(
+    r'connection to server at "[^"]+"(?:\s*\([^)]+\))?,\s*port\s+\d+',
+    re.IGNORECASE,
+)
+_PROSE_USER_RE = re.compile(r'for user "[^"]+"', re.IGNORECASE)
+# All 20 libpq keyword/value connection parameters that psycopg2 may echo in
+# an error string. Coverage extends beyond the round-1 seven-key set: adding
+# options, service, sslmode, sslcert, sslkey, sslrootcert, sslcrl,
+# channel_binding, gsslib, krbsrvname, target_session_attrs, application_name.
+_DSN_KW_RE = re.compile(
+    r"\b(host|hostaddr|port|user|password|dbname|passfile|options|service|sslmode|sslcert"
+    r"|sslkey|sslrootcert|sslcrl|channel_binding|gsslib|krbsrvname|target_session_attrs"
+    r"|application_name)\s*=\s*\S+",
+    re.IGNORECASE,
+)
+
+
 def _sanitize_error_message(msg: str) -> str:
     """Redact libpq DSN fragments from an error message before echoing.
 
-    Strips host=... hostaddr=... port=... user=... password=... dbname=...
-    passfile=... key=value fragments (any of these may be echoed by
-    psycopg2 in a connect failure) replacing them with <redacted>. Also
-    strips postgres:// URLs. Safe to apply to arbitrary error text; a
-    non-DSN message passes through unchanged.
+    Coverage:
+      * libpq prose form (psycopg2 connect failures echo host + port + user
+        as human-readable text alongside the DSN):
+          'connection to server at "<host>" (<addr>), port <port>' ->
+              'connection to server at <redacted>, port <redacted>'
+          'for user "<user>"' -> 'for user <redacted>'
+      * All 20 libpq keyword=value fragments: host, hostaddr, port, user,
+        password, dbname, passfile, options, service, sslmode, sslcert,
+        sslkey, sslrootcert, sslcrl, channel_binding, gsslib, krbsrvname,
+        target_session_attrs, application_name.
+      * postgres:// and postgresql:// URIs (whole URL up to whitespace).
+
+    Safe to apply to arbitrary error text; a non-DSN message passes through
+    unchanged. Sanitization order: prose forms first (so key=value regex
+    does not accidentally re-match a substring of the already-redacted
+    prose), then key=value fragments, then URI.
     """
-    # Redact key=value DSN fragments (bounded so we don't over-consume).
-    sanitized = re.sub(
-        r"\b(host|hostaddr|port|user|password|dbname|passfile)\s*=\s*\S+",
-        r"\1=<redacted>",
-        msg,
-        flags=re.IGNORECASE,
+    sanitized = _PROSE_HOST_RE.sub(
+        "connection to server at <redacted>, port <redacted>", msg
     )
-    # Redact postgres:// URLs (whole URL up to whitespace / quotes).
+    sanitized = _PROSE_USER_RE.sub("for user <redacted>", sanitized)
+    sanitized = _DSN_KW_RE.sub(r"\1=<redacted>", sanitized)
+    # Redact postgres:// / postgresql:// URIs (whole URL up to whitespace / quotes).
     sanitized = re.sub(
         r"postgres(?:ql)?://\S+",
         "postgres://<redacted>",
@@ -225,12 +312,14 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
     (SET SESSION CHARACTERISTICS + default_transaction_read_only + a 60s
     statement_timeout) so the driver is safe under either the nhms_display_ro
     role (role-level enforcement) or the writable nhms role (session-level
-    enforcement).
+    enforcement). Immediately after SET, the guard values are read back via
+    SHOW inside the same transaction and mismatches raise, so a silently-
+    ignored SET (unusual PG config) can never masquerade as an installed guard.
 
-    On connection failure, returns a dict with an "error" key so callers can
-    surface the fallback path (report proceeds with appendix-A cross-check
-    figures + a NOTE that live SQL was unavailable). Error text is sanitized
-    to strip libpq DSN fragments before echo.
+    On connection failure OR query failure, returns a dict with an "error" key
+    so callers can surface the fallback path (report proceeds with appendix-A
+    cross-check figures + a NOTE that live SQL was unavailable). Error text is
+    sanitized to strip libpq DSN fragments before echo.
     """
     try:
         import psycopg2  # type: ignore[import-untyped]
@@ -246,12 +335,31 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
     # autocommit is turned on so the SET commands land in a real transaction.
     # This provides defense-in-depth: even if the connecting role has DML
     # privileges (e.g. writable nhms role), any attempted INSERT/UPDATE/DELETE
-    # in this session will be rejected by PostgreSQL.
+    # in this session will be rejected by PostgreSQL. The SHOW read-back
+    # verifies each GUC actually landed (a silently-ignored SET on unusual PG
+    # configs would otherwise leave the guard nominal-but-not-enforced).
+    guard_txn_ro: str | None = None
+    guard_stmt_to: str | None = None
     try:
         with conn.cursor() as _guard_cur:
             _guard_cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             _guard_cur.execute("SET default_transaction_read_only = on")
             _guard_cur.execute("SET statement_timeout = '60s'")
+            _guard_cur.execute("SHOW default_transaction_read_only")
+            guard_txn_ro = _guard_cur.fetchone()[0]
+            _guard_cur.execute("SHOW statement_timeout")
+            guard_stmt_to = _guard_cur.fetchone()[0]
+        if guard_txn_ro != "on":
+            raise RuntimeError(
+                f"guard verify failed: default_transaction_read_only={guard_txn_ro!r}, expected 'on'"
+            )
+        # PostgreSQL normalizes '60s' to one of several representations depending
+        # on version and locale. Accept any of them.
+        if guard_stmt_to not in ("1min", "60s", "60000"):
+            raise RuntimeError(
+                f"guard verify failed: statement_timeout={guard_stmt_to!r},"
+                " expected one of '1min' / '60s' / '60000'"
+            )
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         try:
@@ -264,9 +372,11 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
         conn.autocommit = True
         cur = conn.cursor()
 
-        # audit UTC (D1 anchor). D2/D3 execute consecutively within the same
-        # autocommit connection so they share the same time anchor (queries
-        # complete within seconds).
+        # audit UTC. Each of D1/D2/D3 stamps its own now() at query time so a
+        # reviewer can bound the wall-clock spread between the queries. The
+        # stamps share the autocommit session and land within milliseconds of
+        # each other in practice, but they are distinct — do NOT treat them as
+        # a single time anchor.
         cur.execute("SELECT now() AT TIME ZONE 'UTC'")
         audit_utc = cur.fetchone()[0].isoformat()
 
@@ -368,7 +478,11 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
             "forcing_ts_2wk_actual_span_days": actual_span_days,
             "forcing_ts_2wk_by_variable": by_variable,
             "active_model_instance_md5": active_mi_md5,
+            "guard_default_transaction_read_only": guard_txn_ro,
+            "guard_statement_timeout": guard_stmt_to,
         }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"query failed: {type(exc).__name__}: {_sanitize_error_message(str(exc))}"}
     finally:
         try:
             conn.close()
@@ -400,7 +514,18 @@ def _resolve_deployment_producer_limits(manifest_limits: dict[str, Any]) -> dict
             raw_display = repr(truncated) + ("..." if len(override_raw) > 64 else "")
             try:
                 override = int(override_raw)
-                override_source = f"env {env_var}={raw_display}"
+                # Mirrors workers/forcing_producer/producer.py:_env_int (parsed<1
+                # falls back to default; keep semantic parity so §2.6 evidence
+                # represents real producer behavior — a value like 0 or -5 in
+                # env would be ignored at runtime, not applied as override).
+                if override < 1:
+                    override_source = (
+                        f"env {env_var}={raw_display} (< 1, ignored — matches"
+                        " producer._env_int fallback)"
+                    )
+                    override = None
+                else:
+                    override_source = f"env {env_var}={raw_display}"
             except ValueError:
                 override_source = f"env {env_var}={raw_display} (non-integer, ignored)"
         effective = override if override is not None else block.get("default")
@@ -442,6 +567,20 @@ def _check_producer_capacity_breach(
     estimated_rows = active_station_count * typical_timestep * output_vars
     estimated_manifest_bytes = active_station_count * PER_STATION_MANIFEST_BYTES_ESTIMATE
 
+    # Guard against manifest corruption: every 4 producer limit's
+    # runtime_effective must be a positive integer. Matches the sibling
+    # _check_staging_limit_zero_or_negative pattern for staging limits — a
+    # missing default (None) or an amended-below-1 value would corrupt the
+    # comparisons below and mask a real breach.
+    for _name, _blk in producer_limits.items():
+        _eff = _blk.get("runtime_effective")
+        if not isinstance(_eff, int) or _eff <= 0:
+            _fail(
+                "manifest",
+                f"producer_limits.{_name}.runtime_effective is {_eff!r};"
+                " manifest corruption suspected (missing default or amended below 1)",
+            )
+
     max_stations = producer_limits["max_station_count"]["runtime_effective"]
     max_timesteps = producer_limits["max_timestep_count"]["runtime_effective"]
     max_rows = producer_limits["max_timeseries_row_count"]["runtime_effective"]
@@ -466,6 +605,37 @@ def _check_producer_capacity_breach(
             f" > max_manifest_bytes={max_manifest_bytes}"
         )
 
+    # Per-limit compute vs cap % coverage. Reviewer can see at a glance how
+    # far each producer limit is from its cap under the live baseline —
+    # complements the aggregate manifest_pct_of_cap already emitted.
+    def _pct_or_none(compute: int, cap: int | None) -> float | None:
+        if isinstance(cap, int) and cap > 0:
+            return round(100.0 * compute / cap, 2)
+        return None
+
+    per_limit_pct: dict[str, dict[str, Any]] = {
+        "max_station_count": {
+            "compute": active_station_count,
+            "cap": max_stations,
+            "pct_of_cap": _pct_or_none(active_station_count, max_stations),
+        },
+        "max_timestep_count": {
+            "compute": typical_timestep,
+            "cap": max_timesteps,
+            "pct_of_cap": _pct_or_none(typical_timestep, max_timesteps),
+        },
+        "max_timeseries_row_count": {
+            "compute": estimated_rows,
+            "cap": max_rows,
+            "pct_of_cap": _pct_or_none(estimated_rows, max_rows),
+        },
+        "max_manifest_bytes": {
+            "compute": estimated_manifest_bytes,
+            "cap": max_manifest_bytes,
+            "pct_of_cap": _pct_or_none(estimated_manifest_bytes, max_manifest_bytes),
+        },
+    }
+
     breakeven_T = max_rows // (active_station_count * output_vars) if active_station_count > 0 else None
     context: dict[str, Any] = {
         "typical_timestep": typical_timestep,
@@ -481,6 +651,7 @@ def _check_producer_capacity_breach(
         ),
         "production_timestep_count_per_cycle": PRODUCTION_TIMESTEP_COUNT_PER_CYCLE,
         "breakeven_timestep_count": breakeven_T,
+        "per_limit_pct": per_limit_pct,
     }
     return breaches, context
 
@@ -526,11 +697,12 @@ def main() -> int:
 
     # ---- header ----
     now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    code_carrier_sha = _git_head_sha(Path(__file__).resolve().parent)
     print(
         f"# captured at {now_utc} host=node-27 bound to baseline_commit={baseline_commit}"
         f" manifest_sha256={manifest_sha}"
     )
-    print("# code_carrier_sha=<40-hex>  # to be filled from git rev-parse HEAD at run time")
+    print(f"# code_carrier_sha={code_carrier_sha}")
     print("# task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts")
     print("# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)")
     print("# env : infra/env/node27-ingest.env — the node27-display-ro.env template is not yet provisioned")
@@ -550,10 +722,23 @@ def main() -> int:
 
     live_available = "error" not in live
 
+    if live_available:
+        # Emit the SHOW-verified guard values into the header preamble so a
+        # reviewer can attest the session-level read-only enforcement was
+        # actually installed (not silently ignored by PG).
+        print(
+            f"# guard verified: default_transaction_read_only={live['guard_default_transaction_read_only']!r},"
+            f" statement_timeout={live['guard_statement_timeout']!r}"
+            f" (SHOW read-back inside the SET transaction; see _run_live_sql)"
+        )
+
     # ---- D1. Basin count ----
     _emit_section("D1. Live legacy basin count vs appendix-A cross-check")
     if live_available:
-        print(f"# stamp (D1 anchor, same autocommit session as D2/D3) = {live['d1_stamp']}")
+        print(
+            "# stamp (D1, own now() at query time; consecutive with D2/D3 in same autocommit"
+            f" session) = {live['d1_stamp']}"
+        )
         print("# Q1a (verbatim from driver at capacity-2.6-node27.py):")
         print("#   SELECT count(*) FROM core.model_instance WHERE active_flag = true;")
         print("#   (production basin oracle; matches smoke-2.4.node-27 INV.A count=13)")
@@ -583,7 +768,10 @@ def main() -> int:
     # ---- D2. Legacy station count ----
     _emit_section("D2. Live legacy station count vs appendix-A cross-check")
     if live_available:
-        print(f"# stamp (D2, same autocommit session as D1/D3) = {live['d2_stamp']}")
+        print(
+            "# stamp (D2, own now() at query time; consecutive with D1/D3 in same autocommit"
+            f" session) = {live['d2_stamp']}"
+        )
         print("# Q2 (verbatim from driver at capacity-2.6-node27.py):")
         print("#   SELECT count(*) FROM met.met_station WHERE active_flag = true;")
         print(f"#   active_met_station     = {_fmt_int(live['active_met_station_count'])}")
@@ -608,8 +796,16 @@ def main() -> int:
             per_day = window_rows / actual_span_days
         else:
             per_day = None
-        print(f"# stamp (D3, same autocommit session as D1/D2) = {live['d3_stamp']}")
-        print("# Q3 (verbatim from driver at capacity-2.6-node27.py:187-195):")
+        print(
+            "# stamp (D3, own now() at query time; consecutive with D1/D2 in same autocommit"
+            f" session) = {live['d3_stamp']}"
+        )
+        # Q3 anchor auto-derived from _run_live_sql source at run time so a
+        # future line reflow inside the function does not leave the anchor
+        # pointing at unrelated code. Falls back to '<unknown>' if the SELECT
+        # is not found — surfaces the drift instead of hiding it.
+        q3_range = _q3_source_line_range()
+        print(f"# Q3 (verbatim from driver at capacity-2.6-node27.py:{q3_range}):")
         print("#   SELECT count(*),")
         print("#          min(valid_time)::text,")
         print("#          max(valid_time)::text")
@@ -666,24 +862,47 @@ def main() -> int:
     print("#      no _FORECAST_END_HOUR / _FORECAST_STEP_HOURS override present in")
     print("#      infra/env/ at capture time — see grep-c note in D4' below)")
     print()
+    producer_breaches, capacity_ctx = _check_producer_capacity_breach(legacy_station_count, producer_limits)
+    per_limit_pct = capacity_ctx["per_limit_pct"]
     print("# Producer limits (default vs manifest_effective vs runtime_effective at capture time):")
     for name, blk in producer_limits.items():
+        pct_blk = per_limit_pct.get(name, {})
+        compute = pct_blk.get("compute")
+        pct = pct_blk.get("pct_of_cap")
+        pct_display = f"{pct:.2f}%" if isinstance(pct, float) else "N/A"
+        active_display = _fmt_int(compute) if isinstance(compute, int) else "N/A"
         print(
             f"#   {name:<28s} default={_fmt_int(blk['default']):>15s}  "
             f"manifest_effective={_fmt_int(blk['manifest_effective']):>15s}  "
             f"runtime_effective={_fmt_int(blk['runtime_effective']):>15s}  "
+            f"active={active_display:>15s}  pct_of_cap={pct_display:>7s}  "
             f"env_var={blk['env_var']}  {blk['runtime_override_source']}"
         )
-    producer_breaches, capacity_ctx = _check_producer_capacity_breach(legacy_station_count, producer_limits)
     print()
-    print("# D4' Deployment env-override grep capture (must be re-populated on node-27 at capture time)")
-    grep_capture = os.environ.get(
+    print("# max_grid_cell_count (workers/forcing_producer/producer.py:320, default=5,000,000):")
+    print("#   EXPLICITLY EXCLUDED from §2.6 scope. Direct-grid produce() branch")
+    print("#   (producer.py:443-568) never calls _enforce_limit('grid_cell_count', ...) —")
+    print("#   only the legacy IDW branch (producer.py:609-613) enforces it. §2.6 covers")
+    print("#   only the 4 producer limits that gate direct-grid packages: max_station_count,")
+    print("#   max_timestep_count, max_timeseries_row_count, max_manifest_bytes.")
+    print()
+    print("# D4' Deployment env-override grep capture (populated on node-27 at capture time)")
+    forcing_grep = os.environ.get(
         "NHMS_CMFD_P02_ENV_GREP_CAPTURE",
         "grep -c FORCING_MAX_ infra/env/node27-ingest.env  ->  <capture on node-27 at run time>",
     )
-    print(f"#   {grep_capture}")
-    print("#   (any non-zero count would indicate a deployment override that the driver would have")
-    print("#    surfaced via env FORCING_MAX_* above; 0 means the manifest_effective values are in force.)")
+    print(f"#   forcing-max:   {forcing_grep}")
+    print("#     (non-zero count would indicate a deployment override the driver would have")
+    print("#      surfaced via env FORCING_MAX_* above; 0 means the manifest_effective values are in force.)")
+    forecast_grep = os.environ.get(
+        "NHMS_CMFD_P02_FORECAST_ENV_GREP_CAPTURE",
+        "grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/*.env  ->  <capture on node-27 at run time>",
+    )
+    print(f"#   forecast-env:  {forecast_grep}")
+    print("#     (non-zero output would indicate a deployment override to the")
+    print("#      services/orchestrator/scheduler_adapters.py:200-203 hard-coded")
+    print("#      forecast horizon; 0 means the code-pinned 57-timestep/cycle anchor")
+    print("#      matches the runtime environment.)")
     print()
     print("# Producer manifest byte estimator (max_manifest_bytes discharge, first-pass upper bound):")
     print(f"#   station_count                     = {legacy_station_count:,}")
@@ -839,4 +1058,23 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Sanity smoke for _sanitize_error_message: a psycopg2 connect failure
+    # produces text in the shapes below (host+port+user prose form, key=value
+    # DSN fragments, sslkey path). These assertions fire before main() so a
+    # regression that leaks any of the sensitive fragments into the pass log
+    # fails fast rather than surfaces on an operator's screen at capture time.
+    assert "p4ssw0rd" not in _sanitize_error_message(
+        "host=pg.example.com port=5432 user=nhms password=p4ssw0rd"
+    ), "sanitizer regression: password= leaked"
+    assert "10.0.1.5" not in _sanitize_error_message(
+        'connection to server at "10.0.1.5" (10.0.1.5), port 5432 failed:'
+        ' FATAL: password authentication failed for user "internal"'
+    ), "sanitizer regression: libpq prose host leaked"
+    assert "internal" not in _sanitize_error_message(
+        'connection to server at "10.0.1.5" (10.0.1.5), port 5432 failed:'
+        ' FATAL: password authentication failed for user "internal"'
+    ), "sanitizer regression: libpq prose user leaked"
+    assert "/etc/pki" not in _sanitize_error_message(
+        "sslkey=/etc/pki/tls/private/pg.key sslmode=require"
+    ), "sanitizer regression: sslkey path leaked"
     sys.exit(main())
