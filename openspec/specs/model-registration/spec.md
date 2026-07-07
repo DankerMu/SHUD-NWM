@@ -59,7 +59,7 @@ A `core.model_instance` MUST be created by linking a `basin_version_id`, a `rive
 - **THEN** column `river_network_version_id` MUST reference the given `core.river_network_version` record
 - **THEN** column `mesh_version_id` MUST store the given mesh version identifier
 - **THEN** column `calibration_version_id` MUST store the given calibration version identifier
-- **THEN** column `shud_code_version` MUST store the exact SHUD engine version string (e.g., `shud_omp-2.0`)
+- **THEN** column `shud_code_version` MUST store the exact SHUD engine version string (e.g., `shud-2.0`)
 - **THEN** column `rshud_code_version` MUST store the rSHUD code version string
 - **THEN** column `autoshud_code_version` MUST store the autoSHUD code version string
 - **THEN** column `model_package_uri` MUST store the URI pointing to the model package in object storage

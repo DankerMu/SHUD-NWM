@@ -35,7 +35,7 @@ Run manifest 是 HPC 作业的唯一输入契约。作业读取 manifest 后即�
     "forcing_uri": "s3://nhms/forcing/gfs/2026043000/yangtze_shud_v12/"
   },
   "runtime": {
-    "executable": "shud_omp",
+    "executable": "shud",
     "threads": 32,
     "init_mode": 3,
     "ascii_output": 1,

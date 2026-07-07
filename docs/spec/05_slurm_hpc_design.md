@@ -120,7 +120,7 @@ HPC 作业有两种回写方式：
 ## 10. SHUD 调用
 
 ```bash
-./shud_omp \
+./shud \
   -p input/{project}.cfg \
   -c input/{project}.cfg.calib \
   -o output/ \

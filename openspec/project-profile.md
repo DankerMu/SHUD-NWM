@@ -11,7 +11,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Pipeline workers: `workers/data_adapters`, `canonical_converter`, `forcing_producer`
 - Model workers: `model_registry`, `shud_runtime`, `output_parser`, `flood_frequency`
 - Shared model state: `packages/common`, `nhms-state`
-- Domain engines: `SHUD/`, `rSHUD/`, `AutoSHUD/`, `shud_omp`
+- Domain engines: `SHUD/`, `rSHUD/`, `AutoSHUD/`, `shud`
 
 ## Contracts
 
@@ -67,6 +67,6 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - `Timescale`, `hypertable`
 - `orchestrator`, `pipeline`, `run_status`, state machine
 - `Slurm`, `sbatch`, `slurm_gateway`, `production_closure`
-- `SHUD`, `shud_omp`, `shud_runtime`, `restart`, `IC`, `forcing`, `meteoCov`
+- `SHUD`, `shud`, `shud_runtime`, `restart`, `IC`, `forcing`, `meteoCov`
 - `forecast window`, `GFS`, `ERA5`, `IFS`, `CDS`, `ECMWF`
 - `run_manifest`, `qc_result`, `provider snapshot`

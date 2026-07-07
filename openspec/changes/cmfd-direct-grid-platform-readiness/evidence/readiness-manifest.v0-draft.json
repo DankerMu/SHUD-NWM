@@ -35,7 +35,7 @@
     "era5": "m2.0"
   },
   "shud_runtime_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
-  "shud_executable": "shud_omp",
+  "shud_executable": "shud",
   "shud_runtime_staging_limits": {
     "MAX_DIRECT_GRID_TSD_FORC_BYTES": 8388608,
     "MAX_DIRECT_GRID_FORCING_CSV_BYTES": 8388608,
@@ -121,7 +121,7 @@
     },
     "shud_executable": {
       "file": "workers/shud_runtime/runtime.py",
-      "line_or_range": "74 (SHUDRuntimeConfig.shud_executable default 'shud_omp')",
+      "line_or_range": "74 (SHUDRuntimeConfig.shud_executable default 'shud')",
       "command": "grep -n 'shud_executable' workers/shud_runtime/runtime.py",
       "timestamp": "2026-07-06T16:12:00Z",
       "host": "local"

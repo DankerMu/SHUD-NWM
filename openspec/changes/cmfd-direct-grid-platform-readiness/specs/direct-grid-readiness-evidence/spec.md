@@ -43,11 +43,11 @@ The platform SHALL execute a minimal basin end-to-end with the production SHUD b
 
 #### Scenario: Minimal basin runs on the production binary
 - **WHEN** the minimal-basin readiness execution runs
-- **THEN** it uses the production SHUD binary (`shud_omp`) identified in the readiness manifest
+- **THEN** it uses the production SHUD binary (`shud`) identified in the readiness manifest
 - **THEN** it stages the synthetic minimal multi-station direct-grid evidence package — rewritten-`FORC` `.sp.att`, binding manifest, standard multi-station `.tsd.forc`, and per-station CSVs — whose construction provenance and SHA-256 checksums are recorded in the evidence; the package is hand-assembled, not produced by a mapping builder, and no production basin package is rewritten
 - **THEN** it stages a standard multi-station direct-grid forcing package and does not rewrite `.sp.att` to a single station
 - **THEN** staged `.sp.att FORC` values are within the staged `.tsd.forc` `ID` set
-- **THEN** the execution evidence records the executed `shud_omp` binary path used on node-22 (production binary, no rebuild), as identified in the readiness manifest
+- **THEN** the execution evidence records the executed `shud` binary path used on node-22 (production binary, no rebuild), as identified in the readiness manifest
 - **THEN** the execution evidence records the node-22 Slurm/SHUD runtime host, the pinned `baseline_commit`, and the readiness manifest checksum.
 
 ### Requirement: G9 capacity baseline is reported against deployment config
