@@ -25,10 +25,11 @@ The platform SHALL run a direct-grid smoke against a real object store and real 
 
 #### Scenario: Node-27 smoke exercises real backends
 - **WHEN** the readiness smoke is executed on node-27
-- **THEN** it reads canonical inputs from the real object store and writes derived rows to the real database
-- **THEN** it confirms direct-grid production does not fall back to legacy IDW station loading
+- **THEN** it reads canonical evidence-contract inputs from the real filesystem-backed evidence-package path on node-27 (`openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/` under the deployed checkout — the real disk the deployment reads canonical evidence inputs from; NOT `/home/ghdc/nwm/object-store/{forcing,models}` which are production forcing-time-series roots read-only to the smoke's user role and out-of-scope for evidence writes)
+- **THEN** the derived rows the smoke depends on are present in the real database (either written by the same `§2.4` smoke run, OR written by the paired `§2.3` evidence-only registration transaction with `§2.4` attesting a byte-identical read-back roundtrip and confinement to the dedicated non-production identity)
+- **THEN** it confirms direct-grid production does not fall back to legacy IDW station loading (structural argument citing scheduler-dispatch filter + producer station-loader filter + runtime path selection is acceptable when the smoke intentionally does not execute a live pipeline pass against the evidence identity)
 - **THEN** it records the live database's applied schema migration version and confirms it equals the manifest's pinned `db_schema_migration_version`
-- **THEN** the smoke evidence records the node-27 host, the pinned `baseline_commit`, and the manifest checksum.
+- **THEN** the smoke evidence records the node-27 host, the pinned `baseline_commit`, and the manifest checksum; when the code carrier commit at run time differs from the pinned `baseline_commit` (because an evidence carrier landed after manifest freeze), the smoke evidence additionally records the `code_carrier_sha` and asserts empty tree-diff between the two commits on all manifest-identity paths (`workers/`, `apps/`, `services/`, `packages/`, `db/`, `schemas/`).
 
 #### Scenario: Smoke runs against the synthetic evidence contract with isolation and cleanup
 - **WHEN** the node-27 smoke provisions its direct-grid contract and writes to the real database
