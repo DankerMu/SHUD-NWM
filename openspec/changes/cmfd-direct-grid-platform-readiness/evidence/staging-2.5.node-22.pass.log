@@ -1,4 +1,4 @@
-# captured at 2026-07-07T09:27:02Z host=node-22 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37
+# captured at 2026-07-07T09:27:02Z host=node-22 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
 # code_carrier_sha=907b30099398cbcc244ab51b022ddcf19c7a789e
 # task: cmfd-direct-grid-platform-readiness §2.5 node-22 minimal-basin staging with production SHUD binary
 # host: node-22 (210.77.77.22:32099, user=frd_muziyao, /scratch/frd_muziyao/NWM)
@@ -23,9 +23,13 @@
 # 2. cd /scratch/frd_muziyao/NWM && git fetch && git checkout feat/issue-893-cmfd-p02-node22-minimal-basin
 # 3. (record) printenv SHUD_EXECUTABLE  # captures the deployment env var
 #    read by workers/shud_runtime/runtime.py:95; may be empty if run outside
-#    a scheduler-dispatched job, in which case D1's SHUD_BINARY captures
-#    the same path used by the deployment via infra/env/compute.example:129
-#    (production `SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud`).
+#    a scheduler-dispatched job. The production Slurm dispatcher exports
+#    SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud (D1 authority);
+#    the env var name itself is documented in infra/env/compute.example:129
+#    (which carries a placeholder value `/opt/shud/bin/shud`, NOT the
+#    production path — the placeholder marks compute.example as a template,
+#    not a source of truth for the deployed value). D1 is the load-bearing
+#    binary identity record; the env-var name reference is orientation only.
 # 4. NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT=/scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package \
 #    SHUD_BINARY=/scratch/frd_muziyao/NWM/SHUD/shud \
 #    python3 /scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/stage-2.5-node22.py
@@ -57,17 +61,35 @@
 #          updated to cite `staging-2.5.node-22.pass.log` D1 (production binary
 #          identity fact) with a parenthetical noting that runtime.py:74/85/95
 #          Python default is still `shud_omp` and deployment env
-#          `SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud` overrides it
-#          (`infra/env/compute.example:129`). This closes the falsified
-#          source-of-truth pointer flagged by Phase 4 broad-expanded review
-#          (correctness-01 / test-2 / spec-1). manifest_sha256 recomputed
-#          e47e31a2… → 426b7f7e… (second errata).
-#   Both errata are permitted under the pre-certification errata clause in
+#          `SHUD_EXECUTABLE` overrides it (env-var *name* declared in
+#          `infra/env/compute.example:129` as a TEMPLATE; the value committed
+#          there is a placeholder `/opt/shud/bin/shud`, NOT the production
+#          path; the actual deployed value `/scratch/frd_muziyao/NWM/SHUD/shud`
+#          is attested by D1 above — realpath + sha256 + submodule commit +
+#          ldd + banner rc). This closes the falsified source-of-truth pointer
+#          flagged by Phase 4 broad-expanded review (correctness-01 / test-2 /
+#          spec-1). manifest_sha256 recomputed e47e31a2… → 426b7f7e…
+#          (second errata).
+#     (iii) §2.5 review round-3: `source_locations["shud_executable"]`
+#          description refined again to explicitly separate the
+#          `compute.example:129` placeholder value from the deployed value
+#          (Phase 6.5 re-review found the round-2 text still read as if the
+#          deployed value could be sourced from compute.example, which it
+#          cannot). Two uncommitted scratchpad carriers from rounds 1-2 —
+#          `register-synth-p02.sql` (§2.3) and `stage-2.5-node22.py` (§2.5) —
+#          are now committed under `openspec/changes/<change>/evidence/`.
+#          D4/D5 runtime.py line citations corrected: `_forcing_declares_direct_grid`
+#          is invoked at :591 (definition at :685), not :588 (which is the
+#          local `is_direct_grid = (` assignment). The
+#          `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING` raise spans :601-606,
+#          not :601-605. manifest_sha256 recomputed 426b7f7e… → bbbc4143…
+#          (third errata).
+#   All three errata are permitted under the pre-certification errata clause in
 #   design.md §"How evidence is bound to commits" (no §3.1 certification has
 #   been produced yet). All 6 pass logs' `manifest_sha256=<64-hex>` binder
 #   headers (check_manifest_completeness.v1 + pytest-2.1 + pytest-2.2 +
 #   db-registration-2.3 + smoke-2.4 + staging-2.5) are updated in-place to
-#   the current sha `426b7f7e…` under the same PR (permitted by the pre-
+#   the current sha `bbbc4143…` under the same PR (permitted by the pre-
 #   merge in-place edit clause in the "File IO / path safety / overwrite"
 #   risk pack because the change is still under `openspec/changes/<change>/`
 #   and not yet archived).
@@ -103,11 +125,14 @@
 ## D4. binding-manifest.json declares direct_grid mode (§2.5 bullet 1: no rewrite to single-station)
 # binding-manifest.forcing_mapping_mode        = 'direct_grid'
 # binding-manifest.station_bindings.length     = 3
-# CHECK-1 PASS: manifest declares direct_grid; the staging path in
-# workers/shud_runtime/runtime.py:588 (`_forcing_declares_direct_grid`)
-# would branch to the direct-grid preserving path, not the legacy
-# `_stage_standard_shud_forcing(is_direct_grid=False)` fallback that rewrites
-# `.sp.att` to a single station.
+# CHECK-1 PASS: manifest declares direct_grid; the staging entrypoint at
+# workers/shud_runtime/runtime.py:591 invokes `_forcing_declares_direct_grid`
+# (defined at line 685) which returns True for this manifest, so the
+# subsequent staging call at :593 receives `is_direct_grid=True` and the
+# refusal branch at :601-606 (SHUDRuntimeError code
+# DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING) is only triggered when the
+# direct-grid contract is present but staging returned None — which does
+# not apply to the synth package where staging succeeds.
 
 ## D5. .sp.att multi-station preservation (§2.5 bullet 1: does NOT rewrite to single station)
 # input_dir/synth-basin/synth-basin.sp.att
@@ -116,9 +141,13 @@
 #   |unique_FORC|               = 3
 # CHECK-2 PASS: `.sp.att` FORC column carries 3 distinct station bindings (not
 # collapsed to a single station). This is the exact runtime invariant that the
-# direct-grid staging path preserves: workers/shud_runtime/runtime.py:601-605
-# refuses "legacy fallback that rewrites .sp.att FORC ownership" with error
-# code DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING.
+# direct-grid staging path preserves: workers/shud_runtime/runtime.py:601-606
+# raises SHUDRuntimeError with code DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING
+# when the direct-grid contract is present but `_stage_standard_shud_forcing`
+# (defined at :626, called at :593 with `is_direct_grid=is_direct_grid`)
+# returned no `staged_ids` — which is how the runtime refuses a broken
+# staging that would silently rewrite multi-station FORC to a single-station
+# fallback.
 
 ## D6. .sp.att FORC ⊆ .tsd.forc ID set (§2.5 bullet 1: FORC ownership invariant)
 # forcing/qhh.tsd.forc

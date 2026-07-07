@@ -1,10 +1,10 @@
-# captured at 2026-07-07T02:04:17Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37
+# captured at 2026-07-07T02:04:17Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
 # task: cmfd-direct-grid-platform-readiness §2.3 D3 — evidence-only registration of the synthetic direct-grid contract as core.model_instance on node-27
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
 # synthetic package aggregate SHA-256 (openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package/package.manifest.sha256):
 #   0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5
-# script: /private/tmp/.../scratchpad/register-synth-p02.sql (transactional; DO $$ RAISE EXCEPTION $$ pre/post-check inline)
+# script: openspec/changes/cmfd-direct-grid-platform-readiness/evidence/register-synth-p02.sql (transactional; DO $$ RAISE EXCEPTION $$ pre/post-check inline; scp-ed to node-27 at run time and executed via psql -f, verbatim body committed under this PR round-3 fix per Phase 6.5 integration-r2-2 close-out)
 # execution model: BEGIN + INSERT×5 + POSTCHECK + COMMIT (single transaction)
 
 # ---- invariant surface pinned by §2.3 (evidence-only DB registration; MUST NOT touch production) ----

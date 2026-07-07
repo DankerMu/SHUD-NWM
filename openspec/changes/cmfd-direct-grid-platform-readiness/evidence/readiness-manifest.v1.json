@@ -121,7 +121,7 @@
     },
     "shud_executable": {
       "file": "openspec/changes/cmfd-direct-grid-platform-readiness/evidence/staging-2.5.node-22.pass.log",
-      "line_or_range": "D1 (SHUD binary path + sha256 + submodule commit + banner rc + ldd) — production binary identity attested on node-22 at 2026-07-07T09:27:02Z UTC; the runtime.py:74/85/95 Python default value 'shud_omp' is a placeholder overridden at deployment via SHUD_EXECUTABLE env (infra/env/compute.example:129 sets 'SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud'), so the pinned value 'shud' is derived from the deployed binary identity, not from the Python source default. See design.md pre-certification errata paragraph for the amendment record.",
+      "line_or_range": "D1 (SHUD binary path + sha256 + submodule commit + banner rc + ldd) — production binary identity attested on node-22 at 2026-07-07T09:27:02Z UTC. The runtime.py:74/85/95 Python default value 'shud_omp' is a placeholder overridden at deployment via the SHUD_EXECUTABLE env variable (env-var name is documented in infra/env/compute.example:129 as a template, whose committed placeholder value '/opt/shud/bin/shud' is NOT the production path — the deployed value is captured in D1 as '/scratch/frd_muziyao/NWM/SHUD/shud' with sha256 ef2f6181…). The pinned value 'shud' is derived from the deployed binary identity in D1, not from the Python source default nor from the compute.example template. See design.md pre-certification errata paragraphs for the amendment record.",
       "command": "sha256sum /scratch/frd_muziyao/NWM/SHUD/shud  # returns ef2f6181113cd18abe08bec8150ae6d0c281b82e6b3c0739ee3c610e97092eb3, per staging-2.5 D1",
       "timestamp": "2026-07-07T09:27:02Z",
       "host": "node-22"
