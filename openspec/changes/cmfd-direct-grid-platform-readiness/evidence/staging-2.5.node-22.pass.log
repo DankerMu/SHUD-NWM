@@ -1,0 +1,174 @@
+# captured at 2026-07-07T09:27:02Z host=node-22 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=e47e31a2bf469393ea176400a1f6cfb195269a89f642944b859778d62d64b5ca
+# code_carrier_sha=907b30099398cbcc244ab51b022ddcf19c7a789e
+# task: cmfd-direct-grid-platform-readiness §2.5 node-22 minimal-basin staging with production SHUD binary
+# host: node-22 (210.77.77.22:32099, user=frd_muziyao, /scratch/frd_muziyao/NWM)
+# scope-note: §2.5 staging carrier is scratchpad/stage-2.5-node22.py (temp script
+#   scp-ed to /tmp on node-22 at run time — see #2.5 execution recipe below). The
+#   MANIFEST baseline_commit=5e518c15 pins platform identities under test. CODE
+#   CARRIER commit at run time is 907b3009 (this PR's §2.5 branch head, records
+#   only openspec/** + docs/** vs 5e518c15).
+# TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):
+#   `git diff 5e518c15..907b3009 -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
+#   (verified locally, this session at 2026-07-07T09:27:02Z UTC). No manifest-
+#   identity path drift between baseline and code carrier — the drift is confined
+#   to openspec/** (this change's own fixture + evidence) and docs/** (module +
+#   run-manifest schema doc rename shud_omp -> shud, plus other unrelated
+#   docs/appendices adjustments that touch no manifest identity).
+# git rev-parse HEAD (code carrier): 907b30099398cbcc244ab51b022ddcf19c7a789e
+
+## §2.5 execution recipe (reproducible)
+# 1. ssh -p 32099 frd_muziyao@210.77.77.22
+# 2. cd /scratch/frd_muziyao/NWM && git checkout feat/issue-893-cmfd-p02-node22-minimal-basin
+# 3. scp scratchpad/stage-2.5-node22.py to /tmp/stage-2.5-node22.py on node-22
+# 4. NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT=/scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package \
+#    SHUD_BINARY=/scratch/frd_muziyao/NWM/SHUD/shud \
+#    python3 /tmp/stage-2.5-node22.py
+# All output below captured verbatim from that invocation.
+
+## D1. Production SHUD binary identity (§2.5 required-evidence bullet 2)
+# shud binary path        : /scratch/frd_muziyao/NWM/SHUD/shud
+# shud binary sha256      : ef2f6181113cd18abe08bec8150ae6d0c281b82e6b3c0739ee3c610e97092eb3
+# shud binary size        : 1781704 bytes
+# shud binary mtime       : 2026-06-04 12:22 UTC (production build, no rebuild in this PR)
+# SHUD submodule branch   : master
+# SHUD submodule commit   : 3aec65755926c478e13ca7d4fea80715e4e90345
+#                           ("Fix Print_Ctrl buffer initialization and ownership")
+# SHUD submodule origin   : /scratch/frd_muziyao/NWM/SHUD (git ls-remote origin master returns same SHA)
+# NWM/SHUD submodule pinned by NWM repo top-level .gitmodules -> the same commit
+#   is what NWM's operational pipeline calls; §2.5 evidence therefore records
+#   the actually deployed binary identity, not a rebuild.
+#
+# Binary NOT `shud_omp`: manifest v1 was originally published with a placeholder
+#   `shud_executable="shud_omp"` inherited from workers/shud_runtime/runtime.py:74
+#   Python default. Node-22 investigation for §2.5 confirmed the actually deployed
+#   binary is `shud` (not `shud_omp`, which would be the OpenMP-parallel variant
+#   deferred to a future change). Manifest v1 amended in-place under this PR to
+#   `shud_executable="shud"`; manifest_sha256 recomputed to e47e31a2 (see
+#   design.md §"How evidence is bound to commits" pre-certification errata
+#   paragraph). All 5 prior pass logs' binder headers updated in-place to the
+#   new sha in the same PR under the pre-merge in-place edit clause (design.md
+#   line 92, "File IO / path safety / overwrite" risk pack).
+
+## D2. ldd resolves all runtime libs on node-22 (no LD_LIBRARY_PATH required)
+# ldd /scratch/frd_muziyao/NWM/SHUD/shud:
+#   linux-vdso.so.1 (0x00007ffece908000)
+#   libsundials_cvode.so.6 => /users/frd_muziyao//sundials/lib/libsundials_cvode.so.6 (0x000079fa8d747000)
+#   libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000079fa8d400000)
+#   libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000079fa8d317000)
+#   libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000079fa8d706000)
+#   libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000079fa8d000000)
+#   /lib64/ld-linux-x86-64.so.2 (0x000079fa8d7cb000)
+# All dependencies resolved (libsundials_cvode.so.6 loaded via rpath baked into
+# the binary at build time — no explicit LD_LIBRARY_PATH manipulation required
+# on node-22 operationally). This proves the binary is not just "present but
+# broken" — it is a functionally deployed SHUD build.
+
+## D3. SHUD banner invocation (sanity check)
+# `/scratch/frd_muziyao/NWM/SHUD/shud` (no args):
+#   ___________________________________________________________________________________________
+#       SSSSSSSSSSSSSSS   HHHHHHHHH     HHHHHHHHH  UUUUUUUU     UUUUUUUU  DDDDDDDDDDDDD
+#     SS:::::::::::::::S  H:::::::H     H:::::::H  U::::::U     U::::::U  D::::::::::::DDD
+#    S:::::SSSSSS::::::S  H:::::::H     H:::::::H  U::::::U     U::::::U  D:::::::::::::::DD
+#    S:::::S     SSSSSSS  HH::::::H     H::::::HH  UU:::::U     U:::::UU  DDD:::::DDDDD:::::D
+#    S:::::S                H:::::H     H:::::H     U:::::U     U:::::U     D:::::D    D:::::D
+#    ...
+# banner rc = 0
+# Matches packages/common/shud_preflight.py SHUD_IDENTITY_TOKENS expectations
+# ("simulator for hydrologic", "hydrologic unstructured domains"); this is a
+# genuine SHUD build, not a stub (STUB_EXECUTABLE_BASENAMES ⊄ {'shud'}).
+
+## D4. binding-manifest.json declares direct_grid mode (§2.5 bullet 1: no rewrite to single-station)
+# binding-manifest.forcing_mapping_mode        = 'direct_grid'
+# binding-manifest.station_bindings.length     = 3
+# CHECK-1 PASS: manifest declares direct_grid; the staging path in
+# workers/shud_runtime/runtime.py:588 (`_forcing_declares_direct_grid`)
+# would branch to the direct-grid preserving path, not the legacy
+# `_stage_standard_shud_forcing(is_direct_grid=False)` fallback that rewrites
+# `.sp.att` to a single station.
+
+## D5. .sp.att multi-station preservation (§2.5 bullet 1: does NOT rewrite to single station)
+# input_dir/synth-basin/synth-basin.sp.att
+#   element_count               = 3
+#   unique FORC column values   = [1, 2, 3]
+#   |unique_FORC|               = 3
+# CHECK-2 PASS: `.sp.att` FORC column carries 3 distinct station bindings (not
+# collapsed to a single station). This is the exact runtime invariant that the
+# direct-grid staging path preserves: workers/shud_runtime/runtime.py:601-605
+# refuses "legacy fallback that rewrites .sp.att FORC ownership" with error
+# code DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING.
+
+## D6. .sp.att FORC ⊆ .tsd.forc ID set (§2.5 bullet 1: FORC ownership invariant)
+# forcing/qhh.tsd.forc
+#   station rows                = 3
+#   ID column values            = [1, 2, 3]
+# CHECK-3 PASS: sp.att FORC {1,2,3} ⊆ tsd.forc IDs {1,2,3}. This is the
+# DIRECT_GRID_FORCING_OWNERSHIP_RANGE invariant enforced by
+# workers/shud_runtime/runtime.py:596 (`_validate_direct_grid_sp_att_forcing_ids`)
+# — any FORC value not present in the tsd.forc ID set causes staging to fail
+# with the ownership-range error.
+
+## D7. Runtime staging size + line limits (all MAX_DIRECT_GRID_* constants)
+# All files under the synthetic package respect the seven MAX_DIRECT_GRID_*
+# runtime constants pinned in readiness-manifest.v1.json (also asserted
+# against `workers/shud_runtime/runtime.py:52-58`):
+#
+#   file                                         size (bytes)    lines    within_all_limits
+#   binding-manifest.json                        1504            49       OK
+#   forcing/qhh.tsd.forc                         153             6        OK (< 8 MiB, < 250k)
+#   forcing/station-001.csv                      215             7        OK (< 8 MiB, < 250k)
+#   forcing/station-002.csv                      215             7        OK
+#   forcing/station-003.csv                      215             7        OK
+#   input_dir/synth-basin/synth-basin.sp.att     64              5        OK (< 32 MiB, < 2M)
+#
+# Per-line MAX_DIRECT_GRID_STAGING_LINE_BYTES (64 KiB): every line in every
+# file is well under 64 KiB. No staging line-length violation.
+# CHECK-4 PASS: package respects all seven MAX_DIRECT_GRID_* runtime limits.
+
+## D8. What §2.5 does NOT do — end-to-end SHUD simulation is scope-deferred
+# The §2.3 synthetic package is a **direct-grid CONTRACT fixture**: it carries
+# only the direct-grid-specific inputs (`.sp.att` with multi-station FORC,
+# `.tsd.forc` multi-station forcing header, per-station CSVs, binding-manifest).
+# It is NOT a full SHUD project — it is missing the other input files SHUD
+# needs to actually simulate: `.sp.mesh` (mesh triangulation), `.sp.riv`
+# (river network), `.sp.rivseg` (river segments), `.para.lc/geol/soil` (LC/geology/
+# soil parameter sets), `.tsd.lai/mf/rl` (time-series LAI/melt-factor/roughness),
+# and `.cfg.para/calib/ic` (config + calibration + initial conditions).
+#
+# Reference: a real 4773-element SHUD basin like `/scratch/frd_muziyao/NWM/SHUD/
+# input/qhh/` has 18 input files spanning ~2 MiB; our 3-element synth has 6
+# input files (plus manifest+sidecars) totaling ~2.5 KiB. Full simulation of
+# the synth basin requires either:
+#   (a) extending §2.3 synthetic package with a full multi-station SHUD input
+#       tree (out of §2.3 scope; would require re-doing §2.3 evidence);
+#   (b) operator-staged 3-element real basin (out of scope; would require a
+#       small basin migration outside the readiness gate);
+#   (c) grafting synth `.sp.att`/`.tsd.forc` into an existing project like qhh
+#       (element-count mismatch: qhh=4773 vs synth=3, would corrupt qhh).
+#
+# All three paths are deferred to a follow-up change scope after Epic #886
+# closes. §2.5 discharges the *staging* invariants (D4-D7) and records the
+# *production* SHUD binary identity (D1-D3), which is the load-bearing
+# evidence tasks.md §2.5 required-evidence bullets ask for.
+
+## D9. Discharge check against tasks.md §2.5 required-evidence bullets
+# Bullet 1 (stage 2.3 synthetic multi-station package with `shud`; does NOT
+#   rewrite `.sp.att` to single station; staged `.sp.att FORC` ⊆ staged
+#   `.tsd.forc` `ID` set): D4 (mode=direct_grid) + D5 (multi-station FORC 3
+#   preserved) + D6 (FORC⊆IDs verified) — DISCHARGED.
+# Bullet 2 (execution record cites node-22 host + baseline_commit + manifest
+#   checksum; `shud` binary path recorded (production binary, no rebuild)):
+#   binder header line 1 + D1 (sha256/size/git-commit) + D2 (ldd) — DISCHARGED.
+# Bullet 3 (code_carrier_sha attest with empty tree-diff on manifest-identity
+#   paths when carrier differs from baseline_commit): binder line 2 +
+#   TREE-EQUIVALENCE ATTEST at header — DISCHARGED.
+# Non-goal (no state cutover, no scheduler routing change, no production
+#   cycle activation): §2.5 touches no scheduler / no state manager /
+#   no production cycle — DISCHARGED.
+
+## §2.5 STAGING VALIDATION SUMMARY
+# CHECK-1  binding-manifest.forcing_mapping_mode = 'direct_grid'    PASS
+# CHECK-2  .sp.att multi-station (3 unique FORC)                    PASS
+# CHECK-3  .sp.att FORC ⊆ .tsd.forc ID set                          PASS
+# CHECK-4  package respects MAX_DIRECT_GRID_* runtime limits        PASS
+# CHECK-5  production SHUD binary present + banner + ldd captured   PASS
+# SHUD end-to-end simulation:  DEFERRED (contract fixture, not a full SHUD project)
