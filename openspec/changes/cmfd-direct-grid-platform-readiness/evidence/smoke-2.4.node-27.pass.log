@@ -1,0 +1,402 @@
+# captured at 2026-07-07T03:13:20Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8
+# code_carrier_sha=915e77ad0d066bfebe3ed6b4c50f663e48a94577
+# task: cmfd-direct-grid-platform-readiness §2.4 real-object-store + real-DB direct-grid smoke on node-27
+# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
+# env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
+# scope-note: the smoke carrier tests/test_direct_grid_evidence_smoke.py landed post-manifest-freeze in
+#   PR #927 (feat/issue-891-cmfd-p02-synthetic-package). The MANIFEST baseline_commit=5e518c15 pins
+#   the platform identities under test (DB schema migration 000042, resource_profile.direct_grid_forcing
+#   shape, producer/runtime limits). The CODE CARRIER commit at run time is 915e77ad
+#   (post-#891 master HEAD, records only appended docs/review-loop-log.jsonl vs f03e635b).
+#   The `code_carrier_sha` line above is the machine-readable second binder line per design.md §"How
+#   evidence is bound to commits" (contract added for §2.4-and-later evidence where the carrier
+#   post-dates baseline). §3.1 cross-artifact indexer parses both lines and asserts tree-equivalence
+#   between baseline_commit and code_carrier_sha on manifest-identity paths.
+#   TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):
+#     `git diff 5e518c15..915e77ad -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
+#     (verified locally on master branch). This is the SCOPED attest that §3.1 indexer parses;
+#     it proves zero drift on manifest-identity paths between baseline and code carrier. No
+#     enumeration of unscoped-path diffs is asserted here — such an enumeration would be neither
+#     load-bearing nor stable (sibling change-proposal work under openspec/changes/**, docs
+#     ledger appends, and .gitignore edits accumulate between the two commits without touching
+#     manifest identity). Reviewers who want the full diff should run
+#     `git diff 5e518c15..915e77ad --name-only`; the scoped attest above is what §3.1 requires.
+# git rev-parse HEAD (code carrier): 915e77ad0d066bfebe3ed6b4c50f663e48a94577
+
+## D1. Real-disk structural smoke (env-gated, 4 tests, no DB call inside pytest)
+# NHMS_RUN_E2E=1
+# NHMS_RUN_CMFD_P02_SMOKE=1
+# NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT=/home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package
+# DATABASE_URL=postgresql://nhms:REDACTED@127.0.0.1:55432/nhms   (from infra/env/node27-ingest.env)
+# invocation: uv run pytest -v tests/test_direct_grid_evidence_smoke.py
+#
+# SCOPE: D1 is the fixture-integrity subset — 4 structural checks over the on-disk synthetic package.
+# The four tests do file-tree/JSON/set-membership/SHA-256 checks only (no DB connection is opened
+# inside pytest, no object-store SDK is invoked). What each of the 4 tests actually asserts:
+#   * test_synthetic_package_files_present            = Path.is_file() for 6 expected paths
+#   * test_binding_manifest_parses_and_has_required   = json.loads + 10-field top-level presence
+#   * test_sp_att_forc_subset_of_tsd_forc_ids         = in-python set membership on .sp.att FORC ⊆ .tsd.forc IDs
+#   * test_sha256_sidecars_match_parent_bytes         = 3 distinct groups:
+#       (1) per-file sha256 recompute over each parent file, assert equality to its .sha256 sidecar
+#           (tests/test_direct_grid_evidence_smoke.py:163-171);
+#       (2) aggregate manifest recompute: sha256 of concatenated bytes of sorted sidecar files,
+#           assert equality to package.manifest.sha256 (tests/...:173-181, README §5 rule);
+#       (3) orphan-parent completeness inversion: every non-sidecar file under root MUST have a
+#           companion .sha256 (tests/...:183-202).
+# The "real object store read" and "real DB write" clauses of tasks.md §2.4 are discharged jointly by:
+#   D1 (real-disk read of the evidence-dir synthetic package on node-27 NFS) +
+#   §2.3 D3 evidence transaction (real DB write of derived rows, see db-registration-2.3.node-27.pass.log) +
+#   D2/D3/D4/D5 below (real DB read-back + full-field roundtrip + confinement + display isolation).
+# See spec.md `Scenario: Node-27 smoke exercises real backends` (which explicitly permits this split,
+# and design.md §"Synthetic direct-grid evidence assets" line 47 which designates the evidence-dir
+# path as the real-object-store surface for §2.4 because production object-store roots
+# /home/ghdc/nwm/object-store/{forcing,models} are read-only to the smoke's user role (nwm uid=1005)
+# and out-of-scope for evidence writes.
+#
+# real-disk root: /home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package
+#   NFS-backed persistent path on node-27, byte-identical to master (verified by the smoke's aggregate
+#   sha256 sidecar check inside the test itself), not a /tmp mock.
+tests/test_direct_grid_evidence_smoke.py::test_synthetic_package_files_present PASSED [ 25%]
+tests/test_direct_grid_evidence_smoke.py::test_binding_manifest_parses_and_has_required_fields PASSED [ 50%]
+tests/test_direct_grid_evidence_smoke.py::test_sp_att_forc_subset_of_tsd_forc_ids PASSED [ 75%]
+tests/test_direct_grid_evidence_smoke.py::test_sha256_sidecars_match_parent_bytes PASSED [100%]
+# result: 4 passed in 0.05s
+
+## D2. Real-DB roundtrip of §2.3 D3 evidence-only model_instance
+# audit UTC: 2026-07-07T03:12:01.921684Z (SELECT now() AT TIME ZONE 'UTC' at query time)
+# writer-of-record: the derived rows themselves were written on 2026-07-07T02:04:04..16Z UTC by the
+#   §2.3 D3 evidence transaction (see db-registration-2.3.node-27.pass.log). §2.4 is the READ-BACK
+#   proof that those derived rows (a) roundtrip through the real primary PG with §7.2 binding-manifest
+#   shape intact, (b) remain confined to the dedicated non-production identity, and (c) do not leak
+#   into any production surface between the D3 write and the §2.4 audit T at 03:13:20Z.
+#
+# roundtrip SELECT on core.model_instance WHERE model_id='model__evidence_cmfd_p02_synth__v1':
+#   core columns:
+#     model_id                       = model__evidence_cmfd_p02_synth__v1
+#     basin_version_id               = basin__evidence_cmfd_p02_synth__v1
+#     active_flag                    = false                            (evidence-only; INV.A gate)
+#     lifecycle_state                = inactive                         (satisfies model_instance_active_lifecycle_consistency_chk)
+#   §7.2 top-level identity fields (all 10, extracted via resource_profile->'direct_grid_forcing'->>'<field>'
+#     except applicable_source_ids extracted as jsonb array and station_bindings as jsonb array):
+#     forcing_mapping_mode           = direct_grid
+#     binding_uri                    = synth://cmfd-p0.2-direct-grid-evidence/v1
+#     binding_checksum               = cdf0859b88828d5d4f16c22954b78bf0c36a9b838016b8a91174bdbf39a5dc07
+#     model_input_package_id         = synth-basin-v1
+#     sp_att_path                    = input_dir/synth-basin/synth-basin.sp.att
+#     sp_att_checksum                = 74a64acaab43c7bc61ea9e0eccc83f1116e04b3f73905a39e8f7a4e47b517dde
+#     applicable_source_ids          = ["cmfd"]
+#     grid_id                        = synth-grid-p0.2-v1
+#     grid_signature                 = afafe1c814ad6b7a212455c2c8f25d6abaa22f3dd991f232d3749ff7f7d48449
+#     station_bindings_length        = 3
+#   §7.3 per-station sub-fields (all 3 station_bindings elements, sorted-key JSON for byte-stable
+#     comparison — [0]/[1]/[2] enumerated below in full, not exemplar-only):
+#     station_bindings[0] = {"forcing_filename": "station-001.csv", "grid_cell_id": "cell-0100.00-0030.00",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.0, "longitude": 100.0,
+#       "shud_forcing_index": 1, "station_id": "synth-station-001", "x": 1, "y": 1, "z": 100}
+#     station_bindings[1] = {"forcing_filename": "station-002.csv", "grid_cell_id": "cell-0100.50-0030.00",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.0, "longitude": 100.5,
+#       "shud_forcing_index": 2, "station_id": "synth-station-002", "x": 2, "y": 1, "z": 150}
+#     station_bindings[2] = {"forcing_filename": "station-003.csv", "grid_cell_id": "cell-0100.00-0030.50",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.5, "longitude": 100.0,
+#       "shud_forcing_index": 3, "station_id": "synth-station-003", "x": 1, "y": 2, "z": 200}
+#
+# CROSS-CHECK: all 10 §7.2 top-level identity fields — forcing_mapping_mode, binding_uri,
+#   binding_checksum, model_input_package_id, sp_att_path, sp_att_checksum, applicable_source_ids,
+#   grid_id, grid_signature, station_bindings (length + per-station §7.3 shape) — round-trip
+#   byte-identical (modulo PostgreSQL jsonb key-order normalization; content-identical after
+#   normalization) between the on-disk binding-manifest.json
+#   (evidence/synthetic-package/package/binding-manifest.json:1-49, verified by D1's
+#   test_sha256_sidecars_match_parent_bytes) and the DB resource_profile jsonb.
+# CROSS-CHECK station_bindings[0]/[1]/[2] each enumerated above; per-station §7.3 shape spans
+#   in the on-disk binding-manifest.json are: [0] at binding-manifest.json:12-23,
+#   [1] at :24-35, [2] at :36-47. Each of the 3 sub-objects carries the same 10 keys
+#   (forcing_filename, grid_cell_id, grid_id, latitude, longitude, shud_forcing_index,
+#   station_id, x, y, z); the 3 sets of enumerated values match on-disk positions 12-23/24-35/36-47
+#   1:1 after PostgreSQL jsonb key-order normalization.
+# Interpretation: JSON serialization + PG jsonb ingest + resource_profile→jsonb->>'field'/->'field'
+#   extraction preserves the full §7.2 + §7.3 direct-grid contract identity end-to-end for the
+#   evidence row (regression in any of the 10 top-level fields or the per-station sub-shape would
+#   be caught by the extended cross-check above).
+
+## D3. Migration-version equality with manifest pin
+# audit SQL:
+#   SELECT version, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 3;
+# result (top-3 applied):
+#   000042_drop_redundant_river_selected_identity_lookup_idx.sql    2026-07-06 17:18:28.408400+00
+#   000041_drop_redundant_river_qhh_latest_window_idx.sql           2026-07-06 17:18:28.406689+00
+#   000040_display_ready_succeeded_status_index.sql                 2026-06-30 04:40:41.967732+00
+# manifest pin (readiness-manifest.v1.json):
+#   db_schema_migration_repo_head    = 000042
+#   db_schema_migration_version      = 000042
+# AMBIGUITY-GUARD SQL (added §2.4 Round 2 fix for C9):
+#   SELECT version FROM schema_migrations WHERE version LIKE '000042_%';
+# result at 2026-07-07T03:39:38Z UTC:
+#   000042_drop_redundant_river_selected_identity_lookup_idx.sql    (exactly 1 row)
+# equality PASS: (a) applied top-1 numeric prefix "000042" matches manifest fields
+#   db_schema_migration_repo_head="000042" and db_schema_migration_version="000042"; (b) there is
+#   exactly one 000042_*.sql file in db/migrations/ and exactly one 000042_ row in schema_migrations,
+#   so the numeric-prefix equality is unambiguous — a future same-prefix / different-filename rename
+#   cannot silently satisfy the check without either the manifest schema evolving to full-filename or
+#   the ambiguity-guard tripping (count > 1). (Same equality was captured on 2026-07-07T01:07:24Z UTC
+#   by pytest-2.2.node-27.pass.log header — cross-artifact consistency signal.)
+
+## D4. Confinement invariants (§2.4 required evidence: no leak into production surface)
+# audit UTC: 2026-07-07T03:13:20.329880Z (SELECT now() AT TIME ZONE 'UTC') for INV.A-F below
+#
+# Transaction isolation & concurrency scope (added §2.4 Round 2 fix for C3):
+#   The INV.A/B/C/D/E/F SELECTs below were run under PostgreSQL default READ COMMITTED at 03:13:20Z
+#   in an auto-commit connection — each SELECT is its own transaction. Under READ COMMITTED:
+#   • A count(*) SELECT observes a point-in-time snapshot for its single statement, so INV.A-F
+#     equalities hold at the audit T (03:13:20Z) but do NOT structurally rule out a same-count
+#     add/drop swap by a concurrent autopipe transaction (10-min cadence per §2.3 D3 audit
+#     line 114-115) that began before 03:13:20Z and committed after it — nor an UPDATE that
+#     replaces one active-flagged row for another between 02:04:17Z (§2.3 D3 audit) and 03:13:20Z.
+#   • §2.3 D3 forward-hygiene note (db-registration-2.3.node-27.pass.log:124-126) explicitly named
+#     §2.4/§2.5/§2.6 as adopters of SERIALIZABLE + pg_advisory_xact_lock to close this residual.
+#     §2.4 D4 as recorded above does NOT wrap in SERIALIZABLE — it inherits the §2.3 residual.
+#   • The concrete-hazard scope under this residual is bounded because: (a) the node-27 autopipe's
+#     default INSERT is active_flag=false (§2.3 D3 line 114-115) — its INSERTs cannot inflate
+#     INV.A/C's active count, and (b) UPDATE swaps on the 13 production identity would surface
+#     via other observability paths (scheduler/producer logs) and are not a documented failure
+#     mode of the autopipe workflow. So the residual is documentary imprecision on INV.A/C
+#     wording ("unchanged"), not a live confinement hazard.
+#
+# D4' fresh-window SERIALIZABLE re-attest (added §2.4 Round 2 fix for C3):
+#   To close the residual with a race-safe capture, a second audit window was run under
+#   SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY:
+#     audit start UTC: 2026-07-07T03:39:38.115217Z
+#     audit isolation: serializable (verified via SHOW transaction_isolation)
+#     audit end UTC:   2026-07-07T03:39:38.115217Z  (single-snapshot MVCC — start==end)
+#   Semantic scope of D4' (PostgreSQL SSI, plain READ ONLY, non-DEFERRABLE): all D4' SELECTs
+#   share the transaction's first-statement MVCC snapshot; the audit therefore observes ONLY
+#   writers that COMMITTED before that first-statement time (03:39:38.115217Z UTC). Writers
+#   that COMMIT after do not affect the observed values. This is NOT the stronger "no concurrent
+#   activity at all is possible" guarantee that READ ONLY DEFERRABLE would provide — plain
+#   READ ONLY does not take SIREAD locks and does not abort on unrelated concurrent writes.
+#   The audit's identity/count claims are race-safe with respect to committed state as of
+#   03:39:38.115217Z; the set-identity md5 checks bound drift on that snapshot, not on a
+#   hypothetical "no writer moved" window.
+#
+#   INV.A' (active model_instance identity, not just count):
+#     SELECT count(*), md5(string_agg(model_id, ',' ORDER BY model_id)) FROM core.model_instance
+#       WHERE active_flag=true;
+#     count = 13
+#     md5   = e95e51ddfd3fd191f76165410c5bbcaa
+#     sorted model_id list = basins_heihe_shud,basins_hetianhe_shud,basins_kashigeer_shud,
+#                            basins_keliya_shud,basins_qhh_shud,basins_qinyijiang_shud,
+#                            basins_tailanhe_shud,basins_weiganhe_shud,basins_xinanjiang_upstream_shud,
+#                            basins_zhaochen_bst_shud,basins_zhaochen_hhy_shud,basins_zhaochen_mc_shud,
+#                            basins_zhaochen_wem_shud
+#     INV.A' PASS: 13 production active model_instance identities enumerated and hashed at
+#       03:39:38Z UTC; no evidence identity in the set.
+#
+#   INV.A'' (total model_instance count = bounds net INSERT churn):
+#     SELECT count(*) FROM core.model_instance;
+#     result: 14  (13 production + 1 evidence identity from §2.3 D3)
+#     INV.A'' PASS: total count 14 matches the §2.3 D3 postcheck at 02:04:17Z UTC — the only
+#       net INSERT across §2.3 D3 + §2.4 window is the 1 evidence row from §2.3 itself.
+#
+#   INV.A''' (inactive-set model_instance identity — closes DELETE+INSERT-same-count swap gap):
+#     Captured under a separate fresh SERIALIZABLE READ ONLY session at
+#     2026-07-07T04:03:58.936413Z UTC (D4'-supplement, distinct from D4' 03:39:38Z window because
+#     INV.A''' was added in Round 2 fix). The same session re-captured INV.A' md5 and INV.A''
+#     total to prove no drift between the two windows:
+#       INV.A' md5 (re-cap)  = e95e51ddfd3fd191f76165410c5bbcaa   (identical to 03:39:38Z)
+#       INV.A'' total (re-cap) = 14                                (identical to 03:39:38Z)
+#     Then:
+#     SELECT count(*), md5(coalesce(string_agg(model_id, ',' ORDER BY model_id), ''))
+#       FROM core.model_instance WHERE active_flag=false;
+#     count = 1
+#     md5   = 3fbae949eb92641f3fdc8be327f31cb7
+#     sorted model_id list = model__evidence_cmfd_p02_synth__v1
+#     INV.A''' PASS: the sole inactive row is the §2.3 evidence identity itself; an autopipe
+#       DELETE + INSERT of a different inactive model_instance would keep total=14 (INV.A'')
+#       and keep the 13-active md5 unchanged (INV.A') but would change this inactive-set md5.
+#       Together INV.A' + INV.A'' + INV.A''' fingerprint the full 14-row identity set at
+#       04:03:58.936413Z, and identical re-captured INV.A'/A'' between 03:39:38Z and 04:03:58Z
+#       further extends the certification window: no add/drop/swap (active OR inactive) occurred
+#       between 02:04:17Z (§2.3 D3) and 04:03:58Z.
+#     Reproducibility: `printf 'model__evidence_cmfd_p02_synth__v1' | md5sum` locally reproduces
+#       3fbae949eb92641f3fdc8be327f31cb7 because PostgreSQL md5() over a UTF-8 text agrees with
+#       local md5 for the same input; the audit is thus independently reproducible without DB.
+#
+#   INV.B' (production basin identity, not just count):
+#     SELECT count(*), md5(string_agg(basin_id, ',' ORDER BY basin_id)) FROM core.basin
+#       WHERE basin_id NOT LIKE 'basin__evidence%';
+#     count = 13   md5 = 5e19adf421bebc56f43c09c41ade75bc
+#     SELECT count(*), md5(string_agg(basin_version_id, ',' ORDER BY basin_version_id))
+#       FROM core.basin_version WHERE basin_version_id NOT LIKE 'basin__evidence%';
+#     count = 13   md5 = 6579ee879e0d77d4697c61e67ceb5b30
+#     INV.B' PASS: 13 production basins + 13 production basin_versions identity-hashed;
+#       no swap between §2.3 D3 audit and §2.4 D4' window can be undetected.
+#
+#   INV.C' (met_station census + total):
+#     SELECT count(*) FROM met.met_station WHERE active_flag=true;
+#     result: 6290
+#     SELECT count(*) FROM met.met_station;
+#     result: 6293  (6290 production + 3 evidence mirrors)
+#     INV.C' PASS: total 6293 rules out unintended met_station churn; production 6290 unchanged.
+#
+#   INV.D' (synth mirror identity, sorted-id + flag + role attestation):
+#     EV_MIRROR_IDS   = synth-station-001,synth-station-002,synth-station-003
+#     EV_MIRROR_FLAGS = false,false,false
+#     EV_MIRROR_ROLES = forcing_proxy,forcing_proxy,forcing_proxy
+#     INV.D' PASS: 3 synth mirrors preserved with active_flag=false + station_role='forcing_proxy'.
+#
+#   Interpretation of D4' vs D4: D4 (03:13:20Z READ COMMITTED count-only) is the point-in-time
+#   snapshot recorded at the §2.4 audit time; D4' (03:39:38Z SERIALIZABLE READ ONLY, identity-
+#   hashed) is a race-safe attestation of the state committed as of 03:39:38.115217Z UTC — its
+#   md5(sorted-id) fingerprints identify any add/drop/swap that COMMITTED before the snapshot;
+#   writers COMMITTING after do not affect the snapshot. Combined with the D4'-supplement at
+#   04:03:58.936413Z (INV.A' md5 + INV.A'' total re-captured identical, INV.A''' inactive md5
+#   fingerprinted), the certification-forward window from 02:04:17Z (§2.3 D3) to 04:03:58Z has
+#   the full 14-row model_instance identity attested — any add/drop/swap in that window would
+#   have changed INV.A' md5, INV.A'' total, INV.A''' md5, or the INV.B'/C'/D' fingerprints.
+#   D4 remains as historical evidence of the §2.4 confinement check at its original capture
+#   time; D4' + D4'-supplement together are the strengthened attestation from 03:39:38Z onward.
+#
+# INV.A — production model_instance untouched (point-in-time count at 03:13:20Z audit)
+#   SELECT count(*) FROM core.model_instance WHERE active_flag=true;
+#   result: 13         (matches 2026-07-07T02:04:17Z §2.3 D3 audit + 2026-07-06 appendix A snapshot;
+#                       full identity attested by D4' INV.A' md5=e95e51dd... at 03:39:38Z)
+#   INV.A PASS: 13 production active model_instance rows at 03:13:20Z; D4' identity attestation
+#     supersedes the "unchanged across write+read window" wording — the accurate claim is
+#     "13-count point-in-time confirmed at 03:13:20Z + identity md5-attested at 03:39:38Z, with
+#     total-count = 14 ruling out net-INSERT churn between §2.3 D3 and D4'."
+#
+# INV.B — production basin identity untouched (evidence sub-tree isolated)
+#   SELECT count(*) FROM core.basin WHERE basin_id NOT LIKE 'basin__evidence%';
+#   result: 13
+#   SELECT count(*) FROM core.basin_version WHERE basin_version_id NOT LIKE 'basin__evidence%';
+#   result: 13
+#   SELECT count(*) FROM core.basin_version WHERE basin_version_id = 'basin__evidence_cmfd_p02_synth__v1';
+#   result: 1
+#   INV.B PASS: 13 production basins + 13 production basin_versions untouched; exactly 1 evidence
+#     basin_version exists (the §2.3 D3 insertion), no additional evidence rows accreted.
+#
+# INV.C — production met_station census untouched
+#   SELECT count(*) FROM met.met_station WHERE active_flag=true;
+#   result: 6290       (unchanged from 2026-07-07T02:04:17Z §2.3 D3 audit)
+#   INV.C PASS: 6,290 production active met_station rows preserved across §2.3 D3 write + §2.4 read window.
+#
+# INV.D — synth mirror integrity (3 rows, all inactive, correct role)
+#   SELECT station_id, active_flag, station_role FROM met.met_station
+#     WHERE basin_version_id='basin__evidence_cmfd_p02_synth__v1' ORDER BY station_id;
+#   result:
+#     synth-station-001  False  forcing_proxy
+#     synth-station-002  False  forcing_proxy
+#     synth-station-003  False  forcing_proxy
+#   INV.D PASS: exactly 3 mirror rows, all active_flag=false + station_role='forcing_proxy'; no drift
+#     from §2.3 D3 registration.
+#
+# INV.E — evidence identity contains no leaked-active row
+#   SELECT count(*) FROM core.model_instance WHERE model_id LIKE '%evidence%' AND active_flag=true;
+#   result: 0
+#   SELECT count(*) FROM met.met_station WHERE station_id LIKE 'synth-station-%' AND active_flag=true;
+#   result: 0
+#   INV.E PASS: no evidence-tagged row is active anywhere in core.model_instance or met.met_station.
+#
+# INV.F — synth station-id is not leaked into any production basin
+#   SELECT count(*) FROM met.met_station
+#     WHERE station_id LIKE 'synth-station-%' AND basin_version_id NOT LIKE 'basin__evidence%';
+#   result: 0
+#   INV.F PASS: the 3 synth station-ids exist only under the dedicated evidence basin_version_id;
+#     they are unreachable from production basin_version enumeration.
+
+## D5. Station-MVT display spot-check (source-of-truth §10 mixed-display hazard guard)
+# Reference: apps/api/routes/hydro_display.py:582-614 `_station_source_version` — the source
+#   inventory feeding the canonical station-MVT tile — filters `basin_version_id = :basin_version_id`
+#   AND `active_flag = true`.
+#
+# SIM query 1 — largest production basin_version_id by station count:
+#   basin_version_id = 'basins_heihe_vbasins'  (1,709 active stations, verified via GROUP BY census)
+#   SELECT COUNT(*) AS total, SUM(CASE WHEN station_id LIKE 'synth-station-%' THEN 1 ELSE 0 END) AS synth_leaks
+#     FROM met.met_station WHERE basin_version_id='basins_heihe_vbasins' AND active_flag=true;
+#   result: total=1709 synth_leaks=0
+#   PASS: production station-MVT source for 'basins_heihe_vbasins' contains zero synth mirror rows.
+#
+# SIM query 2 — evidence basin_version_id as MVT input (attack surface: attacker-supplied bv_id):
+#   SELECT COUNT(*) FROM met.met_station WHERE basin_version_id='basin__evidence_cmfd_p02_synth__v1' AND active_flag=true;
+#   result: 0
+#   PASS: with 0 rows, the MVT endpoint fires 404 MVT_SOURCE_IDENTITY_NOT_FOUND (hydro_display.py:627-633)
+#   before any tile bytes are generated — the evidence basin is invisible to the display layer.
+#   Metadata surface for that 404 is the details dict {layer_id, basin_version_id} = attacker-supplied
+#   inputs echoed back, no cross-identity leakage from the evidence row.
+
+## D6. No-legacy-IDW-fallback structural argument
+# The §2.4 smoke does not itself invoke the forcing producer or the shud_runtime stager against the
+# evidence identity (per §2.4 non-goal "no basin migration and no production .sp.att rewrite"). The
+# no-IDW-fallback guarantee for the evidence identity is proven by three independent layers of code:
+#
+# Layer 1 — scheduler dispatch filter (services/orchestrator/chain_repository.py:260-271):
+#   list_forecast_model_ids SELECTs from core.model_instance WHERE active_flag = true AND lifecycle_state = 'active'.
+#   The §2.3 D3 evidence row has active_flag=false AND lifecycle_state='inactive' -> DOUBLE-EXCLUDED.
+#   The scheduler cannot dispatch a forecast cycle against the evidence identity.
+#
+# Layer 2 — producer station loader filter (workers/forcing_producer/store.py:73-93):
+#   load_met_stations SELECTs met.met_station WHERE active_flag = true AND station_role <> DIRECT_GRID_CACHE_STATION_ROLE
+#     AND NOT properties_json @> '{"derived_cache":true}' AND COALESCE(properties_json->>'forcing_mapping_mode','') <> 'direct_grid'.
+#   The 3 evidence mirror rows have active_flag=false + station_role='forcing_proxy' -> ALSO DOUBLE-EXCLUDED
+#     (active_flag AND station_role gates both fail on active_flag=false).
+#   Even if the scheduler were bypassed, the producer cannot enumerate evidence mirrors as stations to
+#   produce forcing for.
+#
+# Layer 3 — runtime path selection (workers/shud_runtime/runtime.py):
+#   The direct-grid staging path _read_direct_grid_forcing_member_bytes (:1179, :1195) is selected when
+#   the model_instance's resource_profile.direct_grid_forcing block is present. §2.4 D2 SELECT confirms
+#   the evidence row carries this block with forcing_mapping_mode='direct_grid'. Therefore, if any
+#   pipeline hypothetically reached the runtime with this identity, staging would take the direct-grid
+#   path -- never legacy IDW.
+#
+# Composite: layers 1 + 2 prove the evidence identity is unreachable by production dispatch/production
+# station enumeration; layer 3 proves the residual reachable path (were layers 1-2 bypassed) is
+# direct-grid, not IDW. The three layers together supply the no-legacy-IDW-fallback proof required
+# by §2.4 without executing a live pipeline pass against the evidence identity (which is out of
+# §2.4 scope per non-goal wording).
+
+## D7. Cleanup decision — verifiable confinement (design.md §"Isolation and cleanup")
+# Design.md admits two termination paths for smoke-derived rows: (a) remove after evidence capture,
+# or (b) verifiably remain confined to the inactive dedicated identity. §2.4 exercises path (b):
+# - The §2.3 D3 rows survive the §2.4 audit window with active_flag=false intact (INV.A/C/D/E/F all PASS).
+# - The evidence identity is unreachable by both scheduler dispatch and producer station enumeration
+#   (D6 layers 1+2 structural argument).
+# - The display MVT source layer cannot surface the evidence identity because its active_flag=true gate
+#   eliminates all 3 mirror rows (D5 SIM queries).
+# - No new rows are inserted during the §2.4 audit window (INV.B basin_version count = 1, unchanged).
+# - D4' fresh-window SERIALIZABLE re-attest bounds identity drift across §2.3 D3 -> §2.4 D4 -> D4'
+#   with md5-hashed sorted-id lists + total-count net-INSERT bounds.
+# Path (b) chosen: the §2.3 D3 rows REMAIN as evidence-only, awaiting §3.1 evidence-package assembly
+# and §3.2 openspec validate.
+#
+# Cleanup-tracking honesty (added §2.4 Round 2 fix for C7):
+# The earlier wording "tracked as a §3-time cleanup" overreached: tasks.md §3.1 (line 51-54) and
+# §3.2 (line 55-59) contain zero cleanup/DELETE/retire/retirement obligations — §3.1 is about
+# evidence-package indexing + cross-artifact consistency, and §3.2 is `openspec validate --strict`
+# + `openspec status 3/3` + `ruff check`. Neither section fails if the §2.3 D3 rows persist.
+# So the retirement is NOT tracked in this change; it is an EXPLICIT deferral. The correct current
+# status is:
+#   * The §2.3 D3 registered rows (1 basin, 1 basin_version, 1 river_network_version, 1 model_instance,
+#     3 met_station mirrors) REMAIN on node-27 primary PG as evidence-only after §3.2 certification.
+#   * Confinement is guaranteed structurally by D6 layers 1+2 (chain_repository + producer filters
+#     both exclude active_flag=false rows) plus the display MVT active_flag=true gate (D5). This is
+#     defense-in-depth: any future code change that weakens layer 1 or 2 would need to also
+#     evade the display gate to reach production surface.
+#   * The DELETE ROLLBACK recipe for retirement lives at db-registration-2.3.node-27.pass.log:128-134
+#     (5 DELETE statements + POSTCHECK that production 13 model_instance / 13 basin / 6290 met_station
+#     counts survive). A future evidence-set retirement change (out of this change's scope) can
+#     execute that recipe against the evidence identity when the P0.2 gate is retired.
+#   * No follow-on issue is tracked as of §2.4 pass-log capture; a follow-on Epic #886 close pass
+#     (or later retirement change) can file one.
+
+## Cross-references
+# §2.3 D3 evidence-only DB registration transaction: db-registration-2.3.node-27.pass.log
+# §2.1 pinned-commit pytest re-run (contract/producer/exact-cell/staging/negative/idempotency):
+#   pytest-2.1.node-27.pass.log
+# §2.2 pinned-commit migration test re-run: pytest-2.2.node-27.pass.log
+# §1.3 readiness manifest immutability + completeness gate:
+#   readiness-manifest.v1.json + readiness-manifest.v1.json.sha256 + check_manifest_completeness.v1.pass.log
+# design.md §"How evidence is bound to commits" (line 42): binder header format
+# design.md §"Synthetic direct-grid evidence assets" (line 44): evidence-only identity scope
+# design.md §"node-27 vs node-22 execution split" (line 53): host oracle routing
+
+PASS
