@@ -39,6 +39,8 @@ Rationale: a single committed JSON keeps the pin diffable, reviewable, and versi
 ### How evidence is bound to commits (checksums)
 Every evidence artifact (test run log, node-27 smoke record, minimal-basin execution record, G9 capacity report) records: (1) the `baseline_commit` it ran against, and (2) the SHA-256 checksum of the readiness manifest it was validated against. A reviewer verifies readiness by confirming all evidence references the same manifest checksum and the same `baseline_commit`. This is the mechanism that makes readiness provable on a frozen baseline rather than on mutable checkbox state.
 
+Binder format: each `*.pass.log` artifact under `openspec/changes/cmfd-direct-grid-platform-readiness/evidence/` MUST open with a single line of the form `# captured at <ISO-8601 UTC> host=<h> bound to baseline_commit=<40-hex> manifest_sha256=<64-hex>`, where `<h>` is `local`, `node-27`, or `node-22`. Downstream indexers (task 3.1) parse this header for the cross-artifact consistency check; filename shape is descriptive and MAY vary (e.g. `check_manifest_completeness.v1.pass.log`, `pytest-2.1.node-27.pass.log`). The header — not the filename — is the load-bearing binder.
+
 ### Synthetic direct-grid evidence assets (contract, package, smoke carrier)
 None of the 13 live model instances carries a direct-grid contract, keliya's live package is legacy IDW, and the mapping builder is out of scope — so the node-27 smoke and the node-22 minimal-basin execution cannot use any live asset. Both use a **hand-assembled synthetic minimal direct-grid evidence fixture**, scoped as an allowed evidence asset (not a mapping-builder product, not a production migration):
 

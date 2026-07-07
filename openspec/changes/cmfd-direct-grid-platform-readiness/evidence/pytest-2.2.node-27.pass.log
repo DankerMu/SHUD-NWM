@@ -1,0 +1,22 @@
+# captured at 2026-07-07T01:07:24Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8
+# task: cmfd-direct-grid-platform-readiness §2.2 pinned-commit re-run of DB migration static-SQL check
+# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
+# git rev-parse HEAD: 5e518c151375b798c29ee3cafb3260413ac8905f
+# env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
+# suite: tests/test_migrations.py
+# invocation: uv run pytest -q tests/test_migrations.py
+# result: 22 passed in 0.20s
+# skip-audit: git diff master -- tests/test_migrations.py empty at pinned baseline; no test skipped, deleted, or weakened
+# scope-note: tests/test_migrations.py is a static SQL-file check against db/migrations/; it does NOT connect to a running DB
+# manifest binding (task 1.3 identity check re-derivation at run time):
+#   pinned db_schema_migration_repo_head: 000042 (highest .sql in db/migrations/ at pinned HEAD)
+#   pinned db_schema_migration_version:   000042 (recorded in readiness-manifest.v1.json)
+# live applied-version cross-check (SELECT version FROM public.schema_migrations ORDER BY version DESC LIMIT 5;) at 2026-07-07T01:08:07Z:
+#   000042_drop_redundant_river_selected_identity_lookup_idx.sql
+#   000041_drop_redundant_river_qhh_latest_window_idx.sql
+#   000040_display_ready_succeeded_status_index.sql
+#   000039_crosswalk_external_identity.sql
+#   000038_direct_grid_interp_weight_constraints.sql
+# live_top == pinned; equality confirmed here as an ad-hoc cross-check.
+# authoritative equality gate: the 2.4 real-DB smoke (per tasks.md §2.2 note); not enforced by this static-SQL suite.
+PASS
