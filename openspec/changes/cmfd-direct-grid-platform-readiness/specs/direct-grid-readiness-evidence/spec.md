@@ -46,8 +46,8 @@ The platform SHALL execute a minimal basin end-to-end with the production SHUD b
 - **THEN** it stages the synthetic minimal multi-station direct-grid evidence package — rewritten-`FORC` `.sp.att`, binding manifest, standard multi-station `.tsd.forc`, and per-station CSVs — whose construction provenance and SHA-256 checksums are recorded in the evidence; the package is hand-assembled, not produced by a mapping builder, and no production basin package is rewritten
 - **THEN** it stages a standard multi-station direct-grid forcing package and does not rewrite `.sp.att` to a single station
 - **THEN** staged `.sp.att FORC` values are within the staged `.tsd.forc` `ID` set
-- **THEN** the execution evidence records build provenance linking the executed `shud_omp` binary to the pinned solver submodule commit (build-tree submodule HEAD, build log, or checksum comparison against a rebuild from the pin)
-- **THEN** the execution evidence records the node-22 Slurm/SHUD runtime host, the pinned solver submodule commit, the pinned `baseline_commit`, and the readiness manifest checksum.
+- **THEN** the execution evidence records the executed `shud_omp` binary path used on node-22 (production binary, no rebuild), as identified in the readiness manifest
+- **THEN** the execution evidence records the node-22 Slurm/SHUD runtime host, the pinned `baseline_commit`, and the readiness manifest checksum.
 
 ### Requirement: G9 capacity baseline is reported against deployment config
 The platform SHALL produce a Gate G9 capacity baseline that estimates direct-grid resource usage against the deployment configuration and compares it to live legacy baselines measured on node-27 before any migration.
