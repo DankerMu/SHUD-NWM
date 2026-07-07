@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nwm.ac.cn/schemas/grid_snapshot_metadata.schema.json",
+  "title": "GridSnapshotMetadata",
+  "description": "Sidecar metadata for one canonical grid snapshot: validity window (with timezone offsets) and download bbox pinned at registration time.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["valid_from", "valid_to", "download_bbox"],
+  "properties": {
+    "valid_from": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp WITH timezone offset - the moment this grid snapshot becomes authoritative for its source."
+    },
+    "valid_to": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO8601 timestamp WITH timezone offset - the moment this grid snapshot is superseded; NULL means still current."
+    },
+    "download_bbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["south", "north", "west", "east"],
+      "properties": {
+        "south": {"type": "number"},
+        "north": {"type": "number"},
+        "west": {"type": "number"},
+        "east": {"type": "number"}
+      }
+    }
+  }
+}
