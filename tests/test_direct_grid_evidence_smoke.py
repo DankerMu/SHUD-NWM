@@ -10,7 +10,9 @@ only:
     in §2.4/§2.5)
   * SHA-256 sidecars match parent-file bytes and the aggregate manifest matches
 
-Gating (all three required, else all tests skip):
+Gating (all four required, else all tests skip):
+  * NHMS_RUN_E2E=1 — bypasses tests/conftest.py:22-36 e2e-marker auto-skip
+    (fires at collection time BEFORE _gate_or_skip)
   * NHMS_RUN_CMFD_P02_SMOKE=1
   * DATABASE_URL (inherited from infra/env/node27-ingest.env on node-27)
   * NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT=<absolute path to the package/ tree>
@@ -176,4 +178,25 @@ def test_sha256_sidecars_match_parent_bytes() -> None:
     actual_aggregate = hashlib.sha256(concat).hexdigest()
     assert actual_aggregate == expected_aggregate, (
         f"aggregate drift: recomputed {actual_aggregate}, recorded {expected_aggregate}"
+    )
+
+    # Completeness inversion: every non-sidecar regular file under root MUST have a companion .sha256 sidecar.
+    # This catches silent additions to the fixture package (stray .DS_Store, editor swap files, a new
+    # station-N.csv added without its sidecar) that the sidecar-set-only walks above cannot see.
+    non_sidecar_files = [
+        p for p in root.rglob("*")
+        if p.is_file() and not p.name.endswith(".sha256")
+    ]
+    sidecar_parents = {sidecar.with_suffix("") for sidecar in sidecars}
+    # aggregate has no parent file; add sentinel so it is excluded defensively
+    sidecar_parents.add(aggregate_sidecar.with_suffix(""))
+    orphans = [
+        p.relative_to(root)
+        for p in non_sidecar_files
+        if p not in sidecar_parents
+    ]
+    assert not orphans, (
+        f"orphan files without .sha256 sidecar under {root}: {orphans}. "
+        "Add a sidecar (sha256sum <file> > <file>.sha256), regenerate the aggregate "
+        "(README §5 recipe), or remove the file to preserve byte-stability."
     )

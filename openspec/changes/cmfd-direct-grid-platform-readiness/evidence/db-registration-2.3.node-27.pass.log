@@ -78,9 +78,33 @@ INV.F live top schema_migrations = 000042_drop_redundant_river_selected_identity
 # reachable via GET /met/stations/{station_id}/series) does NOT filter active_flag or station_role, so a caller who knows
 # a synth-station-* ID (these IDs are publicly committed via this PR) can distinguish an evidence-registered row from
 # an unknown ID by observing STATION_FORCING_FILE_NOT_FOUND (row exists, CSV absent from prod object store) vs STATION_NOT_FOUND.
-# This is a bounded identity/metadata probe, NOT a data leak: no forcing CSV exists in the production object store for
-# model__evidence_cmfd_p02_synth__v1, so no time-series bytes are exposed. Evidence-only IDs are intentionally-discoverable
-# non-secret identifiers; tightening the station-by-id filter is deferred to a separate change if needed.
+# The STATION_FORCING_FILE_NOT_FOUND 404 body (packages/common/object_store_forcing.py:105-128 StationForcingFileNotFoundError.details,
+# propagated verbatim by apps/api/routes/data_sources.py:_api_error) surfaces the tuple {station_id, basin_version_id, model_id, source_id,
+# cycle_time, expected_path, forcing_filename, message}. Concretely `expected_path` is the RELATIVE object-store key
+# (packages/common/object_store_forcing.py:_object_store_relative_path strips the object_store_root prefix), NOT an absolute host path
+# like /ghdc/data/nwm/... — so the disclosure is: relative storage-key layout (forcing/<source>/<cycle>/<basin_version_id>/<model_id>/shud/<filename>)
+# plus the (basin_version_id, model_id, source_id, cycle_time) linkage. No forcing CSV bytes are exposed by this 404.
+# This is a bounded metadata probe (relative storage-key layout + basin/model/source/cycle linkage), NOT a time-series data leak:
+# no forcing CSV bytes are exposed via this endpoint for the evidence identity — see the structural argument in the paragraph below.
+# ---- structural argument: why the evidence identity is not a live data leak ----
+# Two production filters keep the evidence identity out of any auto-write path to <root>/forcing/cmfd/<cycle>/basin__evidence_cmfd_p02_synth__v1/model__evidence_cmfd_p02_synth__v1/shud/:
+#   (1) Scheduler dispatch (services/orchestrator/chain_repository.py:list_forecast_model_ids around :260-271) filters
+#       `active_flag=true AND lifecycle_state='active'`. The evidence model_instance is active_flag=false + lifecycle_state='inactive'
+#       (INV.B above), so no scheduler cycle will ever target it for a forcing_producer run.
+#   (2) forcing_producer's own station loader (workers/forcing_producer/store.py:load_met_stations around :73-93) filters
+#       `active_flag=true` on met.met_station. Even a manual producer invocation against the evidence basin_version_id would find
+#       zero forcing stations (the three synth-station-* rows are active_flag=false + station_role='forcing_proxy' per INV.E).
+# Therefore no PRODUCTION auto-ingest can populate the evidence-identity object-store path. The station-by-id metadata probe surfaces
+# only relative storage-key layout + identity linkage, never CSV bytes, as long as (1) and (2) hold.
+#
+# §2.4 caveat + cleanup obligation:
+# Task 2.4 (openspec/.../tasks.md §2.4) EXPLICITLY writes to the real object store using this evidence identity as a smoke input.
+# During that window (§2.4 write .. §2.4 cleanup) the "no forcing CSV" property IS temporarily invalidated by design. §2.4's required
+# evidence says the derived rows "are removed or verifiably remain confined to the inactive dedicated identity" — the §2.4 evidence
+# artifact MUST include either a cleanup receipt (object-store DELETE + row DELETE) or a re-attestation that any leftover CSV under
+# basin__evidence_cmfd_p02_synth__v1/model__evidence_cmfd_p02_synth__v1/ is confined to the inactive identity and unreachable by
+# scheduler dispatch (filters (1) and (2) above). This D3 registration receipt does not close that obligation; §2.4 does.
+# Evidence-only IDs are intentionally-discoverable non-secret identifiers; tightening the station-by-id filter is deferred to a separate change if needed.
 # No live browser probe required for the D3 registration step (browser-probe against station-MVT is bound to the 2.4 smoke).
 
 # ---- transaction isolation & concurrency scope (audit hygiene) ----
@@ -90,8 +114,13 @@ INV.F live top schema_migrations = 000042_drop_redundant_river_selected_identity
 # autopipe (infra/systemd/nhms-node27-autopipe.timer, 10-min cadence, calls import-basins-registry which INSERTs with active_flag=false
 # by default per workers/model_registry/basins_registry_import.py:1432) would NOT flip the active-row count and would still be caught
 # by the POSTCHECK if it changed it. What such a race COULD do is silently invalidate the audit line `total_model_instance_count = 14`
-# above (making it 15 rather than 14). At execution time (2026-07-07T02:04:04Z .. 02:04:16Z UTC, 12-second window) no concurrent
-# autopipe first-time-basin discovery is known to have occurred; total=14 was the live SELECT result at 02:04:17Z (line labeled INV.A).
+# above (making it 15 rather than 14).
+# Empirical anchor: the audit SELECT at 02:04:17Z observed total_model_instance_count = 14 (INV.A). Under default READ COMMITTED,
+# this rules out any concurrent autopipe INSERT into core.model_instance that COMMITTED before 02:04:17Z (such a race would have
+# produced total ≥ 15). READ COMMITTED does still allow a concurrent transaction whose INSERT began during the 02:04:04Z .. 02:04:16Z
+# BEGIN..COMMIT window and committed AFTER the audit SELECT (e.g., autopipe BEGIN 02:04:14Z, this txn COMMIT 02:04:16Z, autopipe COMMIT
+# 02:04:18Z); such a race is not falsified by the total=14 observation. That residual uncertainty is exactly the reason for the
+# forward-hygiene note below.
 # Forward-hygiene note for future evidence-registration scripts (§2.4/§2.5/2.6): wrap in SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
 # or take pg_advisory_xact_lock(hashtext('cmfd-direct-grid-evidence-registration')) so both the total-count audit and the active-count
 # guarantee are race-safe by construction, not by manual timing.

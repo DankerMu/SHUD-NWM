@@ -219,6 +219,7 @@ To run the current structural checks on node-27
 (`ssh -p 32099 nwm@210.77.77.27`, `cd /home/nwm/NWM`):
 
 ```bash
+NHMS_RUN_E2E=1 \
 NHMS_RUN_CMFD_P02_SMOKE=1 \
 DATABASE_URL="${DATABASE_URL:?set via infra/env/node27-ingest.env}" \
 NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT="$PWD/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package" \
@@ -229,8 +230,9 @@ Environment contract:
 
 | variable | required | value |
 |---|---|---|
+| `NHMS_RUN_E2E` | yes | `1` (bypasses `tests/conftest.py:22-36` auto-skip for the `e2e` marker; without it, all tests skip at collection time before `_gate_or_skip` runs) |
 | `NHMS_RUN_CMFD_P02_SMOKE` | yes | `1` |
 | `DATABASE_URL` | yes | inherit from `infra/env/node27-ingest.env` (writable `nhms` role) |
 | `NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT` | yes | absolute path to the `package/` directory containing `binding-manifest.json`, `forcing/`, and `input_dir/` |
 
-If any variable is unset, all three tests skip cleanly (default CI behavior).
+If any of the four variables is unset, tests skip cleanly (default CI behavior). Expected PASS output on node-27: `4 passed in ~0.02s`; any `skipped` count means at least one env var above is unset.
