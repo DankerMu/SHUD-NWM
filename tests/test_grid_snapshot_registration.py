@@ -45,8 +45,11 @@ from workers.grid_registry.input_record import (
     CellInput,
     GridSnapshotInputError,
     GridSnapshotInputRecord,
+    InsufficientAxisPointsError,
     InvalidBboxRectangleError,
     InvalidValidityWindowError,
+    MalformedJsonError,
+    MissingGridDefinitionFieldError,
     MissingSidecarError,
     NaNAxisValueError,
     NonMonotonicLatitudeError,
@@ -62,6 +65,7 @@ from workers.grid_registry.input_record import (
 _DEFAULT_LONGITUDES = [63.0, 63.25, 63.5, 63.75, 64.0]
 _DEFAULT_LATITUDES = [8.0, 8.25, 8.5, 8.75, 9.0]
 _DEFAULT_CONVERTER_VERSION = "v1.2.3"
+_DEFAULT_GRID_DEFINITION_URI = "canonical/IFS/grid/ifs_0p25/grid.json"
 
 
 def _default_grid_payload(
@@ -156,6 +160,7 @@ def _read_default_record(tmp_path: pathlib.Path) -> GridSnapshotInputRecord:
         "IFS",
         grid_json,
         sidecar,
+        grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
         expected_converter_version=_stub_converter_resolver,
     )
 
@@ -248,7 +253,11 @@ def test_input_record_sidecar_schema_validated_missing_valid_from(tmp_path: path
     )
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, SidecarSchemaError)
     assert excinfo.value.field == "valid_from"
@@ -263,7 +272,11 @@ def test_input_record_sidecar_schema_validated_valid_from_epoch_int(
     )
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, SidecarSchemaError)
     assert excinfo.value.field == "valid_from"
@@ -279,7 +292,11 @@ def test_input_record_sidecar_schema_validated_download_bbox_missing_north(
     )
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, SidecarSchemaError)
     assert excinfo.value.field == "north"
@@ -294,7 +311,11 @@ def test_input_record_sidecar_schema_validated_extra_top_level_key(
     )
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, SidecarSchemaError)
     assert excinfo.value.field == "unknown_key"
@@ -309,7 +330,11 @@ def test_input_record_sidecar_schema_validated_iso8601_without_timezone(
     )
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, SidecarSchemaError)
     assert excinfo.value.field == "valid_from"
@@ -401,6 +426,75 @@ def _build_bbox_disagrees_with_axis(tmp_path: pathlib.Path) -> tuple[pathlib.Pat
     )
 
 
+def _build_latitudes_too_short(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C3) len(latitudes) < 2 must surface as InsufficientAxisPointsError."""
+    grid_payload = _default_grid_payload(latitudes=[42.0])
+    return _write_fixture(
+        tmp_path,
+        grid_payload=grid_payload,
+        sidecar_payload=_default_sidecar_payload(latitudes=[42.0]),
+    )
+
+
+def _build_longitudes_too_short(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C3) len(longitudes) < 2 must surface as InsufficientAxisPointsError.
+
+    Uses a latitudes fixture of 2 values so `_derive_latitude_order` succeeds
+    and the failure surfaces at `_derive_native_resolution`.
+    """
+    grid_payload = _default_grid_payload(
+        longitudes=[42.0],
+        latitudes=[8.0, 8.25],
+    )
+    return _write_fixture(
+        tmp_path,
+        grid_payload=grid_payload,
+        sidecar_payload=_default_sidecar_payload(
+            longitudes=[42.0],
+            latitudes=[8.0, 8.25],
+        ),
+    )
+
+
+def _build_valid_to_equals_valid_from(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C5) valid_to == valid_from must fail closed (zero-length window)."""
+    same = "2026-07-06T12:00:00+00:00"
+    return _write_fixture(
+        tmp_path,
+        sidecar_payload=_default_sidecar_payload(valid_from=same, valid_to=same),
+    )
+
+
+def _build_shape_mismatch(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C6) declared shape != axis lengths must fail closed at layout invariant."""
+    grid_payload = _default_grid_payload()
+    grid_payload["shape"] = [3, 3]  # actual axis lengths are (5, 5)
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
+def _build_nan_in_latitudes(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C6) symmetric with nan_in_longitudes."""
+    latitudes = [8.0, float("nan"), 8.5, 8.75, 9.0]
+    return _write_fixture(
+        tmp_path,
+        grid_payload=_default_grid_payload(latitudes=latitudes),
+    )
+
+
+def _build_grid_id_missing(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C8) grid.json without a `grid_id` key must fail closed with a narrow subclass."""
+    grid_payload = _default_grid_payload()
+    grid_payload.pop("grid_id", None)
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
+def _build_schema_version_missing(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C8) grid.json without a `schema_version` key must fail closed with a narrow subclass."""
+    grid_payload = _default_grid_payload()
+    grid_payload.pop("schema_version", None)
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
 _FixtureBuilder = Callable[[pathlib.Path], tuple[pathlib.Path, pathlib.Path]]
 _FailClosedCase = tuple[str, _FixtureBuilder, type[GridSnapshotInputError], str]
 
@@ -440,6 +534,52 @@ _FAIL_CLOSED_CASES: tuple[_FailClosedCase, ...] = (
         BboxAxisDisagreementError,
         "south",
     ),
+    # C3: len < 2 axis mislabel — surface distinct exception subclass.
+    (
+        "latitudes_too_short",
+        _build_latitudes_too_short,
+        InsufficientAxisPointsError,
+        "latitudes",
+    ),
+    (
+        "longitudes_too_short",
+        _build_longitudes_too_short,
+        InsufficientAxisPointsError,
+        "longitudes",
+    ),
+    # C5: zero-length validity window (valid_to == valid_from).
+    (
+        "valid_to_equals_valid_from",
+        _build_valid_to_equals_valid_from,
+        InvalidValidityWindowError,
+        "valid_to",
+    ),
+    # C6: fail-closed matrix gaps — shape mismatch + NaN-in-latitudes.
+    (
+        "shape_mismatch",
+        _build_shape_mismatch,
+        NonRectilinearLayoutError,
+        "shape",
+    ),
+    (
+        "nan_in_latitudes",
+        _build_nan_in_latitudes,
+        NaNAxisValueError,
+        "latitudes",
+    ),
+    # C8: silent-empty coercion of grid_id / schema_version.
+    (
+        "grid_id_missing",
+        _build_grid_id_missing,
+        MissingGridDefinitionFieldError,
+        "grid_id",
+    ),
+    (
+        "schema_version_missing",
+        _build_schema_version_missing,
+        MissingGridDefinitionFieldError,
+        "schema_version",
+    ),
 )
 
 
@@ -458,7 +598,11 @@ def test_input_record_fails_closed(
     grid_json, sidecar = builder(tmp_path)
     with pytest.raises(GridSnapshotInputError) as excinfo:
         read_input_record(
-            "IFS", grid_json, sidecar, expected_converter_version=_stub_converter_resolver
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
         )
     assert isinstance(excinfo.value, expected_exception), (
         f"expected {expected_exception.__name__}; got {type(excinfo.value).__name__}"
@@ -542,6 +686,7 @@ def test_input_record_matches_producer_grid_points(tmp_path: pathlib.Path) -> No
         "IFS",
         grid_json,
         sidecar,
+        grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
         expected_converter_version=_stub_converter_resolver,
     )
 
@@ -586,13 +731,24 @@ _BACKFILL_SIGNATURE = "6c008901b8b7" + "0" * 52
 _BACKFILL_BBOX = {"south": 8.0, "north": 64.0, "west": 63.0, "east": 145.0}
 _BACKFILL_RESOLUTION = 0.25
 
+# Byte-for-byte pinned expected key for the (signature, bbox, resolution) triple
+# above. Computed once from the pinned implementation; hard-coded here so a
+# coordinated future refactor of both `_reference_canonical_grid_key` and
+# `derive_canonical_grid_key` cannot silently drift the encoding away from the
+# Task 3.1c contract (evidence f: "byte-for-byte" pin).
+_EXPECTED_BACKFILL_KEY = "2c6f5186d4a738547cab4760e9fc8ea900259d5394c71182043e2d99ca647244"
+
 
 def _reference_canonical_grid_key(
     grid_signature: str,
     bbox: dict[str, float],
     native_resolution: float,
 ) -> str:
-    """Inline reference algorithm mirroring the pinned Task 3.1c contract."""
+    """Inline reference algorithm mirroring the pinned Task 3.1c contract.
+
+    Kept as ALGORITHM DOCUMENTATION for the encoding pinned by Task 3.1c; no
+    longer used as the equality anchor (see `_EXPECTED_BACKFILL_KEY`).
+    """
     payload = json.dumps(
         {
             "grid_signature": grid_signature,
@@ -606,6 +762,7 @@ def _reference_canonical_grid_key(
         },
         sort_keys=True,
         separators=(",", ":"),
+        ensure_ascii=True,
     ).encode("utf-8")
     return sha256_bytes(payload)
 
@@ -621,6 +778,23 @@ def test_canonical_grid_key_same_inputs_same_key() -> None:
     assert key_1 == key_2
     assert len(key_1) == 64
     assert set(key_1).issubset(set("0123456789abcdef"))
+
+
+def test_canonical_grid_key_int_bbox_equals_float_bbox() -> None:
+    """(C1) int bbox values must produce the same key as float bbox values.
+
+    `json.dumps(8)` and `json.dumps(8.0)` differ (`"8"` vs `"8.0"`), so if
+    `_validate_bbox` accepts `int` without coercing to `float`, the same-shape
+    bbox produces different `canonical_grid_key`s.
+    """
+    int_bbox = {"south": 8, "north": 64, "west": 63, "east": 145}
+    float_bbox = {"south": 8.0, "north": 64.0, "west": 63.0, "east": 145.0}
+    key_int = derive_canonical_grid_key(_BACKFILL_SIGNATURE, int_bbox, 0.25)
+    key_float = derive_canonical_grid_key(_BACKFILL_SIGNATURE, float_bbox, 0.25)
+    assert key_int == key_float
+    # Anchor to the pinned expected value so a future refactor that reverts the
+    # coercion silently is caught here.
+    assert key_int == _EXPECTED_BACKFILL_KEY
 
 
 def test_canonical_grid_key_different_bbox_different_key() -> None:
@@ -670,17 +844,24 @@ def test_canonical_grid_key_exact_expected_for_backfill_inputs() -> None:
     The signature ``6c008901b8b7…`` is synthetic (extended to 64 chars with a
     deterministic suffix) — this test pins the encoding, not the live IFS/GFS
     backfill key (SUB-4 does not run backfill).
+
+    The expected value is a hard-coded module-level constant (`_EXPECTED_BACKFILL_KEY`)
+    — NOT `_reference_canonical_grid_key(...)` — so a coordinated future refactor
+    of both `_reference_canonical_grid_key` and `derive_canonical_grid_key` cannot
+    silently drift the encoding away from the Task 3.1c contract.
     """
-    expected = _reference_canonical_grid_key(
-        _BACKFILL_SIGNATURE, dict(_BACKFILL_BBOX), _BACKFILL_RESOLUTION
-    )
     actual = derive_canonical_grid_key(
         _BACKFILL_SIGNATURE, dict(_BACKFILL_BBOX), _BACKFILL_RESOLUTION
     )
-    assert actual == expected
+    assert actual == _EXPECTED_BACKFILL_KEY
     # Sanity: the expected key is 64-char lowercase hex.
-    assert len(expected) == 64
-    assert set(expected).issubset(set("0123456789abcdef"))
+    assert len(_EXPECTED_BACKFILL_KEY) == 64
+    assert set(_EXPECTED_BACKFILL_KEY).issubset(set("0123456789abcdef"))
+    # Documentation cross-check: the algorithm reference produces the same key.
+    reference = _reference_canonical_grid_key(
+        _BACKFILL_SIGNATURE, dict(_BACKFILL_BBOX), _BACKFILL_RESOLUTION
+    )
+    assert reference == _EXPECTED_BACKFILL_KEY
 
 
 _INVALID_INPUT_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
@@ -796,3 +977,142 @@ def test_default_fixture_reads_without_error(tmp_path: pathlib.Path) -> None:
     assert record.layout == "rectilinear"
     assert not math.isnan(record.native_resolution)
     assert isinstance(record.download_bbox, Mapping)
+
+
+# -----------------------------------------------------------------------------
+# C2: JSON decode leak - malformed JSON must surface as GridSnapshotInputError
+# -----------------------------------------------------------------------------
+
+
+_VALID_SIDECAR_BODY = (
+    b'"valid_from": "2026-07-06T00:00:00+00:00", '
+    b'"valid_to": null, '
+    b'"download_bbox": {"south": 8.0, "north": 9.0, "west": 63.0, "east": 64.0}'
+)
+
+_MALFORMED_SIDECAR_CASES: tuple[tuple[str, bytes], ...] = (
+    (
+        "bom_prefixed_sidecar",
+        b"\xef\xbb\xbf"
+        + json.dumps(
+            {
+                "valid_from": "2026-07-06T00:00:00+00:00",
+                "valid_to": None,
+                "download_bbox": {"south": 8.0, "north": 9.0, "west": 63.0, "east": 64.0},
+            }
+        ).encode("utf-8"),
+    ),
+    (
+        "truncated_sidecar",
+        b'{"valid_from": "2026-07-06T00:00:00+00:00", '
+        b'"valid_to": null, "download_bbox": {"south": 8.0',
+    ),
+    (
+        "trailing_comma_sidecar",
+        b"{" + _VALID_SIDECAR_BODY + b",}",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "sidecar_bytes"),
+    _MALFORMED_SIDECAR_CASES,
+    ids=[case[0] for case in _MALFORMED_SIDECAR_CASES],
+)
+def test_input_record_malformed_json_bytes(
+    tmp_path: pathlib.Path,
+    case: str,  # noqa: ARG001 - carried by parametrize id
+    sidecar_bytes: bytes,
+) -> None:
+    """(C2) Malformed sidecar JSON must raise MalformedJsonError (a
+    GridSnapshotInputError subclass) so downstream `except GridSnapshotInputError`
+    handlers do not crash on `json.JSONDecodeError` bubbling up unwrapped."""
+    grid_json = tmp_path / "grid.json"
+    sidecar = tmp_path / "grid_snapshot_metadata.json"
+    grid_json.write_text(json.dumps(_default_grid_payload()), encoding="utf-8")
+    sidecar.write_bytes(sidecar_bytes)
+    with pytest.raises(GridSnapshotInputError) as excinfo:
+        read_input_record(
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
+        )
+    assert isinstance(excinfo.value, MalformedJsonError)
+    assert excinfo.value.field == "sidecar"
+
+
+def test_input_record_malformed_grid_json_bytes(tmp_path: pathlib.Path) -> None:
+    """(C2) Malformed grid.json bytes must raise MalformedJsonError with
+    field='grid.json'."""
+    grid_json = tmp_path / "grid.json"
+    sidecar = tmp_path / "grid_snapshot_metadata.json"
+    grid_json.write_bytes(b'{"schema_version": "nhms.grid_definition.v1",')  # truncated
+    sidecar.write_text(json.dumps(_default_sidecar_payload()), encoding="utf-8")
+    with pytest.raises(GridSnapshotInputError) as excinfo:
+        read_input_record(
+            "IFS",
+            grid_json,
+            sidecar,
+            grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+            expected_converter_version=_stub_converter_resolver,
+        )
+    assert isinstance(excinfo.value, MalformedJsonError)
+    assert excinfo.value.field == "grid.json"
+
+
+# -----------------------------------------------------------------------------
+# C4: TOCTOU-safe capture of grid_definition_uri / grid_definition_checksum
+# -----------------------------------------------------------------------------
+
+
+def test_input_record_captures_grid_definition_checksum(tmp_path: pathlib.Path) -> None:
+    """(C4) The record's `grid_definition_checksum` must equal the SHA-256 of the
+    exact grid.json bytes read at input-record time, and `grid_definition_uri`
+    must equal the caller-supplied URI."""
+    grid_json, sidecar = _write_fixture(tmp_path)
+    expected_checksum = sha256_bytes(grid_json.read_bytes())
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    assert record.grid_definition_uri == _DEFAULT_GRID_DEFINITION_URI
+    assert record.grid_definition_checksum == expected_checksum
+    # Sanity: the checksum is a 64-char lowercase hex string.
+    assert len(record.grid_definition_checksum) == 64
+    assert set(record.grid_definition_checksum).issubset(set("0123456789abcdef"))
+
+
+def test_input_record_capture_prevents_toctou(tmp_path: pathlib.Path) -> None:
+    """(C4) A rewrite of grid.json AFTER `read_input_record` returns must NOT
+    change the record's `grid_definition_checksum`. This proves the reader
+    hashed the exact bytes it parsed (single-open), closing the TOCTOU window
+    that a second-open checksum in the Task 3.1b writer would open."""
+    grid_json, sidecar = _write_fixture(tmp_path)
+    original_bytes = grid_json.read_bytes()
+    original_checksum = sha256_bytes(original_bytes)
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    assert record.grid_definition_checksum == original_checksum
+
+    # Rewrite grid.json bytes with a different valid payload; simulate the
+    # TOCTOU window where the file is replaced between the reader read and any
+    # downstream re-open.
+    rewritten_payload = _default_grid_payload()
+    rewritten_payload["schema_version"] = "nhms.grid_definition.v99"
+    rewritten_bytes = json.dumps(rewritten_payload).encode("utf-8")
+    grid_json.write_bytes(rewritten_bytes)
+    assert sha256_bytes(rewritten_bytes) != original_checksum
+
+    # The record's checksum still reflects the FIRST bytes' digest, not the
+    # rewritten ones — SUB-5 writer can trust it without re-opening.
+    assert record.grid_definition_checksum == original_checksum

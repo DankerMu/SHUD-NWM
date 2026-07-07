@@ -69,6 +69,7 @@ def derive_canonical_grid_key(
         },
         sort_keys=True,
         separators=(",", ":"),
+        ensure_ascii=True,
     ).encode("utf-8")
     return sha256_bytes(payload)
 
@@ -122,6 +123,7 @@ def _validate_bbox(bbox: Mapping[str, float]) -> Mapping[str, float]:
             f"bbox has unexpected key {offending!r}; expected keys are "
             f"{sorted(_BBOX_KEYS)}."
         )
+    coerced: dict[str, float] = {}
     for key in _BBOX_KEYS:
         value = bbox[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -133,4 +135,5 @@ def _validate_bbox(bbox: Mapping[str, float]) -> Mapping[str, float]:
             raise ValueError(
                 f"bbox[{key!r}] must be finite; got {value!r}."
             )
-    return bbox
+        coerced[key] = float_value
+    return coerced

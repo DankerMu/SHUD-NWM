@@ -26,6 +26,8 @@ from typing import Literal
 
 import numpy as np
 
+from packages.common.object_store import sha256_bytes
+
 # The default schema file that ships with the repo. Callers may inject a
 # different path for testing, but production callers should never override it.
 DEFAULT_SIDECAR_SCHEMA_PATH = (
@@ -97,6 +99,33 @@ class BboxAxisDisagreementError(GridSnapshotInputError):
     """Raised when the sidecar bbox drifts from ``grid.json`` axis outer edges."""
 
 
+class MalformedJsonError(GridSnapshotInputError):
+    """Raised when a JSON file (grid.json, sidecar, or schema) cannot be decoded.
+
+    Wraps :class:`json.JSONDecodeError` so downstream callers writing
+    ``except GridSnapshotInputError`` handlers do not crash on BOM-prefixed,
+    truncated, or otherwise malformed JSON bytes.
+    """
+
+
+class InsufficientAxisPointsError(GridSnapshotInputError):
+    """Raised when an axis has fewer than two values.
+
+    A single-point axis is not a monotonicity failure or a spacing failure — it
+    is an insufficient-input failure that must be surfaced distinctly so
+    downstream handlers filtering on exception class are not misled.
+    """
+
+
+class MissingGridDefinitionFieldError(GridSnapshotInputError):
+    """Raised when ``grid.json`` omits a required identity field.
+
+    Distinct from :class:`NonRectilinearLayoutError` so downstream callers can
+    catch missing ``grid_id`` / ``schema_version`` narrowly without swallowing
+    layout / axis failures.
+    """
+
+
 # -----------------------------------------------------------------------------
 # Records
 # -----------------------------------------------------------------------------
@@ -128,10 +157,18 @@ class GridSnapshotInputRecord:
 
     Fields derived from ``grid.json`` at read time:
         ``converter_version`` (from ``expected_converter_version(source_id)``),
-        ``native_resolution``, ``latitude_order``, ``flatten_order``.
+        ``native_resolution``, ``latitude_order``, ``flatten_order``,
+        ``grid_definition_checksum`` (SHA-256 of the exact bytes parsed, so the
+        Task 3.1b writer never needs to re-open ``grid.json`` and open a TOCTOU
+        window with content drift between the input read and the checksum
+        compute).
 
     Fields sourced from sidecar:
         ``valid_from``, ``valid_to``, ``download_bbox``.
+
+    Fields supplied by the caller (Task 3.1b registry writer / SUB-5 CLI):
+        ``grid_definition_uri`` — the ``canonical/{source}/grid/{grid_id}/
+        grid.json`` URI the caller derives; the reader does not synthesize it.
 
     Fields computed in the fixed flatten order (y outer / x inner):
         ``cells``.
@@ -151,6 +188,8 @@ class GridSnapshotInputRecord:
     valid_from: datetime
     valid_to: datetime | None
     download_bbox: Mapping[str, float]
+    grid_definition_uri: str
+    grid_definition_checksum: str
     cells: tuple[CellInput, ...]
 
 
@@ -164,15 +203,35 @@ def read_input_record(
     grid_json_path: pathlib.Path,
     sidecar_path: pathlib.Path,
     *,
+    grid_definition_uri: str,
     schema_path: pathlib.Path | None = None,
     expected_converter_version: Callable[[str], str] | None = None,
 ) -> GridSnapshotInputRecord:
     """Read grid.json + sidecar and return a validated input record.
 
+    ``grid_definition_uri`` is required so the SUB-5 CLI can pass the URI
+    derived from the ``canonical/{source}/grid/{grid_id}/grid.json`` convention;
+    the reader computes ``grid_definition_checksum`` from the exact bytes parsed
+    (no re-open) to close the TOCTOU window between input read and checksum
+    compute at the Task 3.1b writer boundary.
+
     All fail-closed contract violations raise a subclass of
     :class:`GridSnapshotInputError`.
     """
-    grid_payload = _read_grid_json(grid_json_path)
+    grid_payload, grid_raw_bytes = _read_grid_json(grid_json_path)
+    grid_definition_checksum = sha256_bytes(grid_raw_bytes)
+
+    if grid_payload.get("schema_version") is None:
+        raise MissingGridDefinitionFieldError(
+            "schema_version",
+            f"grid.json at {grid_json_path} is missing required key 'schema_version'.",
+        )
+    if grid_payload.get("grid_id") is None:
+        raise MissingGridDefinitionFieldError(
+            "grid_id",
+            f"grid.json at {grid_json_path} is missing required key 'grid_id'.",
+        )
+
     layout = _extract_layout(grid_payload)
     axis_order = _extract_axis_order(grid_payload)
     longitudes = _extract_axis(grid_payload, "longitudes")
@@ -227,6 +286,8 @@ def read_input_record(
         valid_from=valid_from,
         valid_to=valid_to,
         download_bbox=download_bbox,
+        grid_definition_uri=grid_definition_uri,
+        grid_definition_checksum=grid_definition_checksum,
         cells=cells,
     )
 
@@ -236,15 +297,23 @@ def read_input_record(
 # -----------------------------------------------------------------------------
 
 
-def _read_grid_json(grid_json_path: pathlib.Path) -> Mapping[str, object]:
-    with grid_json_path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+def _read_grid_json(grid_json_path: pathlib.Path) -> tuple[Mapping[str, object], bytes]:
+    """Return ``(parsed_payload, raw_bytes)`` so callers can hash the exact
+    bytes that were parsed and avoid TOCTOU between read and checksum."""
+    raw_bytes = grid_json_path.read_bytes()
+    try:
+        payload = json.loads(raw_bytes)
+    except json.JSONDecodeError as err:
+        raise MalformedJsonError(
+            "grid.json",
+            f"grid.json at {grid_json_path} is not valid JSON: {err}.",
+        ) from err
     if not isinstance(payload, Mapping):
         raise NonRectilinearLayoutError(
             "layout",
             f"grid.json at {grid_json_path} must decode to a JSON object; got {type(payload).__name__}.",
         )
-    return payload
+    return payload, raw_bytes
 
 
 def _extract_layout(payload: Mapping[str, object]) -> Literal["rectilinear"]:
@@ -343,7 +412,7 @@ def _extract_shape(
 
 def _derive_latitude_order(latitudes: tuple[float, ...]) -> Literal["ascending", "descending"]:
     if len(latitudes) < 2:
-        raise NonMonotonicLatitudeError(
+        raise InsufficientAxisPointsError(
             "latitudes",
             f"latitudes must contain at least two values to derive an order; got {len(latitudes)}.",
         )
@@ -363,12 +432,12 @@ def _derive_native_resolution(
     latitudes: tuple[float, ...],
 ) -> float:
     if len(longitudes) < 2:
-        raise AxisSpacingMismatchError(
+        raise InsufficientAxisPointsError(
             "longitudes",
             "longitudes must contain at least two values to derive native_resolution.",
         )
     if len(latitudes) < 2:
-        raise AxisSpacingMismatchError(
+        raise InsufficientAxisPointsError(
             "latitudes",
             "latitudes must contain at least two values to derive native_resolution.",
         )
@@ -391,7 +460,13 @@ def _derive_native_resolution(
 def _load_schema(schema_path: pathlib.Path | None) -> Mapping[str, object]:
     path = schema_path if schema_path is not None else DEFAULT_SIDECAR_SCHEMA_PATH
     with path.open("r", encoding="utf-8") as handle:
-        schema = json.load(handle)
+        try:
+            schema = json.load(handle)
+        except json.JSONDecodeError as err:
+            raise MalformedJsonError(
+                "schema",
+                f"Sidecar schema at {path} is not valid JSON: {err}.",
+            ) from err
     if not isinstance(schema, Mapping):
         raise SidecarSchemaError(
             "schema",
@@ -408,7 +483,13 @@ def _read_sidecar(sidecar_path: pathlib.Path) -> Mapping[str, object]:
             "grid_snapshot_metadata.json before registration.",
         )
     with sidecar_path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+        try:
+            payload = json.load(handle)
+        except json.JSONDecodeError as err:
+            raise MalformedJsonError(
+                "sidecar",
+                f"Sidecar at {sidecar_path} is not valid JSON: {err}.",
+            ) from err
     if not isinstance(payload, Mapping):
         raise SidecarSchemaError(
             "sidecar",
