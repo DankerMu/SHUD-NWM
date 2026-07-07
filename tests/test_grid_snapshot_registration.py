@@ -495,6 +495,31 @@ def _build_schema_version_missing(tmp_path: pathlib.Path) -> tuple[pathlib.Path,
     return _write_fixture(tmp_path, grid_payload=grid_payload)
 
 
+def _build_grid_id_empty_string(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C8 residual) grid.json with `grid_id=""` must fail closed with a narrow subclass.
+
+    The earlier fix only guarded `is None`; an explicit empty string slid through
+    the `.get(..., "")` fallback and produced a record with empty identity fields.
+    """
+    grid_payload = _default_grid_payload()
+    grid_payload["grid_id"] = ""
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
+def _build_grid_id_whitespace(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C8 residual) grid.json with `grid_id="   "` (whitespace only) must fail closed."""
+    grid_payload = _default_grid_payload()
+    grid_payload["grid_id"] = "   "
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
+def _build_schema_version_empty_string(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """(C8 residual) grid.json with `schema_version=""` must fail closed with a narrow subclass."""
+    grid_payload = _default_grid_payload()
+    grid_payload["schema_version"] = ""
+    return _write_fixture(tmp_path, grid_payload=grid_payload)
+
+
 _FixtureBuilder = Callable[[pathlib.Path], tuple[pathlib.Path, pathlib.Path]]
 _FailClosedCase = tuple[str, _FixtureBuilder, type[GridSnapshotInputError], str]
 
@@ -575,8 +600,26 @@ _FAIL_CLOSED_CASES: tuple[_FailClosedCase, ...] = (
         "grid_id",
     ),
     (
+        "grid_id_empty_string",
+        _build_grid_id_empty_string,
+        MissingGridDefinitionFieldError,
+        "grid_id",
+    ),
+    (
+        "grid_id_whitespace",
+        _build_grid_id_whitespace,
+        MissingGridDefinitionFieldError,
+        "grid_id",
+    ),
+    (
         "schema_version_missing",
         _build_schema_version_missing,
+        MissingGridDefinitionFieldError,
+        "schema_version",
+    ),
+    (
+        "schema_version_empty_string",
+        _build_schema_version_empty_string,
         MissingGridDefinitionFieldError,
         "schema_version",
     ),

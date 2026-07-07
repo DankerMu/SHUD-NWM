@@ -221,15 +221,17 @@ def read_input_record(
     grid_payload, grid_raw_bytes = _read_grid_json(grid_json_path)
     grid_definition_checksum = sha256_bytes(grid_raw_bytes)
 
-    if grid_payload.get("schema_version") is None:
+    raw_schema_version = grid_payload.get("schema_version")
+    if not isinstance(raw_schema_version, str) or not raw_schema_version.strip():
         raise MissingGridDefinitionFieldError(
             "schema_version",
-            f"grid.json at {grid_json_path} is missing required key 'schema_version'.",
+            f"grid.json at {grid_json_path} must declare a non-empty 'schema_version' string.",
         )
-    if grid_payload.get("grid_id") is None:
+    raw_grid_id = grid_payload.get("grid_id")
+    if not isinstance(raw_grid_id, str) or not raw_grid_id.strip():
         raise MissingGridDefinitionFieldError(
             "grid_id",
-            f"grid.json at {grid_json_path} is missing required key 'grid_id'.",
+            f"grid.json at {grid_json_path} must declare a non-empty 'grid_id' string.",
         )
 
     layout = _extract_layout(grid_payload)
@@ -272,8 +274,8 @@ def read_input_record(
     cells = _build_cells(longitudes=longitudes, latitudes=latitudes)
 
     return GridSnapshotInputRecord(
-        schema_version=str(grid_payload.get("schema_version", "")),
-        grid_id=str(grid_payload.get("grid_id", "")),
+        schema_version=str(grid_payload["schema_version"]),
+        grid_id=str(grid_payload["grid_id"]),
         layout=layout,
         axis_order=axis_order,
         shape=shape,
