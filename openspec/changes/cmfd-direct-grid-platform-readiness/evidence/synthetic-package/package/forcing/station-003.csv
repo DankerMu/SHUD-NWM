@@ -1,0 +1,7 @@
+SYNTH station-003 lon=100.0 lat=30.5 z=200 5-step hand-derived
+Time_Day	Precip	Temp	RH	Wind	RN
+0	0.5	20.0	0.80	7.0	400
+1	1.0	21.0	0.82	7.5	410
+2	1.5	22.0	0.84	8.0	420
+3	2.0	23.0	0.86	8.5	430
+4	2.5	24.0	0.88	9.0	440

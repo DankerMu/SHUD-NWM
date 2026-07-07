@@ -1,0 +1,49 @@
+{
+  "forcing_mapping_mode": "direct_grid",
+  "binding_uri": "synth://cmfd-p0.2-direct-grid-evidence/v1",
+  "binding_checksum": "cdf0859b88828d5d4f16c22954b78bf0c36a9b838016b8a91174bdbf39a5dc07",
+  "model_input_package_id": "synth-basin-v1",
+  "sp_att_path": "input_dir/synth-basin/synth-basin.sp.att",
+  "sp_att_checksum": "74a64acaab43c7bc61ea9e0eccc83f1116e04b3f73905a39e8f7a4e47b517dde",
+  "applicable_source_ids": ["cmfd"],
+  "grid_id": "synth-grid-p0.2-v1",
+  "grid_signature": "afafe1c814ad6b7a212455c2c8f25d6abaa22f3dd991f232d3749ff7f7d48449",
+  "station_bindings": [
+    {
+      "station_id": "synth-station-001",
+      "shud_forcing_index": 1,
+      "forcing_filename": "station-001.csv",
+      "longitude": 100.0,
+      "latitude": 30.0,
+      "x": 1,
+      "y": 1,
+      "z": 100,
+      "grid_id": "synth-grid-p0.2-v1",
+      "grid_cell_id": "cell-0100.00-0030.00"
+    },
+    {
+      "station_id": "synth-station-002",
+      "shud_forcing_index": 2,
+      "forcing_filename": "station-002.csv",
+      "longitude": 100.5,
+      "latitude": 30.0,
+      "x": 2,
+      "y": 1,
+      "z": 150,
+      "grid_id": "synth-grid-p0.2-v1",
+      "grid_cell_id": "cell-0100.50-0030.00"
+    },
+    {
+      "station_id": "synth-station-003",
+      "shud_forcing_index": 3,
+      "forcing_filename": "station-003.csv",
+      "longitude": 100.0,
+      "latitude": 30.5,
+      "x": 1,
+      "y": 2,
+      "z": 200,
+      "grid_id": "synth-grid-p0.2-v1",
+      "grid_cell_id": "cell-0100.00-0030.50"
+    }
+  ]
+}
