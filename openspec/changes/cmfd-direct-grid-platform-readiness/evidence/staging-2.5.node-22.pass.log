@@ -1,12 +1,14 @@
-# captured at 2026-07-07T09:27:02Z host=node-22 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=e47e31a2bf469393ea176400a1f6cfb195269a89f642944b859778d62d64b5ca
+# captured at 2026-07-07T09:27:02Z host=node-22 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37
 # code_carrier_sha=907b30099398cbcc244ab51b022ddcf19c7a789e
 # task: cmfd-direct-grid-platform-readiness §2.5 node-22 minimal-basin staging with production SHUD binary
 # host: node-22 (210.77.77.22:32099, user=frd_muziyao, /scratch/frd_muziyao/NWM)
-# scope-note: §2.5 staging carrier is scratchpad/stage-2.5-node22.py (temp script
-#   scp-ed to /tmp on node-22 at run time — see #2.5 execution recipe below). The
-#   MANIFEST baseline_commit=5e518c15 pins platform identities under test. CODE
-#   CARRIER commit at run time is 907b3009 (this PR's §2.5 branch head, records
-#   only openspec/** + docs/** vs 5e518c15).
+# scope-note: §2.5 staging carrier is the committed script
+#   openspec/changes/cmfd-direct-grid-platform-readiness/evidence/stage-2.5-node22.py
+#   (env-gated CLI, no argv-parsed at import; see execution recipe below).
+#   The MANIFEST baseline_commit=5e518c15 pins platform identities under
+#   test. CODE CARRIER commit at run time is 907b3009 (this PR's §2.5
+#   branch head at capture time, records only openspec/** + docs/** vs
+#   5e518c15).
 # TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):
 #   `git diff 5e518c15..907b3009 -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
 #   (verified locally, this session at 2026-07-07T09:27:02Z UTC). No manifest-
@@ -18,12 +20,18 @@
 
 ## §2.5 execution recipe (reproducible)
 # 1. ssh -p 32099 frd_muziyao@210.77.77.22
-# 2. cd /scratch/frd_muziyao/NWM && git checkout feat/issue-893-cmfd-p02-node22-minimal-basin
-# 3. scp scratchpad/stage-2.5-node22.py to /tmp/stage-2.5-node22.py on node-22
+# 2. cd /scratch/frd_muziyao/NWM && git fetch && git checkout feat/issue-893-cmfd-p02-node22-minimal-basin
+# 3. (record) printenv SHUD_EXECUTABLE  # captures the deployment env var
+#    read by workers/shud_runtime/runtime.py:95; may be empty if run outside
+#    a scheduler-dispatched job, in which case D1's SHUD_BINARY captures
+#    the same path used by the deployment via infra/env/compute.example:129
+#    (production `SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud`).
 # 4. NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT=/scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package \
 #    SHUD_BINARY=/scratch/frd_muziyao/NWM/SHUD/shud \
-#    python3 /tmp/stage-2.5-node22.py
-# All output below captured verbatim from that invocation.
+#    python3 /scratch/frd_muziyao/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/stage-2.5-node22.py
+# The script is committed at the path above; SHUD_BINARY is the script's own
+# argument name (it is not a runtime code path env). All output below
+# captured verbatim from that invocation.
 
 ## D1. Production SHUD binary identity (§2.5 required-evidence bullet 2)
 # shud binary path        : /scratch/frd_muziyao/NWM/SHUD/shud
@@ -42,12 +50,27 @@
 #   `shud_executable="shud_omp"` inherited from workers/shud_runtime/runtime.py:74
 #   Python default. Node-22 investigation for §2.5 confirmed the actually deployed
 #   binary is `shud` (not `shud_omp`, which would be the OpenMP-parallel variant
-#   deferred to a future change). Manifest v1 amended in-place under this PR to
-#   `shud_executable="shud"`; manifest_sha256 recomputed to e47e31a2 (see
-#   design.md §"How evidence is bound to commits" pre-certification errata
-#   paragraph). All 5 prior pass logs' binder headers updated in-place to the
-#   new sha in the same PR under the pre-merge in-place edit clause (design.md
-#   line 92, "File IO / path safety / overwrite" risk pack).
+#   deferred to a future change). Two pre-certification errata under this PR:
+#     (i)  §2.5 identity substitution: `shud_executable="shud_omp"` → `"shud"`.
+#          manifest_sha256 recomputed 4958e747… → e47e31a2… (first errata).
+#     (ii) §2.5 review round-2: `source_locations["shud_executable"]` pointer
+#          updated to cite `staging-2.5.node-22.pass.log` D1 (production binary
+#          identity fact) with a parenthetical noting that runtime.py:74/85/95
+#          Python default is still `shud_omp` and deployment env
+#          `SHUD_EXECUTABLE=/scratch/frd_muziyao/NWM/SHUD/shud` overrides it
+#          (`infra/env/compute.example:129`). This closes the falsified
+#          source-of-truth pointer flagged by Phase 4 broad-expanded review
+#          (correctness-01 / test-2 / spec-1). manifest_sha256 recomputed
+#          e47e31a2… → 426b7f7e… (second errata).
+#   Both errata are permitted under the pre-certification errata clause in
+#   design.md §"How evidence is bound to commits" (no §3.1 certification has
+#   been produced yet). All 6 pass logs' `manifest_sha256=<64-hex>` binder
+#   headers (check_manifest_completeness.v1 + pytest-2.1 + pytest-2.2 +
+#   db-registration-2.3 + smoke-2.4 + staging-2.5) are updated in-place to
+#   the current sha `426b7f7e…` under the same PR (permitted by the pre-
+#   merge in-place edit clause in the "File IO / path safety / overwrite"
+#   risk pack because the change is still under `openspec/changes/<change>/`
+#   and not yet archived).
 
 ## D2. ldd resolves all runtime libs on node-22 (no LD_LIBRARY_PATH required)
 # ldd /scratch/frd_muziyao/NWM/SHUD/shud:
@@ -134,33 +157,83 @@
 # soil parameter sets), `.tsd.lai/mf/rl` (time-series LAI/melt-factor/roughness),
 # and `.cfg.para/calib/ic` (config + calibration + initial conditions).
 #
-# Reference: a real 4773-element SHUD basin like `/scratch/frd_muziyao/NWM/SHUD/
-# input/qhh/` has 18 input files spanning ~2 MiB; our 3-element synth has 6
-# input files (plus manifest+sidecars) totaling ~2.5 KiB. Full simulation of
-# the synth basin requires either:
-#   (a) extending §2.3 synthetic package with a full multi-station SHUD input
-#       tree (out of §2.3 scope; would require re-doing §2.3 evidence);
-#   (b) operator-staged 3-element real basin (out of scope; would require a
-#       small basin migration outside the readiness gate);
-#   (c) grafting synth `.sp.att`/`.tsd.forc` into an existing project like qhh
-#       (element-count mismatch: qhh=4773 vs synth=3, would corrupt qhh).
+# Reference (verified against production basins on node-27, 2026-07-07 UTC).
+# Authoritative production model release for qhh is the object-store
+# release-frozen package:
+#   /home/ghdc/nwm/object-store/models/basins_qhh_shud/
+#   vbasins-qhh-baf3aaf479de-c58dfb94-calibfix20260630/package/
+# with matching manifest.json + 18 SHUD input files (~2 MiB). node-27's
+# basin-owner workspace at `/home/ghdc/nwm/Basins/qhh/input/qhh/` and
+# node-22's replica at `/volume/nwm/Basins/qhh/input/qhh/` are identical-
+# content mirrors of the same modeling inputs (verified: 4,773 elements,
+# 386 stations, 347 unique FORC values, X<lon>Y<lat>.csv per-station
+# grid-derived filename pattern, currently legacy IDW-consumed).
+#
+# 13-basin release census on node-27 object-store (all legacy, none have
+# a direct-grid `binding-manifest.json` yet — this matches docs/ForcingReplace
+# main doc §"13 model 实例全部无 direct-grid contract"):
+#   basin              release_count  stations  el_count  local_workspace
+#   qhh                4              386       4,773     yes (dev workspace)
+#   keliya             2              32        484       yes
+#   heihe              3              1,709     6,335     yes
+#   zhaochen/BST       2              626       4,732     yes
+#   zhaochen/WEM       2              5         967       yes (X1..X5 seq)
+#   zhaochen/MC        2              9         1,900     yes (X1..X9 seq)
+#   hetianhe           3              581       4,872     no local workspace
+#   kashigeer          2              941       3,204     no local workspace
+#   weiganhe           3              401       3,158     no local workspace
+#   xinanjiang_upstream 2             50        801       no local workspace
+#   tailanhe           3              37        1,614     no local workspace
+#   qinyijiang         3              93        3,155     no local workspace
+#   zhaochen/HHY       2              1,420     7,800     no local workspace
+#   TOTAL              33             6,290     44,795
+# 6,290 total sums exactly to node-27 PG `met.met_station active_flag=true`
+# live count from smoke-2.4.node-27.pass.log INV.C — cross-artifact consistent.
+#
+# Our 3-element synth carries 6 input files (plus manifest + sidecars)
+# totaling ~2.5 KiB. Full end-to-end SHUD simulation of the synth basin
+# requires one of:
+#   (a) extending §2.3 synthetic package with a full multi-station SHUD
+#       input tree (out of §2.3 scope; would require re-doing §2.3
+#       evidence);
+#   (b) operator-staged 3-element real basin (out of scope; would require
+#       a small basin migration outside the readiness gate);
+#   (c) grafting synth `.sp.att`/`.tsd.forc` into any of the 13 production
+#       basin release packages (element-count mismatch synth=3 vs
+#       min production=484 keliya / max=7,800 zhaochen_hhy makes `.sp.mesh`
+#       topologically incompatible with the grafted `.sp.att`, and
+#       station-count mismatch synth=3 vs min=5 wem / max=1,709 heihe
+#       makes `.tsd.forc` incompatible with the grafted forcing header;
+#       would corrupt the target production release).
 #
 # All three paths are deferred to a follow-up change scope after Epic #886
 # closes. §2.5 discharges the *staging* invariants (D4-D7) and records the
 # *production* SHUD binary identity (D1-D3), which is the load-bearing
 # evidence tasks.md §2.5 required-evidence bullets ask for.
+#
+# Note: the `/scratch/frd_muziyao/NWM/SHUD/input/qhh/` tree bundled inside
+# the SHUD submodule at `SHUD/input/qhh` is a **standalone SHUD dev toy**
+# (1 station, single `forcing.csv`, 4,773 elements, legacy standalone
+# workflow) and is NOT the production qhh basin. It is not a candidate for
+# path (c) either — same element-count mismatch, plus its `.sp.att` FORC
+# column is uniformly single-station rather than the multi-station column
+# our direct-grid contract requires. Production authority for every basin
+# is the object-store release-frozen package under
+# `/home/ghdc/nwm/object-store/models/basins_<basin>_shud/<release>/package/`.
 
 ## D9. Discharge check against tasks.md §2.5 required-evidence bullets
+# tasks.md §2.5 has exactly 2 required-evidence bullets plus 1 non-goal bullet.
 # Bullet 1 (stage 2.3 synthetic multi-station package with `shud`; does NOT
 #   rewrite `.sp.att` to single station; staged `.sp.att FORC` ⊆ staged
 #   `.tsd.forc` `ID` set): D4 (mode=direct_grid) + D5 (multi-station FORC 3
 #   preserved) + D6 (FORC⊆IDs verified) — DISCHARGED.
 # Bullet 2 (execution record cites node-22 host + baseline_commit + manifest
-#   checksum; `shud` binary path recorded (production binary, no rebuild)):
-#   binder header line 1 + D1 (sha256/size/git-commit) + D2 (ldd) — DISCHARGED.
-# Bullet 3 (code_carrier_sha attest with empty tree-diff on manifest-identity
-#   paths when carrier differs from baseline_commit): binder line 2 +
-#   TREE-EQUIVALENCE ATTEST at header — DISCHARGED.
+#   checksum; `shud` binary path recorded (production binary, no rebuild);
+#   AND, when actual git HEAD ≠ baseline_commit, code_carrier_sha empty
+#   tree-diff attest on manifest-identity paths): binder header line 1
+#   (host + baseline + manifest sha) + D1 (sha256/size/submodule commit)
+#   + D2 (ldd runtime library resolution) + binder header line 2
+#   (code_carrier_sha) + TREE-EQUIVALENCE ATTEST at header — DISCHARGED.
 # Non-goal (no state cutover, no scheduler routing change, no production
 #   cycle activation): §2.5 touches no scheduler / no state manager /
 #   no production cycle — DISCHARGED.

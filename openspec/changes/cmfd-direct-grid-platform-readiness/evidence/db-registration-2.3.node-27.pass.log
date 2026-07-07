@@ -1,4 +1,4 @@
-# captured at 2026-07-07T02:04:17Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=e47e31a2bf469393ea176400a1f6cfb195269a89f642944b859778d62d64b5ca
+# captured at 2026-07-07T02:04:17Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37
 # task: cmfd-direct-grid-platform-readiness §2.3 D3 — evidence-only registration of the synthetic direct-grid contract as core.model_instance on node-27
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)

@@ -1,4 +1,4 @@
-# captured at 2026-07-07T01:07:24Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=e47e31a2bf469393ea176400a1f6cfb195269a89f642944b859778d62d64b5ca
+# captured at 2026-07-07T01:07:24Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37
 # task: cmfd-direct-grid-platform-readiness §2.2 pinned-commit re-run of DB migration static-SQL check
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # git rev-parse HEAD: 5e518c151375b798c29ee3cafb3260413ac8905f

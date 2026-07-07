@@ -8,7 +8,7 @@ hand-derived input contract that mirrors the fixture shape used by
 
 Pinned baseline: `readiness-manifest.v1.json` (baseline_commit
 `5e518c151375b798c29ee3cafb3260413ac8905f`, manifest SHA-256
-`e47e31a2bf469393ea176400a1f6cfb195269a89f642944b859778d62d64b5ca`).
+`426b7f7ed6f0c5e0d08a73c860a77eac81c634300d51065c8f429b05b811ff37`).
 
 ## 1. Purpose and non-goals
 

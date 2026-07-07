@@ -1,0 +1,35 @@
+# §2.7 Pre-work: Spec vs Code Drift Log
+
+Pre-work receipt for tasks.md `§2.7` ("Record that readiness is certified on pinned-commit evidence, and capture any observed OpenSpec/code drift"). This log is committed under `openspec/changes/cmfd-direct-grid-platform-readiness/evidence/` so it moves into archive together with the change on merge and is discoverable during any post-merge audit.
+
+## Drift entry 1: `shud-runtime` spec says `shud`, code default says `shud_omp`
+
+- **Recorded**: 2026-07-07 (post-PR#928 shud_omp → shud purge, during PR#929 §2.5 Phase 4 review)
+- **Spec**: `openspec/specs/shud-runtime/spec.md` (13 MUST-clauses referring to `shud` executable) plus `openspec/specs/basins-runtime-consumption/spec.md`, `openspec/specs/model-registration/spec.md`, `openspec/project-profile.md` (all now say `shud`; previously said `shud_omp`).
+- **Code (baseline_commit `5e518c15…`, unchanged in PR#928 and PR#929)**:
+    - `workers/shud_runtime/runtime.py:74` — `shud_executable: str = "shud_omp"` (SHUDRuntimeConfig dataclass default)
+    - `workers/shud_runtime/runtime.py:85` — behavioral gate literally names `shud_omp`
+    - `workers/shud_runtime/runtime.py:95` — `SHUDRuntimeConfig.from_env` reads `os.getenv("SHUD_EXECUTABLE", "shud_omp")`
+    - `services/production_closure/slurm_validation.py:319,653` — same `shud_omp` fallback
+    - `schemas/examples/run_manifest.example.json:45` — `"executable": "shud_omp"`
+- **Deployment reconciliation**: production `SHUD_EXECUTABLE` env is set to `/scratch/frd_muziyao/NWM/SHUD/shud` (see `infra/env/compute.example:129`), overriding the Python default at runtime — a Slurm-dispatched hydro run therefore executes `shud`, not `shud_omp`. The MUST-clauses are satisfied at the deployment envelope, not at the code default.
+- **Discovery mechanism**: Phase 4 broad-expanded review packs (`correctness`, `test-evidence`, `spec-compliance`) verified that `grep -n 'shud_executable' workers/shud_runtime/runtime.py` returns `shud_omp` at line 74, contradicting both the spec and the manifest's `source_locations["shud_executable"]` pointer (first found in Round-1). The manifest pointer was fixed by second pre-cert errata (see `design.md`, "Pre-certification manifest v1 second errata" paragraph); the spec/code drift itself is not fixed here.
+- **Reason not fixed in this PR**: `§1.1` non-goal for this change is "no production-code change to how any component reports its version". Flipping the Python default would be a semantic behavior change at the Python API layer (any caller that constructs `SHUDRuntimeConfig()` without overriding gets a different binary name), out of `Epic #886` readiness-gate scope.
+- **Proposed reconciliation path**: follow-up change flips runtime.py:74/85/95 + slurm_validation.py + example manifest defaults from `shud_omp` to `shud`. This is a mechanical edit but touches production code, and requires its own OpenSpec change + PR + review because it changes runtime code behavior in the absence of the env override (e.g. in local dev, in ad-hoc `python -c`, in unit tests that construct SHUDRuntimeConfig without env). Deferred; not blocking `Epic #886` gate.
+
+## Drift entry 2: `direct-grid-readiness-evidence` spec `Requirement: Minimal-basin execution` scope narrowing
+
+- **Recorded**: 2026-07-07 (during PR#929 §2.5 Phase 4 review; findings test-3, spec-3)
+- **Original spec text** (before `§2.5` review): "The platform SHALL execute a minimal basin end-to-end with the production SHUD binary, staging the hand-assembled synthetic multi-station direct-grid evidence package, to confirm the pinned solver stages and runs a standard multi-station direct-grid package."
+- **New spec text** (post-`§2.5` review, this PR): "The platform SHALL stage the hand-assembled synthetic multi-station direct-grid evidence package on node-22 and verify the staging invariants ... AND SHALL record the production SHUD binary identity ... End-to-end SHUD simulation of the synthetic minimal basin is deferred to a follow-up change: the synthetic package is a direct-grid CONTRACT fixture, not a full SHUD project ..."
+- **Why narrowed**: the `§2.3` synthetic package is a direct-grid CONTRACT fixture (only `.sp.att` with multi-station FORC, `.tsd.forc` multi-station forcing header, per-station CSVs, binding-manifest). It is not a full SHUD project (missing `.sp.mesh`, `.sp.riv`, `.sp.rivseg`, `.para.lc/geol/soil`, `.tsd.lai/mf/rl`, `.cfg.para/calib/ic`). Full end-to-end simulation requires either extending `§2.3` to a full-tree synth basin (out of `§2.3` scope; would re-do `§2.3` evidence), an operator-staged 3-element real basin (out of readiness-gate scope), or grafting into an existing 13-basin production release (element-count mismatch synth=3 vs min production=484 keliya / max=7,800 zhaochen_hhy plus station-count mismatch synth=3 vs min=5 wem / max=1,709 heihe would corrupt any grafted basin). All three paths are proper `Epic #886 + 1` scope items.
+- **Discovery mechanism**: Phase 4 `test-evidence` (test-3) and `spec-compliance` (spec-3) reviewer packs both flagged the "SHALL execute end-to-end" wording as unsatisfied by `staging-2.5.node-22.pass.log` D8's explicit deferral of end-to-end simulation.
+- **Proposed reconciliation path**: none in this change — the spec is now aligned with the actual scope in this PR. A follow-up change (either full-tree synth basin or operator-staged small real basin) can restore the "end-to-end execute" scenario if hydrology / operations warrant it.
+
+---
+
+## Meta
+
+- This log is `§2.7` **pre-work**, not the `§2.7` receipt itself. `§2.7` proper produces the final "readiness certified on pinned-commit evidence" receipt, at which point this drift log is one of its inputs.
+- New drift entries MUST be appended here (chronological order) whenever a `§2.x` review round discovers additional spec/code inconsistency. Do not silently fix them under `Epic #886`; either record and defer, or open a separate change.
+- Every entry MUST cite (a) the exact spec file + clause, (b) the exact code file + line, (c) the discovery mechanism (Phase 4 pack name / grep / test failure), (d) whether reconciliation is deferred and to which future change, and (e) whether deployment/env override reconciles at runtime.
