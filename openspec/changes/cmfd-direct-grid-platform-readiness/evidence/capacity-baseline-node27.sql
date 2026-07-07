@@ -1,0 +1,83 @@
+-- §2.6 G9 Capacity Baseline queries for node-27 active primary PG.
+--
+-- Purpose: measure live legacy baseline at evidence-production time (basin
+-- count, legacy station count, met.forcing_station_timeseries row counts)
+-- so §2.6 report can cite exact SQL + measurement timestamps rather than
+-- appendix-A prior-day cross-checks alone.
+--
+-- Usage (readonly role sufficient):
+--   ssh -p 32099 nwm@210.77.77.27
+--   cd /home/nwm/NWM && git pull --ff-only
+--   set -a; source infra/env/node27-display-ro.env; set +a
+--   psql "$DATABASE_URL" \
+--     -f openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-baseline-node27.sql
+--
+-- All SELECTs are read-only; no DDL/DML. Row-count queries on met.forcing_station_timeseries
+-- may take 5-30s on the hypertable — do NOT wrap in a long-running transaction.
+--
+-- Cross-check reference (appendix-A of docs/ForcingReplace/CMFD 建模资产向
+-- IFSGFS Direct-Grid 的安全迁移.md, 2026-07-06 snapshot): 13 active basins,
+-- 6,290 active legacy stations, ~121M met.forcing_station_timeseries rows
+-- per 2 weeks (~8M rows/day). These are cross-check references only, NOT
+-- acceptance values — §2.6 accepts what the SQL below returns at run time.
+
+\echo ===== §2.6 G9 Capacity Baseline (node-27, live SQL) =====
+\echo audit UTC:
+SELECT now() AT TIME ZONE 'UTC' AS audit_utc;
+
+\echo
+\echo ---- Q1. Active basin_version count (expected ~13 per appendix-A) ----
+SELECT count(*) AS active_basin_version_count
+  FROM core.basin_version
+  WHERE active_flag = true;
+
+\echo ---- Q1'. Total basin_version count (production 13 + any evidence-only rows) ----
+SELECT count(*) AS total_basin_version_count
+  FROM core.basin_version;
+
+\echo
+\echo ---- Q2. Active legacy met_station count (expected ~6,290 per appendix-A) ----
+SELECT count(*) AS active_met_station_count
+  FROM met.met_station
+  WHERE active_flag = true;
+
+\echo ---- Q2'. Total met_station count (production + any evidence-only mirrors) ----
+SELECT count(*) AS total_met_station_count
+  FROM met.met_station;
+
+\echo
+\echo ---- Q3. met.forcing_station_timeseries recent 2-week row count ----
+\echo (cross-check against appendix-A ~121M rows/2wks ≈ 8M rows/day)
+SELECT count(*) AS forcing_station_timeseries_rows_2wk
+  FROM met.forcing_station_timeseries
+  WHERE valid_time >= (now() - interval '2 weeks');
+
+\echo
+\echo ---- Q3'. Per-day rate approximation over the 2-week window ----
+SELECT
+  count(*)                              AS window_row_count,
+  count(*)::numeric / 14.0              AS approx_rows_per_day,
+  min(valid_time)                       AS window_min_valid_time,
+  max(valid_time)                       AS window_max_valid_time
+  FROM met.forcing_station_timeseries
+  WHERE valid_time >= (now() - interval '2 weeks');
+
+\echo
+\echo ---- Q4. Recent-2wk row breakdown by variable (formula validation) ----
+SELECT
+  variable,
+  count(*) AS row_count
+  FROM met.forcing_station_timeseries
+  WHERE valid_time >= (now() - interval '2 weeks')
+  GROUP BY variable
+  ORDER BY variable;
+
+\echo
+\echo ---- Q5. Basin_version identity md5 (for cross-artifact consistency proof) ----
+SELECT
+  count(*) AS active_bv_count,
+  md5(string_agg(basin_version_id, ',' ORDER BY basin_version_id)) AS active_bv_md5
+  FROM core.basin_version
+  WHERE active_flag = true;
+
+\echo ===== end capacity baseline =====

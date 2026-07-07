@@ -1,0 +1,91 @@
+# captured at <ISO-8601 UTC> host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=<40-hex>  # to be filled from git rev-parse HEAD at run time on node-27
+# task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts
+# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
+# env : infra/env/node27-display-ro.env (readonly role nhms_display_ro) preferred; ingest.env acceptable
+# scope-note: §2.6 driver is the committed script
+#   openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py
+#   (env-gated CLI, no argv-parsed at import; recipe below).
+#   The MANIFEST baseline_commit=5e518c15 pins platform identities under
+#   test (producer + runtime limits, deployment config env-var names).
+#   CODE CARRIER commit at run time is <40-hex> (this PR's §2.6 branch
+#   head at capture time; records only openspec/** + docs/** vs 5e518c15).
+# TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable, filled at capture time):
+#   `git diff 5e518c15..<code_carrier_sha> -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
+#   (verified on node-27 at capture time). No manifest-identity path drift
+#   between baseline and code carrier — drift confined to openspec/** (this
+#   change's own driver + evidence) and docs/** (append-only ledgers).
+
+## §2.6 execution recipe (reproducible)
+# 1. ssh -p 32099 nwm@210.77.77.27
+# 2. cd /home/nwm/NWM && git fetch && git checkout feat/issue-894-cmfd-p02-g9-capacity && git pull --ff-only
+# 3. set -a; source infra/env/node27-ingest.env; set +a
+#    (or node27-display-ro.env for readonly role)
+# 4. NHMS_CMFD_P02_MANIFEST_PATH=/home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json \
+#    NHMS_CMFD_P02_PG_DSN="$DATABASE_URL" \
+#    uv run python /home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py \
+#    | tee /home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6.node-27.pass.log
+# 5. Fill the `code_carrier_sha=` binder line (line 2 above) with `git rev-parse HEAD` on node-27.
+# 6. Verify the tree-equivalence attest line by running
+#    `git diff 5e518c15..$(git rev-parse HEAD) -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c`
+#    and updating the "= 0" claim above accordingly.
+# 7. git add capacity-2.6.node-27.pass.log && git commit + git push from node-27.
+#
+# THIS FILE IS A SKELETON — awaiting the node-27 operator run. The captured
+# output of step 4 REPLACES the D1-D9 sections below. The header lines above
+# (baseline_commit + manifest_sha256) are fixed; only <ISO-8601 UTC> and
+# <code_carrier_sha> and the TREE-EQUIVALENCE ATTEST wc -c value are filled
+# at capture time.
+
+## D1. Live legacy basin count vs appendix-A cross-check
+# (skeleton — will be replaced by driver output; expected structure:
+#  Q1 SELECT count(*) FROM core.basin_version WHERE active_flag=true
+#    audit UTC, active_basin_version, total_basin_version, appendix-A ~13)
+
+## D2. Live legacy station count vs appendix-A cross-check
+# (skeleton — will be replaced by driver output; expected structure:
+#  Q2 SELECT count(*) FROM met.met_station WHERE active_flag=true
+#    active_met_station, total_met_station, appendix-A ~6,290)
+
+## D3. met.forcing_station_timeseries 2-week + per-day row count
+# (skeleton — will be replaced by driver output; expected structure:
+#  Q3 SELECT count(*) FROM met.forcing_station_timeseries WHERE valid_time >= now() - interval '2 weeks'
+#    window_row_count, min/max valid_time, per-variable breakdown,
+#    appendix-A ~121M / ~8M/day cross-check)
+
+## D4. Direct-grid capacity formula vs producer limits
+# (skeleton — will be replaced by driver output; expected structure:
+#  formula: estimated_rows = station_count × timestep_count × output_variable_count
+#  producer limits table: default / manifest_effective / runtime_effective
+#  BREACH: none expected at production baseline)
+
+## D5. Runtime staging byte/line limits (7 MAX_DIRECT_GRID_* constants)
+# (skeleton — MAX_PACKAGE_MANIFEST_BYTES explicitly EXCLUDED from the 7-set)
+
+## D6. ~5x used-cell reduction structural evaluation
+# (skeleton — appendix-A ~1,200 used cells vs ~6,290 legacy stations ≈ 5.24x)
+
+## D7. Limit-breach verdict
+# (skeleton — expected NO BREACH at production baseline; any breach = blocker)
+
+## D8. Non-goal reaffirmation
+# (skeleton — no capacity-limit change, no per-basin migration accounting)
+
+## D9. Discharge check against tasks.md §2.6 required-evidence bullets
+# (skeleton — bullets 1-3 + non-goal marked DISCHARGED)
+
+## Cross-references
+# §1.3 readiness manifest immutability + completeness gate:
+#   readiness-manifest.v1.json + readiness-manifest.v1.json.sha256 + check_manifest_completeness.v1.pass.log
+# §2.1 pinned-commit pytest re-run: pytest-2.1.node-27.pass.log
+# §2.2 pinned-commit migration test re-run: pytest-2.2.node-27.pass.log
+# §2.3 D3 evidence-only DB registration transaction: db-registration-2.3.node-27.pass.log
+# §2.4 real-object-store + real-DB direct-grid smoke: smoke-2.4.node-27.pass.log
+# §2.5 node-22 minimal-basin staging + production shud binary: staging-2.5.node-22.pass.log
+# design.md §"How evidence is bound to commits" (line 42): binder header format
+# design.md §"node-27 vs node-22 execution split": host oracle routing
+# tasks.md §2.6: 3 required-evidence bullets + 1 non-goal bullet
+
+# SKELETON — awaiting node-27 operator capture. Once captured, remove this line
+# and confirm binder header line 1 (ISO-8601 UTC) is filled and line 2
+# (code_carrier_sha) is filled with the run-time HEAD sha.
