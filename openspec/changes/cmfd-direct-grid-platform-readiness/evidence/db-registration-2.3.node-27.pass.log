@@ -2,7 +2,7 @@
 # task: cmfd-direct-grid-platform-readiness §2.3 D3 — evidence-only registration of the synthetic direct-grid contract as core.model_instance on node-27
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
-# synthetic package aggregate SHA-256 (openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package.manifest.sha256):
+# synthetic package aggregate SHA-256 (openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package/package.manifest.sha256):
 #   0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5
 # script: /private/tmp/.../scratchpad/register-synth-p02.sql (transactional; DO $$ RAISE EXCEPTION $$ pre/post-check inline)
 # execution model: BEGIN + INSERT×5 + POSTCHECK + COMMIT (single transaction)
@@ -72,9 +72,29 @@ INV.F live top schema_migrations = 000042_drop_redundant_river_selected_identity
 
 # ---- station-MVT / display side-check ----
 # Evidence rows carry active_flag=false and (for met.met_station) station_role='forcing_proxy'.
-# The display MVT layer selects on active_flag=true, so the evidence identity is invisible to the /hydro-met UI (source-of-truth §10).
-# This is a static-schema/flag-based invariant confirmed by the row states above; no live browser probe required for the D3 registration step
-# (browser-probe is bound to the 2.4 smoke, which touches the same evidence identity via the real object-store carrier).
+# The station-MVT tile layer (apps/api/routes/hydro_display.py) and the aggregate /met/stations listing filter on active_flag=true
+# per source-of-truth §10, so the evidence identity is invisible to /hydro-met tile rendering and to aggregate list responses.
+# The station-by-id lookup path (packages/common/object_store_forcing.py:_lookup_with_cursor + packages/common/forecast_store.py:_fetch_station_for_series,
+# reachable via GET /met/stations/{station_id}/series) does NOT filter active_flag or station_role, so a caller who knows
+# a synth-station-* ID (these IDs are publicly committed via this PR) can distinguish an evidence-registered row from
+# an unknown ID by observing STATION_FORCING_FILE_NOT_FOUND (row exists, CSV absent from prod object store) vs STATION_NOT_FOUND.
+# This is a bounded identity/metadata probe, NOT a data leak: no forcing CSV exists in the production object store for
+# model__evidence_cmfd_p02_synth__v1, so no time-series bytes are exposed. Evidence-only IDs are intentionally-discoverable
+# non-secret identifiers; tightening the station-by-id filter is deferred to a separate change if needed.
+# No live browser probe required for the D3 registration step (browser-probe against station-MVT is bound to the 2.4 smoke).
+
+# ---- transaction isolation & concurrency scope (audit hygiene) ----
+# BEGIN was default READ COMMITTED (no SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, no LOCK TABLE, no pg_advisory_xact_lock).
+# The §2.3 required-evidence invariant "13 production model_instance rows are untouched" is filter-scoped to active_flag=true and
+# is enforced by the POSTCHECK DO$$ RAISE EXCEPTION on active-row-count drift — a concurrent inactive-model INSERT by the node-27
+# autopipe (infra/systemd/nhms-node27-autopipe.timer, 10-min cadence, calls import-basins-registry which INSERTs with active_flag=false
+# by default per workers/model_registry/basins_registry_import.py:1432) would NOT flip the active-row count and would still be caught
+# by the POSTCHECK if it changed it. What such a race COULD do is silently invalidate the audit line `total_model_instance_count = 14`
+# above (making it 15 rather than 14). At execution time (2026-07-07T02:04:04Z .. 02:04:16Z UTC, 12-second window) no concurrent
+# autopipe first-time-basin discovery is known to have occurred; total=14 was the live SELECT result at 02:04:17Z (line labeled INV.A).
+# Forward-hygiene note for future evidence-registration scripts (§2.4/§2.5/2.6): wrap in SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+# or take pg_advisory_xact_lock(hashtext('cmfd-direct-grid-evidence-registration')) so both the total-count audit and the active-count
+# guarantee are race-safe by construction, not by manual timing.
 
 # ---- reversibility ----
 # All rows carry evidence-only identifiers ('basin__evidence_cmfd_p02_synth' family). A single ROLLBACK is:

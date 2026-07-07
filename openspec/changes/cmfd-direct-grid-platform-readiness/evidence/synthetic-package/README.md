@@ -138,21 +138,31 @@ Subset holds (equality in this synth). This is exactly the runtime
 `workers/shud_runtime/runtime.py:2205-2270`; the 2.4 smoke asserts it directly
 by parsing both files.
 
-### 4.2 `binding_checksum` self-referential-hash construction
+### 4.2 `binding_checksum` — self-referential SHA-256 (verification recipe)
 
-Method used: write `binding-manifest.json` with `binding_checksum: ""`
-(empty-string sentinel) plus every other final field, then compute the sha256
-over those bytes and patch the sentinel to that value.
+The manifest's `binding_checksum` field is a self-referential SHA-256 covering
+the manifest bytes themselves with the checksum field's own 64-hex value
+replaced by the empty string. It is NOT a re-serialization from parsed JSON —
+`json.dumps(manifest, indent=2)+'\n'` produces a DIFFERENT byte layout
+(1512 vs the on-disk 1504 bytes) and would not reproduce the recorded value.
 
-Rationale: this is the only well-defined way to make a manifest carry a
-checksum of itself. The specific rule this fixture pins:
+Recipe to reproduce the recorded value:
 
-> `binding_checksum` = `sha256(bytes-of-binding-manifest.json when the
-> `binding_checksum` field's value string is `""`)`.
+```python
+import hashlib, pathlib
 
-Reproduction: reset the field to `""`, save with byte-identical formatting
-(2-space indent, LF line endings, trailing LF), and re-hash. Expected value:
-`cdf0859b88828d5d4f16c22954b78bf0c36a9b838016b8a91174bdbf39a5dc07`.
+path = pathlib.Path("openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package/binding-manifest.json")
+raw = path.read_bytes()
+recorded_hex = b"cdf0859b88828d5d4f16c22954b78bf0c36a9b838016b8a91174bdbf39a5dc07"
+target_bytes = raw.replace(recorded_hex, b"")
+assert hashlib.sha256(target_bytes).hexdigest() == recorded_hex.decode()
+```
+
+This is byte-for-byte reproducible against the on-disk `binding-manifest.json`.
+Any editor reformatting of the JSON (indent change, key reorder, trailing-newline
+change) will invalidate the checksum; regenerate by (a) resetting `binding_checksum`
+to `""`, (b) saving the file with your editor, (c) reading the raw bytes,
+(d) sha256, (e) pasting the digest back into the field.
 
 ### 4.3 `sp_att_checksum`
 
@@ -198,3 +208,29 @@ Expected aggregate:
 
 Recorded in `package/package.manifest.sha256` with `package.manifest` as the
 symbolic file label (the aggregate itself is not a real file).
+
+## 7. Operator runbook (§2.4 consumers)
+
+The env-gated smoke carrier `tests/test_direct_grid_evidence_smoke.py` consumes
+this fixture package. It is a skeleton pre-flight (structural checks only) —
+§2.4's actual real-object-store + real-DB smoke will extend it.
+
+To run the current structural checks on node-27
+(`ssh -p 32099 nwm@210.77.77.27`, `cd /home/nwm/NWM`):
+
+```bash
+NHMS_RUN_CMFD_P02_SMOKE=1 \
+DATABASE_URL="${DATABASE_URL:?set via infra/env/node27-ingest.env}" \
+NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT="$PWD/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package" \
+uv run pytest -q tests/test_direct_grid_evidence_smoke.py
+```
+
+Environment contract:
+
+| variable | required | value |
+|---|---|---|
+| `NHMS_RUN_CMFD_P02_SMOKE` | yes | `1` |
+| `DATABASE_URL` | yes | inherit from `infra/env/node27-ingest.env` (writable `nhms` role) |
+| `NHMS_CMFD_P02_SYNTHETIC_PACKAGE_ROOT` | yes | absolute path to the `package/` directory containing `binding-manifest.json`, `forcing/`, and `input_dir/` |
+
+If any variable is unset, all three tests skip cleanly (default CI behavior).
