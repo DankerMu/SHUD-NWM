@@ -5,15 +5,20 @@
 -- so §2.6 report can cite exact SQL + measurement timestamps rather than
 -- appendix-A prior-day cross-checks alone.
 --
--- Usage (readonly role sufficient):
+-- Usage:
 --   ssh -p 32099 nwm@210.77.77.27
 --   cd /home/nwm/NWM && git pull --ff-only
---   set -a; source infra/env/node27-display-ro.env; set +a
+--   set -a; source infra/env/node27-ingest.env; set +a
 --   psql "$DATABASE_URL" \
+--     -c "SET default_transaction_read_only = on; SET statement_timeout = '60s';" \
 --     -f openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-baseline-node27.sql
 --
--- All SELECTs are read-only; no DDL/DML. Row-count queries on met.forcing_station_timeseries
--- may take 5-30s on the hypertable — do NOT wrap in a long-running transaction.
+-- Note: the display-ro env template (node27-display-ro.env) is not yet provisioned on
+-- node-27; ingest.env is sufficient because this helper issues SELECT-only queries and
+-- the psql -c preamble installs a session-level read-only guard + 60s statement timeout.
+-- All queries here are SELECT-only; no DDL/DML. Row-count queries on
+-- met.forcing_station_timeseries may take 5-30s on the hypertable — do NOT wrap in a
+-- long-running transaction.
 --
 -- Cross-check reference (appendix-A of docs/ForcingReplace/CMFD 建模资产向
 -- IFSGFS Direct-Grid 的安全迁移.md, 2026-07-06 snapshot): 13 active basins,
@@ -61,12 +66,18 @@ SELECT count(*) AS forcing_station_timeseries_rows_2wk
   WHERE valid_time >= (now() - interval '2 weeks');
 
 \echo
-\echo ---- Q3'. Per-day rate approximation over the 2-week window ----
+\echo ---- Q3'. Per-day rate approximation over the 2-week window (actual span from min/max) ----
+\echo (span computed from min/max valid_time, NOT hardcoded 14 — protects against a
+\echo  partially-populated window when ingest just started or the hypertable was truncated)
 SELECT
-  count(*)                              AS window_row_count,
-  count(*)::numeric / 14.0              AS approx_rows_per_day,
-  min(valid_time)                       AS window_min_valid_time,
-  max(valid_time)                       AS window_max_valid_time
+  count(*)                                                                              AS window_row_count,
+  min(valid_time)                                                                       AS window_min_valid_time,
+  max(valid_time)                                                                       AS window_max_valid_time,
+  EXTRACT(EPOCH FROM (max(valid_time) - min(valid_time))) / 86400.0                     AS actual_span_days,
+  CASE WHEN max(valid_time) > min(valid_time)
+       THEN count(*)::numeric / (EXTRACT(EPOCH FROM (max(valid_time) - min(valid_time))) / 86400.0)
+       ELSE NULL
+  END                                                                                   AS approx_rows_per_day
   FROM met.forcing_station_timeseries
   WHERE valid_time >= (now() - interval '2 weeks');
 
