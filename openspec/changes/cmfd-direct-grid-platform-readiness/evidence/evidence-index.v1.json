@@ -1,9 +1,9 @@
 {
   "index_schema_version": "v1",
-  "index_created_utc": "2026-07-07T13:11:02Z",
+  "index_created_utc": "2026-07-07T13:28:56Z",
   "pinned_baseline_commit": "5e518c151375b798c29ee3cafb3260413ac8905f",
   "pinned_manifest_sha256": "bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf",
-  "index_generator_head_sha": "7e7c759815f3082c0b1d538af27b01486ac04843",
+  "index_generator_head_sha": "3d991ff76d8cf0cf068df4de99f34674a3d1a49b",
   "tree_equivalence_paths": [
     "workers/",
     "apps/",
@@ -131,8 +131,8 @@
     {
       "key": "spec_code_drift_log",
       "filename": "spec-code-drift-log.md",
-      "sha256": "a9c80a06129dd689903b8cb00b633adf45e50694c51ef72923c2565aafdab70d",
-      "bytes": 8697
+      "sha256": "08364d28dcf64eea708881e4ff76c09b61b459127df9bfe14a2c5f50b38623cb",
+      "bytes": 13805
     },
     {
       "key": "synthetic_package_readme",

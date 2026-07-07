@@ -1,5 +1,5 @@
-# captured at 2026-07-07T13:11:03Z host=local bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
-# code_carrier_sha=7e7c759815f3082c0b1d538af27b01486ac04843
+# captured at 2026-07-07T13:28:56Z host=local bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=3d991ff76d8cf0cf068df4de99f34674a3d1a49b
 # task: cmfd-direct-grid-platform-readiness §3.1 cross-artifact consistency check
 # generator: openspec/changes/cmfd-direct-grid-platform-readiness/evidence/assemble-evidence-index.py
 # scope: parses every §1.3/§2.1-§2.6 pass log's binder header lines (1 = captured/host/baseline/manifest; 2 = optional code_carrier_sha) and asserts:

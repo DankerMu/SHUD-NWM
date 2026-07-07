@@ -67,6 +67,13 @@ BINDER_LINE_RE = re.compile(
 )
 CODE_CARRIER_LINE_RE = re.compile(r"^# code_carrier_sha=(?P<carrier>[0-9a-f]{40})\s*$")
 
+# md5 chain extraction (Round-2 fix): the §2.4 smoke D4' INV.A' and §2.6 capacity
+# D1 both record the active-model_instance identity fingerprint under the sorted
+# set-agg md5 of model_id. When both pass logs carry the same md5, the "13-basin
+# active-model_instance" verdict is bound to the *same content*, not merely to a
+# 13-count set. C4 asserts and reports this equality live.
+MD5_EXTRACT_RE = re.compile(r"(?:md5|active_model_instance_md5)\s*=\s*([0-9a-f]{32})")
+
 # §2.3 grandfather clause: this log was captured before the code_carrier_sha
 # contract landed (§2.4 Round-1 fix). Its retro-attest lives in the sibling
 # smoke-2.4 log (same code_carrier_sha, same manifest-identity paths verified
@@ -131,6 +138,19 @@ def parse_binder(log_path: Path) -> tuple[dict, str | None]:
     return binder, carrier
 
 
+def extract_model_instance_md5(pass_log_path: Path) -> str | None:
+    """Return the first ``md5=<32-hex>`` or ``active_model_instance_md5=<32-hex>``
+    match in the pass log, or None when absent.
+
+    Used by C4 to bind the "13-basin active-model_instance" verdict across the
+    §2.4 smoke (D4' INV.A') and the §2.6 capacity log (D1) to the same content
+    fingerprint, not merely to a 13-count set.
+    """
+    text = pass_log_path.read_text(encoding="utf-8")
+    match = MD5_EXTRACT_RE.search(text)
+    return match.group(1) if match else None
+
+
 def tree_equivalent(baseline: str, carrier: str) -> tuple[bool, str]:
     """Return (True, "") when git diff between baseline..carrier is empty on
     manifest-identity paths; (False, non-empty-diff) otherwise.
@@ -139,7 +159,7 @@ def tree_equivalent(baseline: str, carrier: str) -> tuple[bool, str]:
         "git", "-C", str(REPO_ROOT), "diff",
         f"{baseline}..{carrier}", "--", *TREE_EQUIVALENCE_PATHS,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
     if proc.returncode != 0:
         fail(
             f"git-diff:{baseline[:8]}..{carrier[:8]}",
@@ -160,7 +180,7 @@ def build_index() -> tuple[dict, list[dict], str]:
     """
     current_head = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=30,
     ).stdout.strip()
 
     artifacts: list[dict] = []
@@ -417,9 +437,38 @@ def emit_consistency_log(table_rows: list[dict], current_head: str) -> Path:
 
 
 def emit_certification_log(index: dict, current_head: str) -> Path:
-    """Write certification-2.7.pass.log with binder header + certification body."""
+    """Write certification-2.7.pass.log with binder header + certification body.
+
+    Round-2 fix (md5 chain): before emitting the certification, extract the
+    active-model_instance md5 fingerprint from smoke-2.4 D4' INV.A' and
+    capacity-2.6 D1 and assert they exist AND are identical. This binds the
+    "13-basin active-model_instance" verdict across the two evidence artifacts
+    to the same content, not merely to a 13-count set. C4 then reports the
+    shared md5 fingerprint alongside the NO BREACH verdict.
+    """
     out = HERE / "certification-2.7.pass.log"
     captured = now_utc_iso()
+
+    # Assert md5 chain identity between §2.4 smoke and §2.6 capacity.
+    smoke_md5 = extract_model_instance_md5(HERE / "smoke-2.4.node-27.pass.log")
+    capacity_md5 = extract_model_instance_md5(HERE / "capacity-2.6.node-27.pass.log")
+    if smoke_md5 is None:
+        fail(
+            "certification",
+            "md5-chain-broken: smoke-2.4 vs capacity-2.6 — smoke-2.4 md5 missing",
+        )
+    if capacity_md5 is None:
+        fail(
+            "certification",
+            "md5-chain-broken: smoke-2.4 vs capacity-2.6 — capacity-2.6 md5 missing",
+        )
+    if smoke_md5 != capacity_md5:
+        fail(
+            "certification",
+            f"md5-chain-broken: smoke-2.4 vs capacity-2.6 — "
+            f"smoke_md5={smoke_md5} != capacity_md5={capacity_md5}",
+        )
+    shared_model_instance_md5 = smoke_md5
     lines: list[str] = []
     lines.append(
         f"# captured at {captured} host=local bound to "
@@ -548,6 +597,16 @@ def emit_certification_log(index: dict, current_head: str) -> Path:
         "requires either a full-tree synth basin or an operator-staged small "
         "real basin and is deferred to a follow-up change."
     )
+    lines.append(
+        "  * Drift entry 3: tasks.md §2.3 and §2.4 checkboxes remain `[ ]` "
+        "while their evidence artifacts (db-registration-2.3.node-27.pass.log, "
+        "smoke-2.4.node-27.pass.log, synthetic-package/) are committed and "
+        "cited by C2.3+C2.4 above as members of this certification set. Per "
+        "design.md §\"Why checkbox state is not evidence\" the checkboxes are "
+        "not the readiness signal (this C2 evidence set is); the observation is "
+        "recorded per the durable-ledger clause. Reconciliation deferred to a "
+        "follow-up housekeeping change; not blocking readiness certification."
+    )
     lines.append("")
 
     lines.append("## C4. G9 capacity-limit breach verdict")
@@ -557,6 +616,13 @@ def emit_certification_log(index: dict, current_head: str) -> Path:
         "2 weeks) fits within all pinned producer + runtime staging limits. "
         "0 unresolved capacity-limit breaches; §2.7 certification precondition "
         "\"no unresolved limit breach\" is satisfied."
+    )
+    lines.append(
+        f"Shared model_instance identity fingerprint: "
+        f"md5={shared_model_instance_md5} (asserted equal across smoke-2.4 "
+        f"D4' INV.A' and capacity-2.6 D1; this binds the \"13 basins\" verdict "
+        f"to the same production model_instance identity content, not merely "
+        f"to a 13-count set)."
     )
     lines.append("")
 
