@@ -26,12 +26,20 @@
 SELECT now() AT TIME ZONE 'UTC' AS audit_utc;
 
 \echo
-\echo ---- Q1. Active basin_version count (expected ~13 per appendix-A) ----
+\echo ---- Q1a. Active model_instance count (production basin oracle; expected ~13 per appendix-A) ----
+\echo (matches smoke-2.4.node-27.pass.log INV.A count=13; the correct
+\echo  "production basin count" query on node-27 is model_instance active,
+\echo  not basin_version — basin_version rows all carry active_flag=false
+\echo  because they are versioning bookkeeping rows.)
+SELECT count(*) AS active_model_instance_count
+  FROM core.model_instance
+  WHERE active_flag = true;
+
+\echo ---- Q1b. Total basin/basin_version count (13 prod + 1 evidence-only) ----
+SELECT count(*) AS total_basin_count FROM core.basin;
 SELECT count(*) AS active_basin_version_count
   FROM core.basin_version
   WHERE active_flag = true;
-
-\echo ---- Q1'. Total basin_version count (production 13 + any evidence-only rows) ----
 SELECT count(*) AS total_basin_version_count
   FROM core.basin_version;
 
@@ -73,11 +81,11 @@ SELECT
   ORDER BY variable;
 
 \echo
-\echo ---- Q5. Basin_version identity md5 (for cross-artifact consistency proof) ----
+\echo ---- Q5. Model_instance identity md5 (cross-check against smoke-2.4 INV.A' e95e51dd…) ----
 SELECT
-  count(*) AS active_bv_count,
-  md5(string_agg(basin_version_id, ',' ORDER BY basin_version_id)) AS active_bv_md5
-  FROM core.basin_version
+  count(*) AS active_mi_count,
+  md5(coalesce(string_agg(model_id, ',' ORDER BY model_id), '')) AS active_mi_md5
+  FROM core.model_instance
   WHERE active_flag = true;
 
 \echo ===== end capacity baseline =====

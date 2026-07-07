@@ -158,11 +158,24 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
         cur.execute("SELECT now() AT TIME ZONE 'UTC'")
         audit_utc = cur.fetchone()[0].isoformat()
 
-        # Q1 basin_version
+        # Q1 basin identity. Node-27 uses core.model_instance as the production
+        # basin oracle (see smoke-2.4.node-27.pass.log INV.A: count=13 active
+        # production model_instances = 13 production basins). core.basin_version
+        # is a versioning bookkeeping table whose rows all carry active_flag=false
+        # even for production basins (verified at capture time: 13 production
+        # bv rows + 1 evidence bv row = 14, all active_flag=false). Both counts
+        # are reported so a reviewer can distinguish "production basin count"
+        # (model_instance active) from "basin_version registry population".
+        cur.execute("SELECT count(*) FROM core.model_instance WHERE active_flag = true")
+        active_mi = int(cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM core.model_instance")
+        total_mi = int(cur.fetchone()[0])
         cur.execute("SELECT count(*) FROM core.basin_version WHERE active_flag = true")
         active_bv = int(cur.fetchone()[0])
         cur.execute("SELECT count(*) FROM core.basin_version")
         total_bv = int(cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM core.basin")
+        total_basin = int(cur.fetchone()[0])
 
         # Q2 met.met_station
         cur.execute("SELECT count(*) FROM met.met_station WHERE active_flag = true")
@@ -197,27 +210,32 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
         )
         by_variable = {v: int(c) for v, c in cur.fetchall()}
 
-        # Q5 basin_version identity md5 (for cross-artifact md5 chain)
+        # Q5 model_instance identity md5 (matches smoke-2.4 INV.A' fingerprint —
+        # cross-artifact md5 chain proving the same 13 production basins
+        # observed across evidence artifacts).
         cur.execute(
             """
-            SELECT md5(coalesce(string_agg(basin_version_id, ',' ORDER BY basin_version_id), ''))
-              FROM core.basin_version
+            SELECT md5(coalesce(string_agg(model_id, ',' ORDER BY model_id), ''))
+              FROM core.model_instance
               WHERE active_flag = true
             """
         )
-        active_bv_md5 = cur.fetchone()[0]
+        active_mi_md5 = cur.fetchone()[0]
 
         return {
             "audit_utc": audit_utc,
+            "active_model_instance_count": active_mi,
+            "total_model_instance_count": total_mi,
             "active_basin_version_count": active_bv,
             "total_basin_version_count": total_bv,
+            "total_basin_count": total_basin,
             "active_met_station_count": active_ms,
             "total_met_station_count": total_ms,
             "forcing_ts_2wk_row_count": window_rows,
             "forcing_ts_2wk_window_min_valid_time": window_min,
             "forcing_ts_2wk_window_max_valid_time": window_max,
             "forcing_ts_2wk_by_variable": by_variable,
-            "active_basin_version_md5": active_bv_md5,
+            "active_model_instance_md5": active_mi_md5,
         }
     finally:
         try:
@@ -356,17 +374,30 @@ def main() -> int:
     # ---- D1. Basin count ----
     _emit_section("D1. Live legacy basin count vs appendix-A cross-check")
     if live_available:
-        print("# Q1 SELECT count(*) FROM core.basin_version WHERE active_flag=true")
-        print(f"#   audit UTC              = {live['audit_utc']}")
-        print(f"#   active_basin_version   = {_fmt_int(live['active_basin_version_count'])}")
-        print(f"#   total_basin_version    = {_fmt_int(live['total_basin_version_count'])}")
-        print(f"#   appendix-A cross-check = {APPENDIX_A_BASIN_COUNT} (2026-07-06 snapshot)")
-        delta = live["active_basin_version_count"] - APPENDIX_A_BASIN_COUNT
-        print(f"#   delta vs appendix-A    = {delta:+d}")
+        print("# Q1a SELECT count(*) FROM core.model_instance WHERE active_flag=true")
+        print("#     (production basin oracle; matches smoke-2.4.node-27 INV.A count=13)")
+        print(f"#   audit UTC                = {live['audit_utc']}")
+        print(f"#   active_model_instance    = {_fmt_int(live['active_model_instance_count'])}")
+        print(f"#   total_model_instance     = {_fmt_int(live['total_model_instance_count'])}"
+              " (13 prod active + 1 evidence-only inactive)")
+        print(f"#   active_model_instance_md5= {live['active_model_instance_md5']}"
+              " (fingerprint; cross-check smoke-2.4 D4' INV.A' e95e51dd…)")
+        print()
+        print("# Q1b SELECT count(*) FROM core.basin_version WHERE active_flag=true")
+        print("#     (basin_version is versioning bookkeeping — all rows carry")
+        print("#      active_flag=false; total_basin_version = 13 prod + 1 evidence)")
+        print(f"#   active_basin_version     = {_fmt_int(live['active_basin_version_count'])}")
+        print(f"#   total_basin_version      = {_fmt_int(live['total_basin_version_count'])}")
+        print(f"#   total_basin              = {_fmt_int(live['total_basin_count'])}"
+              " (parent table; 13 prod + 1 evidence)")
+        print()
+        print(f"#   appendix-A cross-check   = {APPENDIX_A_BASIN_COUNT} (2026-07-06 snapshot)")
+        delta = live["active_model_instance_count"] - APPENDIX_A_BASIN_COUNT
+        print(f"#   delta vs appendix-A      = {delta:+d}  (using model_instance active count as basin count)")
     else:
         print(f"# LIVE SQL unavailable: {live['error']}")
         print("# reporting appendix-A cross-check as fallback baseline (2026-07-06 snapshot):")
-        print(f"#   active_basin_version   = {APPENDIX_A_BASIN_COUNT}   (appendix-A)")
+        print(f"#   basin_count              = {APPENDIX_A_BASIN_COUNT}   (appendix-A)")
 
     # ---- D2. Legacy station count ----
     _emit_section("D2. Live legacy station count vs appendix-A cross-check")
@@ -514,7 +545,8 @@ def main() -> int:
     # ---- summary + exit ----
     print()
     print("=== §2.6 CAPACITY BASELINE SUMMARY ===")
-    print(f"D1 basin_count_live         = {live.get('active_basin_version_count', 'N/A')}")
+    print(f"D1 basin_count_live         = {live.get('active_model_instance_count', 'N/A')}"
+          f"  (production basins via active model_instance)")
     print(f"D2 legacy_station_live      = {live.get('active_met_station_count', 'N/A')}")
     print(f"D3 forcing_ts_2wk_rows_live = {live.get('forcing_ts_2wk_row_count', 'N/A')}")
     print(f"D4 formula_estimate         = {estimated_rows_pre:,}")
