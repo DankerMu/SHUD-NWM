@@ -38,16 +38,17 @@ The platform SHALL run a direct-grid smoke against a real object store and real 
 - **THEN** derived rows are confined to a dedicated non-production identity (dedicated `basin_version_id`/`model_id`) and any `met.met_station` mirror rows carry `active_flag=false`, so the station-MVT layer cannot display mixed old/new stations
 - **THEN** after evidence capture the smoke's derived and mirror rows are removed, or verifiably remain confined to the inactive dedicated identity, and a display spot-check confirms production display is unaffected.
 
-### Requirement: Minimal-basin execution with the production SHUD binary
-The platform SHALL execute a minimal basin end-to-end with the production SHUD binary, staging the hand-assembled synthetic multi-station direct-grid evidence package, to confirm the pinned solver stages and runs a standard multi-station direct-grid package.
+### Requirement: Minimal-basin staging validation with the production SHUD binary
+The platform SHALL stage the hand-assembled synthetic multi-station direct-grid evidence package on node-22 and verify the staging invariants (direct-grid mode, multi-station preservation, FORC ownership range, MAX_DIRECT_GRID_* runtime limits), AND SHALL record the production SHUD binary identity (path + sha256 + submodule commit + banner + ldd) alongside the staging validation. End-to-end SHUD simulation of the synthetic minimal basin is deferred to a follow-up change: the synthetic package is a direct-grid CONTRACT fixture (`.sp.att` + `.tsd.forc` + station CSVs + binding-manifest), not a full SHUD project (no `.sp.mesh` / `.sp.riv` / `.para.*` / `.tsd.lai/mf/rl` / `.cfg.*`), so a full solver invocation would require either extending the synthetic package to a full-tree synth basin (out of `§2.3` scope), an operator-staged real basin (out of readiness-gate scope), or grafting synth into a production basin release (element/station count mismatch would corrupt the target). This scope narrowing is documented in `evidence/spec-code-drift-log.md` under `§2.7` pre-work.
 
-#### Scenario: Minimal basin runs on the production binary
-- **WHEN** the minimal-basin readiness execution runs
-- **THEN** it uses the production SHUD binary (`shud_omp`) identified in the readiness manifest
+#### Scenario: Minimal basin stages on the production binary
+- **WHEN** the minimal-basin readiness staging validation runs
+- **THEN** it identifies the production SHUD binary (`shud`) via its readiness-manifest-declared identity (path + sha256 + submodule commit); the binary is invoked at least for a banner sanity check (no-arg exit rc = 0 with the SHUD identity banner) and ldd resolution is recorded, without requiring an end-to-end simulation run
 - **THEN** it stages the synthetic minimal multi-station direct-grid evidence package — rewritten-`FORC` `.sp.att`, binding manifest, standard multi-station `.tsd.forc`, and per-station CSVs — whose construction provenance and SHA-256 checksums are recorded in the evidence; the package is hand-assembled, not produced by a mapping builder, and no production basin package is rewritten
-- **THEN** it stages a standard multi-station direct-grid forcing package and does not rewrite `.sp.att` to a single station
-- **THEN** staged `.sp.att FORC` values are within the staged `.tsd.forc` `ID` set
-- **THEN** the execution evidence records the executed `shud_omp` binary path used on node-22 (production binary, no rebuild), as identified in the readiness manifest
+- **THEN** the staged `.sp.att` FORC column preserves multi-station bindings and is not rewritten to a single station (verified either by invoking the runtime staging path or by static assertion against the synthetic fixture with reference to `workers/shud_runtime/runtime.py:_validate_direct_grid_sp_att_forcing_ids` — scope narrowing acceptable per `evidence/spec-code-drift-log.md`)
+- **THEN** staged `.sp.att FORC` values are within the staged `.tsd.forc` `ID` set (same acceptable-verification-scope note as above)
+- **THEN** the staging validation confirms every file in the synthetic package respects the seven `MAX_DIRECT_GRID_*` runtime staging limits pinned in the readiness manifest
+- **THEN** the execution evidence records the executed `shud` binary path used on node-22 (production binary, no rebuild), as identified in the readiness manifest
 - **THEN** the execution evidence records the node-22 Slurm/SHUD runtime host, the pinned `baseline_commit`, and the readiness manifest checksum.
 
 ### Requirement: G9 capacity baseline is reported against deployment config

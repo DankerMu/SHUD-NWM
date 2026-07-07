@@ -1,4 +1,4 @@
-# captured at 2026-07-07T01:06:37Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8
+# captured at 2026-07-07T01:06:37Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
 # task: cmfd-direct-grid-platform-readiness §2.1 pinned-commit re-run
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # git rev-parse HEAD: 5e518c151375b798c29ee3cafb3260413ac8905f

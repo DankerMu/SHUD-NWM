@@ -1124,6 +1124,7 @@ Evidence package 必须不可变，并与 mapping asset checksum 互相绑定。
 核查要点：
 
 - 13 个 model 实例全部**无 direct-grid contract**，全在 legacy IDW 路径（IFS + GFS 双 source，每站 4 邻居 × 6 变量）；mapping builder 代码中不存在（仅有 contract parser / producer consumer / runtime 校验）。
+- **模型输入权威源 = object-store release-frozen 包**（`/home/ghdc/nwm/object-store/models/basins_<basin>_shud/<release>/package/`，13/13 basin 全部齐全，33 个 release 覆盖 13 buckets），**非** `/home/ghdc/nwm/Basins/<basin>/input/<basin>/`（node-27 建模者 dev workspace，best-effort，6/13 齐全 — qhh/keliya/heihe/zhaochen_{bst,wem,mc}；7 个 hetianhe/kashigeer/weiganhe/xinanjiang_upstream/tailanhe/qinyijiang/zhaochen_hhy 只有 CALIB/forcing/input 骨架而无 sp.att/tsd.forc，其完整 SHUD 输入唯一存放在 object-store release 中）。node-22 上 `/volume/nwm/Basins/` 是 dev-workspace 副本，与 node-27 一致，同样不是权威。mapping builder（Epic #909）读取源必须锁定在 object-store 上，不得读 dev workspace。
 - `ifs_0p25` 与 `gfs_0p25` 的 `grid_signature` 实测一致（`6c008901b8b7…`），而 `grid_id` 字符串不同——§2.2 共用判据的直接依据。
 - `grid_cell_id` 为 bbox 裁剪后的扁平索引字符串（如 `"36268"`）；bbox 来自 env `NHMS_DOWNLOAD_BBOX_*`（默认 63–145°E / 8–64°N），13 流域（73–119°E / 28–43°N）均在覆盖内——§5.1 bbox 钉死的依据。
 - 11/13 流域 baseline 存在 unused station——§6.5 used-cell 子集规则的现实依据。

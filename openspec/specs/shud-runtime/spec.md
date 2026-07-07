@@ -71,18 +71,18 @@ The adapter MUST generate or modify a `.cfg.para` configuration file that sets t
 
 ### Requirement: SHUD execution
 
-The adapter MUST execute `shud_omp` via `subprocess.run()` (or equivalent) and capture the exit code, stdout, and stderr. A non-zero exit code MUST be treated as a failure. The CLI entry point is `nhms-shud-runtime execute --manifest <manifest.json>`. The Slurm sbatch template `run_shud_forecast.sbatch` MUST define the execution environment.
+The adapter MUST execute `shud` via `subprocess.run()` (or equivalent) and capture the exit code, stdout, and stderr. A non-zero exit code MUST be treated as a failure. The CLI entry point is `nhms-shud-runtime execute --manifest <manifest.json>`. The Slurm sbatch template `run_shud_forecast.sbatch` MUST define the execution environment.
 
-#### Scenario: Successful shud_omp execution
+#### Scenario: Successful shud execution
 
-- **WHEN** `shud_omp` is invoked with the prepared workspace and exits with code 0
+- **WHEN** `shud` is invoked with the prepared workspace and exits with code 0
 - **THEN** stdout and stderr MUST be captured and written to `runs/{run_id}/logs/shud_stdout.log` and `runs/{run_id}/logs/shud_stderr.log`
 - **THEN** the `hydro.hydro_run.status` MUST be updated from `running` to `succeeded`
 - **THEN** the `hydro.hydro_run.updated_at` timestamp MUST be set
 
-#### Scenario: shud_omp exits with non-zero code
+#### Scenario: shud exits with non-zero code
 
-- **WHEN** `shud_omp` exits with a non-zero exit code (e.g., segmentation fault, input error)
+- **WHEN** `shud` exits with a non-zero exit code (e.g., segmentation fault, input error)
 - **THEN** the adapter MUST capture stdout and stderr to log files
 - **THEN** the `hydro.hydro_run.status` MUST be updated to `failed`
 - **THEN** the `hydro.hydro_run.error_code` MUST store the exit code and `hydro.hydro_run.error_message` MUST include the last 50 lines of stderr
@@ -92,22 +92,22 @@ The adapter MUST execute `shud_omp` via `subprocess.run()` (or equivalent) and c
 
 - **WHEN** a user or Slurm job runs `nhms-shud-runtime execute --manifest manifest.json`
 - **THEN** the adapter MUST read the run manifest JSON containing nested structure: `model.model_id`, `model.model_package_uri`, `forcing.forcing_uri`, `outputs.output_uri`, `source_id`, `cycle_time`, and `initial_state.ic_file_uri`
-- **THEN** the adapter MUST execute the full sequence: workspace preparation → config generation → shud_omp execution → output verification → result upload
+- **THEN** the adapter MUST execute the full sequence: workspace preparation → config generation → shud execution → output verification → result upload
 
 ### Requirement: Output completeness verification
 
-After `shud_omp` execution, the adapter MUST verify that the expected output files exist and are complete. The `.rivqdown` file MUST exist in the output directory. The row count of `.rivqdown` MUST match the expected number of time steps based on the simulation time window and output interval.
+After `shud` execution, the adapter MUST verify that the expected output files exist and are complete. The `.rivqdown` file MUST exist in the output directory. The row count of `.rivqdown` MUST match the expected number of time steps based on the simulation time window and output interval.
 
 #### Scenario: Output file exists with correct row count
 
-- **WHEN** `shud_omp` completes successfully for a 7-day forecast with daily output (7 time steps)
+- **WHEN** `shud` completes successfully for a 7-day forecast with daily output (7 time steps)
 - **THEN** the file `runs/{run_id}/output/{basin}.rivqdown` MUST exist
 - **THEN** the file MUST contain a header row plus exactly 7 data rows (one per time step)
 - **THEN** the verification MUST pass and execution continues to upload
 
 #### Scenario: Output file is missing
 
-- **WHEN** `shud_omp` exits with code 0 but `.rivqdown` is not found in the output directory
+- **WHEN** `shud` exits with code 0 but `.rivqdown` is not found in the output directory
 - **THEN** the adapter MUST set `hydro.hydro_run.status` to `failed`
 - **THEN** the `error_code` MUST be set and `error_message` MUST indicate: "Output verification failed: .rivqdown file not found"
 
@@ -123,7 +123,7 @@ Upon successful execution and output verification, the adapter MUST upload all o
 
 #### Scenario: Upload output and logs after successful run
 
-- **WHEN** `shud_omp` execution succeeds and output verification passes
+- **WHEN** `shud` execution succeeds and output verification passes
 - **THEN** all files in the local `runs/{run_id}/output/` directory MUST be uploaded to `s3://nhms-runs/runs/{run_id}/output/`
 - **THEN** all files in the local `runs/{run_id}/logs/` directory MUST be uploaded to `s3://nhms-runs/runs/{run_id}/logs/`
 - **THEN** the `hydro.hydro_run.output_uri` MUST be set to the S3 URI of the output directory
@@ -137,7 +137,7 @@ Upon successful execution and output verification, the adapter MUST upload all o
 
 #### Scenario: Upload logs even on failed run
 
-- **WHEN** `shud_omp` execution fails (non-zero exit code)
+- **WHEN** `shud` execution fails (non-zero exit code)
 - **THEN** the adapter MUST still upload log files (`shud_stdout.log`, `shud_stderr.log`) to `runs/{run_id}/logs/`
 - **THEN** this ensures post-mortem debugging is possible from the central store
 
@@ -153,12 +153,12 @@ The adapter MUST create and maintain a `hydro.hydro_run` record. Required column
 - **THEN** `init_state_id` MUST be explicitly set to `NULL` for M1 cold-start runs
 - **THEN** when workspace is prepared, status MUST transition to `staged` and `updated_at` MUST be set
 - **THEN** when the Slurm job is submitted, status MUST transition to `submitted`, `slurm_job_id` MUST be recorded, and `updated_at` MUST be set
-- **THEN** when `shud_omp` begins execution, status MUST transition to `running` and `updated_at` MUST be set
+- **THEN** when `shud` begins execution, status MUST transition to `running` and `updated_at` MUST be set
 - **THEN** when execution and upload complete, status MUST transition to `succeeded`, `output_uri` and `log_uri` MUST be set, and `updated_at` MUST be set
 
 #### Scenario: Run record lifecycle for a failed forecast
 
-- **WHEN** `shud_omp` fails during execution
+- **WHEN** `shud` fails during execution
 - **THEN** status MUST transition to `failed`
 - **THEN** `updated_at` MUST be set to the current time
 - **THEN** `error_code` MUST store a structured error code (e.g., the exit code) and `error_message` MUST contain a description of the failure (stderr excerpt)

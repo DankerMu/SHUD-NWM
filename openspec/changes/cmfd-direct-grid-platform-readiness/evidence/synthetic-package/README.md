@@ -8,7 +8,7 @@ hand-derived input contract that mirrors the fixture shape used by
 
 Pinned baseline: `readiness-manifest.v1.json` (baseline_commit
 `5e518c151375b798c29ee3cafb3260413ac8905f`, manifest SHA-256
-`4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8`).
+`bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf`).
 
 ## 1. Purpose and non-goals
 
@@ -135,8 +135,10 @@ Columns: `Precip / Temp / RH / Wind / RN`.
 `.tsd.forc` ID column: `{1, 2, 3}`
 Subset holds (equality in this synth). This is exactly the runtime
 `DIRECT_GRID_FORCING_OWNERSHIP_RANGE` gate at
-`workers/shud_runtime/runtime.py:2205-2270`; the 2.4 smoke asserts it directly
-by parsing both files.
+`workers/shud_runtime/runtime.py:2205-2213` (`_validate_direct_grid_sp_att_forcing_ids`
+validator, raise at :2210); the reader helper `_read_sp_att_forcing_ids` at
+:2216-2274 supplies the FORC id set that the validator checks against. The
+2.4 smoke asserts the invariant directly by parsing both files.
 
 ### 4.2 `binding_checksum` — self-referential SHA-256 (verification recipe)
 

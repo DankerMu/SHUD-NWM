@@ -5,7 +5,7 @@
 
 ## 1. 模块目标
 
-在 HPC workspace 中准备 SHUD 输入文件、执行 SHUD/shud_omp、收集输出和日志。
+在 HPC workspace 中准备 SHUD 输入文件、执行 SHUD/shud、收集输出和日志。
 
 ## 2. 上下游关系
 
@@ -19,7 +19,7 @@
 
 - 拉取模型包、forcing、`.cfg.ic`。
 - 生成或修改 `.cfg.para`。
-- 执行 shud/shud_omp。
+- 执行 shud/shud。
 - 检查输出文件完整性。
 - 上传 output/logs 到对象存储。
 

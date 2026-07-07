@@ -9,7 +9,7 @@ The platform SHALL publish a single readiness release manifest that records the 
 - **THEN** it records the SHUD-NWM repository commit or tag as `baseline_commit`
 - **THEN** it records the forcing producer version
 - **THEN** it records the canonical converter versions for gfs (`m1.4`), ifs (`m4.1`), and era5 (`m2.0`) as read from `workers/canonical_converter/converter.py`
-- **THEN** it records the SHUD runtime commit or tag and the SHUD executable name (`shud_omp`)
+- **THEN** it records the SHUD runtime commit or tag and the SHUD executable name (`shud`)
 - **THEN** it records the repository DB schema migration head (`db_schema_migration_repo_head`, the highest migration file in `db/migrations/`) and, as a distinct field, the deployment-applied DB schema migration version (`db_schema_migration_version`) resolved by live query on node-27's active primary database
 - **THEN** a mismatch between the repository migration head and the deployment-applied version renders the schema identity unresolved
 - **THEN** it records the PROJ/CRS database version

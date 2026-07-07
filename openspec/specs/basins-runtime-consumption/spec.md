@@ -10,7 +10,7 @@ The system SHALL verify that at least one Basins-backed `model_package_uri` can 
 #### Scenario: Runtime dry-run stages Basins package
 
 - **WHEN** a run manifest references an imported Basins model package and dry-run or mock runtime execution is requested
-- **THEN** SHUD runtime stages the package into `runs/{run_id}/input`, finds the model control files, and returns a deterministic success or validation result without executing real `shud_omp`
+- **THEN** SHUD runtime stages the package into `runs/{run_id}/input`, finds the model control files, and returns a deterministic success or validation result without executing real `shud`
 
 ### Requirement: Basins-backed API surfaces expose model and river data
 
