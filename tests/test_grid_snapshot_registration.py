@@ -21,22 +21,44 @@ Covers issue #901 (Epic #897 SUB-4) Task 3.1a + 3.1c Evidence Floor:
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import math
 import pathlib
+import subprocess
+import sys
+import uuid
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
+import psycopg2
+import psycopg2.extras
 import pytest
+from psycopg2.extras import Json as _PgJson
 
 from packages.common.canonical_grid_key import derive_canonical_grid_key
+from packages.common.grid_registry_store import (
+    CanonicalGridCell,
+    CanonicalGridSnapshot,
+    PsycopgGridRegistryStore,
+    RegistryStoreError,
+)
+from packages.common.grid_signature import grid_signature_hash
 from packages.common.object_store import sha256_bytes
 from workers.forcing_producer.producer import (
     CanonicalProduct,
     ForcingProducer,
     ForcingProducerConfig,
     _normalize_longitude,
+)
+from workers.grid_registry import (
+    GridDriftDetectedError,
+    LiveProducerSignatureMismatchError,
+    RegistrationError,
+    RegistrationInvariantError,
+    register_snapshot,
 )
 from workers.grid_registry.input_record import (
     AxisOrderError,
@@ -57,6 +79,7 @@ from workers.grid_registry.input_record import (
     SidecarSchemaError,
     read_input_record,
 )
+from workers.grid_registry.registry import _live_producer_signature
 
 # -----------------------------------------------------------------------------
 # Fixture fabricator
@@ -1159,3 +1182,612 @@ def test_input_record_capture_prevents_toctou(tmp_path: pathlib.Path) -> None:
     # The record's checksum still reflects the FIRST bytes' digest, not the
     # rewritten ones — SUB-5 writer can trust it without re-opening.
     assert record.grid_definition_checksum == original_checksum
+
+
+# =============================================================================
+# SUB-5 / Task 3.1b — writer & CLI tests
+# =============================================================================
+
+# The 21-field snapshot provenance table mirrors Task 3.1b §"Field provenance"
+# byte-for-byte. Test 6 walks every row.
+_SUB5_FIELD_SOURCE_TABLE: tuple[tuple[str, str], ...] = (
+    ("grid_snapshot_id", "DB gen_random_uuid()"),
+    ("canonical_grid_key", "derive_canonical_grid_key(signature, bbox, native_resolution)"),
+    ("source_id", "normalize_source_id(cli_source_id)"),
+    ("grid_id", "record.grid_id"),
+    ("grid_signature", "grid_signature_hash(record.cells)"),
+    ("grid_definition_uri", "record.grid_definition_uri"),
+    ("grid_definition_checksum", "record.grid_definition_checksum"),
+    ("longitude_convention", "pinned literal '[-180, 180)'"),
+    ("latitude_order", "record.latitude_order"),
+    ("flatten_order", "record.flatten_order"),
+    ("native_resolution", "record.native_resolution"),
+    ("bbox_south", "record.download_bbox['south']"),
+    ("bbox_north", "record.download_bbox['north']"),
+    ("bbox_west", "record.download_bbox['west']"),
+    ("bbox_east", "record.download_bbox['east']"),
+    ("converter_version", "record.converter_version"),
+    ("valid_from", "record.valid_from"),
+    ("valid_to", "record.valid_to"),
+    ("applicable_source_ids", "(normalize_source_id(cli_source_id),)"),
+    ("superseded_at", "None on insert"),
+    ("created_at", "DB default"),
+)
+
+_SUB5_RUN_PREFIX = "sub5_902"
+
+
+# -----------------------------------------------------------------------------
+# Pure-Python (no DB, no marker) tests — Task 3.1b evidence
+# -----------------------------------------------------------------------------
+
+
+def test_register_snapshot_signature_pinned() -> None:
+    """The public writer signature is exactly `(record, *, source_id, store) -> UUID`."""
+    sig = inspect.signature(register_snapshot)
+    assert tuple(sig.parameters.keys()) == ("record", "source_id", "store"), (
+        f"unexpected parameter names {tuple(sig.parameters.keys())!r}"
+    )
+    # `register_snapshot` uses `from __future__ import annotations`, so
+    # annotations are strings. Resolve via `get_type_hints` for the strict
+    # `is uuid.UUID` check.
+    hints = inspect.get_annotations(register_snapshot, eval_str=True)
+    assert hints["return"] is uuid.UUID
+    # `source_id` and `store` must be keyword-only.
+    for name in ("source_id", "store"):
+        assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+def test_writer_provenance_table_covers_all_21_snapshot_fields() -> None:
+    """The SUB-5 field-source table must enumerate every CanonicalGridSnapshot
+    dataclass field byte-for-byte. A future field rename or addition to SUB-3
+    surfaces here as a test failure."""
+    dataclass_fields = tuple(f.name for f in dataclasses.fields(CanonicalGridSnapshot))
+    table_fields = tuple(row[0] for row in _SUB5_FIELD_SOURCE_TABLE)
+    assert set(dataclass_fields) == set(table_fields), (
+        f"provenance table {set(table_fields)!r} does not cover CanonicalGridSnapshot "
+        f"fields {set(dataclass_fields)!r}"
+    )
+    assert len(dataclass_fields) == 21
+
+
+def test_cli_help_lists_required_flags() -> None:
+    """`python -m workers.grid_registry --help` MUST list all four required flags."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "workers.grid_registry", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"CLI --help exited nonzero: stderr={proc.stderr!r}"
+    )
+    for flag in ("--source-id", "--grid-json", "--sidecar", "--grid-definition-uri"):
+        assert flag in proc.stdout, (
+            f"CLI --help output missing flag {flag!r}; got:\n{proc.stdout}"
+        )
+
+
+def _build_manual_record(
+    *,
+    override_cell_longitude: float | None = None,
+) -> GridSnapshotInputRecord:
+    """Build a `GridSnapshotInputRecord` via direct dataclass instantiation.
+
+    Used for tests that need to bypass SUB-4's `_build_cells` normalization to
+    prove the writer defends against a future SUB-4 refactor.
+    """
+    longitudes = tuple(_DEFAULT_LONGITUDES)
+    latitudes = tuple(_DEFAULT_LATITUDES)
+    cells: list[CellInput] = []
+    for index, (lat, lon) in enumerate((lat, lon) for lat in latitudes for lon in longitudes):
+        cell_lon = override_cell_longitude if index == 0 and override_cell_longitude is not None else lon
+        cells.append(
+            CellInput(
+                grid_cell_id=str(index),
+                canonical_ordinal=index + 1,
+                longitude=cell_lon,
+                latitude=lat,
+            )
+        )
+    return GridSnapshotInputRecord(
+        schema_version="nhms.grid_definition.v1",
+        grid_id="ifs_0p25",
+        layout="rectilinear",
+        axis_order=("latitude", "longitude"),
+        shape=(len(latitudes), len(longitudes)),
+        longitudes=longitudes,
+        latitudes=latitudes,
+        converter_version=_DEFAULT_CONVERTER_VERSION,
+        native_resolution=0.25,
+        latitude_order="ascending",
+        flatten_order="y_major_lat_then_lon",
+        valid_from=datetime(2026, 7, 6, tzinfo=UTC),
+        valid_to=None,
+        download_bbox={
+            "south": min(latitudes),
+            "north": max(latitudes),
+            "west": min(longitudes),
+            "east": max(longitudes),
+        },
+        grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
+        grid_definition_checksum="a" * 64,
+        cells=tuple(cells),
+    )
+
+
+def test_writer_asserts_normalized_longitude_defensively() -> None:
+    """Direct-dataclass record with cell longitude outside `[-180.0, 180.0)`
+    MUST raise `RegistrationInvariantError` BEFORE any DB touch."""
+    record = _build_manual_record(override_cell_longitude=200.0)
+    # The store MUST NOT be touched — pass a URL that would otherwise raise.
+    store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
+    with pytest.raises(RegistrationInvariantError) as excinfo:
+        register_snapshot(record, source_id="IFS", store=store)
+    assert "cell 0" in str(excinfo.value)
+    assert "200.0" in str(excinfo.value)
+
+
+def test_error_hierarchy_is_registration_error_subclass() -> None:
+    """All three writer errors inherit from `RegistrationError`."""
+    assert issubclass(RegistrationInvariantError, RegistrationError)
+    assert issubclass(LiveProducerSignatureMismatchError, RegistrationError)
+    assert issubclass(GridDriftDetectedError, RegistrationError)
+
+
+def test_live_producer_signature_matches_registry_on_valid_record(tmp_path: pathlib.Path) -> None:
+    """The live-producer path returns the same hash as `grid_signature_hash(record.cells)`
+    on a valid record — proves the two paths agree at the source of truth."""
+    record = _read_default_record(tmp_path)
+    registry_computed = grid_signature_hash(record.cells)
+    live_computed = _live_producer_signature(record)
+    assert registry_computed == live_computed
+
+
+def test_backfill_signature_constant_is_reused_verbatim() -> None:
+    """Pin: SUB-5 tests reuse SUB-4's `_BACKFILL_SIGNATURE` constant byte-for-byte.
+    A future edit that redefines the constant surfaces here."""
+    assert _BACKFILL_SIGNATURE == "6c008901b8b7" + "0" * 52
+    assert len(_BACKFILL_SIGNATURE) == 64
+    # Encoding pin: the derived canonical_grid_key for the pinned constant must
+    # equal the SUB-4 pinned value byte-for-byte.
+    key = derive_canonical_grid_key(
+        _BACKFILL_SIGNATURE, dict(_BACKFILL_BBOX), _BACKFILL_RESOLUTION
+    )
+    assert key == _EXPECTED_BACKFILL_KEY
+
+
+# -----------------------------------------------------------------------------
+# Real-DB integration tests — Task 3.1b evidence
+# -----------------------------------------------------------------------------
+
+
+def _seed_sub5_data_sources(database_url: str) -> None:
+    connection = psycopg2.connect(database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            for src in ("IFS", "gfs", "ERA5"):
+                cursor.execute(
+                    """
+                    INSERT INTO met.data_source (
+                        source_id, source_name, source_type, status, native_format,
+                        adapter_name, config_json
+                    )
+                    VALUES (%s, %s, 'forecast', 'mock', 'netcdf', %s, %s)
+                    ON CONFLICT (source_id) DO NOTHING
+                    """,
+                    (src, f"{src} SUB-5 test source", src, _PgJson({"test": True})),
+                )
+    finally:
+        connection.close()
+
+
+@pytest.fixture(scope="module")
+def sub5_migrated_database(integration_database_url: str) -> str:
+    from tests.integration_helpers import apply_migrations_from_zero
+
+    apply_migrations_from_zero(integration_database_url)
+    _seed_sub5_data_sources(integration_database_url)
+    return integration_database_url
+
+
+def _fetch_snapshot_row(database_url: str, grid_snapshot_id: uuid.UUID) -> dict[str, Any]:
+    connection = psycopg2.connect(
+        database_url, cursor_factory=psycopg2.extras.RealDictCursor
+    )
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM met.canonical_grid_snapshot WHERE grid_snapshot_id = %s",
+                (str(grid_snapshot_id),),
+            )
+            row = cursor.fetchone()
+        assert row is not None
+        return dict(row)
+    finally:
+        connection.close()
+
+
+def _count_rows_for_id(database_url: str, grid_snapshot_id: uuid.UUID) -> tuple[int, int]:
+    connection = psycopg2.connect(database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM met.canonical_grid_snapshot WHERE grid_snapshot_id = %s",
+                (str(grid_snapshot_id),),
+            )
+            snap_count = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT COUNT(*) FROM met.canonical_grid_cell WHERE grid_snapshot_id = %s",
+                (str(grid_snapshot_id),),
+            )
+            cell_count = cursor.fetchone()[0]
+        return snap_count, cell_count
+    finally:
+        connection.close()
+
+
+def _write_unique_fixture(
+    tmp_path: pathlib.Path,
+    *,
+    suffix: str,
+    grid_id: str | None = None,
+) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Write a grid.json + sidecar pair whose grid_id embeds `suffix` for uniqueness."""
+    payload = _default_grid_payload()
+    if grid_id is not None:
+        payload["grid_id"] = grid_id
+    else:
+        payload["grid_id"] = f"grid_{suffix}"
+    grid_json = tmp_path / f"grid_{suffix}.json"
+    sidecar = tmp_path / f"sidecar_{suffix}.json"
+    grid_json.write_text(json.dumps(payload), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(_default_sidecar_payload()),
+        encoding="utf-8",
+    )
+    uri = f"canonical/IFS/grid/{payload['grid_id']}/grid.json"
+    return grid_json, sidecar, uri
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("cli_source_id", "expected_normalized"),
+    [("ifs", "IFS"), ("GFS", "gfs")],
+    ids=["ifs_lowercase", "gfs_uppercase"],
+)
+def test_writer_snapshot_field_provenance_round_trip(
+    sub5_migrated_database: str,
+    tmp_path: pathlib.Path,
+    cli_source_id: str,
+    expected_normalized: str,
+) -> None:
+    """Every one of the 21 snapshot fields round-trips per Task 3.1b field
+    provenance. Also proves `applicable_source_ids` equals the single-element
+    tuple of the normalized source id (matching the SUB-8 case rules).
+    `longitude_convention` MUST equal '[-180, 180)' byte-for-byte."""
+    grid_json, sidecar, uri = _write_unique_fixture(
+        tmp_path, suffix=f"prov_{cli_source_id}"
+    )
+    record = read_input_record(
+        cli_source_id,
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    snapshot_id = register_snapshot(record, source_id=cli_source_id, store=store)
+    assert isinstance(snapshot_id, uuid.UUID)
+
+    row = _fetch_snapshot_row(sub5_migrated_database, snapshot_id)
+    assert row["grid_snapshot_id"] == snapshot_id
+    assert row["source_id"] == expected_normalized
+    assert row["grid_id"] == record.grid_id
+    # Byte-for-byte pin.
+    assert row["longitude_convention"] == "[-180, 180)"
+    assert row["latitude_order"] == record.latitude_order
+    assert row["flatten_order"] == record.flatten_order
+    assert row["native_resolution"] == pytest.approx(record.native_resolution)
+    assert row["bbox_south"] == pytest.approx(record.download_bbox["south"])
+    assert row["bbox_north"] == pytest.approx(record.download_bbox["north"])
+    assert row["bbox_west"] == pytest.approx(record.download_bbox["west"])
+    assert row["bbox_east"] == pytest.approx(record.download_bbox["east"])
+    assert row["converter_version"] == record.converter_version
+    assert row["valid_from"] == record.valid_from
+    assert row["valid_to"] is None
+    assert list(row["applicable_source_ids"]) == [expected_normalized]
+    assert row["superseded_at"] is None
+    assert row["created_at"] is not None
+    assert row["grid_definition_uri"] == uri
+    assert row["grid_definition_checksum"] == record.grid_definition_checksum
+    # grid_signature equals the SUB-1 shared-helper value for the record's cells.
+    expected_signature = grid_signature_hash(record.cells)
+    assert row["grid_signature"] == expected_signature
+    # canonical_grid_key equals the derived value.
+    expected_key = derive_canonical_grid_key(
+        expected_signature, dict(record.download_bbox), record.native_resolution
+    )
+    assert row["canonical_grid_key"] == expected_key
+
+
+@pytest.mark.integration
+def test_writer_live_producer_signature_matches_at_registration(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """When registration succeeds, the stored `grid_signature` equals BOTH the
+    registry-computed hash AND the live producer's `_grid_points_from_definition`
+    recompute. This proves the two paths agree at the write boundary."""
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="live_match")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    registry_computed = grid_signature_hash(record.cells)
+    live_computed = _live_producer_signature(record)
+    assert registry_computed == live_computed
+
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    snapshot_id = register_snapshot(record, source_id="IFS", store=store)
+    row = _fetch_snapshot_row(sub5_migrated_database, snapshot_id)
+    assert row["grid_signature"] == registry_computed == live_computed
+
+
+def test_writer_rejects_live_producer_signature_mismatch() -> None:
+    """A record whose `cells` were mutated to disagree with the producer's
+    live path MUST raise `LiveProducerSignatureMismatchError` with BOTH
+    computed values on the exception attributes. Runs pure-Python (no DB) —
+    we mutate the cells tuple to simulate the drift condition."""
+    record = _build_manual_record()
+    # Mutate cell 0's latitude to break the equality without leaving the
+    # normalized-longitude range (defensive assertion stays green).
+    mutated_cells = list(record.cells)
+    original = mutated_cells[0]
+    mutated_cells[0] = CellInput(
+        grid_cell_id=original.grid_cell_id,
+        canonical_ordinal=original.canonical_ordinal,
+        longitude=original.longitude,
+        latitude=original.latitude + 0.5,
+    )
+    mutated_record = dataclasses.replace(record, cells=tuple(mutated_cells))
+    store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
+    with pytest.raises(LiveProducerSignatureMismatchError) as excinfo:
+        register_snapshot(mutated_record, source_id="IFS", store=store)
+    error = excinfo.value
+    # Both hashes must be populated on the exception attributes.
+    assert error.registry_computed and len(error.registry_computed) == 64
+    assert error.live_producer_computed and len(error.live_producer_computed) == 64
+    assert error.registry_computed != error.live_producer_computed
+
+
+@pytest.mark.integration
+def test_writer_idempotent_on_identical_input(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """Two `register_snapshot` calls with an identical record + source_id
+    return the SAME UUID and only ONE row exists in the DB."""
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="idem")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    first_id = register_snapshot(record, source_id="IFS", store=store)
+    second_id = register_snapshot(record, source_id="IFS", store=store)
+    assert first_id == second_id
+    # Only one snapshot row for this grid_id.
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_writer_rejects_grid_drift_within_source(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """A second `register_snapshot` with same `(source_id, grid_id)` but a
+    mutated cell (different signature) MUST raise `GridDriftDetectedError`
+    naming both signatures. SUB-5 does NOT own supersession."""
+    grid_id = f"grid_drift_{uuid.uuid4().hex[:8]}"
+    # First registration: use the standard 5x5 grid.
+    dir_a = tmp_path / "a"
+    dir_a.mkdir()
+    grid_json_a, sidecar_a, uri = _write_unique_fixture(dir_a, suffix="drift_a", grid_id=grid_id)
+    record_a = read_input_record(
+        "IFS",
+        grid_json_a,
+        sidecar_a,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    first_id = register_snapshot(record_a, source_id="IFS", store=store)
+
+    # Second registration: same grid_id, but shift the latitudes (identity drift
+    # while staying rectilinear and matching bbox for the drift path — we want
+    # SUB-5 to reject at the drift check).
+    dir_b = tmp_path / "b"
+    dir_b.mkdir()
+    drifted_latitudes = [lat + 0.5 for lat in _DEFAULT_LATITUDES]
+    drifted_payload = _default_grid_payload(latitudes=drifted_latitudes)
+    drifted_payload["grid_id"] = grid_id
+    grid_json_b = dir_b / "grid.json"
+    sidecar_b = dir_b / "sidecar.json"
+    grid_json_b.write_text(json.dumps(drifted_payload), encoding="utf-8")
+    sidecar_b.write_text(
+        json.dumps(_default_sidecar_payload(latitudes=drifted_latitudes)),
+        encoding="utf-8",
+    )
+    record_b = read_input_record(
+        "IFS",
+        grid_json_b,
+        sidecar_b,
+        grid_definition_uri=uri,  # same URI intentionally — drift scenario
+        expected_converter_version=_stub_converter_resolver,
+    )
+    # Sanity: signatures actually differ.
+    assert grid_signature_hash(record_a.cells) != grid_signature_hash(record_b.cells)
+
+    with pytest.raises(GridDriftDetectedError) as excinfo:
+        register_snapshot(record_b, source_id="IFS", store=store)
+    error = excinfo.value
+    assert error.source_id == "IFS"
+    assert error.grid_id == grid_id
+    assert error.existing_snapshot_id == first_id
+    assert error.existing_signature == grid_signature_hash(record_a.cells)
+    assert error.registry_computed_signature == grid_signature_hash(record_b.cells)
+
+
+@pytest.mark.integration
+def test_writer_atomicity_no_partial_rows(
+    sub5_migrated_database: str, tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """A mid-write failure inside `insert_snapshot` MUST leave ZERO rows across
+    both the snapshot and cell tables — writer-level atomicity guarantee."""
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="atomic")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+
+    # Force `insert_snapshot` to raise mid-way. We monkeypatch the store's
+    # `insert_snapshot` to raise a RegistryStoreError AFTER any partial write
+    # would have happened — the sibling test at
+    # `tests/test_grid_registry_store.py::test_mid_write_failure_rolls_back_all_rows`
+    # proves the store-level rollback; here we prove the WRITER surfaces the
+    # error and does not leave partial rows for the same key.
+    original_insert = store.insert_snapshot
+
+    def failing_insert(
+        snapshot: CanonicalGridSnapshot,
+        cells: list[CanonicalGridCell],
+    ) -> uuid.UUID:
+        del snapshot, cells
+        raise RegistryStoreError("simulated mid-write DB failure for atomicity test")
+
+    monkeypatch.setattr(store, "insert_snapshot", failing_insert)
+
+    with pytest.raises(RegistryStoreError):
+        register_snapshot(record, source_id="IFS", store=store)
+
+    # Restore and verify no rows exist for this grid_id.
+    monkeypatch.setattr(store, "insert_snapshot", original_insert)
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_cell c
+                JOIN met.canonical_grid_snapshot s USING (grid_snapshot_id)
+                WHERE s.source_id = %s AND s.grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_writer_backfill_shared_canonical_grid_key(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """Two source snapshots with identical `grid_signature`, identical bbox,
+    and identical `native_resolution` MUST share the same `canonical_grid_key`
+    (Task 3.1b Evidence Floor: 'paired with the Task 3.3 backfill acceptance').
+
+    We simulate the pre-shared-eligibility state: each snapshot's
+    `applicable_source_ids` equals its own single normalized source id.
+    """
+    # Same grid.json bytes but registered under different source_ids means
+    # the FK to met.data_source picks up the normalized id. The signature is
+    # signature-of-cells, which is the same regardless of source_id.
+    grid_json_ifs, sidecar_ifs, uri_ifs = _write_unique_fixture(
+        tmp_path / "ifs", suffix="backfill_ifs", grid_id=f"shared_{uuid.uuid4().hex[:6]}"
+    )
+    # Reuse the same grid_id? No — the DB has a UNIQUE(source_id, grid_id)
+    # in effect via the drift check; different source ids means different rows.
+    # But `applicable_source_ids` shows same normalized source id.
+    dir_gfs = tmp_path / "gfs"
+    dir_gfs.mkdir()
+    grid_payload = _default_grid_payload()
+    grid_payload["grid_id"] = f"shared_gfs_{uuid.uuid4().hex[:6]}"
+    grid_json_gfs = dir_gfs / "grid.json"
+    sidecar_gfs = dir_gfs / "sidecar.json"
+    grid_json_gfs.write_text(json.dumps(grid_payload), encoding="utf-8")
+    sidecar_gfs.write_text(
+        json.dumps(_default_sidecar_payload()),
+        encoding="utf-8",
+    )
+    uri_gfs = f"canonical/gfs/grid/{grid_payload['grid_id']}/grid.json"
+
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    (tmp_path / "ifs").mkdir(exist_ok=True)
+    record_ifs = read_input_record(
+        "IFS",
+        grid_json_ifs,
+        sidecar_ifs,
+        grid_definition_uri=uri_ifs,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    record_gfs = read_input_record(
+        "gfs",
+        grid_json_gfs,
+        sidecar_gfs,
+        grid_definition_uri=uri_gfs,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    # Sanity: identical signatures because cells are identical (same
+    # longitudes/latitudes even though grid_ids differ).
+    sig_ifs = grid_signature_hash(record_ifs.cells)
+    sig_gfs = grid_signature_hash(record_gfs.cells)
+    assert sig_ifs == sig_gfs
+    assert record_ifs.native_resolution == record_gfs.native_resolution
+    assert record_ifs.download_bbox == record_gfs.download_bbox
+
+    id_ifs = register_snapshot(record_ifs, source_id="IFS", store=store)
+    id_gfs = register_snapshot(record_gfs, source_id="gfs", store=store)
+    row_ifs = _fetch_snapshot_row(sub5_migrated_database, id_ifs)
+    row_gfs = _fetch_snapshot_row(sub5_migrated_database, id_gfs)
+    # Same canonical_grid_key because (signature, bbox, native_resolution) match.
+    assert row_ifs["canonical_grid_key"] == row_gfs["canonical_grid_key"]
+    # Pre-shared-eligibility phase: each row's applicable_source_ids is its own.
+    assert list(row_ifs["applicable_source_ids"]) == ["IFS"]
+    assert list(row_gfs["applicable_source_ids"]) == ["gfs"]

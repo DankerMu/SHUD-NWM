@@ -794,3 +794,51 @@ class PsycopgGridRegistryStore:
         raise RegistryImmutabilityError(
             grid_snapshot_id=grid_snapshot_id, field_or_op=field_name
         )
+
+    def find_snapshot_by_identity(
+        self,
+        source_id: str,
+        grid_id: str,
+        grid_signature: str,
+    ) -> UUID | None:
+        """Return the ``grid_snapshot_id`` matching the identity triple, or ``None``.
+
+        Used by the SUB-5 writer (:mod:`workers.grid_registry.registry`) for
+        idempotent re-registration on backfill re-runs. The ``source_id`` is
+        normalized before comparison so callers may pass raw case forms
+        (``"ifs"`` / ``"GFS"``) and still match the stored row.
+        """
+        normalized_source = normalize_source_id(source_id)
+        try:
+            import psycopg2
+        except ImportError as error:
+            raise RegistryStoreError(
+                "psycopg2 is required for grid-registry database operations."
+            ) from error
+
+        connection = None
+        try:
+            connection = psycopg2.connect(self.database_url)
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT grid_snapshot_id
+                    FROM met.canonical_grid_snapshot
+                    WHERE source_id = %s
+                      AND grid_id = %s
+                      AND grid_signature = %s
+                    """,
+                    (normalized_source, grid_id, grid_signature),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                return UUID(str(row[0]))
+        except psycopg2.Error as error:
+            raise RegistryStoreError(
+                f"find_snapshot_by_identity failed: {error}"
+            ) from error
+        finally:
+            if connection is not None:
+                connection.close()
