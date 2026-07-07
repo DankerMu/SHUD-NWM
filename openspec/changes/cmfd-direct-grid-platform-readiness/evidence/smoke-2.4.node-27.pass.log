@@ -12,12 +12,15 @@
 #   evidence is bound to commits" (contract added for §2.4-and-later evidence where the carrier
 #   post-dates baseline). §3.1 cross-artifact indexer parses both lines and asserts tree-equivalence
 #   between baseline_commit and code_carrier_sha on manifest-identity paths.
-#   TREE-EQUIVALENCE ATTEST: `git diff 5e518c15..915e77ad -- workers/ apps/ services/ packages/ db/
-#   schemas/` = empty (no bytes) — verified locally on master branch. The only file paths that
-#   differ between the two commits are (a) openspec/changes/cmfd-direct-grid-platform-readiness/**
-#   (this change's own artifacts), (b) tests/test_direct_grid_evidence_smoke.py (the §2.3 carrier
-#   file itself, added post-baseline), (c) docs/review-loop-log.jsonl (the §2.3 accountability log
-#   append). None of these paths are manifest-identity paths.
+#   TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):
+#     `git diff 5e518c15..915e77ad -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
+#     (verified locally on master branch). This is the SCOPED attest that §3.1 indexer parses;
+#     it proves zero drift on manifest-identity paths between baseline and code carrier. No
+#     enumeration of unscoped-path diffs is asserted here — such an enumeration would be neither
+#     load-bearing nor stable (sibling change-proposal work under openspec/changes/**, docs
+#     ledger appends, and .gitignore edits accumulate between the two commits without touching
+#     manifest identity). Reviewers who want the full diff should run
+#     `git diff 5e518c15..915e77ad --name-only`; the scoped attest above is what §3.1 requires.
 # git rev-parse HEAD (code carrier): 915e77ad0d066bfebe3ed6b4c50f663e48a94577
 
 ## D1. Real-disk structural smoke (env-gated, 4 tests, no DB call inside pytest)
@@ -33,7 +36,13 @@
 #   * test_synthetic_package_files_present            = Path.is_file() for 6 expected paths
 #   * test_binding_manifest_parses_and_has_required   = json.loads + 10-field top-level presence
 #   * test_sp_att_forc_subset_of_tsd_forc_ids         = in-python set membership on .sp.att FORC ⊆ .tsd.forc IDs
-#   * test_sha256_sidecars_match_parent_bytes         = hashlib.sha256 recompute + orphan-sidecar inversion
+#   * test_sha256_sidecars_match_parent_bytes         = 3 distinct groups:
+#       (1) per-file sha256 recompute over each parent file, assert equality to its .sha256 sidecar
+#           (tests/test_direct_grid_evidence_smoke.py:163-171);
+#       (2) aggregate manifest recompute: sha256 of concatenated bytes of sorted sidecar files,
+#           assert equality to package.manifest.sha256 (tests/...:173-181, README §5 rule);
+#       (3) orphan-parent completeness inversion: every non-sidecar file under root MUST have a
+#           companion .sha256 (tests/...:183-202).
 # The "real object store read" and "real DB write" clauses of tasks.md §2.4 are discharged jointly by:
 #   D1 (real-disk read of the evidence-dir synthetic package on node-27 NFS) +
 #   §2.3 D3 evidence transaction (real DB write of derived rows, see db-registration-2.3.node-27.pass.log) +
@@ -79,21 +88,31 @@ tests/test_direct_grid_evidence_smoke.py::test_sha256_sidecars_match_parent_byte
 #     grid_id                        = synth-grid-p0.2-v1
 #     grid_signature                 = afafe1c814ad6b7a212455c2c8f25d6abaa22f3dd991f232d3749ff7f7d48449
 #     station_bindings_length        = 3
-#   §7.3 per-station sub-fields (station_bindings[0], sorted-key JSON for byte-stable comparison):
-#     {"forcing_filename": "station-001.csv", "grid_cell_id": "cell-0100.00-0030.00",
-#      "grid_id": "synth-grid-p0.2-v1", "latitude": 30.0, "longitude": 100.0,
-#      "shud_forcing_index": 1, "station_id": "synth-station-001", "x": 1, "y": 1, "z": 100}
+#   §7.3 per-station sub-fields (all 3 station_bindings elements, sorted-key JSON for byte-stable
+#     comparison — [0]/[1]/[2] enumerated below in full, not exemplar-only):
+#     station_bindings[0] = {"forcing_filename": "station-001.csv", "grid_cell_id": "cell-0100.00-0030.00",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.0, "longitude": 100.0,
+#       "shud_forcing_index": 1, "station_id": "synth-station-001", "x": 1, "y": 1, "z": 100}
+#     station_bindings[1] = {"forcing_filename": "station-002.csv", "grid_cell_id": "cell-0100.50-0030.00",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.0, "longitude": 100.5,
+#       "shud_forcing_index": 2, "station_id": "synth-station-002", "x": 2, "y": 1, "z": 150}
+#     station_bindings[2] = {"forcing_filename": "station-003.csv", "grid_cell_id": "cell-0100.00-0030.50",
+#       "grid_id": "synth-grid-p0.2-v1", "latitude": 30.5, "longitude": 100.0,
+#       "shud_forcing_index": 3, "station_id": "synth-station-003", "x": 1, "y": 2, "z": 200}
 #
 # CROSS-CHECK: all 10 §7.2 top-level identity fields — forcing_mapping_mode, binding_uri,
 #   binding_checksum, model_input_package_id, sp_att_path, sp_att_checksum, applicable_source_ids,
 #   grid_id, grid_signature, station_bindings (length + per-station §7.3 shape) — round-trip
-#   byte-identical between the on-disk binding-manifest.json
+#   byte-identical (modulo PostgreSQL jsonb key-order normalization; content-identical after
+#   normalization) between the on-disk binding-manifest.json
 #   (evidence/synthetic-package/package/binding-manifest.json:1-49, verified by D1's
 #   test_sha256_sidecars_match_parent_bytes) and the DB resource_profile jsonb.
-# CROSS-CHECK station_bindings[0]: the first per-station sub-object was JSON-serialized under
-#   sort_keys=True and its 10 keys (forcing_filename, grid_cell_id, grid_id, latitude, longitude,
-#   shud_forcing_index, station_id, x, y, z) match the §7.3 shape at
-#   binding-manifest.json:22-31 byte-for-byte after PostgreSQL jsonb key-order normalization.
+# CROSS-CHECK station_bindings[0]/[1]/[2] each enumerated above; per-station §7.3 shape spans
+#   in the on-disk binding-manifest.json are: [0] at binding-manifest.json:12-23,
+#   [1] at :24-35, [2] at :36-47. Each of the 3 sub-objects carries the same 10 keys
+#   (forcing_filename, grid_cell_id, grid_id, latitude, longitude, shud_forcing_index,
+#   station_id, x, y, z); the 3 sets of enumerated values match on-disk positions 12-23/24-35/36-47
+#   1:1 after PostgreSQL jsonb key-order normalization.
 # Interpretation: JSON serialization + PG jsonb ingest + resource_profile→jsonb->>'field'/->'field'
 #   extraction preserves the full §7.2 + §7.3 direct-grid contract identity end-to-end for the
 #   evidence row (regression in any of the 10 top-level fields or the per-station sub-shape would
@@ -148,9 +167,15 @@ tests/test_direct_grid_evidence_smoke.py::test_sha256_sidecars_match_parent_byte
 #     audit start UTC: 2026-07-07T03:39:38.115217Z
 #     audit isolation: serializable (verified via SHOW transaction_isolation)
 #     audit end UTC:   2026-07-07T03:39:38.115217Z  (single-snapshot MVCC — start==end)
-#   All D4' SELECTs share a single MVCC snapshot; a same-count swap or UPDATE inside this window
-#   is structurally impossible without a serialization-failure abort. D4' set-identity checks
-#   add md5(sorted-id list) attestations that bound identity drift, not just cardinality.
+#   Semantic scope of D4' (PostgreSQL SSI, plain READ ONLY, non-DEFERRABLE): all D4' SELECTs
+#   share the transaction's first-statement MVCC snapshot; the audit therefore observes ONLY
+#   writers that COMMITTED before that first-statement time (03:39:38.115217Z UTC). Writers
+#   that COMMIT after do not affect the observed values. This is NOT the stronger "no concurrent
+#   activity at all is possible" guarantee that READ ONLY DEFERRABLE would provide — plain
+#   READ ONLY does not take SIREAD locks and does not abort on unrelated concurrent writes.
+#   The audit's identity/count claims are race-safe with respect to committed state as of
+#   03:39:38.115217Z; the set-identity md5 checks bound drift on that snapshot, not on a
+#   hypothetical "no writer moved" window.
 #
 #   INV.A' (active model_instance identity, not just count):
 #     SELECT count(*), md5(string_agg(model_id, ',' ORDER BY model_id)) FROM core.model_instance
@@ -170,8 +195,30 @@ tests/test_direct_grid_evidence_smoke.py::test_sha256_sidecars_match_parent_byte
 #     result: 14  (13 production + 1 evidence identity from §2.3 D3)
 #     INV.A'' PASS: total count 14 matches the §2.3 D3 postcheck at 02:04:17Z UTC — the only
 #       net INSERT across §2.3 D3 + §2.4 window is the 1 evidence row from §2.3 itself.
-#       Combined with INV.A' identity hash, any add/drop swap between 02:04:17Z and 03:39:38Z
-#       would either bump total or change the md5; both hold, so identity is preserved.
+#
+#   INV.A''' (inactive-set model_instance identity — closes DELETE+INSERT-same-count swap gap):
+#     Captured under a separate fresh SERIALIZABLE READ ONLY session at
+#     2026-07-07T04:03:58.936413Z UTC (D4'-supplement, distinct from D4' 03:39:38Z window because
+#     INV.A''' was added in Round 2 fix). The same session re-captured INV.A' md5 and INV.A''
+#     total to prove no drift between the two windows:
+#       INV.A' md5 (re-cap)  = e95e51ddfd3fd191f76165410c5bbcaa   (identical to 03:39:38Z)
+#       INV.A'' total (re-cap) = 14                                (identical to 03:39:38Z)
+#     Then:
+#     SELECT count(*), md5(coalesce(string_agg(model_id, ',' ORDER BY model_id), ''))
+#       FROM core.model_instance WHERE active_flag=false;
+#     count = 1
+#     md5   = 3fbae949eb92641f3fdc8be327f31cb7
+#     sorted model_id list = model__evidence_cmfd_p02_synth__v1
+#     INV.A''' PASS: the sole inactive row is the §2.3 evidence identity itself; an autopipe
+#       DELETE + INSERT of a different inactive model_instance would keep total=14 (INV.A'')
+#       and keep the 13-active md5 unchanged (INV.A') but would change this inactive-set md5.
+#       Together INV.A' + INV.A'' + INV.A''' fingerprint the full 14-row identity set at
+#       04:03:58.936413Z, and identical re-captured INV.A'/A'' between 03:39:38Z and 04:03:58Z
+#       further extends the certification window: no add/drop/swap (active OR inactive) occurred
+#       between 02:04:17Z (§2.3 D3) and 04:03:58Z.
+#     Reproducibility: `printf 'model__evidence_cmfd_p02_synth__v1' | md5sum` locally reproduces
+#       3fbae949eb92641f3fdc8be327f31cb7 because PostgreSQL md5() over a UTF-8 text agrees with
+#       local md5 for the same input; the audit is thus independently reproducible without DB.
 #
 #   INV.B' (production basin identity, not just count):
 #     SELECT count(*), md5(string_agg(basin_id, ',' ORDER BY basin_id)) FROM core.basin
@@ -197,12 +244,16 @@ tests/test_direct_grid_evidence_smoke.py::test_sha256_sidecars_match_parent_byte
 #     INV.D' PASS: 3 synth mirrors preserved with active_flag=false + station_role='forcing_proxy'.
 #
 #   Interpretation of D4' vs D4: D4 (03:13:20Z READ COMMITTED count-only) is the point-in-time
-#   snapshot recorded at the §2.4 audit time; D4' (03:39:38Z SERIALIZABLE identity-hashed) is
-#   the race-safe fresh-window attestation that structurally rules out same-count swaps within
-#   its window and, combined with total-count evidence, rules out any net-INSERT churn since
-#   the §2.3 D3 postcheck at 02:04:17Z (only the 1 evidence row was net-added). D4 remains as
-#   historical evidence of the §2.4 confinement check at its original capture time; D4' is
-#   the strengthened attestation for the certification-forward window from 03:39:38Z onward.
+#   snapshot recorded at the §2.4 audit time; D4' (03:39:38Z SERIALIZABLE READ ONLY, identity-
+#   hashed) is a race-safe attestation of the state committed as of 03:39:38.115217Z UTC — its
+#   md5(sorted-id) fingerprints identify any add/drop/swap that COMMITTED before the snapshot;
+#   writers COMMITTING after do not affect the snapshot. Combined with the D4'-supplement at
+#   04:03:58.936413Z (INV.A' md5 + INV.A'' total re-captured identical, INV.A''' inactive md5
+#   fingerprinted), the certification-forward window from 02:04:17Z (§2.3 D3) to 04:03:58Z has
+#   the full 14-row model_instance identity attested — any add/drop/swap in that window would
+#   have changed INV.A' md5, INV.A'' total, INV.A''' md5, or the INV.B'/C'/D' fingerprints.
+#   D4 remains as historical evidence of the §2.4 confinement check at its original capture
+#   time; D4' + D4'-supplement together are the strengthened attestation from 03:39:38Z onward.
 #
 # INV.A — production model_instance untouched (point-in-time count at 03:13:20Z audit)
 #   SELECT count(*) FROM core.model_instance WHERE active_flag=true;

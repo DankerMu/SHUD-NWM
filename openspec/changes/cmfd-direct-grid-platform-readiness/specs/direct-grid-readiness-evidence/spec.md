@@ -32,7 +32,7 @@ The platform SHALL run a direct-grid smoke against a real object store and real 
 - **THEN** the smoke evidence records the node-27 host, the pinned `baseline_commit`, and the manifest checksum; when the code carrier commit at run time differs from the pinned `baseline_commit` (because an evidence carrier landed after manifest freeze), the smoke evidence additionally records the `code_carrier_sha` and asserts empty tree-diff between the two commits on all manifest-identity paths (`workers/`, `apps/`, `services/`, `packages/`, `db/`, `schemas/`).
 
 #### Scenario: Smoke runs against the synthetic evidence contract with isolation and cleanup
-- **WHEN** the node-27 smoke provisions its direct-grid contract and writes to the real database
+- **WHEN** the node-27 smoke's `§2.3`+`§2.4` pair provisions its direct-grid contract and writes derived rows to the real database (whether directly in the `§2.4` smoke or via the paired `§2.3` evidence-only registration transaction that the `§2.4` smoke attests read-back for)
 - **THEN** it uses the hand-assembled synthetic direct-grid evidence contract registered as a dedicated evidence-only `core.model_instance` row carrying `resource_profile.direct_grid_forcing`, with construction provenance and SHA-256 checksums recorded in the evidence
 - **THEN** it does not read its contract from, or write derived rows against, any of the 13 live production model instances
 - **THEN** derived rows are confined to a dedicated non-production identity (dedicated `basin_version_id`/`model_id`) and any `met.met_station` mirror rows carry `active_flag=false`, so the station-MVT layer cannot display mixed old/new stations
@@ -79,15 +79,17 @@ The platform SHALL judge migration readiness on pinned-commit test results, smok
 - **THEN** any drift between OpenSpec task state and code state is recorded in the evidence rather than assumed absent.
 
 ### Requirement: Readiness evidence package binds all artifacts to a single baseline
-The platform SHALL assemble a readiness evidence package that indexes the readiness manifest and every readiness evidence artifact, and SHALL treat the evidence set as valid only when every artifact references the identical readiness manifest checksum and the identical `baseline_commit`.
+The platform SHALL assemble a readiness evidence package that indexes the readiness manifest and every readiness evidence artifact, and SHALL treat the evidence set as valid only when every artifact references the identical readiness manifest checksum and the identical `baseline_commit`, and — when an artifact records a `code_carrier_sha` distinct from `baseline_commit` — MUST additionally verify that the tree-diff between the two commits on manifest-identity paths is empty.
 
 #### Scenario: Evidence package indexes all artifacts against one baseline
 - **WHEN** the readiness evidence package is assembled
 - **THEN** it indexes the readiness manifest and its `.sha256` companion, the manifest completeness-check output, the suite re-run records, the node-27 smoke record, the minimal-basin execution record, and the G9 capacity baseline report
 - **THEN** every indexed artifact references the same readiness manifest checksum
-- **THEN** every indexed artifact references the same `baseline_commit`.
+- **THEN** every indexed artifact references the same `baseline_commit`
+- **THEN** for every indexed artifact that records a `# code_carrier_sha=<40-hex>` header line distinct from `baseline_commit`, the cross-artifact consistency check parses that line and asserts `git diff <baseline_commit>..<code_carrier_sha> -- workers/ apps/ services/ packages/ db/ schemas/` is empty; a non-empty diff invalidates the artifact
+- **THEN** artifacts captured before the `code_carrier_sha` contract landed (e.g. `db-registration-2.3.node-27.pass.log`) are grandfathered by the sibling `smoke-2.4.node-27.pass.log` retro-attest sharing the same `code_carrier_sha` and manifest-identity path empty-diff.
 
 #### Scenario: Mismatched baseline references invalidate the evidence set
-- **WHEN** any indexed artifact references a readiness manifest checksum or a `baseline_commit` that differs from the rest of the evidence set
+- **WHEN** any indexed artifact references a readiness manifest checksum or a `baseline_commit` that differs from the rest of the evidence set, OR records a `code_carrier_sha` that produces a non-empty tree-diff on manifest-identity paths against `baseline_commit`
 - **THEN** the evidence set is invalid
 - **THEN** readiness certification is blocked until a consistent evidence set is produced on a single pinned baseline.
