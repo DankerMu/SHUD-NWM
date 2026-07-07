@@ -16,8 +16,15 @@
 --     met.interp_weight.grid_snapshot_id
 --
 -- Triggers (identity + display cross-check enforcement):
---   canonical_met_product_grid_definition_uri_match_trg  -- URI-match on insert/update
---   canonical_grid_snapshot_identity_immutable_trg       -- reject identity mutation
+--   canonical_met_product_grid_definition_uri_match_trg    -- URI-match on insert/update
+--   canonical_grid_snapshot_identity_immutable_trg         -- reject identity mutation
+--   canonical_grid_cell_immutable_trg                      -- reject any UPDATE on cell rows
+--   canonical_grid_cell_direct_delete_blocked_trg          -- reject direct DELETE (cascade allowed)
+--
+-- DELETE-rejection on met.canonical_grid_snapshot itself is a store-layer concern
+-- deferred to Task 2.2 (SUB-3) — this migration provides UPDATE-based identity
+-- enforcement, and ON DELETE CASCADE on met.canonical_grid_cell is intentional to
+-- support store-driven snapshot removal during future spec-driven migrations.
 
 CREATE TABLE IF NOT EXISTS met.canonical_grid_snapshot (
   grid_snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -87,6 +94,9 @@ RETURNS TRIGGER AS $$
 DECLARE
   snapshot_uri TEXT;
 BEGIN
+  -- The NULL-URI branch is intentional — when a product row's display cross-check
+  -- URI is unset (or explicitly cleared), no cross-check comparison is possible.
+  -- The FK column on `grid_snapshot_id` remains the referential-integrity anchor.
   IF NEW.grid_snapshot_id IS NULL OR NEW.grid_definition_uri IS NULL THEN
     RETURN NEW;
   END IF;
@@ -178,3 +188,50 @@ CREATE TRIGGER canonical_grid_snapshot_identity_immutable_trg
   BEFORE UPDATE ON met.canonical_grid_snapshot
   FOR EACH ROW
   EXECUTE FUNCTION met.canonical_grid_snapshot_identity_immutable();
+
+-- Trigger C: Reject any UPDATE on met.canonical_grid_cell. Per-cell rows are
+-- identity components of the immutable snapshot
+-- (grid-snapshot-registration/spec.md scenario "Snapshots are never updated in
+-- place" enumerates "per-cell rows" alongside grid_signature and bbox). Cells
+-- are structurally immutable once inserted; any drift in geometry requires
+-- registering a new snapshot version (grid-drift-lifecycle capability).
+CREATE OR REPLACE FUNCTION met.canonical_grid_cell_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION
+    'canonical_grid_cell rows are immutable once inserted (grid_snapshot_id=%, grid_cell_id=%); register a new snapshot version to change cell geometry',
+    OLD.grid_snapshot_id, OLD.grid_cell_id;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS canonical_grid_cell_immutable_trg
+  ON met.canonical_grid_cell;
+CREATE TRIGGER canonical_grid_cell_immutable_trg
+  BEFORE UPDATE ON met.canonical_grid_cell
+  FOR EACH ROW
+  EXECUTE FUNCTION met.canonical_grid_cell_immutable();
+
+-- Trigger D: Reject DIRECT DELETE on met.canonical_grid_cell while allowing
+-- CASCADE-driven deletes from met.canonical_grid_snapshot. Postgres sets
+-- pg_trigger_depth() = 1 when the DELETE is a top-level statement and
+-- pg_trigger_depth() > 1 when it originates from a foreign-key CASCADE. This
+-- preserves the intended parent-snapshot-driven removal path while blocking
+-- ad-hoc DELETE FROM met.canonical_grid_cell WHERE ... from callers.
+CREATE OR REPLACE FUNCTION met.canonical_grid_cell_direct_delete_blocked()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF pg_trigger_depth() = 1 THEN
+    RAISE EXCEPTION
+      'canonical_grid_cell rows may not be deleted directly (grid_snapshot_id=%, grid_cell_id=%); DELETE the parent canonical_grid_snapshot row instead to cascade',
+      OLD.grid_snapshot_id, OLD.grid_cell_id;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS canonical_grid_cell_direct_delete_blocked_trg
+  ON met.canonical_grid_cell;
+CREATE TRIGGER canonical_grid_cell_direct_delete_blocked_trg
+  BEFORE DELETE ON met.canonical_grid_cell
+  FOR EACH ROW
+  EXECUTE FUNCTION met.canonical_grid_cell_direct_delete_blocked();
