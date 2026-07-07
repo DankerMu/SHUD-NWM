@@ -1,0 +1,87 @@
+# captured at 2026-07-07T02:04:17Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=4958e747213db2c9e013363cc6f8c6232f0d0eb7db29e4096fc11edc72558bf8
+# task: cmfd-direct-grid-platform-readiness §2.3 D3 — evidence-only registration of the synthetic direct-grid contract as core.model_instance on node-27
+# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
+# env: infra/env/node27-ingest.env (writable nhms role; DATABASE_URL redacted)
+# synthetic package aggregate SHA-256 (openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/package.manifest.sha256):
+#   0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5
+# script: /private/tmp/.../scratchpad/register-synth-p02.sql (transactional; DO $$ RAISE EXCEPTION $$ pre/post-check inline)
+# execution model: BEGIN + INSERT×5 + POSTCHECK + COMMIT (single transaction)
+
+# ---- invariant surface pinned by §2.3 (evidence-only DB registration; MUST NOT touch production) ----
+# INV.A production core.model_instance active_flag=true count == 13 (matches source-of-truth appendix-A)
+# INV.B evidence core.model_instance row exists with active_flag=false, lifecycle_state='inactive'
+# INV.C evidence row resource_profile.direct_grid_forcing conforms to design.md §7.1 (envelope) + §7.2 (binding manifest)
+# INV.D no production basin/version/river-network/mesh mutated; only new evidence-only identifiers added
+# INV.E met.met_station synthetic mirrors are active_flag=false + station_role='forcing_proxy'
+# INV.F live DB migration version == manifest.db_schema_migration_version (000042)
+
+# ---- pre-execution probe (2026-07-07T02:00:36Z) ----
+#   core.model_instance NOT NULL columns (verified via information_schema):
+#     model_id, basin_version_id, river_network_version_id, mesh_version_id, calibration_version_id,
+#     shud_code_version, model_package_uri, active_flag, resource_profile, created_at, lifecycle_state
+#   Nullable: rshud_code_version, autoshud_code_version, container_image
+#   FK constraints on core.model_instance (only): basin_version_id -> core.basin_version, river_network_version_id -> core.river_network_version
+#   NOTE: mesh_version_id / calibration_version_id are NOT NULL TEXT with NO FK constraint (design accepts opaque version strings for these).
+#         Evidence-only string identifiers 'mesh__evidence_cmfd_p02_synth__v1' and 'calib__evidence_cmfd_p02_synth__v1' are therefore correct
+#         without a companion core.mesh_version / core.calibration_version row — no production row is bound to them.
+#   CHECK constraints on core.model_instance:
+#     model_instance_lifecycle_state_chk: lifecycle_state IN ('inactive','active','deprecated','superseded')
+#     model_instance_active_lifecycle_consistency_chk: (active=true AND lifecycle='active') OR (active=false AND lifecycle<>'active')
+#   Selected lifecycle_state for the evidence row: 'inactive' (correct evidence-only semantics; not schedulable)
+
+# ---- transactional SQL execution (2026-07-07T02:04:04Z .. 02:04:16Z UTC) ----
+BEGIN;
+DO $$ ... PRECHECK: count(core.model_instance)=13 AND no model_id LIKE 'model__evidence%' ... END $$;   -- passed
+INSERT INTO core.basin ...basin__evidence_cmfd_p02_synth ...;                                          -- 1 row
+INSERT INTO core.basin_version ...basin__evidence_cmfd_p02_synth__v1
+  geom = ST_GeomFromText('MULTIPOLYGON(((99.9 29.9,100.6 29.9,100.6 30.6,99.9 30.6,99.9 29.9)))', 4490)
+  active_flag=false checksum=0baeaf810241b4bc06b129acc0785b1840b79fb32a664b9d42817d3a33aadae5 ...;     -- 1 row
+INSERT INTO core.river_network_version ...rnw__evidence_cmfd_p02_synth__v1 segment_count=0 ...;         -- 1 row
+INSERT INTO core.model_instance ...model__evidence_cmfd_p02_synth__v1
+  mesh_version_id='mesh__evidence_cmfd_p02_synth__v1'  calibration_version_id='calib__evidence_cmfd_p02_synth__v1'
+  shud_code_version='basins-shud'  active_flag=false  lifecycle_state='inactive'
+  resource_profile.direct_grid_forcing = §7.2 binding manifest with 3 station_bindings ...;             -- 1 row
+INSERT INTO met.met_station synth-station-001/002/003
+  active_flag=false  station_role='forcing_proxy'  basin_version_id=basin__evidence_cmfd_p02_synth__v1 ...; -- 3 rows
+DO $$ ... POSTCHECK: active model_instance still =13; evidence row present with active_flag=false; evidence mirror active_flag=false ... END $$;  -- passed
+COMMIT;   -- OK
+
+# ---- post-execution audit (2026-07-07T02:04:17Z UTC) ----
+INV.A active_model_instance_count = 13                                                                     PASS
+      total_model_instance_count  = 14                                                                     (13 prod active + 1 evidence inactive)
+INV.B evidence row identity
+      model_id                   = model__evidence_cmfd_p02_synth__v1
+      basin_version_id           = basin__evidence_cmfd_p02_synth__v1
+      river_network_version_id   = rnw__evidence_cmfd_p02_synth__v1
+      mesh_version_id            = mesh__evidence_cmfd_p02_synth__v1
+      calibration_version_id     = calib__evidence_cmfd_p02_synth__v1
+      shud_code_version          = basins-shud
+      model_package_uri          = https://github.com/DankerMu/SHUD-NWM/tree/master/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package
+      active_flag                = false
+      lifecycle_state            = inactive                                                                PASS
+INV.C resource_profile.direct_grid_forcing.forcing_mapping_mode = direct_grid
+      resource_profile.direct_grid_forcing.binding_uri          = synth://cmfd-p0.2-direct-grid-evidence/v1
+      resource_profile.direct_grid_forcing.grid_id              = synth-grid-p0.2-v1
+      station_bindings count = 3 -> [synth-station-001, synth-station-002, synth-station-003]              PASS
+INV.D prod core.basin rows with basin_group<>'evidence-only' = 13                                          PASS (unchanged)
+      evidence core.basin rows with basin_group='evidence-only' = 1                                        PASS (new)
+INV.E synth-station-001/002/003 all active_flag=false + station_role='forcing_proxy'                       PASS
+      production met.met_station active_flag=true count = 6290                                             PASS (unchanged)
+INV.F live top schema_migrations = 000042_drop_redundant_river_selected_identity_lookup_idx.sql
+      manifest.db_schema_migration_version = 000042                                                        PASS (equal)
+
+# ---- station-MVT / display side-check ----
+# Evidence rows carry active_flag=false and (for met.met_station) station_role='forcing_proxy'.
+# The display MVT layer selects on active_flag=true, so the evidence identity is invisible to the /hydro-met UI (source-of-truth §10).
+# This is a static-schema/flag-based invariant confirmed by the row states above; no live browser probe required for the D3 registration step
+# (browser-probe is bound to the 2.4 smoke, which touches the same evidence identity via the real object-store carrier).
+
+# ---- reversibility ----
+# All rows carry evidence-only identifiers ('basin__evidence_cmfd_p02_synth' family). A single ROLLBACK is:
+#   DELETE FROM met.met_station WHERE basin_version_id='basin__evidence_cmfd_p02_synth__v1';
+#   DELETE FROM core.model_instance WHERE model_id='model__evidence_cmfd_p02_synth__v1';
+#   DELETE FROM core.river_network_version WHERE river_network_version_id='rnw__evidence_cmfd_p02_synth__v1';
+#   DELETE FROM core.basin_version WHERE basin_version_id='basin__evidence_cmfd_p02_synth__v1';
+#   DELETE FROM core.basin WHERE basin_id='basin__evidence_cmfd_p02_synth';
+
+PASS
