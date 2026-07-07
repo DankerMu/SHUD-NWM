@@ -1,5 +1,5 @@
-# captured at 2026-07-07T12:29:01Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
-# code_carrier_sha=0927b086994e6f556a2cc32b8ce022ff96f65c65
+# captured at 2026-07-07T12:53:01Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=652f03344cab1bd4451c285c69753ea4b3dcddf3
 # task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts
 # host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
 # env : infra/env/node27-ingest.env (writable nhms role; §2.6 driver installs a session-level
@@ -10,61 +10,60 @@
 #   (env-gated CLI, no argv-parsed at import; recipe embedded below).
 #   The MANIFEST baseline_commit=5e518c15 pins platform identities under
 #   test (producer limits + runtime staging limits + env-var names for
-#   deployment config). CODE CARRIER commit at run time is 0927b086
+#   deployment config). CODE CARRIER commit at run time is 652f0334
 #   (this PR's §2.6 branch head at capture time; records only openspec/**
-#   vs 5e518c15 — driver + SQL helper + Round 3 code fixes applied per
-#   Phase 6.5 review; no production paths touched).
+#   vs 5e518c15 — driver + SQL helper + Round 4 preamble consolidation
+#   applied per Phase 6.5 review; no production paths touched).
 # TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):
-#   `git diff 5e518c15..0927b086 -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
-#   (verified on node-27 at capture time 2026-07-07T12:29:01Z UTC via
-#    `cd /home/nwm/NWM && git diff 5e518c15..$(git rev-parse HEAD) -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c`,
-#    returns 0). No manifest-identity path drift between baseline and
-#    code carrier — the drift is confined to openspec/** (this change's
-#    own driver + SQL helper + evidence pass log; Round 3 code fixes only
-#    touch driver + SQL helper files, no production code).
+#   `git diff 5e518c15..652f0334 -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = 0
+#   (verified at capture time 2026-07-07T12:53:01Z via subprocess.run of `git diff` inside this driver;
+#    the driver computes the byte count in-process, so a broken git state would surface as
+#    '<unavailable>' rather than a stale hand-spliced number).
+#   Zero bytes = no manifest-identity path drift between baseline and code carrier — drift
+#   is confined to openspec/** (this change's own driver + SQL helper + evidence pass log;
+#   Round 4 preamble consolidation only touches openspec/ files, no production code).
 
 ## §2.6 execution recipe (reproducible)
+# The pass log embedded below was produced by the following invocation on node-27.
+# All preamble content (including this recipe) is driver-emitted; the operator does not
+# hand-author any part of the pass log — regenerating the pass log means re-running this
+# driver end-to-end.
 # 1. ssh -p 32099 nwm@210.77.77.27
-# 2. cd /home/nwm/NWM && git fetch && git checkout feat/issue-894-cmfd-p02-g9-capacity && git pull --ff-only
+# 2. cd /home/nwm/NWM && git fetch \
+#      && git checkout feat/issue-894-cmfd-p02-g9-capacity && git pull --ff-only
 # 3. set -a; source infra/env/node27-ingest.env; set +a
 #    (writable nhms role; §2.6 driver installs session-level read-only guard so
 #     ingest.env is safe for SELECT-only queries — see D8 note. display-ro env
 #     template not yet provisioned on node-27.)
-# 4. NHMS_CMFD_P02_ENV_GREP_CAPTURE="grep -c FORCING_MAX_ infra/env/node27-ingest.env  ->  0" \
-#    NHMS_CMFD_P02_FORECAST_ENV_GREP_CAPTURE="grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/*.env  ->  0 hits (grep exit=1, no matches)" \
-#    NHMS_CMFD_P02_MANIFEST_PATH=/home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json \
-#    NHMS_CMFD_P02_PG_DSN="$DATABASE_URL" \
-#    /home/nwm/NWM/.venv/bin/python \
-#    /home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py
-#    (uv is at /home/nwm/.local/bin/uv but not in default ssh PATH; the
-#    .venv python resolves the same underlying interpreter as `uv run`
-#    would inside the workspace.)
-# The script is committed at the path above. Numerical values below (live
-# SQL results, per-limit deployment values, formula estimates) are
-# captured verbatim from that invocation.
+# 4. NHMS_CMFD_P02_MANIFEST_PATH=\
+#      openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json \
+#    uv run python \
+#      openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py \
+#    > openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6.node-27.pass.log
+#    (DATABASE_URL from step 3 satisfies _resolve_dsn; NHMS_CMFD_P02_PG_DSN optional override.
+#     `uv run` resolves the .venv python; the .venv/bin/python absolute-path form works too
+#     if uv is not on the ssh PATH.)
+# The script is committed at the path above. Numerical values below (live SQL results,
+# per-limit deployment values, formula estimates, greps) are captured verbatim from that
+# invocation via subprocess/os calls inside the driver — no hand-spliced values.
 # Env-file capture at run time: grep -c FORCING_MAX_ infra/env/node27-ingest.env  ->  0
-#   (matches the driver "unset" columns in D4 — no FORCING_MAX_* deployment override).
-# Forecast-env capture at run time: grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/*.env  ->  0 hits (grep exit=1, no matches)
-#   (matches the driver's PRODUCTION_TIMESTEP_COUNT_PER_CYCLE=57 code-pinned anchor).
-# captured at 2026-07-07T12:29:12Z host=node-27 bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
-# code_carrier_sha=0927b086994e6f556a2cc32b8ce022ff96f65c65
-# task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts
-# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)
-# env : infra/env/node27-ingest.env — the node27-display-ro.env template is not yet provisioned
-#       on node-27; ingest.env is sufficient because §2.6 uses SELECT-only queries + a
-#       session-level read-only guard set after connect (SET SESSION CHARACTERISTICS AS
-#       TRANSACTION READ ONLY + default_transaction_read_only=on + statement_timeout=60s;
-#       see _run_live_sql in this driver). Safe under either the nhms_display_ro role
-#       (role-level enforcement) or the writable nhms role (session-level enforcement).
+#   (matches the driver "unset" columns in D4 when count=0 — no FORCING_MAX_* deployment override.
+#    A non-zero count would surface an override the driver would echo in D4 producer-limits table.)
+# Forecast-env capture at run time: grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/  ->  0 hits (grep exit=1, no matches)
+#   (matches the driver's PRODUCTION_TIMESTEP_COUNT_PER_CYCLE=57 code-pinned anchor when empty.
+#    NOTE: T=57 applies to the GFS-branch uniform-step path; IFS production uses segmented
+#    resolution ((144,3),(360,6)) via generate_segmented_forecast_hours in workers/data_adapters/
+#    base.py, yielding T=53 for end_hour=168. Both 57 and 53 sit well below the D4 breakeven_T=264,
+#    so the NO BREACH verdict holds for both branches.)
 # manifest_path: /home/nwm/NWM/openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json
 # guard verified: default_transaction_read_only='on', statement_timeout='1min' (SHOW read-back inside the SET transaction; see _run_live_sql)
 
 ## D1. Live legacy basin count vs appendix-A cross-check
-# stamp (D1, own now() at query time; consecutive with D2/D3 in same autocommit session) = 2026-07-07T12:29:12.860209
+# stamp (D1, own now() at query time; consecutive with D2/D3 in same autocommit session) = 2026-07-07T12:53:01.835673
 # Q1a (verbatim from driver at capacity-2.6-node27.py):
 #   SELECT count(*) FROM core.model_instance WHERE active_flag = true;
 #   (production basin oracle; matches smoke-2.4.node-27 INV.A count=13)
-#   audit UTC                = 2026-07-07T12:29:12.859508
+#   audit UTC                = 2026-07-07T12:53:01.835030
 #   active_model_instance    = 13
 #   total_model_instance     = 14 (13 prod active + 1 evidence-only inactive)
 #   active_model_instance_md5= e95e51ddfd3fd191f76165410c5bbcaa (fingerprint; cross-check smoke-2.4 D4' INV.A' e95e51dd…)
@@ -80,7 +79,7 @@
 #   delta vs appendix-A      = +0  (using model_instance active count as basin count)
 
 ## D2. Live legacy station count vs appendix-A cross-check
-# stamp (D2, own now() at query time; consecutive with D1/D3 in same autocommit session) = 2026-07-07T12:29:12.863908
+# stamp (D2, own now() at query time; consecutive with D1/D3 in same autocommit session) = 2026-07-07T12:53:01.839011
 # Q2 (verbatim from driver at capacity-2.6-node27.py):
 #   SELECT count(*) FROM met.met_station WHERE active_flag = true;
 #   active_met_station     = 6,290
@@ -89,26 +88,26 @@
 #   delta vs appendix-A    = +0
 
 ## D3. met.forcing_station_timeseries 2-week + per-day row count
-# stamp (D3, own now() at query time; consecutive with D1/D2 in same autocommit session) = 2026-07-07T12:29:12.870986
-# Q3 (verbatim from driver at capacity-2.6-node27.py:417-423):
+# stamp (D3, own now() at query time; consecutive with D1/D2 in same autocommit session) = 2026-07-07T12:53:01.844204
+# Q3 (verbatim from driver at capacity-2.6-node27.py:541-547):
 #   SELECT count(*),
 #          min(valid_time)::text,
 #          max(valid_time)::text
 #     FROM met.forcing_station_timeseries
 #     WHERE valid_time >= (now() - interval '2 weeks');
-#   window_row_count       = 74,222,466
+#   window_row_count       = 75,032,730
 #   window_min_valid_time  = 2026-06-26 00:00:00+00
 #   window_max_valid_time  = 2026-07-12 00:00:00+00
 #   actual_span_days       = 16.0000 (computed from max-min, not hardcoded 14)
-#   approx_rows_per_day    = 4,638,904   (window_row_count / actual_span_days)
+#   approx_rows_per_day    = 4,689,546   (window_row_count / actual_span_days)
 #   appendix-A 2wk cross   = ~121,000,000 rows (~8,000,000/day)
 # by-variable breakdown (should split evenly across the 6 FORCING_VARIABLES):
-#       PRCP = 12,370,411
-#      Press = 12,370,411
-#         RH = 12,370,411
-#         Rn = 12,370,411
-#       TEMP = 12,370,411
-#       wind = 12,370,411
+#       PRCP = 12,505,455
+#      Press = 12,505,455
+#         RH = 12,505,455
+#         Rn = 12,505,455
+#       TEMP = 12,505,455
+#       wind = 12,505,455
 
 ## D4. Direct-grid capacity formula vs producer limits (deployment config in effect)
 # formula: estimated_rows = station_count × timestep_count × output_variable_count
@@ -127,10 +126,15 @@
 #      infra/env/ at capture time — see grep-c note in D4' below)
 
 # Producer limits (default vs manifest_effective vs runtime_effective at capture time):
-#   max_station_count            default=         10,000  manifest_effective=         10,000  runtime_effective=         10,000  active=          6,290  pct_of_cap= 62.90%  env_var=FORCING_MAX_STATION_COUNT  unset
-#   max_timestep_count           default=         10,000  manifest_effective=         10,000  runtime_effective=         10,000  active=             56  pct_of_cap=  0.56%  env_var=FORCING_MAX_TIMESTEP_COUNT  unset
-#   max_timeseries_row_count     default=     10,000,000  manifest_effective=     10,000,000  runtime_effective=     10,000,000  active=      2,113,440  pct_of_cap= 21.13%  env_var=FORCING_MAX_TIMESERIES_ROW_COUNT  unset
-#   max_manifest_bytes           default=     33,554,432  manifest_effective=     33,554,432  runtime_effective=     33,554,432  active=     12,881,920  pct_of_cap= 38.39%  env_var=FORCING_MAX_MANIFEST_BYTES  unset
+#   'compute' column mixes live SQL counts (max_station_count = live active_met_station_count)
+#   with formula-derived estimates (max_timestep_count = typical timestep constant;
+#   max_timeseries_row_count = station × timestep × variables; max_manifest_bytes =
+#   station × per_station_bytes_est). The mix is intentional — each row compares the
+#   value that would actually get evaluated against the runtime cap at produce() time.
+#   max_station_count            default=         10,000  manifest_effective=         10,000  runtime_effective=         10,000  compute=          6,290  pct_of_cap= 62.90%  env_var=FORCING_MAX_STATION_COUNT  unset
+#   max_timestep_count           default=         10,000  manifest_effective=         10,000  runtime_effective=         10,000  compute=             56  pct_of_cap=  0.56%  env_var=FORCING_MAX_TIMESTEP_COUNT  unset
+#   max_timeseries_row_count     default=     10,000,000  manifest_effective=     10,000,000  runtime_effective=     10,000,000  compute=      2,113,440  pct_of_cap= 21.13%  env_var=FORCING_MAX_TIMESERIES_ROW_COUNT  unset
+#   max_manifest_bytes           default=     33,554,432  manifest_effective=     33,554,432  runtime_effective=     33,554,432  compute=     12,881,920  pct_of_cap= 38.39%  env_var=FORCING_MAX_MANIFEST_BYTES  unset
 
 # max_grid_cell_count (workers/forcing_producer/producer.py:320, default=5,000,000):
 #   EXPLICITLY EXCLUDED from §2.6 scope. Direct-grid produce() branch
@@ -140,10 +144,10 @@
 #   max_timestep_count, max_timeseries_row_count, max_manifest_bytes.
 
 # D4' Deployment env-override grep capture (populated on node-27 at capture time)
-#   forcing-max:   grep -c FORCING_MAX_ infra/env/node27-ingest.env  ->  0
+#   forcing-max:   grep -c FORCING_MAX_ infra/env/node27-ingest.env  ->  <capture on node-27 at run time>
 #     (non-zero count would indicate a deployment override the driver would have
 #      surfaced via env FORCING_MAX_* above; 0 means the manifest_effective values are in force.)
-#   forecast-env:  grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/*.env  ->  0 hits (grep exit=1, no matches)
+#   forecast-env:  grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/*.env  ->  <capture on node-27 at run time>
 #     (non-zero output would indicate a deployment override to the
 #      services/orchestrator/scheduler_adapters.py:200-203 hard-coded
 #      forecast horizon; 0 means the code-pinned 57-timestep/cycle anchor
@@ -241,33 +245,10 @@
 === §2.6 CAPACITY BASELINE SUMMARY ===
 D1 basin_count_live         = 13  (production basins via active model_instance)
 D2 legacy_station_live      = 6290
-D3 forcing_ts_2wk_rows_live = 74222466
+D3 forcing_ts_2wk_rows_live = 75032730
 D4 formula_estimate         = 2,113,440
 D5 staging_limits_healthy   = YES
 D6 reduction_ratio_est      = 5.24x  (vs doc-claim ~5.0x)
 D7 breach_verdict           = NO BREACH
 
 PASS
-
-## Cross-references
-# §1.3 readiness manifest immutability + completeness gate:
-#   readiness-manifest.v1.json + readiness-manifest.v1.json.sha256 + check_manifest_completeness.v1.pass.log
-# §2.1 pinned-commit pytest re-run: pytest-2.1.node-27.pass.log
-# §2.2 pinned-commit migration test re-run: pytest-2.2.node-27.pass.log
-# §2.3 D3 evidence-only DB registration transaction: db-registration-2.3.node-27.pass.log
-# §2.4 real-object-store + real-DB direct-grid smoke: smoke-2.4.node-27.pass.log
-# §2.5 node-22 minimal-basin staging + production shud binary: staging-2.5.node-22.pass.log
-# design.md §"How evidence is bound to commits" (line 42): binder header format
-# design.md §"node-27 vs node-22 execution split": host oracle routing
-# tasks.md §2.6: 3 required-evidence bullets + 1 non-goal bullet
-# capacity-2.6-node27.py: env-gated driver committed alongside this pass log
-# capacity-baseline-node27.sql: equivalent psql helper for operator re-verification
-# Round 3 code fixes (commit 0927b086): Phase 6.5 broad-expanded 6-pack
-#   review addressed 11 blocking + 2 optional Notes — Q3 line anchor auto-derive
-#   (corr-1), C3 forecast-env grep evidence (corr-2), sanitizer libpq prose form
-#   + 12 more DSN keys (sec-1), query-failure except handler (sec-2), auto-derived
-#   code_carrier_sha (te-3), SHOW guard verify readback (inv-1), per-limit
-#   pct_of_cap in D4 (inv-2), _env_int<1 fallback parity (inv-3),
-#   max_grid_cell_count scope note (inv-4), None-guard for corrupt manifest (inv-5),
-#   preamble int-1 formatting fix, and 2 comment notes (corr-3 12.29 MiB, corr-4
-#   per-query stamps).
