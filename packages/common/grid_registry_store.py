@@ -60,6 +60,17 @@ class RegistryStoreError(RuntimeError):
     """
 
 
+class RegistryUniqueViolationError(RegistryStoreError):
+    """Raised when the DB rejects a concurrent duplicate via SQLSTATE 23505.
+
+    Distinct from the base :class:`RegistryStoreError` so the SUB-5 writer can
+    scope its race-fallback re-query to ONLY the partial-UNIQUE-index race
+    path (000044) — a transient network / connection error must NOT be silently
+    reinterpreted as a race-lost duplicate. The original ``psycopg2`` exception
+    is preserved as ``__cause__`` for triage.
+    """
+
+
 class RegistryImmutabilityError(RegistryStoreError):
     """Raised when a caller attempts to mutate an existing snapshot's identity.
 
@@ -480,9 +491,22 @@ class PsycopgGridRegistryStore:
                     )
             connection.commit()
             return grid_snapshot_id
+        except psycopg2.errors.UniqueViolation as error:
+            if connection is not None:
+                connection.rollback()
+            raise RegistryUniqueViolationError(
+                f"canonical_grid_snapshot INSERT rejected by unique constraint: {error}"
+            ) from error
         except psycopg2.Error as error:
             if connection is not None:
                 connection.rollback()
+            # Defensive: psycopg2 versions that don't subclass UniqueViolation
+            # from the base Error still expose pgcode; catch 23505 here too so
+            # the writer's race-fallback can rely on the narrower type.
+            if getattr(error, "pgcode", None) == "23505":
+                raise RegistryUniqueViolationError(
+                    f"canonical_grid_snapshot INSERT rejected by unique constraint: {error}"
+                ) from error
             raise RegistryStoreError(
                 f"canonical_grid_snapshot INSERT failed: {error}"
             ) from error

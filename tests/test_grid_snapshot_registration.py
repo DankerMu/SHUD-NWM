@@ -46,6 +46,7 @@ from packages.common.grid_registry_store import (
     CanonicalGridSnapshot,
     PsycopgGridRegistryStore,
     RegistryStoreError,
+    RegistryUniqueViolationError,
 )
 from packages.common.grid_signature import grid_signature_hash
 from packages.common.object_store import sha256_bytes
@@ -1467,6 +1468,48 @@ def test_backfill_signature_constant_is_reused_verbatim() -> None:
     assert key == _EXPECTED_BACKFILL_KEY
 
 
+def test_writer_race_fallback_only_triggers_on_unique_violation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A generic `RegistryStoreError` from `insert_snapshot` (e.g. a transient
+    connection reset) MUST propagate raw and MUST NOT trigger the
+    `find_snapshot_by_identity` race-fallback. Only
+    `RegistryUniqueViolationError` (SQLSTATE 23505) should activate that path.
+    Guards against silent misinterpretation of non-race errors as race-lost."""
+    record = _read_default_record(tmp_path)
+    store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
+
+    call_counter = {"find": 0}
+
+    def counting_find_snapshot_by_identity(*_a: Any, **_kw: Any) -> uuid.UUID | None:
+        call_counter["find"] += 1
+        if call_counter["find"] == 1:
+            # Pre-insert idempotency check: no existing snapshot.
+            return None
+        # A second call would be the race fallback — must not fire.
+        pytest.fail(
+            "race fallback invoked for non-UniqueViolation store error; "
+            "fallback must be scoped to RegistryUniqueViolationError only."
+        )
+
+    def no_drift(*_a: Any, **_kw: Any) -> None:
+        return None
+
+    def failing_insert(*_a: Any, **_kw: Any) -> uuid.UUID:
+        raise RegistryStoreError("simulated transient connection failure")
+
+    # Monkeypatch on the dataclass instance without pytest fixtures (module fn).
+    object.__setattr__(store, "find_snapshot_by_identity", counting_find_snapshot_by_identity)
+    object.__setattr__(store, "find_conflicting_snapshot_by_source_grid", no_drift)
+    object.__setattr__(store, "insert_snapshot", failing_insert)
+
+    with pytest.raises(RegistryStoreError, match="simulated transient") as excinfo:
+        register_snapshot(record, source_id="IFS", store=store)
+    # Not the narrower subtype — the raw base error propagates unchanged.
+    assert not isinstance(excinfo.value, RegistryUniqueViolationError)
+    assert call_counter["find"] == 1
+
+
 # -----------------------------------------------------------------------------
 # Real-DB integration tests — Task 3.1b evidence
 # -----------------------------------------------------------------------------
@@ -2012,7 +2055,12 @@ def test_writer_atomicity_derive_canonical_grid_key_raise(
 ) -> None:
     """(F4) A raise from `derive_canonical_grid_key` MUST propagate and leave
     ZERO rows across the snapshot / cell tables — writer atomicity guarantee."""
-    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="atomic_key")
+    # Randomize per-run so a stale row from a prior pytest invocation cannot
+    # short-circuit through find_snapshot_by_identity and bypass the
+    # derive_canonical_grid_key path this test exercises.
+    grid_json, sidecar, uri = _write_unique_fixture(
+        tmp_path, suffix=f"atomic_key_{uuid.uuid4().hex[:8]}"
+    )
     record = read_input_record(
         "IFS",
         grid_json,
@@ -2101,7 +2149,12 @@ def test_writer_concurrent_registration_produces_single_row(
     produce exactly ONE row — the DB-level partial UNIQUE index (000044) is
     the concurrency backstop; the writer catches the resulting store error
     and re-reads the winning row for read-your-writes idempotency."""
-    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="concurrent")
+    # Randomize per-run so a stale row from a prior pytest invocation against
+    # a persistent test DB cannot short-circuit both threads through
+    # find_snapshot_by_identity and skip the race path entirely.
+    grid_json, sidecar, uri = _write_unique_fixture(
+        tmp_path, suffix=f"concurrent_{uuid.uuid4().hex[:8]}"
+    )
     record = read_input_record(
         "IFS",
         grid_json,
@@ -2149,6 +2202,60 @@ def test_writer_concurrent_registration_produces_single_row(
             assert cursor.fetchone()[0] == 1
     finally:
         connection.close()
+
+
+@pytest.mark.integration
+def test_writer_race_fallback_returns_winner_on_unique_violation(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """When a real active row exists for the identity triple, a monkeypatched
+    `RegistryUniqueViolationError` from `insert_snapshot` MUST trigger the
+    fallback re-query and return the seeded UUID (read-your-writes). Pairs
+    with the pure-Python narrowing test to prove the fallback path lives on
+    exactly SQLSTATE 23505."""
+    grid_json, sidecar, uri = _write_unique_fixture(
+        tmp_path, suffix=f"race_fallback_{uuid.uuid4().hex[:8]}"
+    )
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    # Seed the active row the fallback re-query is expected to find.
+    seeded_id = register_snapshot(record, source_id="IFS", store=store)
+
+    # Bypass the pre-check idempotency once so the writer reaches the insert
+    # path; the monkeypatched insert then raises UniqueViolation and the
+    # subsequent fallback re-query hits the real DB and returns `seeded_id`.
+    original_find = store.find_snapshot_by_identity
+    find_calls = {"n": 0}
+
+    def find_bypass_first(
+        source_id: str, grid_id: str, grid_signature: str
+    ) -> uuid.UUID | None:
+        find_calls["n"] += 1
+        if find_calls["n"] == 1:
+            return None  # force writer past the pre-check
+        return original_find(source_id, grid_id, grid_signature)
+
+    def raising_insert(*_a: Any, **_kw: Any) -> uuid.UUID:
+        raise RegistryUniqueViolationError(
+            "simulated 23505 unique constraint violation"
+        )
+
+    # Frozen dataclass — `monkeypatch.setattr` raises FrozenInstanceError, so
+    # bypass via object.__setattr__ (the store instance is scoped to this
+    # test only; no cleanup needed).
+    object.__setattr__(store, "find_snapshot_by_identity", find_bypass_first)
+    object.__setattr__(store, "insert_snapshot", raising_insert)
+
+    returned_id = register_snapshot(record, source_id="IFS", store=store)
+    assert returned_id == seeded_id
+    # Two calls total: pre-check (skipped) + fallback (returned seeded_id).
+    assert find_calls["n"] == 2
 
 
 @pytest.mark.integration

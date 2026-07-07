@@ -33,7 +33,7 @@ from packages.common.grid_registry_store import (
     CanonicalGridCell,
     CanonicalGridSnapshot,
     PsycopgGridRegistryStore,
-    RegistryStoreError,
+    RegistryUniqueViolationError,
 )
 from packages.common.grid_signature import grid_signature_hash
 from packages.common.source_identity import normalize_source_id
@@ -294,18 +294,25 @@ def register_snapshot(
     )
     try:
         return store.insert_snapshot(snapshot, cells)
-    except RegistryStoreError:
+    except RegistryUniqueViolationError as unique_error:
         # Concurrency backstop: the DB-level partial UNIQUE index on
         # (source_id, grid_id, grid_signature) WHERE superseded_at IS NULL
         # (000044) rejects racing duplicates the check-then-insert cannot
-        # see. On any store error, re-query — if a winning row now exists,
-        # return its id (read-your-writes); otherwise re-raise the real
-        # failure.
+        # see. Scope the fallback to SQLSTATE 23505 only so a transient
+        # network/connection failure surfaces as a real error rather than a
+        # race-lost misinterpretation.
         winner_id = store.find_snapshot_by_identity(
             normalized_source, record.grid_id, registry_computed
         )
         if winner_id is not None:
             return winner_id
+        # Race winner rolled back after the unique violation fired but before
+        # our re-query. Re-raise the original unique-violation with the note
+        # so callers see the true cause.
+        unique_error.add_note(
+            "race-fallback re-query returned no winner; the racing transaction "
+            "likely rolled back after the unique constraint fired."
+        )
         raise
 
 
