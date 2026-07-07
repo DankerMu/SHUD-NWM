@@ -806,7 +806,10 @@ class PsycopgGridRegistryStore:
         Used by the SUB-5 writer (:mod:`workers.grid_registry.registry`) for
         idempotent re-registration on backfill re-runs. The ``source_id`` is
         normalized before comparison so callers may pass raw case forms
-        (``"ifs"`` / ``"GFS"``) and still match the stored row.
+        (``"ifs"`` / ``"GFS"``) and still match the stored row. Superseded
+        rows (``superseded_at IS NOT NULL``) are intentionally excluded so a
+        post-supersede re-register writes a NEW row rather than falsely
+        satisfying idempotency against the historical superseded row.
         """
         normalized_source = normalize_source_id(source_id)
         try:
@@ -828,6 +831,7 @@ class PsycopgGridRegistryStore:
                     WHERE source_id = %s
                       AND grid_id = %s
                       AND grid_signature = %s
+                      AND superseded_at IS NULL
                     """,
                     (normalized_source, grid_id, grid_signature),
                 )
@@ -838,6 +842,60 @@ class PsycopgGridRegistryStore:
         except psycopg2.Error as error:
             raise RegistryStoreError(
                 f"find_snapshot_by_identity failed: {error}"
+            ) from error
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def find_conflicting_snapshot_by_source_grid(
+        self,
+        source_id: str,
+        grid_id: str,
+        excluded_signature: str,
+    ) -> tuple[UUID, str] | None:
+        """Return ``(grid_snapshot_id, grid_signature)`` of a drift-conflicting row.
+
+        Used by the SUB-5 writer (:mod:`workers.grid_registry.registry`) to
+        detect grid drift: a row with the same ``(source_id, grid_id)`` but a
+        different ``grid_signature`` than the caller's registry-computed one.
+        Returns the oldest such row (``ORDER BY created_at ASC LIMIT 1``) so
+        error messages name the original snapshot the operator must supersede.
+        Superseded rows are excluded so the drift check does not surface
+        already-resolved history as a fresh drift.
+        """
+        normalized_source = normalize_source_id(source_id)
+        try:
+            import psycopg2
+        except ImportError as error:
+            raise RegistryStoreError(
+                "psycopg2 is required for grid-registry database operations."
+            ) from error
+
+        connection = None
+        try:
+            connection = psycopg2.connect(self.database_url)
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT grid_snapshot_id, grid_signature
+                    FROM met.canonical_grid_snapshot
+                    WHERE source_id = %s
+                      AND grid_id = %s
+                      AND grid_signature <> %s
+                      AND superseded_at IS NULL
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (normalized_source, grid_id, excluded_signature),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                return (UUID(str(row[0])), str(row[1]))
+        except psycopg2.Error as error:
+            raise RegistryStoreError(
+                f"find_conflicting_snapshot_by_source_grid failed: {error}"
             ) from error
         finally:
             if connection is not None:

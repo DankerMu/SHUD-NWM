@@ -33,6 +33,7 @@ from packages.common.grid_registry_store import (
     CanonicalGridCell,
     CanonicalGridSnapshot,
     PsycopgGridRegistryStore,
+    RegistryStoreError,
 )
 from packages.common.grid_signature import grid_signature_hash
 from packages.common.source_identity import normalize_source_id
@@ -132,18 +133,28 @@ def _assert_normalized_longitudes(record: GridSnapshotInputRecord) -> None:
             )
 
 
-def _live_producer_signature(record: GridSnapshotInputRecord) -> str:
+def _live_producer_signature(
+    record: GridSnapshotInputRecord,
+    *,
+    registry_computed: str,
+) -> str:
     """Recompute ``grid_signature`` through the producer's live path.
 
     Constructs a :class:`SimpleNamespace` shim whose ``object_store.read_bytes``
-    returns the record's canonical grid.json bytes (re-serialized from
-    frozen record fields — SUB-4 did not persist the raw bytes on the record,
-    and re-opening the file here would open a TOCTOU window with the
-    checksum SUB-4 already pinned). A synthetic :class:`CanonicalProduct` is
-    passed to the unbound method call; only ``grid_definition_uri`` and
-    ``canonical_product_id`` matter for the ``layout=="rectilinear"`` branch.
+    returns ``record.raw_grid_json_bytes`` — the exact bytes SUB-4 read from
+    the local ``grid.json`` path and pinned via ``grid_definition_checksum``.
+    Reusing the checksum-verified bytes closes the TOCTOU window a second
+    open would introduce AND guarantees the live path re-parses the raw JSON
+    rather than a re-serialization derived from the same SUB-4-parsed axis
+    tuples (which would let a SUB-4 parsing bug propagate identically to
+    both hash paths).
+
+    A synthetic :class:`CanonicalProduct` is passed to the unbound method
+    call; only ``grid_definition_uri`` and ``canonical_product_id`` matter
+    for the ``layout=="rectilinear"`` branch. On a ``None`` return from
+    the producer helper, the mismatch error carries the caller's
+    ``registry_computed`` so operators triaging the log see BOTH paths.
     """
-    import json
     from datetime import UTC, datetime
 
     from workers.forcing_producer.producer import (
@@ -151,25 +162,13 @@ def _live_producer_signature(record: GridSnapshotInputRecord) -> str:
         ForcingProducer,
     )
 
-    grid_json_bytes = json.dumps(
-        {
-            "schema_version": record.schema_version,
-            "grid_id": record.grid_id,
-            "layout": record.layout,
-            "axis_order": list(record.axis_order),
-            "shape": list(record.shape),
-            "longitudes": list(record.longitudes),
-            "latitudes": list(record.latitudes),
-        }
-    ).encode("utf-8")
-
     def _read_bytes(uri: str) -> bytes:
         if uri != record.grid_definition_uri:
             raise RuntimeError(
                 f"live-producer shim: unexpected read {uri!r}; expected "
                 f"{record.grid_definition_uri!r}."
             )
-        return grid_json_bytes
+        return record.raw_grid_json_bytes
 
     shim = SimpleNamespace(object_store=SimpleNamespace(read_bytes=_read_bytes))
     synthetic_product = CanonicalProduct(
@@ -189,12 +188,12 @@ def _live_producer_signature(record: GridSnapshotInputRecord) -> str:
     )
     if points is None:
         raise LiveProducerSignatureMismatchError(
-            registry_computed="",
+            registry_computed=registry_computed,
             live_producer_computed=None,
             reason=(
                 "producer._grid_points_from_definition returned None; the "
                 "rectilinear branch could not reconstruct the grid from the "
-                "record's serialized bytes."
+                "record's checksum-verified bytes."
             ),
         )
     return grid_signature_hash(points)
@@ -259,7 +258,9 @@ def register_snapshot(
     normalized_source = normalize_source_id(source_id)
     registry_computed = grid_signature_hash(record.cells)
 
-    live_producer_computed = _live_producer_signature(record)
+    live_producer_computed = _live_producer_signature(
+        record, registry_computed=registry_computed
+    )
     if registry_computed != live_producer_computed:
         raise LiveProducerSignatureMismatchError(
             registry_computed=registry_computed,
@@ -277,9 +278,9 @@ def register_snapshot(
     if existing_id is not None:
         return existing_id
 
-    drift_id = _find_drift(store, normalized_source, record.grid_id, registry_computed)
-    if drift_id is not None:
-        raise drift_id
+    drift_error = _check_drift(store, normalized_source, record.grid_id, registry_computed)
+    if drift_error is not None:
+        raise drift_error
 
     canonical_grid_key = derive_canonical_grid_key(
         registry_computed, dict(record.download_bbox), record.native_resolution
@@ -291,10 +292,24 @@ def register_snapshot(
         grid_signature=registry_computed,
         canonical_grid_key=canonical_grid_key,
     )
-    return store.insert_snapshot(snapshot, cells)
+    try:
+        return store.insert_snapshot(snapshot, cells)
+    except RegistryStoreError:
+        # Concurrency backstop: the DB-level partial UNIQUE index on
+        # (source_id, grid_id, grid_signature) WHERE superseded_at IS NULL
+        # (000044) rejects racing duplicates the check-then-insert cannot
+        # see. On any store error, re-query — if a winning row now exists,
+        # return its id (read-your-writes); otherwise re-raise the real
+        # failure.
+        winner_id = store.find_snapshot_by_identity(
+            normalized_source, record.grid_id, registry_computed
+        )
+        if winner_id is not None:
+            return winner_id
+        raise
 
 
-def _find_drift(
+def _check_drift(
     store: PsycopgGridRegistryStore,
     normalized_source: str,
     grid_id: str,
@@ -302,40 +317,24 @@ def _find_drift(
 ) -> GridDriftDetectedError | None:
     """Return a populated :class:`GridDriftDetectedError` if drift is detected.
 
-    Runs one direct query for any snapshot sharing ``(source_id, grid_id)``
-    but carrying a different ``grid_signature``. DB / connection errors are
-    NOT swallowed — they propagate so an unavailable DB never masks drift.
+    Delegates to :meth:`PsycopgGridRegistryStore.find_conflicting_snapshot_by_source_grid`
+    so DB / connection errors surface as ``RegistryStoreError`` through the
+    store boundary (not raw ``psycopg2`` exceptions leaking through the
+    writer to the CLI).
     """
-    import psycopg2
-
-    connection = psycopg2.connect(store.database_url)
-    try:
-        connection.autocommit = True
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT grid_snapshot_id, grid_signature
-                FROM met.canonical_grid_snapshot
-                WHERE source_id = %s
-                  AND grid_id = %s
-                  AND grid_signature <> %s
-                ORDER BY created_at ASC
-                LIMIT 1
-                """,
-                (normalized_source, grid_id, registry_computed),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return GridDriftDetectedError(
-            source_id=normalized_source,
-            grid_id=grid_id,
-            registry_computed_signature=registry_computed,
-            existing_signature=str(row[1]),
-            existing_snapshot_id=UUID(str(row[0])),
-        )
-    finally:
-        connection.close()
+    conflict = store.find_conflicting_snapshot_by_source_grid(
+        normalized_source, grid_id, registry_computed
+    )
+    if conflict is None:
+        return None
+    existing_id, existing_signature = conflict
+    return GridDriftDetectedError(
+        source_id=normalized_source,
+        grid_id=grid_id,
+        registry_computed_signature=registry_computed,
+        existing_signature=existing_signature,
+        existing_snapshot_id=existing_id,
+    )
 
 
 # Explicit __all__ so `from workers.grid_registry.registry import *` stays crisp.

@@ -25,9 +25,11 @@ import dataclasses
 import inspect
 import json
 import math
+import os
 import pathlib
 import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -1268,6 +1270,72 @@ def test_cli_help_lists_required_flags() -> None:
         )
 
 
+def test_cli_database_url_env_fallback_with_env(tmp_path: pathlib.Path) -> None:
+    """(F7) With DATABASE_URL set in env but no --database-url flag, the CLI
+    MUST fall through to attempting a store call and fail with a store-level
+    diagnostic — NOT the missing-env diagnostic. Uses a mock URL that fails
+    at connect time to prove the fallback ran."""
+    grid_json, sidecar = _write_fixture(tmp_path)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "DATABASE_URL": "postgres://mock:0/none",
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "workers.grid_registry",
+            "--source-id",
+            "ifs",
+            "--grid-json",
+            str(grid_json),
+            "--sidecar",
+            str(sidecar),
+            "--grid-definition-uri",
+            "s3://mock/x",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "DATABASE_URL environment variable is required" not in proc.stderr, (
+        f"CLI reported missing-env even though DATABASE_URL was set. "
+        f"stderr={proc.stderr!r}"
+    )
+
+
+def test_cli_database_url_env_fallback_no_env(tmp_path: pathlib.Path) -> None:
+    """(F7) With NEITHER DATABASE_URL in env NOR --database-url flag, the CLI
+    MUST fail with a diagnostic naming `DATABASE_URL`."""
+    grid_json, sidecar = _write_fixture(tmp_path)
+    env = {"PATH": os.environ.get("PATH", "")}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "workers.grid_registry",
+            "--source-id",
+            "ifs",
+            "--grid-json",
+            str(grid_json),
+            "--sidecar",
+            str(sidecar),
+            "--grid-definition-uri",
+            "s3://mock/x",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "DATABASE_URL environment variable is required" in proc.stderr, (
+        f"CLI did not surface the required-env diagnostic. stderr={proc.stderr!r}"
+    )
+
+
 def _build_manual_record(
     *,
     override_cell_longitude: float | None = None,
@@ -1275,7 +1343,10 @@ def _build_manual_record(
     """Build a `GridSnapshotInputRecord` via direct dataclass instantiation.
 
     Used for tests that need to bypass SUB-4's `_build_cells` normalization to
-    prove the writer defends against a future SUB-4 refactor.
+    prove the writer defends against a future SUB-4 refactor. `raw_grid_json_bytes`
+    holds a valid rectilinear payload so the live-producer shim parses cleanly
+    on the happy-path tests; callers overriding cell geometry can rely on the
+    cells-vs-raw-bytes divergence to force `LiveProducerSignatureMismatchError`.
     """
     longitudes = tuple(_DEFAULT_LONGITUDES)
     latitudes = tuple(_DEFAULT_LATITUDES)
@@ -1290,6 +1361,17 @@ def _build_manual_record(
                 latitude=lat,
             )
         )
+    raw_grid_json_bytes = json.dumps(
+        {
+            "schema_version": "nhms.grid_definition.v1",
+            "grid_id": "ifs_0p25",
+            "layout": "rectilinear",
+            "axis_order": ["latitude", "longitude"],
+            "shape": [len(latitudes), len(longitudes)],
+            "longitudes": list(longitudes),
+            "latitudes": list(latitudes),
+        }
+    ).encode("utf-8")
     return GridSnapshotInputRecord(
         schema_version="nhms.grid_definition.v1",
         grid_id="ifs_0p25",
@@ -1313,19 +1395,42 @@ def _build_manual_record(
         grid_definition_uri=_DEFAULT_GRID_DEFINITION_URI,
         grid_definition_checksum="a" * 64,
         cells=tuple(cells),
+        raw_grid_json_bytes=raw_grid_json_bytes,
     )
 
 
-def test_writer_asserts_normalized_longitude_defensively() -> None:
+@pytest.mark.parametrize("override_lon", [200.0, -200.0, 180.0])
+def test_writer_asserts_normalized_longitude_defensively(override_lon: float) -> None:
     """Direct-dataclass record with cell longitude outside `[-180.0, 180.0)`
-    MUST raise `RegistrationInvariantError` BEFORE any DB touch."""
-    record = _build_manual_record(override_cell_longitude=200.0)
+    MUST raise `RegistrationInvariantError` BEFORE any DB touch.
+
+    Covers three boundary cases: `200.0` (above upper bound),
+    `-200.0` (below lower bound), and `180.0` (upper bound is exclusive; the
+    normalized value would be `-180.0`).
+    """
+    record = _build_manual_record(override_cell_longitude=override_lon)
     # The store MUST NOT be touched — pass a URL that would otherwise raise.
     store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
     with pytest.raises(RegistrationInvariantError) as excinfo:
         register_snapshot(record, source_id="IFS", store=store)
     assert "cell 0" in str(excinfo.value)
-    assert "200.0" in str(excinfo.value)
+    assert repr(override_lon) in str(excinfo.value)
+
+
+def test_writer_accepts_normalized_longitude_lower_bound() -> None:
+    """Positive-control: `-180.0` (exact lower inclusive bound) MUST NOT raise
+    the defensive `RegistrationInvariantError`; the invariant window is
+    `[-180.0, 180.0)`. The register call would fail later on a mock DB URL, so
+    we assert only the specific invariant does not fire."""
+    record = _build_manual_record(override_cell_longitude=-180.0)
+    # The invariant should pass; anything after (live-producer / DB) may fail.
+    store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
+    with pytest.raises(Exception) as excinfo:
+        register_snapshot(record, source_id="IFS", store=store)
+    assert not isinstance(excinfo.value, RegistrationInvariantError), (
+        f"-180.0 must be accepted by the invariant guard; got "
+        f"RegistrationInvariantError: {excinfo.value}"
+    )
 
 
 def test_error_hierarchy_is_registration_error_subclass() -> None:
@@ -1340,8 +1445,13 @@ def test_live_producer_signature_matches_registry_on_valid_record(tmp_path: path
     on a valid record — proves the two paths agree at the source of truth."""
     record = _read_default_record(tmp_path)
     registry_computed = grid_signature_hash(record.cells)
-    live_computed = _live_producer_signature(record)
+    live_computed = _live_producer_signature(record, registry_computed=registry_computed)
     assert registry_computed == live_computed
+    # The live-producer shim consumed the raw grid.json bytes SUB-4 pinned via
+    # `grid_definition_checksum`, not a re-serialization derived from the same
+    # SUB-4-parsed axis tuples (F5).
+    assert isinstance(record.raw_grid_json_bytes, bytes)
+    assert len(record.raw_grid_json_bytes) > 0
 
 
 def test_backfill_signature_constant_is_reused_verbatim() -> None:
@@ -1531,7 +1641,7 @@ def test_writer_live_producer_signature_matches_at_registration(
         expected_converter_version=_stub_converter_resolver,
     )
     registry_computed = grid_signature_hash(record.cells)
-    live_computed = _live_producer_signature(record)
+    live_computed = _live_producer_signature(record, registry_computed=registry_computed)
     assert registry_computed == live_computed
 
     store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
@@ -1565,6 +1675,76 @@ def test_writer_rejects_live_producer_signature_mismatch() -> None:
     assert error.registry_computed and len(error.registry_computed) == 64
     assert error.live_producer_computed and len(error.live_producer_computed) == 64
     assert error.registry_computed != error.live_producer_computed
+
+
+def test_writer_rejects_live_producer_signature_mismatch_via_raw_bytes_mutation() -> None:
+    """(F5) Mutating `raw_grid_json_bytes` (the live-producer shim input)
+    without mutating `cells` MUST also raise `LiveProducerSignatureMismatchError`.
+
+    This proves the live path re-parses the actual bytes rather than the
+    SUB-4-parsed axis tuples: a byte-level edit that shifts a longitude value
+    diverges the live hash from the record.cells hash.
+    """
+    record = _build_manual_record()
+    payload = json.loads(record.raw_grid_json_bytes.decode("utf-8"))
+    payload["longitudes"][0] = payload["longitudes"][0] + 0.01
+    mutated_bytes = json.dumps(payload).encode("utf-8")
+    mutated_record = dataclasses.replace(record, raw_grid_json_bytes=mutated_bytes)
+    store = PsycopgGridRegistryStore(database_url="postgres://never-touched:0/none")
+    with pytest.raises(LiveProducerSignatureMismatchError) as excinfo:
+        register_snapshot(mutated_record, source_id="IFS", store=store)
+    error = excinfo.value
+    assert error.registry_computed and len(error.registry_computed) == 64
+    assert error.live_producer_computed and len(error.live_producer_computed) == 64
+    assert error.registry_computed != error.live_producer_computed
+
+
+def test_live_producer_signature_mismatch_populates_registry_computed_on_none_return() -> None:
+    """(F1) When `_grid_points_from_definition` returns None (rectilinear branch
+    cannot rebuild), the raised `LiveProducerSignatureMismatchError` MUST carry
+    the caller's `registry_computed` (a valid 64-hex string), not the empty
+    string the pre-fix code planted."""
+    # Build a manual record whose shape/longitudes/latitudes are internally
+    # inconsistent so `_grid_points_from_definition` fails the rectilinear
+    # shape check and returns None. Shape (3, 3) but longitudes of length 4:
+    # `len(longitudes) != x_count` at producer.py:1468 → None.
+    base = _build_manual_record()
+    inconsistent_bytes = json.dumps(
+        {
+            "schema_version": base.schema_version,
+            "grid_id": base.grid_id,
+            "layout": "rectilinear",
+            "axis_order": list(base.axis_order),
+            "shape": [3, 3],
+            "longitudes": list(range(4)),  # length mismatch
+            "latitudes": list(range(3)),
+        }
+    ).encode("utf-8")
+    bad_record = dataclasses.replace(
+        base,
+        shape=(3, 3),
+        longitudes=tuple(range(4)),
+        latitudes=tuple(range(3)),
+        raw_grid_json_bytes=inconsistent_bytes,
+    )
+    expected_registry_computed = grid_signature_hash(bad_record.cells)
+    with pytest.raises(LiveProducerSignatureMismatchError) as excinfo:
+        _live_producer_signature(bad_record, registry_computed=expected_registry_computed)
+    error = excinfo.value
+    assert error.live_producer_computed is None
+    assert error.registry_computed == expected_registry_computed
+    assert len(error.registry_computed) == 64
+    assert set(error.registry_computed).issubset(set("0123456789abcdef"))
+
+
+def test_input_record_raw_grid_json_bytes_matches_checksum(tmp_path: pathlib.Path) -> None:
+    """(F5) SHA-256 of `record.raw_grid_json_bytes` MUST equal
+    `record.grid_definition_checksum` — the checksum-verified bytes flow from
+    SUB-4's single-open read through to the SUB-5 live-producer shim."""
+    record = _read_default_record(tmp_path)
+    assert isinstance(record.raw_grid_json_bytes, bytes)
+    assert len(record.raw_grid_json_bytes) > 0
+    assert sha256_bytes(record.raw_grid_json_bytes) == record.grid_definition_checksum
 
 
 @pytest.mark.integration
@@ -1658,6 +1838,25 @@ def test_writer_rejects_grid_drift_within_source(
     assert error.existing_snapshot_id == first_id
     assert error.existing_signature == grid_signature_hash(record_a.cells)
     assert error.registry_computed_signature == grid_signature_hash(record_b.cells)
+
+    # (F9) Post-condition: only v1 exists — the drift-rejected v2 was NOT
+    # inserted. Guards against a future refactor that would silently write
+    # the drift row anyway.
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", grid_id),
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        connection.close()
 
 
 @pytest.mark.integration
@@ -1791,3 +1990,201 @@ def test_writer_backfill_shared_canonical_grid_key(
     # Pre-shared-eligibility phase: each row's applicable_source_ids is its own.
     assert list(row_ifs["applicable_source_ids"]) == ["IFS"]
     assert list(row_gfs["applicable_source_ids"]) == ["gfs"]
+
+
+# -----------------------------------------------------------------------------
+# Phase 4.5 gate additions — F2, F3, F4, F6, F8 integration coverage
+# -----------------------------------------------------------------------------
+
+
+def test_find_conflicting_snapshot_by_source_grid_wraps_db_error_as_registry_store_error() -> None:
+    """(F2) A DB connection failure inside
+    `find_conflicting_snapshot_by_source_grid` MUST surface as `RegistryStoreError`,
+    not a raw `psycopg2.OperationalError` — the store owns the boundary."""
+    bad_store = PsycopgGridRegistryStore(database_url="postgres://mock:0/none")
+    with pytest.raises(RegistryStoreError):
+        bad_store.find_conflicting_snapshot_by_source_grid("IFS", "grid_x", "a" * 64)
+
+
+@pytest.mark.integration
+def test_writer_atomicity_derive_canonical_grid_key_raise(
+    sub5_migrated_database: str, tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """(F4) A raise from `derive_canonical_grid_key` MUST propagate and leave
+    ZERO rows across the snapshot / cell tables — writer atomicity guarantee."""
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="atomic_key")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+
+    def raising_derive(*_a: Any, **_kw: Any) -> str:
+        raise ValueError("simulated derive_canonical_grid_key failure")
+
+    monkeypatch.setattr(
+        "workers.grid_registry.registry.derive_canonical_grid_key", raising_derive
+    )
+
+    with pytest.raises(ValueError, match="simulated"):
+        register_snapshot(record, source_id="IFS", store=store)
+
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_idempotency_skips_superseded_snapshot(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """(F6) A registration whose identity triple matches a SUPERSEDED historical
+    row MUST NOT return the historical UUID; it must write a NEW row.
+    Guards `find_snapshot_by_identity`'s `superseded_at IS NULL` filter."""
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="supersede_skip")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    first_id = register_snapshot(record, source_id="IFS", store=store)
+    store.supersede(first_id, _dt.now(_UTC))
+
+    # Same identity triple as before but the historical row is superseded — a
+    # second register_snapshot must write a NEW row, not return `first_id`.
+    second_id = register_snapshot(record, source_id="IFS", store=store)
+    assert second_id != first_id
+
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 2
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_writer_concurrent_registration_produces_single_row(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """(F3) Two threads registering the same identity triple concurrently MUST
+    produce exactly ONE row — the DB-level partial UNIQUE index (000044) is
+    the concurrency backstop; the writer catches the resulting store error
+    and re-reads the winning row for read-your-writes idempotency."""
+    grid_json, sidecar, uri = _write_unique_fixture(tmp_path, suffix="concurrent")
+    record = read_input_record(
+        "IFS",
+        grid_json,
+        sidecar,
+        grid_definition_uri=uri,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+
+    results: list[uuid.UUID | Exception] = [None, None]  # type: ignore[list-item]
+    barrier = threading.Barrier(2)
+
+    def _worker(slot: int) -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            results[slot] = register_snapshot(record, source_id="IFS", store=store)
+        except Exception as error:  # noqa: BLE001 — thread capture
+            results[slot] = error
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+
+    for slot, result in enumerate(results):
+        assert isinstance(result, uuid.UUID), (
+            f"thread {slot} did not return a UUID: {result!r}"
+        )
+    # Both threads should have converged on the same winning UUID.
+    assert results[0] == results[1]
+
+    connection = psycopg2.connect(sub5_migrated_database)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM met.canonical_grid_snapshot
+                WHERE source_id = %s AND grid_id = %s
+                """,
+                ("IFS", record.grid_id),
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_cli_stdout_contains_only_uuid(
+    sub5_migrated_database: str, tmp_path: pathlib.Path
+) -> None:
+    """(F8) On success the CLI MUST print exactly one line of stdout containing
+    only the inserted UUID — no diagnostic noise, no trailing whitespace beyond
+    the one newline. Consumers relying on stdout to capture the id must not
+    have to parse noise."""
+    grid_json, sidecar, _uri = _write_unique_fixture(tmp_path, suffix="cli_stdout")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "workers.grid_registry",
+            "--source-id",
+            "ifs",
+            "--grid-json",
+            str(grid_json),
+            "--sidecar",
+            str(sidecar),
+            "--grid-definition-uri",
+            "canonical/IFS/grid/cli_stdout/grid.json",
+            "--database-url",
+            sub5_migrated_database,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"CLI exited nonzero: stdout={proc.stdout!r}, stderr={proc.stderr!r}"
+    )
+    # Exactly one line + trailing newline.
+    assert proc.stdout.count("\n") == 1, f"unexpected stdout shape: {proc.stdout!r}"
+    # The line parses as a UUID.
+    parsed = uuid.UUID(proc.stdout.strip())
+    assert isinstance(parsed, uuid.UUID)
