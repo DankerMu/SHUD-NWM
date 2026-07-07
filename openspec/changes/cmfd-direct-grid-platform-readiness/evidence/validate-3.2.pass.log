@@ -1,0 +1,60 @@
+# captured at 2026-07-07T13:28:55Z host=local bound to baseline_commit=5e518c151375b798c29ee3cafb3260413ac8905f manifest_sha256=bbbc4143d228dc36d6f0973a51060a9debe54b81f49505682de709ded88eeeaf
+# code_carrier_sha=3d991ff76d8cf0cf068df4de99f34674a3d1a49b
+# task: cmfd-direct-grid-platform-readiness §3.2 openspec validate + status + ruff final validation
+# host: local (macOS Darwin 24.6.0, user=danker)
+# scope: §3.2 discharges the three validators pinned in tasks.md:
+#   (1) openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive
+#   (2) openspec status --change cmfd-direct-grid-platform-readiness
+#   (3) uv run ruff check .
+# non-goal (§3.2): "no readiness certification here; certification requires the §2
+#   evidence to have actually passed on the pinned baseline." Certification is the
+#   §2.7 receipt (certification-2.7.pass.log) + §3.1 cross-artifact consistency
+#   (cross-artifact-consistency-3.1.pass.log). §3.2 is the mechanical gate that the
+#   change proposal + design + spec + tasks documents are internally consistent and
+#   that the pinning helper code passes lint.
+# note on §3.2 status wording: the tasks.md line reads "reports 3/3 complete"; the
+#   installed openspec CLI shape reports 4/4 (proposal + design + specs + tasks — a
+#   later CLI split "specs" out from "tasks"). The intent is satisfied: every
+#   artifact category is complete and the CLI emits "All artifacts complete!". The
+#   4/4 vs 3/3 wording gap is not a drift entry (no spec/code inconsistency); it is
+#   a CLI evolution.
+# note on §2.3/§2.4 checkbox state at time of §3.2 capture: tasks.md §2.3 and §2.4
+#   remain "[ ]" while their evidence artifacts are committed and cited by the §2.7
+#   certification set. This observation is recorded in the durable ledger as
+#   spec-code-drift-log.md "Drift entry 3" per the durable-ledger clause in
+#   specs/direct-grid-readiness-evidence/spec.md:80 (Scenario "Checkbox completion
+#   does not certify readiness"); certification-2.7.pass.log C3 references entry 3
+#   alongside entries 1 and 2. Not blocking for readiness certification — the
+#   readiness signal is the C2 pinned artifact set, not tasks.md checkbox state.
+
+## D1. openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive
+$ openspec validate cmfd-direct-grid-platform-readiness --strict --no-interactive
+Change 'cmfd-direct-grid-platform-readiness' is valid
+rc=0
+
+## D2. openspec status --change cmfd-direct-grid-platform-readiness
+$ openspec status --change cmfd-direct-grid-platform-readiness
+- Loading change status...
+Change: cmfd-direct-grid-platform-readiness
+Schema: spec-driven
+Progress: 4/4 artifacts complete
+
+[x] proposal
+[x] design
+[x] specs
+[x] tasks
+
+All artifacts complete!
+rc=0
+
+## D3. uv run ruff check .
+$ uv run ruff check .
+All checks passed!
+rc=0
+
+## Verdict
+PASS — §3.2 validators all discharge:
+  D1 openspec validate --strict --no-interactive  = PASS (rc=0, "Change is valid")
+  D2 openspec status --change                     = PASS (rc=0, "All artifacts complete!")
+  D3 uv run ruff check .                          = PASS (rc=0, "All checks passed!")
+PASS
