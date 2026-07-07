@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1537,15 +1537,39 @@ def _seed_sub5_data_sources(database_url: str) -> None:
 
 
 @pytest.fixture(scope="module")
-def sub5_migrated_database(integration_database_url: str) -> str:
+def sub5_migrated_database(integration_database_url: str) -> Iterator[str]:
     from tests.integration_helpers import apply_migrations_from_zero
 
     apply_migrations_from_zero(integration_database_url)
     _seed_sub5_data_sources(integration_database_url)
-    return integration_database_url
+    yield integration_database_url
+    # Teardown: delete any canonical_grid_snapshot rows referencing the SUB-5
+    # seeded data_source ids so downstream module-scoped fixtures in
+    # `tests/test_real_database_integration.py` can DELETE from met.data_source
+    # without hitting the canonical_grid_snapshot.source_id FK. The FK on
+    # met.canonical_grid_cell.grid_snapshot_id is ON DELETE CASCADE (see
+    # db/migrations/000043_canonical_grid_snapshot.sql), so a single DELETE on
+    # the snapshot table cascades to cell rows.
+    connection = psycopg2.connect(integration_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM met.canonical_grid_snapshot
+                WHERE source_id IN ('IFS', 'gfs', 'ERA5')
+                """
+            )
+    finally:
+        connection.close()
 
 
 def _fetch_snapshot_row(database_url: str, grid_snapshot_id: uuid.UUID) -> dict[str, Any]:
+    # Register psycopg2's UUID adapter so PostgreSQL UUID columns come back
+    # as `uuid.UUID` objects (not str). Migration 000043 stores
+    # `grid_snapshot_id` as `UUID` and callers compare against `uuid.UUID`
+    # values returned by `register_snapshot`.
+    psycopg2.extras.register_uuid()
     connection = psycopg2.connect(
         database_url, cursor_factory=psycopg2.extras.RealDictCursor
     )
@@ -1924,22 +1948,24 @@ def test_writer_atomicity_no_partial_rows(
     # `tests/test_grid_registry_store.py::test_mid_write_failure_rolls_back_all_rows`
     # proves the store-level rollback; here we prove the WRITER surfaces the
     # error and does not leave partial rows for the same key.
-    original_insert = store.insert_snapshot
+    # `PsycopgGridRegistryStore` is a frozen dataclass, so we patch the class-level
+    # method rather than an instance attribute; monkeypatch teardown restores it.
 
     def failing_insert(
+        self: PsycopgGridRegistryStore,
         snapshot: CanonicalGridSnapshot,
         cells: list[CanonicalGridCell],
     ) -> uuid.UUID:
-        del snapshot, cells
+        del self, snapshot, cells
         raise RegistryStoreError("simulated mid-write DB failure for atomicity test")
 
-    monkeypatch.setattr(store, "insert_snapshot", failing_insert)
+    monkeypatch.setattr(PsycopgGridRegistryStore, "insert_snapshot", failing_insert)
 
     with pytest.raises(RegistryStoreError):
         register_snapshot(record, source_id="IFS", store=store)
 
-    # Restore and verify no rows exist for this grid_id.
-    monkeypatch.setattr(store, "insert_snapshot", original_insert)
+    # Verify no rows exist for this grid_id. monkeypatch teardown restores the
+    # original class method automatically at test exit.
     connection = psycopg2.connect(sub5_migrated_database)
     connection.autocommit = True
     try:
@@ -1981,6 +2007,7 @@ def test_writer_backfill_shared_canonical_grid_key(
     # Same grid.json bytes but registered under different source_ids means
     # the FK to met.data_source picks up the normalized id. The signature is
     # signature-of-cells, which is the same regardless of source_id.
+    (tmp_path / "ifs").mkdir(exist_ok=True)
     grid_json_ifs, sidecar_ifs, uri_ifs = _write_unique_fixture(
         tmp_path / "ifs", suffix="backfill_ifs", grid_id=f"shared_{uuid.uuid4().hex[:6]}"
     )
@@ -2001,7 +2028,6 @@ def test_writer_backfill_shared_canonical_grid_key(
     uri_gfs = f"canonical/gfs/grid/{grid_payload['grid_id']}/grid.json"
 
     store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
-    (tmp_path / "ifs").mkdir(exist_ok=True)
     record_ifs = read_input_record(
         "IFS",
         grid_json_ifs,
