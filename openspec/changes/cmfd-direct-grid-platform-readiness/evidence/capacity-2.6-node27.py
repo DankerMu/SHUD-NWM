@@ -118,6 +118,11 @@ PER_STATION_MANIFEST_BYTES_ESTIMATE = 2048
 # a grep verifying no _FORECAST_END_HOUR / _FORECAST_STEP_HOURS override present
 # in any infra/env/*.env file at code-carrier commit (grep evidence captured
 # on the running host, not a universal claim).
+#
+# NOTE: T=57 applies to the GFS-branch uniform-step path. IFS production uses
+# segmented resolution ((144,3),(360,6)) via generate_segmented_forecast_hours
+# in workers/data_adapters/base.py:85, yielding T=53 for end_hour=168. NO BREACH
+# holds for both branches (both 57 and 53 sit well below the D4 breakeven_T=264).
 PRODUCTION_FORECAST_START_HOUR = 0
 PRODUCTION_FORECAST_STEP_HOURS = 3
 PRODUCTION_FORECAST_END_HOUR = 168
@@ -159,6 +164,125 @@ def _git_head_sha(script_dir: Path) -> str:
         return "<40-hex>"
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return "<40-hex>"
+
+
+def _repo_root(script_dir: Path) -> Path:
+    """Return the git repo root that script_dir belongs to, or script_dir on failure.
+
+    The subprocess captures (grep for infra/env/*, git diff for manifest-identity
+    paths) all operate on paths relative to the repo root, not the script's own
+    directory (which sits under openspec/changes/...). Using `git rev-parse
+    --show-toplevel` keeps the driver portable across the local dev tree and
+    node-27 (both /home/nwm/NWM and /scratch/frd_muziyao/NWM shapes).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        root = Path(result.stdout.strip())
+        if root.is_dir():
+            return root
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return script_dir
+
+
+def _compute_tree_equivalence_bytes(script_dir: Path, baseline_commit: str) -> str:
+    """Compute `git diff <baseline>..HEAD -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c`.
+
+    Returns a decimal string (e.g. '0') on success, or '<unavailable>' on any git
+    failure. The value is baked into the TREE-EQUIVALENCE ATTEST block emitted at
+    driver invocation time so the attest reflects the actual code carrier -> baseline
+    delta on the running host (not a hand-spliced number that could drift silently).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                f"{baseline_commit}..HEAD",
+                "--",
+                "workers/",
+                "apps/",
+                "services/",
+                "packages/",
+                "db/",
+                "schemas/",
+            ],
+            cwd=_repo_root(script_dir),
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        # wc -c counts bytes; git diff output is bytes already.
+        return str(len(result.stdout))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return "<unavailable>"
+
+
+def _capture_env_grep(script_dir: Path) -> str:
+    """Run `grep -c FORCING_MAX_ infra/env/node27-ingest.env` and return a display string.
+
+    Emitted in the preamble so the pass log records the FORCING_MAX_* override
+    grep (or absence thereof) at driver invocation time — no hand-splice, driver
+    is the single source of truth. Returns '<unavailable>' on any failure (env
+    file missing, subprocess failure) so the operator sees the miss clearly.
+    """
+    env_path = "infra/env/node27-ingest.env"
+    try:
+        result = subprocess.run(
+            ["grep", "-c", "FORCING_MAX_", env_path],
+            cwd=_repo_root(script_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # grep exit=0 with count on stdout, or exit=1 with '0' when no match.
+        # We keep the raw count (which may be 0) and echo it verbatim. Exit=2
+        # indicates the env file is missing (dev tree without infra/env/... yet).
+        if result.returncode == 2:
+            return f"grep -c FORCING_MAX_ {env_path}  ->  <env-file-missing>"
+        count = result.stdout.strip() or "0"
+        return f"grep -c FORCING_MAX_ {env_path}  ->  {count}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return f"grep -c FORCING_MAX_ {env_path}  ->  <unavailable>"
+
+
+def _capture_forecast_env_grep(script_dir: Path) -> str:
+    """Run `grep -rEn '_FORECAST_END_HOUR|_FORECAST_STEP_HOURS' infra/env/` and return a display string.
+
+    Emitted in the preamble as the forecast-horizon override grep. grep exit=1 with
+    empty stdout means "no matches" — echoed as '0 hits (grep exit=1, no matches)'
+    to match the historical preamble text and make the "no override present"
+    condition unambiguous.
+    """
+    pattern = "_FORECAST_END_HOUR|_FORECAST_STEP_HOURS"
+    env_dir = "infra/env/"
+    try:
+        result = subprocess.run(
+            ["grep", "-rEn", pattern, env_dir],
+            cwd=_repo_root(script_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        stdout = result.stdout.strip()
+        if result.returncode == 2:
+            # File / dir not found (dev tree without infra/env/ populated).
+            return f"grep -rEn '{pattern}' {env_dir}  ->  <env-dir-missing>"
+        if not stdout:
+            return f"grep -rEn '{pattern}' {env_dir}  ->  0 hits (grep exit={result.returncode}, no matches)"
+        # Real matches: echo each line verbatim (indented) so the pass log carries
+        # the actual override location.
+        indented = "\n".join(f"#     {line}" for line in stdout.splitlines())
+        return f"grep -rEn '{pattern}' {env_dir}  ->  matches (grep exit={result.returncode}):\n{indented}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return f"grep -rEn '{pattern}' {env_dir}  ->  <unavailable>"
 
 
 def _q3_source_line_range() -> str:
@@ -450,9 +574,14 @@ def _run_live_sql(dsn: str) -> dict[str, Any]:
         )
         active_mi_md5 = cur.fetchone()[0]
 
-        # Compute actual span from min/max instead of assuming 14 days. This
-        # matters because now() may sit inside a window shorter than 14 days
-        # if the ingest has just started or the hypertable was truncated.
+        # Compute actual span from min/max instead of assuming 14 days. The
+        # observed span may sit either SHORTER than 14 days (partial ingest,
+        # hypertable truncation) or LONGER than 14 days (forecast horizon
+        # extends max(valid_time) past now() — the 2-week WHERE window filters
+        # by valid_time >= now()-2wk with no upper bound, so forecast-time
+        # rows past now() are captured too). Both cases are legitimate; the
+        # driver just divides row_count by the real span to get a stable
+        # per-day rate regardless of ingest/forecast state.
         parsed_min = _parse_pg_ts(window_min) if window_min else None
         parsed_max = _parse_pg_ts(window_max) if window_max else None
         if parsed_min and parsed_max:
@@ -679,6 +808,107 @@ def _fmt_int(n: int | None) -> str:
     return f"{n:,}" if isinstance(n, int) else "N/A"
 
 
+def _emit_preamble(
+    script_dir: Path,
+    manifest_path: Path,
+    manifest_sha: str,
+    baseline_commit: str,
+    code_carrier_sha: str,
+    now_utc: str,
+) -> None:
+    """Emit the full pass log preamble (binder + scope-note + attest + recipe + captures).
+
+    Single source of truth for the pass log header — all preamble content is driver-
+    emitted at invocation time so `capacity-2.6.node-27.pass.log` can be regenerated
+    end-to-end by re-running this driver alone. No hand-splice of dates, shas, greps,
+    or attest values; all filled in at run time via git/subprocess/os.
+    """
+    # Binder header (2 lines): captured-at + code_carrier_sha
+    print(
+        f"# captured at {now_utc} host=node-27 bound to baseline_commit={baseline_commit}"
+        f" manifest_sha256={manifest_sha}"
+    )
+    print(f"# code_carrier_sha={code_carrier_sha}")
+
+    # task / host / env / scope-note prose
+    print("# task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts")
+    print("# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)")
+    print("# env : infra/env/node27-ingest.env (writable nhms role; §2.6 driver installs a session-level")
+    print("#       read-only guard so ingest.env is safe for SELECT-only queries). The node27-display-ro.env")
+    print("#       template is not yet provisioned on node-27; when it is provisioned, either env file will work.")
+    print("# scope-note: §2.6 driver is the committed script")
+    print("#   openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py")
+    print("#   (env-gated CLI, no argv-parsed at import; recipe embedded below).")
+    print(f"#   The MANIFEST baseline_commit={baseline_commit[:8]} pins platform identities under")
+    print("#   test (producer limits + runtime staging limits + env-var names for")
+    print(f"#   deployment config). CODE CARRIER commit at run time is {code_carrier_sha[:8]}")
+    print("#   (this PR's §2.6 branch head at capture time; records only openspec/**")
+    print(f"#   vs {baseline_commit[:8]} — driver + SQL helper + Round 4 preamble consolidation")
+    print("#   applied per Phase 6.5 review; no production paths touched).")
+
+    # TREE-EQUIVALENCE ATTEST block (computed via subprocess at runtime)
+    tree_bytes = _compute_tree_equivalence_bytes(script_dir, baseline_commit)
+    print("# TREE-EQUIVALENCE ATTEST (load-bearing, machine-verifiable):")
+    print(
+        f"#   `git diff {baseline_commit[:8]}..{code_carrier_sha[:8]}"
+        f" -- workers/ apps/ services/ packages/ db/ schemas/ | wc -c` = {tree_bytes}"
+    )
+    print(f"#   (verified at capture time {now_utc} via subprocess.run of `git diff` inside this driver;")
+    print("#    the driver computes the byte count in-process, so a broken git state would surface as")
+    print("#    '<unavailable>' rather than a stale hand-spliced number).")
+    if tree_bytes == "0":
+        print("#   Zero bytes = no manifest-identity path drift between baseline and code carrier — drift")
+        print("#   is confined to openspec/** (this change's own driver + SQL helper + evidence pass log;")
+        print("#   Round 4 preamble consolidation only touches openspec/ files, no production code).")
+    else:
+        print("#   NON-ZERO bytes indicates production-path drift between baseline and code carrier;")
+        print("#   reviewer must reconcile the diff before accepting the pass log as evidence.")
+    print()
+
+    # §2.6 execution recipe section — describes THIS driver invocation shape
+    print("## §2.6 execution recipe (reproducible)")
+    print("# The pass log embedded below was produced by the following invocation on node-27.")
+    print("# All preamble content (including this recipe) is driver-emitted; the operator does not")
+    print("# hand-author any part of the pass log — regenerating the pass log means re-running this")
+    print("# driver end-to-end.")
+    print("# 1. ssh -p 32099 nwm@210.77.77.27")
+    print("# 2. cd /home/nwm/NWM && git fetch \\")
+    print("#      && git checkout feat/issue-894-cmfd-p02-g9-capacity && git pull --ff-only")
+    print("# 3. set -a; source infra/env/node27-ingest.env; set +a")
+    print("#    (writable nhms role; §2.6 driver installs session-level read-only guard so")
+    print("#     ingest.env is safe for SELECT-only queries — see D8 note. display-ro env")
+    print("#     template not yet provisioned on node-27.)")
+    print("# 4. NHMS_CMFD_P02_MANIFEST_PATH=\\")
+    print("#      openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json \\")
+    print("#    uv run python \\")
+    print("#      openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6-node27.py \\")
+    print("#    > openspec/changes/cmfd-direct-grid-platform-readiness/evidence/capacity-2.6.node-27.pass.log")
+    print("#    (DATABASE_URL from step 3 satisfies _resolve_dsn; NHMS_CMFD_P02_PG_DSN optional override.")
+    print("#     `uv run` resolves the .venv python; the .venv/bin/python absolute-path form works too")
+    print("#     if uv is not on the ssh PATH.)")
+    print("# The script is committed at the path above. Numerical values below (live SQL results,")
+    print("# per-limit deployment values, formula estimates, greps) are captured verbatim from that")
+    print("# invocation via subprocess/os calls inside the driver — no hand-spliced values.")
+
+    # Env-file capture (grep -c FORCING_MAX_) — driver-executed at run time
+    forcing_grep = _capture_env_grep(script_dir)
+    print(f"# Env-file capture at run time: {forcing_grep}")
+    print('#   (matches the driver "unset" columns in D4 when count=0 — no FORCING_MAX_* deployment override.')
+    print("#    A non-zero count would surface an override the driver would echo in D4 producer-limits table.)")
+
+    # Forecast-env capture (grep -rEn) — driver-executed at run time
+    forecast_grep = _capture_forecast_env_grep(script_dir)
+    print(f"# Forecast-env capture at run time: {forecast_grep}")
+    print("#   (matches the driver's PRODUCTION_TIMESTEP_COUNT_PER_CYCLE=57 code-pinned anchor when empty.")
+    print("#    NOTE: T=57 applies to the GFS-branch uniform-step path; IFS production uses segmented")
+    print("#    resolution ((144,3),(360,6)) via generate_segmented_forecast_hours in workers/data_adapters/")
+    print("#    base.py, yielding T=53 for end_hour=168. Both 57 and 53 sit well below the D4 breakeven_T=264,")
+    print("#    so the NO BREACH verdict holds for both branches.)")
+
+    # manifest path breadcrumb (unchanged from Round 3)
+    print(f"# manifest_path: {manifest_path}")
+
+
 def main() -> int:
     manifest_path_str = os.environ.get("NHMS_CMFD_P02_MANIFEST_PATH")
     if not manifest_path_str:
@@ -695,23 +925,22 @@ def main() -> int:
     producer_limits_raw = manifest["forcing_producer_limits"]
     staging_limits = manifest["shud_runtime_staging_limits"]
 
-    # ---- header ----
+    # ---- preamble (binder + scope-note + attest + recipe + captures) ----
+    # Driver is the single source of truth for the entire pass log preamble; no
+    # hand-splice above the binder header. See _emit_preamble docstring for the
+    # rationale (Phase 6.5 Round 4 finding: hand-spliced preamble produced a
+    # duplicate binder header and made the recipe non-reproducible).
     now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    code_carrier_sha = _git_head_sha(Path(__file__).resolve().parent)
-    print(
-        f"# captured at {now_utc} host=node-27 bound to baseline_commit={baseline_commit}"
-        f" manifest_sha256={manifest_sha}"
+    script_dir = Path(__file__).resolve().parent
+    code_carrier_sha = _git_head_sha(script_dir)
+    _emit_preamble(
+        script_dir=script_dir,
+        manifest_path=manifest_path,
+        manifest_sha=manifest_sha,
+        baseline_commit=baseline_commit,
+        code_carrier_sha=code_carrier_sha,
+        now_utc=now_utc,
     )
-    print(f"# code_carrier_sha={code_carrier_sha}")
-    print("# task: cmfd-direct-grid-platform-readiness §2.6 node-27 G9 capacity baseline against live legacy facts")
-    print("# host: node-27 (210.77.77.27:32099, user=nwm, /home/nwm/NWM)")
-    print("# env : infra/env/node27-ingest.env — the node27-display-ro.env template is not yet provisioned")
-    print("#       on node-27; ingest.env is sufficient because §2.6 uses SELECT-only queries + a")
-    print("#       session-level read-only guard set after connect (SET SESSION CHARACTERISTICS AS")
-    print("#       TRANSACTION READ ONLY + default_transaction_read_only=on + statement_timeout=60s;")
-    print("#       see _run_live_sql in this driver). Safe under either the nhms_display_ro role")
-    print("#       (role-level enforcement) or the writable nhms role (session-level enforcement).")
-    print("# manifest_path:", manifest_path)
 
     # ---- live SQL ----
     dsn = _resolve_dsn()
@@ -865,17 +1094,22 @@ def main() -> int:
     producer_breaches, capacity_ctx = _check_producer_capacity_breach(legacy_station_count, producer_limits)
     per_limit_pct = capacity_ctx["per_limit_pct"]
     print("# Producer limits (default vs manifest_effective vs runtime_effective at capture time):")
+    print("#   'compute' column mixes live SQL counts (max_station_count = live active_met_station_count)")
+    print("#   with formula-derived estimates (max_timestep_count = typical timestep constant;")
+    print("#   max_timeseries_row_count = station × timestep × variables; max_manifest_bytes =")
+    print("#   station × per_station_bytes_est). The mix is intentional — each row compares the")
+    print("#   value that would actually get evaluated against the runtime cap at produce() time.")
     for name, blk in producer_limits.items():
         pct_blk = per_limit_pct.get(name, {})
         compute = pct_blk.get("compute")
         pct = pct_blk.get("pct_of_cap")
         pct_display = f"{pct:.2f}%" if isinstance(pct, float) else "N/A"
-        active_display = _fmt_int(compute) if isinstance(compute, int) else "N/A"
+        compute_display = _fmt_int(compute) if isinstance(compute, int) else "N/A"
         print(
             f"#   {name:<28s} default={_fmt_int(blk['default']):>15s}  "
             f"manifest_effective={_fmt_int(blk['manifest_effective']):>15s}  "
             f"runtime_effective={_fmt_int(blk['runtime_effective']):>15s}  "
-            f"active={active_display:>15s}  pct_of_cap={pct_display:>7s}  "
+            f"compute={compute_display:>15s}  pct_of_cap={pct_display:>7s}  "
             f"env_var={blk['env_var']}  {blk['runtime_override_source']}"
         )
     print()
