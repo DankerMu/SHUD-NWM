@@ -766,6 +766,20 @@ def test_register_new_version_step_two_failure_leaves_orphan_rows() -> None:
     same ``canonical_grid_key``. This test LOCKS the docstring's orphan-
     state gap paragraph so a future refactor that silently swallows the
     step-2 exception or manufactures fake atomicity surfaces here.
+
+    Post-state pin: after the raise, BOTH rows are still non-superseded in
+    the store (``superseded_at is None`` on each), which is the observable
+    manifestation of the orphan-state gap.
+
+    Fake-fidelity limitation (deferred to node-27 real-DB carrier):
+    ``_FakeDriftStore.load_snapshot_by_key`` returns a single "current"
+    pointer per ``canonical_grid_key`` (``_current_by_key`` collapses to one
+    slot; step 1's ``insert_snapshot`` overwrites the pointer to the new
+    id). The real Postgres store filters ``WHERE superseded_at IS NULL``
+    and would see BOTH rows as "current" for the same key — i.e. the
+    orphan condition. This test asserts the two-rows state via ``_by_id``
+    lookups (id-addressed reads bypass the single-slot pointer) instead of
+    via ``load_snapshot_by_key``.
     """
     prior = _make_snapshot(_PRIOR_SIGNATURE, grid_snapshot_id=uuid4())
     prior_id = prior.grid_snapshot_id
@@ -774,6 +788,8 @@ def test_register_new_version_step_two_failure_leaves_orphan_rows() -> None:
         _pad_signature("sig_new_step_two_fail_"),
         grid_snapshot_id=uuid4(),
     )
+    new_id = new.grid_snapshot_id
+    assert new_id is not None
     store = _FailingSupersedeDriftStore(seeded_by_id={prior_id: prior})
     derived_cache = _FakeDerivedCache()
 
@@ -794,6 +810,21 @@ def test_register_new_version_step_two_failure_leaves_orphan_rows() -> None:
     assert store.supersede_calls == [(prior_id, _NEW_SUPERSEDED_AT)]
     # Step 3 was never reached — derived-cache staleness was NOT flipped.
     assert derived_cache.mark_derived_stale_calls == []
+
+    # Post-state pin (orphan-state gap): BOTH rows exist and BOTH remain
+    # non-superseded. The prior kept its original ``superseded_at is None``
+    # because ``_FailingSupersedeDriftStore.supersede`` raises BEFORE
+    # mutating store state; the new row was committed by step 1's
+    # ``insert_snapshot`` with no ``superseded_at`` set.
+    prior_after = store.load_snapshot_by_id(prior_id)
+    assert prior_after is not None
+    assert prior_after.superseded_at is None
+    new_after = store.load_snapshot_by_id(new_id)
+    assert new_after is not None
+    assert new_after.superseded_at is None
+    # Same ``canonical_grid_key`` on both rows — this is the "two active
+    # rows for one key" orphan condition the docstring names.
+    assert prior_after.canonical_grid_key == new_after.canonical_grid_key
 
 
 # Unused imports guarded by test bodies elsewhere; suppress unused warnings by

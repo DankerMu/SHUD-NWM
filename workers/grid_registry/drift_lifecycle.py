@@ -231,9 +231,16 @@ def register_new_version(
         ``prior_original_superseded_at`` is non-None, a best-effort rollback
         of step 2 is attempted before re-raising. If the rollback
         ``store.supersede`` call ITSELF raises (double-fault), the rollback
-        failure is swallowed (chained as ``__context__``) and the ORIGINAL
-        ``mark_derived_stale`` exception is re-raised — the primary failure
-        is never masked by a transient DB error on the compensating write.
+        failure is DISCARDED (swallowed by a bare ``except: pass``) and the
+        ORIGINAL ``mark_derived_stale`` exception is re-raised — the primary
+        failure is never masked by a transient DB error on the compensating
+        write. The discarded rollback exception is NOT preserved as
+        ``__context__`` on the re-raised original (the bare ``raise`` re-
+        raises the ORIGINAL with its original context; Python does not
+        retro-fit the swallowed rollback exception onto a re-raise). Post-
+        mortem after a double-fault: check derived-cache logs for the
+        primary, then inspect registry state manually — the compensating
+        write's failure is not observable through the exception chain.
 
     Orphan-state gap (documented, not defended)
     -------------------------------------------
@@ -288,15 +295,24 @@ def register_new_version(
             # The rollback itself is wrapped so a double-fault (rollback
             # ``supersede`` also raises) cannot mask the primary
             # ``mark_derived_stale`` exception. The rollback failure is
-            # preserved as ``__context__`` on the re-raised original — Python
-            # chains implicitly because the rollback exception is under
-            # handling when the bare ``raise`` below executes.
+            # DISCARDED by the inner ``except: pass`` below — it is NOT
+            # preserved as ``__context__`` on the re-raised original. The
+            # bare ``raise`` outside this inner try re-raises the ORIGINAL
+            # ``mark_derived_stale`` exception with its ORIGINAL context;
+            # Python does not retro-fit the swallowed rollback exception
+            # onto a re-raise. Losing the rollback exception is intentional:
+            # surface visibility of the primary derived-cache failure is
+            # the priority; the rollback double-fault is discoverable only
+            # via post-mortem inspection of registry state.
             try:
                 store.supersede(prior_snapshot_id, prior_original_superseded_at)
             except Exception:
-                # Swallow the rollback failure; the ORIGINAL
+                # Discard the rollback failure — the ORIGINAL
                 # mark_derived_stale exception is still the primary that
-                # gets re-raised on the bare ``raise`` below.
+                # gets re-raised on the bare ``raise`` below. The rollback
+                # exception is lost (not chained via __context__ on the
+                # re-raise); rely on operator-side registry inspection to
+                # detect a failed compensating write.
                 pass
         # If prior_original_superseded_at is None, the SUB-3 store cannot
         # un-supersede (it rejects superseded_at=None), so best-effort ends
