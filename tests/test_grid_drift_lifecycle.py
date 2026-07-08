@@ -649,6 +649,153 @@ def test_protocols_are_runtime_checkable() -> None:
     assert isinstance(fake_cache, DerivedCacheStoreProtocol)
 
 
+# -----------------------------------------------------------------------------
+# Phase 6 F1 + F2 gates — rollback double-fault + step-2 orphan-state lock.
+# -----------------------------------------------------------------------------
+
+
+class _DoubleFailingDriftStore(_FakeDriftStore):
+    """``_FakeDriftStore`` variant whose ``supersede`` succeeds on the FIRST
+    call (step 2 initial supersede) and RAISES on the SECOND call (rollback
+    path). Combined with :class:`_FailingDerivedCache` this exercises the
+    double-fault path in :func:`register_new_version`: the primary
+    ``mark_derived_stale`` failure MUST propagate, NOT the rollback failure.
+    """
+
+    _ROLLBACK_ERROR_MESSAGE = "rollback supersede failure (double-fault)"
+
+    def supersede(
+        self,
+        grid_snapshot_id: UUID,
+        superseded_at: datetime,
+    ) -> None:
+        # Record the attempt BEFORE deciding whether to raise so tests can
+        # assert both attempts landed regardless of the second call's fate.
+        self.supersede_calls.append((grid_snapshot_id, superseded_at))
+        if len(self.supersede_calls) == 1:
+            # First call — mutate stored state exactly like the parent fake.
+            prior = self._by_id[grid_snapshot_id]
+            updated = replace(prior, superseded_at=superseded_at)
+            self._by_id[grid_snapshot_id] = updated
+            key = updated.canonical_grid_key
+            if self._current_by_key.get(key) == grid_snapshot_id:
+                del self._current_by_key[key]
+            return
+        # Second call (rollback path) — raise WITHOUT mutating state so the
+        # test can distinguish this failure from the primary derived-cache
+        # failure via message body.
+        raise RuntimeError(self._ROLLBACK_ERROR_MESSAGE)
+
+
+class _FailingSupersedeDriftStore(_FakeDriftStore):
+    """``_FakeDriftStore`` variant whose ``supersede`` raises on the FIRST
+    call. Used to lock the F2 docstring gap: if step 2 raises AFTER step 1
+    (``insert_snapshot``) has committed, the composer CANNOT undo the insert
+    (SUB-3 forbids delete_snapshot) — both the prior and the newly-inserted
+    snapshot are left non-superseded (orphan-state gap). This test PROVES
+    the composer propagates the step-2 exception without attempting derived-
+    cache work; it does NOT assert atomicity (atomicity is the documented
+    out-of-scope).
+    """
+
+    _STEP_TWO_ERROR_MESSAGE = "step 2 supersede failure (orphan-state gap)"
+
+    def supersede(
+        self,
+        grid_snapshot_id: UUID,
+        superseded_at: datetime,
+    ) -> None:
+        self.supersede_calls.append((grid_snapshot_id, superseded_at))
+        raise RuntimeError(self._STEP_TWO_ERROR_MESSAGE)
+
+
+def test_register_new_version_rollback_failure_does_not_mask_original() -> None:
+    """F1: When BOTH ``mark_derived_stale`` AND the rollback ``supersede``
+    raise (double-fault), the ORIGINAL ``mark_derived_stale`` exception
+    propagates — never the rollback failure. The docstring promises "re-raise
+    the original either way"; this test locks that against a silent
+    regression in the ``except Exception:`` block on the compensating write.
+    """
+    prior = _make_snapshot(
+        _PRIOR_SIGNATURE,
+        grid_snapshot_id=uuid4(),
+        superseded_at=_PRIOR_SUPERSEDED_AT,
+    )
+    prior_id = prior.grid_snapshot_id
+    assert prior_id is not None
+    new = _make_snapshot(
+        _pad_signature("sig_new_double_fault_"),
+        grid_snapshot_id=uuid4(),
+    )
+    store = _DoubleFailingDriftStore(seeded_by_id={prior_id: prior})
+    failing_cache = _FailingDerivedCache()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        register_new_version(
+            new,
+            prior_id,
+            _NEW_SUPERSEDED_AT,
+            store=store,
+            derived_cache_store=failing_cache,
+        )
+
+    # The ORIGINAL derived-cache failure must be the primary — matching the
+    # message body of :class:`_FailingDerivedCache`. The rollback error
+    # message must NOT be the primary.
+    assert str(excinfo.value) == (
+        f"derived cache failure for grid_snapshot_id={prior_id}"
+    )
+    assert str(excinfo.value) != _DoubleFailingDriftStore._ROLLBACK_ERROR_MESSAGE
+
+    # BOTH supersede attempts landed on the store: the initial step-2 call
+    # AND the rollback compensating call.
+    assert store.supersede_calls == [
+        (prior_id, _NEW_SUPERSEDED_AT),
+        (prior_id, _PRIOR_SUPERSEDED_AT),
+    ]
+    # mark_derived_stale WAS attempted before the double-fault surfaced.
+    assert failing_cache.mark_derived_stale_calls == [prior_id]
+
+
+def test_register_new_version_step_two_failure_leaves_orphan_rows() -> None:
+    """F2: If step 2 (``store.supersede``) raises AFTER step 1
+    (``store.insert_snapshot``) has committed, the composer CANNOT undo the
+    insert — SUB-3 forbids ``delete_snapshot`` on already-committed rows. The
+    exception propagates; the registry is left with BOTH the prior
+    (non-superseded) AND the newly-inserted (non-superseded) row for the
+    same ``canonical_grid_key``. This test LOCKS the docstring's orphan-
+    state gap paragraph so a future refactor that silently swallows the
+    step-2 exception or manufactures fake atomicity surfaces here.
+    """
+    prior = _make_snapshot(_PRIOR_SIGNATURE, grid_snapshot_id=uuid4())
+    prior_id = prior.grid_snapshot_id
+    assert prior_id is not None
+    new = _make_snapshot(
+        _pad_signature("sig_new_step_two_fail_"),
+        grid_snapshot_id=uuid4(),
+    )
+    store = _FailingSupersedeDriftStore(seeded_by_id={prior_id: prior})
+    derived_cache = _FakeDerivedCache()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        register_new_version(
+            new,
+            prior_id,
+            _NEW_SUPERSEDED_AT,
+            store=store,
+            derived_cache_store=derived_cache,
+        )
+    assert str(excinfo.value) == _FailingSupersedeDriftStore._STEP_TWO_ERROR_MESSAGE
+
+    # Step 1 succeeded — the new snapshot was inserted.
+    assert store.insert_snapshot_calls == [(new, [])]
+    # Step 2 raised on the ONLY attempt — no rollback path because there is
+    # nothing after step 2 that triggers the composer's best-effort branch.
+    assert store.supersede_calls == [(prior_id, _NEW_SUPERSEDED_AT)]
+    # Step 3 was never reached — derived-cache staleness was NOT flipped.
+    assert derived_cache.mark_derived_stale_calls == []
+
+
 # Unused imports guarded by test bodies elsewhere; suppress unused warnings by
 # referencing the symbol.
 _ = timedelta

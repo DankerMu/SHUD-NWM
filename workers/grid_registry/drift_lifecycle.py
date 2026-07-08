@@ -229,7 +229,25 @@ def register_new_version(
         ``store.supersede`` / ``derived_cache_store.mark_derived_stale``
         propagates. If ``mark_derived_stale`` raises AND
         ``prior_original_superseded_at`` is non-None, a best-effort rollback
-        of step 2 is attempted before re-raising.
+        of step 2 is attempted before re-raising. If the rollback
+        ``store.supersede`` call ITSELF raises (double-fault), the rollback
+        failure is swallowed (chained as ``__context__``) and the ORIGINAL
+        ``mark_derived_stale`` exception is re-raised — the primary failure
+        is never masked by a transient DB error on the compensating write.
+
+    Orphan-state gap (documented, not defended)
+    -------------------------------------------
+    If step 2 (``store.supersede``) raises AFTER step 1
+    (``store.insert_snapshot``) has already committed, the composer CANNOT
+    roll back the insert: SUB-3's store forbids ``delete_snapshot`` on
+    already-committed rows (append-only immutability). The exception
+    propagates as-is, but the registry is left with BOTH the prior
+    (non-superseded) AND the new (non-superseded) row for the same
+    ``canonical_grid_key`` — two "active" rows for one key. Operator
+    intervention is required to reconcile (typically: retry ``supersede``
+    on the prior once the transient failure clears). Naming this gap out
+    is intentional: cross-primitive atomicity is out-of-scope for a
+    free-function composer.
     """
     if new_snapshot.grid_snapshot_id is None:
         raise ValueError(
@@ -267,7 +285,19 @@ def register_new_version(
         if prior_original_superseded_at is not None:
             # SUB-3 store's supersede accepts any tz-aware datetime; restoring
             # the prior's original superseded_at is a valid re-supersede.
-            store.supersede(prior_snapshot_id, prior_original_superseded_at)
+            # The rollback itself is wrapped so a double-fault (rollback
+            # ``supersede`` also raises) cannot mask the primary
+            # ``mark_derived_stale`` exception. The rollback failure is
+            # preserved as ``__context__`` on the re-raised original — Python
+            # chains implicitly because the rollback exception is under
+            # handling when the bare ``raise`` below executes.
+            try:
+                store.supersede(prior_snapshot_id, prior_original_superseded_at)
+            except Exception:
+                # Swallow the rollback failure; the ORIGINAL
+                # mark_derived_stale exception is still the primary that
+                # gets re-raised on the bare ``raise`` below.
+                pass
         # If prior_original_superseded_at is None, the SUB-3 store cannot
         # un-supersede (it rejects superseded_at=None), so best-effort ends
         # here — the prior is left in the "superseded" state.
