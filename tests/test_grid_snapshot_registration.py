@@ -83,6 +83,10 @@ from workers.grid_registry.input_record import (
     read_input_record,
 )
 from workers.grid_registry.registry import _live_producer_signature
+from workers.grid_registry.shared_binding_eligibility import (
+    SharedBindingVerificationEvidence,
+    evaluate_shared_binding_eligibility,
+)
 
 # -----------------------------------------------------------------------------
 # Fixture fabricator
@@ -2059,6 +2063,171 @@ def test_writer_backfill_shared_canonical_grid_key(
     # Pre-shared-eligibility phase: each row's applicable_source_ids is its own.
     assert list(row_ifs["applicable_source_ids"]) == ["IFS"]
     assert list(row_gfs["applicable_source_ids"]) == ["gfs"]
+
+
+# -----------------------------------------------------------------------------
+# SUB-10 / Task 3.3 backfill acceptance — live grid.json + sidecar files
+# -----------------------------------------------------------------------------
+
+
+_LIVE_CANONICAL_ROOT = pathlib.Path(__file__).resolve().parent.parent / "canonical"
+
+
+def _row_to_snapshot(row: dict[str, Any]) -> CanonicalGridSnapshot:
+    """Rebuild a ``CanonicalGridSnapshot`` dataclass from a ``_fetch_snapshot_row``
+    result.
+
+    Used by SUB-10 §3.3 backfill acceptance so the shared-binding eligibility
+    entry point (Task 5.1) can be invoked with real persisted rows without
+    routing through the SUB-3 ``load_snapshot`` object-reader path (which
+    demands an object-store to re-verify the ``grid_definition_checksum``;
+    the SUB-10 test asserts the DB rows only, not object-store bytes).
+    """
+    return CanonicalGridSnapshot(
+        grid_snapshot_id=row["grid_snapshot_id"],
+        canonical_grid_key=row["canonical_grid_key"],
+        source_id=row["source_id"],
+        grid_id=row["grid_id"],
+        grid_signature=row["grid_signature"],
+        grid_definition_uri=row["grid_definition_uri"],
+        grid_definition_checksum=row["grid_definition_checksum"],
+        longitude_convention=row["longitude_convention"],
+        latitude_order=row["latitude_order"],
+        flatten_order=row["flatten_order"],
+        native_resolution=float(row["native_resolution"]),
+        bbox_south=float(row["bbox_south"]),
+        bbox_north=float(row["bbox_north"]),
+        bbox_west=float(row["bbox_west"]),
+        bbox_east=float(row["bbox_east"]),
+        converter_version=row["converter_version"],
+        valid_from=row["valid_from"],
+        valid_to=row["valid_to"],
+        applicable_source_ids=tuple(row["applicable_source_ids"]),
+        superseded_at=row["superseded_at"],
+        created_at=row["created_at"],
+    )
+
+
+@pytest.mark.integration
+def test_backfill_ifs_gfs_share_key(
+    sub5_migrated_database: str,
+) -> None:
+    """SUB-10 §3.3 backfill acceptance: the two LIVE snapshot rows registered
+    from the committed `canonical/{IFS,gfs}/grid/{grid_id}/grid.json` + sidecar
+    files share one `canonical_grid_key`, carry the pinned bbox
+    63-145°E / 8-64°N and `native_resolution = 0.25`, and after
+    `evaluate_shared_binding_eligibility` acceptance both rows'
+    `applicable_source_ids` cover both `IFS` and `gfs`.
+
+    Fixture-bootstrapped from the SAME 4 committed live files node-27 uses:
+    reading them AS the inputs (not fabricating identical bytes) proves the
+    committed live assets themselves discharge the SUB-1 shared-signature
+    invariant at SUB-4's canonical_grid_key boundary, not just fabricated
+    fixture blocks.
+
+    Set-equality assertion on `applicable_source_ids` (not positional) per the
+    §3.3 pin-relaxation recorded in tasks.md §5.1 — the SUB-3 store's
+    position-preserving append leaves the IFS row `["IFS", "gfs"]` and the
+    gfs row `["gfs", "IFS"]`, both satisfying
+    `sorted(...) == ["IFS", "gfs"]`.
+    """
+    # Sanity: the 4 live files exist in the committed tree at the URIs
+    # SUB-10 pinned for node-27.
+    grid_json_ifs = _LIVE_CANONICAL_ROOT / "IFS" / "grid" / "ifs_0p25" / "grid.json"
+    sidecar_ifs = (
+        _LIVE_CANONICAL_ROOT / "IFS" / "grid" / "ifs_0p25" / "grid_snapshot_metadata.json"
+    )
+    grid_json_gfs = _LIVE_CANONICAL_ROOT / "gfs" / "grid" / "gfs_0p25" / "grid.json"
+    sidecar_gfs = (
+        _LIVE_CANONICAL_ROOT / "gfs" / "grid" / "gfs_0p25" / "grid_snapshot_metadata.json"
+    )
+    for path in (grid_json_ifs, sidecar_ifs, grid_json_gfs, sidecar_gfs):
+        assert path.is_file(), f"missing SUB-10 live asset: {path}"
+
+    uri_ifs = "canonical/IFS/grid/ifs_0p25/grid.json"
+    uri_gfs = "canonical/gfs/grid/gfs_0p25/grid.json"
+
+    record_ifs = read_input_record(
+        "IFS",
+        grid_json_ifs,
+        sidecar_ifs,
+        grid_definition_uri=uri_ifs,
+        expected_converter_version=_stub_converter_resolver,
+    )
+    record_gfs = read_input_record(
+        "gfs",
+        grid_json_gfs,
+        sidecar_gfs,
+        grid_definition_uri=uri_gfs,
+        expected_converter_version=_stub_converter_resolver,
+    )
+
+    # SUB-1 shared-signature invariant: identical bbox × resolution × axis
+    # order → byte-identical signatures.
+    sig_ifs = grid_signature_hash(record_ifs.cells)
+    sig_gfs = grid_signature_hash(record_gfs.cells)
+    assert sig_ifs == sig_gfs
+    assert record_ifs.native_resolution == pytest.approx(0.25)
+    assert record_gfs.native_resolution == pytest.approx(0.25)
+    assert record_ifs.download_bbox == record_gfs.download_bbox
+
+    store = PsycopgGridRegistryStore(database_url=sub5_migrated_database)
+    id_ifs = register_snapshot(record_ifs, source_id="IFS", store=store)
+    id_gfs = register_snapshot(record_gfs, source_id="gfs", store=store)
+
+    row_ifs = _fetch_snapshot_row(sub5_migrated_database, id_ifs)
+    row_gfs = _fetch_snapshot_row(sub5_migrated_database, id_gfs)
+
+    # (1) shared canonical_grid_key.
+    assert row_ifs["canonical_grid_key"] == row_gfs["canonical_grid_key"]
+
+    # (2) pinned bbox 63-145°E / 8-64°N and native_resolution = 0.25 on BOTH rows.
+    for row in (row_ifs, row_gfs):
+        assert row["bbox_south"] == pytest.approx(8.0)
+        assert row["bbox_north"] == pytest.approx(64.0)
+        assert row["bbox_west"] == pytest.approx(63.0)
+        assert row["bbox_east"] == pytest.approx(145.0)
+        assert row["native_resolution"] == pytest.approx(0.25)
+
+    # (3) Post-3.1b phase: each row's applicable_source_ids equals its own
+    # single normalized source id (SUB-5 write semantics before SUB-8 fires).
+    assert list(row_ifs["applicable_source_ids"]) == ["IFS"]
+    assert list(row_gfs["applicable_source_ids"]) == ["gfs"]
+
+    # (4) Invoke SUB-8 shared-binding eligibility on the two persisted rows.
+    # Fabricated evidence: URI can be a fake because the decision only checks
+    # non-None; verified_source_ids covers both normalized ids.
+    snapshot_ifs = _row_to_snapshot(row_ifs)
+    snapshot_gfs = _row_to_snapshot(row_gfs)
+    evidence = SharedBindingVerificationEvidence(
+        verified_source_ids=frozenset({"IFS", "gfs"}),
+        comparison_evidence_uri="s3://nhms-evidence/backfill-2026-07-08/comparison.json",
+    )
+    # Acceptance returns None; any denial raises SharedBindingEligibilityError.
+    result = evaluate_shared_binding_eligibility(
+        snapshot_ifs,
+        snapshot_gfs,
+        verification_evidence=evidence,
+        store=store,
+    )
+    assert result is None
+
+    # (5) Reload both rows; SUB-8 acceptance-time canonical-pair write extended
+    # applicable_source_ids on BOTH rows. Set-equality assertion per the §3.3
+    # pin-relaxation (positional would fail on the gfs row that lands as
+    # ["gfs", "IFS"] under position-preserving append).
+    reloaded_ifs = _fetch_snapshot_row(sub5_migrated_database, id_ifs)
+    reloaded_gfs = _fetch_snapshot_row(sub5_migrated_database, id_gfs)
+    assert sorted(reloaded_ifs["applicable_source_ids"]) == ["IFS", "gfs"]
+    assert sorted(reloaded_gfs["applicable_source_ids"]) == ["IFS", "gfs"]
+
+    # (6) bbox pin re-asserted on the reloaded rows for §3.3 evidence completeness.
+    for row in (reloaded_ifs, reloaded_gfs):
+        assert row["bbox_south"] == pytest.approx(8.0)
+        assert row["bbox_north"] == pytest.approx(64.0)
+        assert row["bbox_west"] == pytest.approx(63.0)
+        assert row["bbox_east"] == pytest.approx(145.0)
+        assert row["native_resolution"] == pytest.approx(0.25)
 
 
 # -----------------------------------------------------------------------------
