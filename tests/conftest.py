@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import psycopg2
@@ -10,6 +11,50 @@ import pytest
 from psycopg2 import sql
 
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def build_canonical_nc(
+    tmp_path: pathlib.Path,
+    *,
+    source: str,
+    cycle_iso: str,
+    variable: str,
+    latitudes: Sequence[float],
+    longitudes: Sequence[float],
+) -> pathlib.Path:
+    """Write a small ``NETCDF4`` fixture matching the canonical rectilinear shape.
+
+    Layout: dims ``(latitude, longitude)``, coord vars ``latitude`` /
+    ``longitude`` matching SUB-4 ``_build_cells`` expectations, one data var
+    named after ``variable`` filled with deterministic zero values. The output
+    path is
+    ``tmp_path/{source}/{cycle_iso}/{variable}.nc`` — parents are created on
+    demand.
+
+    Used by :file:`tests/test_grid_stability_verification.py` (SUB-7 / #904)
+    to author per-cycle / per-variable / per-backend fixtures under
+    ``tmp_path`` without committing any NetCDF binaries to the repo.
+    """
+    import xarray as xr
+
+    lat_list = [float(value) for value in latitudes]
+    lon_list = [float(value) for value in longitudes]
+    y_count, x_count = len(lat_list), len(lon_list)
+    zeros = [[0.0] * x_count for _ in range(y_count)]
+    dataset = xr.Dataset(
+        data_vars={variable: (("latitude", "longitude"), zeros)},
+        coords={
+            "latitude": ("latitude", lat_list),
+            "longitude": ("longitude", lon_list),
+        },
+    )
+    target = tmp_path / source / cycle_iso / f"{variable}.nc"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dataset.to_netcdf(target, engine="netcdf4", format="NETCDF4")
+    finally:
+        dataset.close()
+    return target
 
 
 def pytest_configure(config: pytest.Config) -> None:
