@@ -54,6 +54,15 @@ from workers.grid_registry.stability import (
 _PINNED_LATS: tuple[float, ...] = (8.0, 8.25, 8.5, 8.75, 9.0)
 _PINNED_LONS: tuple[float, ...] = (63.0, 63.25, 63.5, 63.75, 64.0)
 
+# §4.1c pins the multi-backend test at the LITERAL production bbox
+# ``{south:8.0, north:64.0, west:63.0, east:145.0}`` at ``0.25°`` resolution.
+# 225 latitudes × 329 longitudes = 74,025 cells. Verify the pin edges:
+# ``8.0 + 0.25 * 224 == 64.0``; ``63.0 + 0.25 * 328 == 145.0``. Test wall-clock
+# grows by ~1-2s vs the 5x5 sub-grid but is still well under the CI budget,
+# and this literal bbox is what discharges the §4.1c pin.
+_BACKEND_LATS: tuple[float, ...] = tuple(round(8.0 + 0.25 * i, 4) for i in range(225))
+_BACKEND_LONS: tuple[float, ...] = tuple(round(63.0 + 0.25 * i, 4) for i in range(329))
+
 # The 6 canonical variables (the "5 SHUD variables" display fact — Wind is a
 # U/V pair). Mirrors the pinned set from tasks.md §4.0 line 109.
 _CANONICAL_VARIABLES: tuple[str, ...] = (
@@ -82,12 +91,42 @@ _PINNED_BACKENDS: tuple[str, ...] = (
 
 
 # -----------------------------------------------------------------------------
+# §4.0 pinned-symbols static-import assertion
+# -----------------------------------------------------------------------------
+
+
+def test_stability_uses_pinned_symbols() -> None:
+    """§4.0 line 101 forbids reimplementing ``_build_cells`` / ``grid_signature_hash`` in stability.py.
+
+    The pin: the verifier module MUST resolve its ``_build_cells`` and
+    ``grid_signature_hash`` symbols to the SUB-4 (input_record) and SUB-1
+    (grid_signature) authors verbatim. Any future refactor that shadows either
+    binding with a local reimplementation regresses the derivation-oracle
+    contract; this identity-binding assertion locks the pin in place.
+    """
+    from packages.common.grid_signature import grid_signature_hash as _pinned_signature_hash
+    from workers.grid_registry import stability as _stability
+    from workers.grid_registry.input_record import _build_cells as _pinned_build_cells
+
+    assert _stability._build_cells is _pinned_build_cells
+    assert _stability.grid_signature_hash is _pinned_signature_hash
+
+
+# -----------------------------------------------------------------------------
 # 4.1a — multi-cycle stability
 # -----------------------------------------------------------------------------
 
 
 def test_multi_cycle_signature_identical(tmp_path: Path) -> None:
-    """§4.1a happy path: three consecutive cycles hash to one signature."""
+    """§4.1a happy path: three consecutive cycles hash to one signature.
+
+    Also asserts (§4.1a Required-evidence tuple pin) the raw ``_build_cells``
+    output tuples are byte-identical across the three cycles — the
+    signature-equality proxy is redundant, but the raw tuple assertion is the
+    literal discharge of the "``grid_cell_id`` values stable across cycles"
+    clause and prevents a future signature-collision from masking a real
+    cell-list drift.
+    """
     fixtures: dict[str, Path] = {
         cycle: build_canonical_nc(
             tmp_path,
@@ -100,6 +139,22 @@ def test_multi_cycle_signature_identical(tmp_path: Path) -> None:
         for cycle in _PINNED_CYCLES
     }
     assert verify_multi_cycle_stability(fixtures) is None
+
+    # §4.1a tuple-equality pin: raw ``_build_cells`` output is byte-identical
+    # across every cycle. Uses the verifier-internal helpers so the assertion
+    # exercises the SAME canonicalization path the verifier walks.
+    from workers.grid_registry.input_record import _build_cells
+    from workers.grid_registry.stability import _canonical_latitudes, _extract_axes
+
+    cells_per_cycle: dict[str, tuple] = {}
+    for cycle_key, fixture_path in fixtures.items():
+        latitudes, longitudes = _extract_axes(fixture_path)
+        canonical_latitudes = _canonical_latitudes(latitudes)
+        cells_per_cycle[cycle_key] = _build_cells(
+            longitudes=longitudes, latitudes=canonical_latitudes
+        )
+    cell_tuples = list(cells_per_cycle.values())
+    assert cell_tuples[0] == cell_tuples[1] == cell_tuples[2]
 
 
 def test_multi_cycle_mutated_cell_fails_closed(tmp_path: Path) -> None:
@@ -202,10 +257,12 @@ def test_multi_variable_mutated_fails_closed(tmp_path: Path) -> None:
 def test_multi_backend_signature_identical(tmp_path: Path) -> None:
     """§4.1c happy path: three source-family adapters hash to one signature.
 
-    Uses a SMALL 5x5 sub-grid at 0.25° step. The invariant tested is signature
-    invariance under adapter identity, not IFS/GFS/ERA5 bbox differences —
-    inflating to production bbox (63-145 x 8-64 = 328 x 224) would balloon CI
-    runtime for no marginal fidelity gain.
+    Uses the §4.1c pin-literal production bbox
+    ``{south:8.0, north:64.0, west:63.0, east:145.0}`` at 0.25° resolution
+    (225 × 329 = 74,025 cells). The pin explicitly names this bbox as the
+    §4.1c fixture geometry; a 5x5 sub-grid rationalization would satisfy the
+    invariant semantically but would fail to discharge the byte-for-byte pin.
+    Wall-clock grows by ~1-2s but stays well within CI budget.
     """
     fixtures: dict[str, Path] = {
         backend: build_canonical_nc(
@@ -213,8 +270,8 @@ def test_multi_backend_signature_identical(tmp_path: Path) -> None:
             source=backend.rsplit(".", maxsplit=1)[-1],
             cycle_iso="2026-05-03T00Z",
             variable="air_temperature_2m",
-            latitudes=_PINNED_LATS,
-            longitudes=_PINNED_LONS,
+            latitudes=_BACKEND_LATS,
+            longitudes=_BACKEND_LONS,
         )
         for backend in _PINNED_BACKENDS
     }
@@ -320,16 +377,76 @@ def _make_lon_pair(tmp_path: Path) -> tuple[Path, Path]:
     return fixture_0_360, fixture_180
 
 
+def _make_lat_identity_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Build two fixtures that share the SAME latitude convention (identity no-op).
+
+    Both fixtures store the same ascending latitude axis and identical
+    longitude axis. Feeding them into :func:`verify_coordinate_normalization`
+    as the lat arm makes the lat-invariance check a trivially-passing identity
+    so a regression in the OTHER (longitude) arm surfaces in isolation.
+    """
+    fixture_a = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z",
+        variable="air_temperature_2m_lat_identity_a",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    fixture_b = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z",
+        variable="air_temperature_2m_lat_identity_b",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    return fixture_a, fixture_b
+
+
+def _make_lon_identity_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Build two fixtures that share the SAME longitude convention (identity no-op).
+
+    Both fixtures store the same ``-180..180``-convention longitude axis and
+    identical latitude axis. Feeding them into
+    :func:`verify_coordinate_normalization` as the lon arm makes the
+    lon-convention check a trivially-passing identity so a regression in the
+    OTHER (latitude) arm surfaces in isolation.
+    """
+    fixture_a = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z",
+        variable="air_temperature_2m_lon_identity_a",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    fixture_b = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z",
+        variable="air_temperature_2m_lon_identity_b",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    return fixture_a, fixture_b
+
+
 def test_lat_order_invariance(tmp_path: Path) -> None:
-    """§4.1d happy path: latitude ascending / descending hash equal."""
+    """§4.1d happy path: latitude ascending / descending hash equal.
+
+    Varies ONLY the latitude pair; the longitude arm is fed identity-matched
+    fixtures via :func:`_make_lon_identity_pair` so a regression in the lat
+    axis surfaces without cross-talk from the lon convention.
+    """
     lat_ascending, lat_descending = _make_lat_pair(tmp_path)
-    lon_0_360, lon_180 = _make_lon_pair(tmp_path)
+    lon_identity_a, lon_identity_b = _make_lon_identity_pair(tmp_path)
     assert (
         verify_coordinate_normalization(
             lat_ascending,
             lat_descending,
-            lon_0_360,
-            lon_180,
+            lon_identity_a,
+            lon_identity_b,
         )
         is None
     )
@@ -338,16 +455,16 @@ def test_lat_order_invariance(tmp_path: Path) -> None:
 def test_lon_convention_normalization(tmp_path: Path) -> None:
     """§4.1d happy path: longitude ``0..360`` / ``-180..180`` hash equal via ``_normalize_longitude``.
 
-    Uses a fresh pair of longitude fixtures independent of
-    :func:`test_lat_order_invariance` so a regression in the longitude arm
-    surfaces in isolation.
+    Varies ONLY the longitude pair; the latitude arm is fed identity-matched
+    fixtures via :func:`_make_lat_identity_pair` so a regression in the lon
+    axis surfaces without cross-talk from the lat order.
     """
-    lat_ascending, lat_descending = _make_lat_pair(tmp_path)
+    lat_identity_a, lat_identity_b = _make_lat_identity_pair(tmp_path)
     lon_0_360, lon_180 = _make_lon_pair(tmp_path)
     assert (
         verify_coordinate_normalization(
-            lat_ascending,
-            lat_descending,
+            lat_identity_a,
+            lat_identity_b,
             lon_0_360,
             lon_180,
         )
@@ -548,6 +665,62 @@ def test_dynamic_crop_refused(tmp_path: Path) -> None:
         assert isinstance(max_lat, float)
     # Pinned §4.0 message literal — byte-for-byte.
     assert "canonical grid contract must be stabilized" in str(err)
+
+
+def test_dynamic_crop_refused_on_dict_key_collision(tmp_path: Path) -> None:
+    """§4.1e caller-bug guard: two fixtures with the same cycle-key derivation raise ``ValueError``.
+
+    The dynamic-crop check aggregates per-fixture geometry into a dict keyed by
+    ``fixture_path.parent.name`` (with fallback to ``stem``). If two fixtures
+    share that key, the second geometry would silently overwrite the first —
+    masking a real drift. The aggregation refuses at collision time with a
+    ``ValueError`` so the caller bug surfaces directly instead of leaking into
+    a wrong-pass or a wrong-fail down the road.
+    """
+    pre_upgrade = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z-pre",
+        variable="air_temperature_2m",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    post_upgrade = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="2026-05-03T00Z-post",
+        variable="air_temperature_2m",
+        latitudes=tuple(lat + 0.1 for lat in _PINNED_LATS),
+        longitudes=_PINNED_LONS,
+    )
+    # Build two fixtures that share ``parent.name == "cycleA"`` but differ in
+    # underlying geometry. The builder writes to
+    # ``tmp_path/{source}/{cycle_iso}/{variable}.nc`` — using distinct
+    # ``source`` values with the same ``cycle_iso`` produces the collision.
+    collision_a = build_canonical_nc(
+        tmp_path,
+        source="ifs",
+        cycle_iso="cycleA",
+        variable="air_temperature_2m",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS,
+    )
+    collision_b = build_canonical_nc(
+        tmp_path,
+        source="gfs",
+        cycle_iso="cycleA",
+        variable="air_temperature_2m",
+        latitudes=_PINNED_LATS,
+        longitudes=_PINNED_LONS[:-1],  # shrunk geometry — would silently overwrite
+    )
+    assert collision_a.parent.name == collision_b.parent.name == "cycleA"
+    with pytest.raises(ValueError, match=r"cycleA.*unique fixture path"):
+        verify_product_upgrade_and_dynamic_crop(
+            pre_upgrade,
+            post_upgrade,
+            [collision_a, collision_b],
+            declared_upgrade=True,
+        )
 
 
 # -----------------------------------------------------------------------------

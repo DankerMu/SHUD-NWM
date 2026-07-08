@@ -271,11 +271,19 @@ def _signature_without_normalization(nc_path: Path) -> str:
     ``_normalize_longitude``. Production callers MUST NOT set that flag; this
     helper deliberately reimplements the ordered iteration to synthesize the
     fail-closed path without touching SUB-4.
+
+    Bypasses ONLY longitude normalization; latitude canonicalization via
+    :func:`_canonical_latitudes` is still applied so the fail-closed path
+    stays symmetric with :func:`_signature_from_netcdf` on the latitude axis.
+    Without this, a lat-ascending vs lat-descending fixture pair fed through
+    this bypass path would drift on latitude order and mask the longitude
+    convention issue the bypass exists to expose.
     """
     latitudes, longitudes = _extract_axes(nc_path)
+    canonical_latitudes = _canonical_latitudes(latitudes)
     raw_cells: list[_RawCell] = []
     for index, (latitude, longitude) in enumerate(
-        (lat, lon) for lat in latitudes for lon in longitudes
+        (lat, lon) for lat in canonical_latitudes for lon in longitudes
     ):
         raw_cells.append(_RawCell(str(index), float(longitude), float(latitude)))
     return grid_signature_hash(raw_cells)
@@ -564,10 +572,15 @@ def verify_product_upgrade_and_dynamic_crop(
         When ``declared_upgrade=True`` and pre/post signatures are equal.
     DynamicCropRefusedError
         When ≥2 per-cycle fixtures have differing geometry tuples. Error
-        ``per_cycle_geometry`` maps cycle label (fixture path ``stem``) to
-        ``(cell_count, min_lon, max_lon, min_lat, max_lat)`` for every
-        supplied fixture (not just the offenders), so the operator has the
-        full picture in the message.
+        ``per_cycle_geometry`` maps cycle label (fixture path ``parent.name``
+        with fallback to ``stem``) to ``(cell_count, min_lon, max_lon, min_lat,
+        max_lat)`` for every supplied fixture (not just the offenders), so the
+        operator has the full picture in the message.
+    ValueError
+        When two per-cycle fixtures share the same cycle-key derivation
+        (``parent.name`` / ``stem``). The dict-key aggregation would otherwise
+        silently overwrite the earlier fixture's geometry and mask a real
+        drift; refusing at aggregation time surfaces the caller bug directly.
     """
     pre_signature, _ = _signature_from_netcdf(pre_upgrade_fixture)
     post_signature, _ = _signature_from_netcdf(post_upgrade_fixture)
@@ -586,6 +599,11 @@ def verify_product_upgrade_and_dynamic_crop(
             # so ``parent.name`` is the cycle key). Fall back to the file stem
             # when the fixture is at a flatter path.
             cycle_key = fixture_path.parent.name or fixture_path.stem
+            if cycle_key in per_cycle_geometry:
+                raise ValueError(
+                    f"per_cycle_fixtures contains multiple fixtures with the same cycle key "
+                    f"{cycle_key!r}; each cycle MUST have a unique fixture path"
+                )
             per_cycle_geometry[cycle_key] = _extract_geometry_tuple(fixture_path)
         distinct = set(per_cycle_geometry.values())
         if len(distinct) > 1:
