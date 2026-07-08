@@ -1,6 +1,6 @@
 ## 1. Mapping Input Integrity (Gates G0 + G1)
 
-- [ ] 1.1 Implement `workers/mapping_builder/integrity.py` baseline verification: recompute baseline package checksum, parse `.sp.mesh` and `.sp.att`, and verify element IDs are unique and contiguous from 1 with equal mesh/att sets and equal counts.
+- [x] 1.1 Implement `workers/mapping_builder/integrity.py` baseline verification: recompute baseline package checksum, parse `.sp.mesh` and `.sp.att`, and verify element IDs are unique and contiguous from 1 with equal mesh/att sets and equal counts.
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_integrity.py` proves a valid baseline passes and that a checksum mismatch, unparseable mesh/att, non-unique ID, non-contiguous ID, unequal ID sets, or unequal counts each fails closed with no output.
   - Required evidence: tests prove old `FORC` values that are non-positive or non-integer fail closed, and that legal old `.tsd.forc` references pass while illegal references fail.
   - Non-goal for 1.1: no barycenter mapping, no grid matching, no `.sp.att` rewrite, no binding emission.
