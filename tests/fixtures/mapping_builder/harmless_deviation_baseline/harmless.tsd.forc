@@ -1,0 +1,7 @@
+4 19510101
+/home/ghdc/nwm/input/harmless
+ID	Lon	Lat	X	Y	Z	Filename
+1	108.00	32.00	500000.0	3540000	1200	forcing_1.csv
+2	108.10	32.00	510000.0	3540000	1220	forcing_2.csv
+3	108.00	32.10	500000.0	3550000	1240	forcing_3.csv
+4	108.10	32.10	510000.0	3550000	1260	forcing_4.csv
