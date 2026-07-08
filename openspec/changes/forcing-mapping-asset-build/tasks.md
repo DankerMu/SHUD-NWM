@@ -4,7 +4,7 @@
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_integrity.py` proves a valid baseline passes and that a checksum mismatch, unparseable mesh/att, non-unique ID, non-contiguous ID, unequal ID sets, or unequal counts each fails closed with no output.
   - Required evidence: tests prove old `FORC` values that are non-positive or non-integer fail closed, and that legal old `.tsd.forc` references pass while illegal references fail.
   - Non-goal for 1.1: no barycenter mapping, no grid matching, no `.sp.att` rewrite, no binding emission.
-- [ ] 1.2 Implement CRS authority and ancillary inventory: read model CRS only from the package `gis/*.prj` (checksum-bound), reject missing/unparseable/non-WGS84-convertible `.prj`, make no global CRS assumption, and build a complete ancillary `*.tsd.*` dependency inventory.
+- [x] 1.2 Implement CRS authority and ancillary inventory: read model CRS only from the package `gis/*.prj` (checksum-bound), reject missing/unparseable/non-WGS84-convertible `.prj`, make no global CRS assumption, and build a complete ancillary `*.tsd.*` dependency inventory.
   - Required evidence: tests prove CRS is read from the package `.prj` only, that a `PROJCS["unknown"]` custom Albers and the qhh Transverse Mercator both parse and transform to WGS84, and that a missing/unparseable `.prj` fails closed.
   - Required evidence: tests prove `.sp.mesh` is never used as a CRS source and that the ancillary `*.tsd.*` inventory is complete.
   - Non-goal for 1.2: no EPSG lookup or global CRS default.
