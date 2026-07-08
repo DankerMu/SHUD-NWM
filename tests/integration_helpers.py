@@ -326,6 +326,29 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                      VALID_TIME_2, 2, "q_down", 150.0, "m3/s", "ok"),
                 ],
             )
+            cursor.execute(
+                """
+                INSERT INTO ops.pipeline_job (
+                    job_id, run_id, cycle_id, job_type, slurm_job_id,
+                    model_id, status, stage, submitted_at, started_at, finished_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (
+                    f"{ISSUE_126_PREFIX}_forecast_job",
+                    FORECAST_RUN_ID,
+                    CYCLE_ID,
+                    "forecast",
+                    "8101",
+                    MODEL_ID,
+                    "succeeded",
+                    "forecast",
+                    VALID_TIME_1,
+                    VALID_TIME_1,
+                    VALID_TIME_2,
+                ),
+            )
 
 
 def _clear_issue_126_rows(connection: Any) -> None:
