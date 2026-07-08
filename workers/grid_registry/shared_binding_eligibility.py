@@ -174,7 +174,10 @@ class SharedBindingVerificationEvidence:
         Set of normalized source ids (post-``normalize_source_id``) that have
         been verified against the shared ``canonical_grid_key`` on
         representative cycles. Both snapshot source ids MUST appear here or
-        eligibility is denied.
+        eligibility is denied. ``__post_init__`` re-runs ``normalize_source_id``
+        on every entry: a lowercase mis-wire that would silently produce a
+        ``SingleSourceVerifiedError`` false-denial instead lands as canonical
+        casing at construction; an unknown id fails-fast with ``ValueError``.
     comparison_evidence_uri:
         URI of the archived multi-cycle dual-source signature-comparison
         artifact. ``None`` denies eligibility (a missing URI means no
@@ -183,6 +186,15 @@ class SharedBindingVerificationEvidence:
 
     verified_source_ids: frozenset[str]
     comparison_evidence_uri: str | None
+
+    def __post_init__(self) -> None:
+        # Enforce the "post-normalize_source_id" docstring contract at
+        # construction time — lowercase mis-wire => canonical casing; unknown
+        # id => fail-fast ValueError from normalize_source_id.
+        normalized = frozenset(
+            normalize_source_id(sid) for sid in self.verified_source_ids
+        )
+        object.__setattr__(self, "verified_source_ids", normalized)
 
 
 @runtime_checkable
@@ -258,13 +270,41 @@ def evaluate_shared_binding_eligibility(
         source id at eligibility-check time. ``snapshot_a`` is checked
         before ``snapshot_b`` to keep the first-raise sequence deterministic.
     ValueError
-        Propagated unchanged from :func:`normalize_source_id` when either
-        snapshot's ``source_id`` is not one of the accepted labels.
+        Raised for caller-contract violations that precede the 4-tier denial
+        cascade: (1) either snapshot has ``grid_snapshot_id is None``
+        (unpersisted snapshot — the pinned
+        :class:`ApplicableSourceIdsIncompleteError.grid_snapshot_id` is
+        non-optional ``UUID``), (2) the two snapshots normalize to the SAME
+        ``source_id`` (shared-binding is a CROSS-SOURCE decision per spec.md;
+        same-source is a caller contract violation, not a denial branch), or
+        (3) either snapshot's ``source_id`` is not one of the accepted
+        labels (propagated unchanged from :func:`normalize_source_id`).
     """
+    # Precondition 1: persisted-snapshot invariant. Downstream raise sites
+    # populate ApplicableSourceIdsIncompleteError.grid_snapshot_id (pinned
+    # non-optional UUID at tasks.md §5.1 line 146); enforce here so mypy /
+    # runtime agree the field is never None past this point.
+    if snapshot_a.grid_snapshot_id is None or snapshot_b.grid_snapshot_id is None:
+        raise ValueError(
+            "evaluate_shared_binding_eligibility requires persisted snapshots; "
+            f"snapshot_a.grid_snapshot_id={snapshot_a.grid_snapshot_id!r}, "
+            f"snapshot_b.grid_snapshot_id={snapshot_b.grid_snapshot_id!r}"
+        )
+
     # normalize_source_id may raise ValueError on unknown source ids — let it
     # propagate per §5.1 (an unknown source id fails closed).
     source_id_a = normalize_source_id(snapshot_a.source_id)
     source_id_b = normalize_source_id(snapshot_b.source_id)
+
+    # Precondition 2: distinct-source invariant. Shared-binding is defined by
+    # spec.md as a CROSS-SOURCE decision (IFS/gfs, IFS/ERA5, gfs/ERA5); same-
+    # source is a caller contract violation, not a denial branch, and does
+    # NOT warrant a SharedBindingEligibilityError subclass.
+    if source_id_a == source_id_b:
+        raise ValueError(
+            f"shared-binding eligibility requires two DISTINCT source ids; both "
+            f"snapshots normalize to {source_id_a!r}"
+        )
 
     # Re-derive both canonical keys at eligibility time (do NOT trust the
     # stored ``canonical_grid_key`` — a stored-key vs current-code drift

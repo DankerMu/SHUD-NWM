@@ -641,3 +641,108 @@ def test_denial_check_order_first_raise_matches_pin(
             store=cast(GridRegistryStoreProtocol, store),
         )
     assert store.calls == []
+
+
+# -----------------------------------------------------------------------------
+# Test 14: precondition — same-source pair raises ValueError (F1)
+# -----------------------------------------------------------------------------
+
+
+def test_same_source_pair_raises_value_error() -> None:
+    """Same-source pairs (both normalize to the SAME source_id) are a caller
+    contract violation — shared-binding is a CROSS-SOURCE decision. Raises
+    ``ValueError`` at eligibility entry BEFORE the 4-tier denial cascade."""
+    ifs_id = uuid4()
+    ifs_id_2 = uuid4()
+    # Both snapshots use IFS-family source ids; "ifs" and "IFS" both normalize
+    # to canonical "IFS" — the pair is same-source.
+    ifs_a = _make_snapshot(
+        _BACKFILL_SIGNATURE_IFS_GFS,
+        "ifs",
+        applicable_source_ids=("IFS",),
+        grid_snapshot_id=ifs_id,
+    )
+    ifs_b = _make_snapshot(
+        _BACKFILL_SIGNATURE_IFS_GFS,
+        "IFS",
+        applicable_source_ids=("IFS",),
+        grid_snapshot_id=ifs_id_2,
+    )
+    store = _FakeStore({ifs_id: ["IFS"], ifs_id_2: ["IFS"]})
+    with pytest.raises(ValueError, match=r"DISTINCT source ids"):
+        evaluate_shared_binding_eligibility(
+            ifs_a,
+            ifs_b,
+            verification_evidence=_both_verified_evidence(),
+            store=store,
+        )
+    # No writes on precondition failure.
+    assert store.calls == []
+
+
+# -----------------------------------------------------------------------------
+# Tests 15-16: evidence carrier normalizes / rejects on construction (F3)
+# -----------------------------------------------------------------------------
+
+
+def test_verification_evidence_normalizes_verified_source_ids() -> None:
+    """Post-init normalization: lowercase 'ifs' + 'gfs' becomes canonical
+    'IFS' + 'gfs'. Enforces the "post-``normalize_source_id``" docstring
+    contract at construction time so a lowercase mis-wire cannot silently
+    produce a :class:`SingleSourceVerifiedError` false-denial."""
+    evidence = SharedBindingVerificationEvidence(
+        verified_source_ids=frozenset({"ifs", "gfs"}),
+        comparison_evidence_uri="s3://evidence/artifact",
+    )
+    assert evidence.verified_source_ids == frozenset({"IFS", "gfs"})
+
+
+def test_verification_evidence_rejects_unknown_source_id() -> None:
+    """Unknown source ids in ``verified_source_ids`` fail-fast at construction
+    with ``ValueError`` from :func:`normalize_source_id`."""
+    with pytest.raises(ValueError, match=r"Unknown source_id"):
+        SharedBindingVerificationEvidence(
+            verified_source_ids=frozenset({"IFS", "nope"}),
+            comparison_evidence_uri="s3://evidence/artifact",
+        )
+
+
+# -----------------------------------------------------------------------------
+# Test 17: precondition — persisted snapshot (grid_snapshot_id UUID) (F4)
+# -----------------------------------------------------------------------------
+
+
+def test_rejects_unpersisted_snapshot() -> None:
+    """Persisted snapshot precondition — ``grid_snapshot_id`` MUST NOT be
+    ``None`` on either input. Upholds the pinned
+    :attr:`ApplicableSourceIdsIncompleteError.grid_snapshot_id` non-optional
+    ``UUID`` attribute type at eligibility raise sites without widening the
+    error contract."""
+    from dataclasses import replace
+
+    persisted = _make_snapshot(
+        _BACKFILL_SIGNATURE_IFS_GFS,
+        "ifs",
+        applicable_source_ids=("IFS", "gfs"),
+    )
+    unpersisted_seed = _make_snapshot(
+        _BACKFILL_SIGNATURE_IFS_GFS,
+        "gfs",
+        applicable_source_ids=("gfs", "IFS"),
+    )
+    unpersisted = replace(unpersisted_seed, grid_snapshot_id=cast(UUID, None))
+    store = _FakeStore(
+        {
+            persisted.grid_snapshot_id: ["IFS", "gfs"],
+            unpersisted_seed.grid_snapshot_id: ["gfs", "IFS"],
+        }
+    )
+    with pytest.raises(ValueError, match=r"persisted snapshots"):
+        evaluate_shared_binding_eligibility(
+            persisted,
+            unpersisted,
+            verification_evidence=_both_verified_evidence(),
+            store=store,
+        )
+    # No writes on precondition failure.
+    assert store.calls == []
