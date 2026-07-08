@@ -270,6 +270,34 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     ),
                 ],
             )
+            cursor.execute(
+                """
+                INSERT INTO hydro.state_snapshot (
+                    state_id,
+                    model_id,
+                    run_id,
+                    valid_time,
+                    state_uri,
+                    checksum,
+                    usable_flag,
+                    source_id,
+                    cycle_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (state_id) DO NOTHING
+                """,
+                (
+                    STATE_ID,
+                    MODEL_ID,
+                    FORECAST_RUN_ID,
+                    VALID_TIME_1,
+                    "s3://nhms/state/it126/2026050300.pkl",
+                    "0" * 64,
+                    True,
+                    SOURCE_ID,
+                    CYCLE_ID,
+                ),
+            )
             execute_values(
                 cursor,
                 """
