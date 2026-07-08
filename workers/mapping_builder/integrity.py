@@ -1052,8 +1052,17 @@ def _parse_tsd_forc_stations(
 
     Rows with too few tokens are skipped silently — §1.3 is RECORD-ONLY and
     must not raise inside classification; malformed rows are §1.1's job.
+
+    Non-UTF-8 bytes are also swallowed with a sentinel-empty return: the §1.1
+    gate is responsible for decode failures; here we align with the sibling
+    ``_parse_sp_att_station_index`` / ``_detect_harmless_deviations`` helpers
+    so ``classify_baseline`` honors its RECORD-ONLY docstring contract.
     """
-    lines = _read_text_lines(path)
+    try:
+        lines = _read_text_lines(path)
+    except UnparseableMeshError:
+        # RECORD-ONLY — swallow decode errors here; §1.1 gate would raise.
+        return ("", ())
     if len(lines) < 3:
         return ("", ())
     header0_tokens = lines[0].split()
@@ -1404,7 +1413,12 @@ def verify_baseline_inv1_end_to_end(
         Optional directory carrying historical forcing versions to include
         in the pre/post checksum sweep. When supplied, every regular file
         under this directory is snapshot alongside baseline files. When
-        ``None``, only ``baseline_root`` is swept.
+        ``None``, only ``baseline_root`` is swept. Duplicates in the rel_path
+        space (e.g. baseline ``history/foo`` colliding with
+        ``historical_forcing_dir/foo`` after the ``history/`` prefix) are
+        handled correctly: both entries live in the checksum sets
+        independently, so drift on either side surfaces the shared rel_path
+        in :attr:`Inv1ViolationError.drifted_paths`.
 
     Returns
     -------
@@ -1488,14 +1502,19 @@ def _diff_drifted_rel_paths(
     pre: tuple[tuple[str, str], ...],
     post: tuple[tuple[str, str], ...],
 ) -> tuple[str, ...]:
-    """Return every relative path whose SHA-256 differs (or exists in only one snapshot)."""
-    pre_map = dict(pre)
-    post_map = dict(post)
-    drifted: set[str] = set()
-    for rel, sha in pre_map.items():
-        if post_map.get(rel) != sha:
-            drifted.add(rel)
-    for rel in post_map:
-        if rel not in pre_map:
-            drifted.add(rel)
+    """Return every relative path whose SHA-256 differs (or exists in only one snapshot).
+
+    Implemented as a **set symmetric-difference over ``(rel_path, sha)`` pairs**
+    rather than a dict comparison. Two entries can legitimately share the same
+    relative path — e.g. a baseline package that ships ``history/foo.txt`` while
+    ``historical_forcing_dir`` also contains ``foo.txt`` (prefixed to
+    ``history/foo.txt`` in :func:`_compute_end_to_end_checksums`). A dict-based
+    diff would collapse the pair via last-write-wins and silently report an
+    empty payload when only one of the colliding entries drifts. Set-based
+    diffing preserves both entries independently: any drift on either side
+    surfaces the shared rel_path in the drifted output.
+    """
+    pre_set = set(pre)
+    post_set = set(post)
+    drifted = {rel for (rel, _sha) in pre_set ^ post_set}
     return tuple(sorted(drifted))

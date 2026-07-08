@@ -997,3 +997,130 @@ def test_keliya_minimal_classification_zero_findings() -> None:
     assert report.domain_shp_checksum is None
     assert len(report.startdate_heterogeneity) == 1
     assert report.startdate_heterogeneity[0].startdate == "20200101"
+
+
+def test_classify_baseline_absorbs_non_utf8_tsd_forc(tmp_path: pathlib.Path) -> None:
+    """§1.3 RECORD-ONLY: a non-UTF-8 ``.tsd.forc`` MUST NOT raise from classify_baseline.
+
+    ``classify_baseline``'s docstring promises it never raises on malformed
+    content — only on ``baseline_root`` not being a directory. A ``.tsd.forc``
+    with a non-UTF-8 byte (e.g. ``b"\\xff"``) would trip
+    :func:`_read_text_lines`'s decode into :class:`UnparseableMeshError`;
+    the parser MUST swallow that failure with a sentinel-empty return,
+    matching the sibling ``_parse_sp_att_station_index`` /
+    ``_detect_harmless_deviations`` helpers. The §1.1 gate is the sole
+    authority on decode failures for weather forcing files.
+    """
+    baseline = _copy_fixture(tmp_path)
+    tsd_path = baseline / "keliya.tsd.forc"
+    # Overwrite with header shape plus a non-UTF-8 byte so ``_read_text_lines``
+    # raises inside classification. If the fix is missing, this call re-raises
+    # UnparseableMeshError; if the fix holds, the file's stations/startdate
+    # simply drop out of the aggregate.
+    tsd_path.write_bytes(b"20200101 20200102\n\n\n1 \xff 105.0 0.0 0.0 -9999 X1.csv\n")
+
+    # Must not raise.
+    report = classify_baseline(baseline)
+    assert isinstance(report, BaselineClassificationReport)
+
+    # The malformed .tsd.forc contributes no stations and no startdate:
+    #   - stations excluded => no duplicate-coord clusters, no non-grid findings.
+    #   - startdate excluded => no StartdateRecord for that file.
+    assert report.duplicate_coord_clusters == ()
+    assert report.non_grid_findings == ()
+    for record in report.startdate_heterogeneity:
+        assert record.path != tsd_path, (
+            "malformed .tsd.forc must NOT surface as a startdate record"
+        )
+
+
+def test_verify_baseline_inv1_end_to_end_history_collision_drift_payload(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1.3: rel_path collision between baseline ``history/`` + historical dir MUST NOT hide drift.
+
+    When ``historical_forcing_dir`` is supplied, historical files are namespaced
+    with a ``history/`` prefix by :func:`_compute_end_to_end_checksums`. If a
+    baseline package ALSO carries a real ``history/`` subdirectory, two entries
+    can legitimately share the same rel_path (different SHAs).
+
+    A dict-based drift diff would collapse the pair via last-write-wins and
+    report an empty drift payload when only one colliding entry mutates. The
+    fixed set-based diff MUST surface the shared rel_path in
+    :attr:`Inv1ViolationError.drifted_paths`.
+    """
+    baseline = _copy_fixture(tmp_path)
+    # Baseline contribution: ``history/foo.txt`` with sha=A.
+    history_dir = baseline / "history"
+    history_dir.mkdir()
+    baseline_history_file = history_dir / "foo.txt"
+    baseline_history_file.write_bytes(b"baseline-payload-A")
+
+    # historical_forcing_dir contribution: ``foo.txt`` with sha=B, prefixed to
+    # ``history/foo.txt`` at checksum-time — same rel_path key as above.
+    historical_dir = tmp_path / "historical_forcing"
+    historical_dir.mkdir()
+    (historical_dir / "foo.txt").write_bytes(b"historical-payload-B")
+
+    from workers.mapping_builder import integrity as integrity_module
+
+    real_classify = integrity_module.classify_baseline
+
+    def sneaky_classify(root: pathlib.Path) -> BaselineClassificationReport:
+        result = real_classify(root)
+        # Mid-run mutation of ONLY the baseline-side ``history/foo.txt`` (A -> C).
+        # The historical-side ``foo.txt`` (B) stays put. A dict-collapse would
+        # see {"history/foo.txt": B} on both sides and report drift=() — the
+        # regression this test guards against.
+        victim = root / "history" / "foo.txt"
+        victim.write_bytes(b"mutated-payload-C")
+        return result
+
+    monkeypatch.setattr(integrity_module, "classify_baseline", sneaky_classify)
+
+    with pytest.raises(Inv1ViolationError) as exc_info:
+        integrity_module.verify_baseline_inv1_end_to_end(
+            baseline, historical_forcing_dir=historical_dir
+        )
+    assert "history/foo.txt" in exc_info.value.drifted_paths, (
+        "collision rel_path MUST surface in drifted_paths; empty payload "
+        "indicates the dict-collapse regression is back"
+    )
+
+
+def test_verify_baseline_inv1_end_to_end_positive_with_historical_dir(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§1.3: positive path with ``historical_forcing_dir`` — no drift, evidence tuples equal.
+
+    Complements ``test_verify_baseline_inv1_end_to_end_positive`` by covering
+    the branch where ``historical_forcing_dir`` is supplied. Also proves the
+    set-based drift diff does not spuriously flag rel_path collisions when
+    both entries remain byte-stable across pre/post.
+    """
+    baseline = _copy_fixture(tmp_path)
+    # Include a baseline-side ``history/`` file and a historical dir that will
+    # collide on rel_path ``history/foo.txt`` at checksum-time. Neither side
+    # mutates during the run, so evidence tuples must match end-to-end.
+    history_dir = baseline / "history"
+    history_dir.mkdir()
+    (history_dir / "foo.txt").write_bytes(b"baseline-payload-A")
+
+    historical_dir = tmp_path / "historical_forcing"
+    historical_dir.mkdir()
+    (historical_dir / "foo.txt").write_bytes(b"historical-payload-B")
+
+    evidence = verify_baseline_inv1_end_to_end(
+        baseline, historical_forcing_dir=historical_dir
+    )
+    assert isinstance(evidence, Inv1EndToEndEvidence)
+    assert evidence.pre_checksums == evidence.post_checksums
+    # Both colliding entries live in the tuple independently (different SHAs
+    # under the same rel_path). Counting occurrences of the collision key
+    # proves the checksum sweep does NOT dedupe by rel_path.
+    collisions = [rel for rel, _sha in evidence.pre_checksums if rel == "history/foo.txt"]
+    assert len(collisions) == 2, (
+        "history/foo.txt should appear twice — once from baseline, once from "
+        "historical_forcing_dir (post-prefix). Dedup here indicates a regression."
+    )
