@@ -172,6 +172,13 @@ class GridSnapshotInputRecord:
 
     Fields computed in the fixed flatten order (y outer / x inner):
         ``cells``.
+
+    The ``raw_grid_json_bytes`` field carries the exact bytes read from
+    ``grid_json_path``; the SUB-5 writer uses these as the live-producer
+    signature shim input so the SUB-4 parsing path and the producer's
+    ``_grid_points_from_definition`` path are truly distinct (a SUB-4
+    parsing bug propagates only through ``record.cells``, not through the
+    re-parse from these bytes).
     """
 
     schema_version: str
@@ -191,6 +198,7 @@ class GridSnapshotInputRecord:
     grid_definition_uri: str
     grid_definition_checksum: str
     cells: tuple[CellInput, ...]
+    raw_grid_json_bytes: bytes
 
 
 # -----------------------------------------------------------------------------
@@ -291,6 +299,7 @@ def read_input_record(
         grid_definition_uri=grid_definition_uri,
         grid_definition_checksum=grid_definition_checksum,
         cells=cells,
+        raw_grid_json_bytes=grid_raw_bytes,
     )
 
 

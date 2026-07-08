@@ -1,0 +1,17 @@
+-- Extend hydro.run_type with the 'hindcast' variant to unblock the
+-- pre-existing tests/integration_helpers.py:257 fixture that has referenced
+-- run_type='hindcast' since 2026-06-23 (commit 35ae1b96) but never had a
+-- matching enum member. The bug was latent because tests/test_real_database
+-- _integration only runs under the SQL Migration Dry Run CI job (gated on
+-- db/** path-scope), which no master commit had triggered between 06-23 and
+-- 2026-07-07 when SUB-5 (issue #902) landed migration 000044 and re-enabled
+-- the gate.
+--
+-- 'hindcast' is a distinct hydrological semantic (offline historical
+-- simulation) — not a synonym for 'analysis' or 'forecast' — so extending
+-- the enum is correct; rewriting the fixture to a different value would
+-- corrupt the test's intent.
+--
+-- PostgreSQL ALTER TYPE ... ADD VALUE is transactional-safe as of PG 12+.
+-- The IF NOT EXISTS guard makes the migration idempotent on re-runs.
+ALTER TYPE hydro.run_type ADD VALUE IF NOT EXISTS 'hindcast';

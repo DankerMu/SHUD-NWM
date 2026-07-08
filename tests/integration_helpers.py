@@ -270,6 +270,34 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     ),
                 ],
             )
+            cursor.execute(
+                """
+                INSERT INTO hydro.state_snapshot (
+                    state_id,
+                    model_id,
+                    run_id,
+                    valid_time,
+                    state_uri,
+                    checksum,
+                    usable_flag,
+                    source_id,
+                    cycle_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (state_id) DO NOTHING
+                """,
+                (
+                    STATE_ID,
+                    MODEL_ID,
+                    FORECAST_RUN_ID,
+                    VALID_TIME_1,
+                    "s3://nhms/state/it126/2026050300.pkl",
+                    "0" * 64,
+                    True,
+                    SOURCE_ID,
+                    CYCLE_ID,
+                ),
+            )
             execute_values(
                 cursor,
                 """
@@ -297,6 +325,29 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     (FORECAST_RUN_ID, BASIN_VERSION_ID, RIVER_NETWORK_VERSION_ID, f"{ISSUE_126_PREFIX}_seg_outside",
                      VALID_TIME_2, 2, "q_down", 150.0, "m3/s", "ok"),
                 ],
+            )
+            cursor.execute(
+                """
+                INSERT INTO ops.pipeline_job (
+                    job_id, run_id, cycle_id, job_type, slurm_job_id,
+                    model_id, status, stage, submitted_at, started_at, finished_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (
+                    f"{ISSUE_126_PREFIX}_forecast_job",
+                    FORECAST_RUN_ID,
+                    CYCLE_ID,
+                    "forecast",
+                    "8101",
+                    MODEL_ID,
+                    "succeeded",
+                    "forecast",
+                    VALID_TIME_1,
+                    VALID_TIME_1,
+                    VALID_TIME_2,
+                ),
             )
 
 
