@@ -3635,6 +3635,7 @@ def _forecast_response_from_rows(
             {
                 "scenario_id": scenario_id,
                 "segment_role": "future_7_days",
+                "variable": "q_down",
                 **_forecast_series_metadata(row),
                 "points": [],
             },
