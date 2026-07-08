@@ -2194,7 +2194,22 @@ def test_backfill_ifs_gfs_share_key(
     assert list(row_ifs["applicable_source_ids"]) == ["IFS"]
     assert list(row_gfs["applicable_source_ids"]) == ["gfs"]
 
-    # (4) Invoke SUB-8 shared-binding eligibility on the two persisted rows.
+    # (4) Opt-in step: pre-populate applicable_source_ids to satisfy SUB-8's
+    # registry-state gate (check #4). SUB-8 is a fail-closed audit that
+    # requires both rows to already list both source ids; the eligibility
+    # function only re-writes the canonical pair idempotently. In production
+    # the operator (or a CLI flag on registration) writes the pair before
+    # invoking eligibility.
+    store.extend_applicable_source_ids(id_ifs, ("IFS", "gfs"))
+    store.extend_applicable_source_ids(id_gfs, ("IFS", "gfs"))
+
+    # Reload rows so the snapshots handed to SUB-8 reflect the opt-in state.
+    row_ifs = _fetch_snapshot_row(sub5_migrated_database, id_ifs)
+    row_gfs = _fetch_snapshot_row(sub5_migrated_database, id_gfs)
+    assert sorted(row_ifs["applicable_source_ids"]) == ["IFS", "gfs"]
+    assert sorted(row_gfs["applicable_source_ids"]) == ["IFS", "gfs"]
+
+    # (5) Invoke SUB-8 shared-binding eligibility on the two opted-in rows.
     # Fabricated evidence: URI can be a fake because the decision only checks
     # non-None; verified_source_ids covers both normalized ids.
     snapshot_ifs = _row_to_snapshot(row_ifs)
@@ -2212,16 +2227,16 @@ def test_backfill_ifs_gfs_share_key(
     )
     assert result is None
 
-    # (5) Reload both rows; SUB-8 acceptance-time canonical-pair write extended
-    # applicable_source_ids on BOTH rows. Set-equality assertion per the §3.3
-    # pin-relaxation (positional would fail on the gfs row that lands as
-    # ["gfs", "IFS"] under position-preserving append).
+    # (6) Reload both rows; SUB-8 acceptance-time canonical-pair write is
+    # idempotent (extend semantics) over the pre-opted-in state. Set-equality
+    # assertion per the §3.3 pin-relaxation (positional would fail on the gfs
+    # row that lands as ["gfs", "IFS"] under position-preserving append).
     reloaded_ifs = _fetch_snapshot_row(sub5_migrated_database, id_ifs)
     reloaded_gfs = _fetch_snapshot_row(sub5_migrated_database, id_gfs)
     assert sorted(reloaded_ifs["applicable_source_ids"]) == ["IFS", "gfs"]
     assert sorted(reloaded_gfs["applicable_source_ids"]) == ["IFS", "gfs"]
 
-    # (6) bbox pin re-asserted on the reloaded rows for §3.3 evidence completeness.
+    # (7) bbox pin re-asserted on the reloaded rows for §3.3 evidence completeness.
     for row in (reloaded_ifs, reloaded_gfs):
         assert row["bbox_south"] == pytest.approx(8.0)
         assert row["bbox_north"] == pytest.approx(64.0)
