@@ -1,13 +1,22 @@
 """G0 baseline integrity verification for the mapping builder.
 
 This module implements OpenSpec change ``forcing-mapping-asset-build`` §1.1 (Epic
-#909 SUB-1) and §1.2 (Epic #909 SUB-2). It exposes three pure entry points that
-read a baseline SHUD basin model package **read-only** (INV-1):
+#909 SUB-1), §1.2 (Epic #909 SUB-2), and §1.3 (Epic #909 SUB-3). It exposes five
+pure entry points that read a baseline SHUD basin model package **read-only**
+(INV-1):
 
 * :func:`verify_g0_baseline` — §1.1 baseline integrity gate.
 * :func:`verify_package_crs` — §1.2 CRS authority (WKT from ``gis/*.prj``).
 * :func:`build_ancillary_inventory` — §1.2 ancillary ``*.tsd.*`` inventory
   (excluding the weather ``.tsd.forc`` reference, which is §1.1's territory).
+* :func:`classify_baseline` — §1.3 RECORD-ONLY classification of duplicate-
+  coordinate stations, non-grid X-station baselines, startdate heterogeneity,
+  ``domain.shp`` presence-only checksum, and known-harmless deviations
+  (e.g. ``.tsd.forc`` line-2 absolute paths). Never repairs, never opens
+  ``domain.shp`` as geometry.
+* :func:`verify_baseline_inv1_end_to_end` — §1.3 end-to-end INV-1 evidence
+  chain: pre-checksum all baseline files, run every §1.1/§1.2/§1.3 entry
+  point, post-checksum, and prove byte-identical.
 
 Each entry point either returns an immutable report or raises a
 :class:`BaselineIntegrityError` subclass explaining the exact violation.
@@ -15,10 +24,8 @@ Each entry point either returns an immutable report or raises a
 Fail-closed guarantee: any subcheck failure raises without writing any output
 artifact. The mapping variant tree remains empty.
 
-Non-goals for §1.1 + §1.2 (deferred to later SUBs):
+Non-goal for §1.3 (deferred to later SUBs):
 
-* SUB-3 — baseline classification (duplicate-coordinate stations, non-grid
-  baselines, startdate heterogeneity).
 * SUB-4 — G1 non-degenerate triangle geometry check.
 
 The SHUD file formats parsed here are inferred from live baseline packages
@@ -202,6 +209,23 @@ class AncillaryInventoryError(BaselineIntegrityError):
         super().__init__(f"unable to inventory ancillary file {path}: {read_error}")
         self.path = path
         self.read_error = read_error
+
+
+class Inv1ViolationError(BaselineIntegrityError):
+    """Raised when INV-1 (read-only baseline) is violated during a full-stack run.
+
+    Signals that at least one baseline file's byte content changed between the
+    pre-check and post-check snapshot taken by
+    :func:`verify_baseline_inv1_end_to_end`. The mapping builder MUST write no
+    output artifact when this is raised.
+    """
+
+    def __init__(self, drifted_paths: tuple[str, ...]) -> None:
+        super().__init__(
+            f"baseline package mutated during end-to-end verification (INV-1 violation): "
+            f"drifted={list(drifted_paths)}"
+        )
+        self.drifted_paths = drifted_paths
 
 
 @dataclass(frozen=True)
@@ -913,3 +937,584 @@ def build_ancillary_inventory(baseline_root: pathlib.Path) -> AncillaryInventory
         baseline_root=baseline_root,
         entries=tuple(entries),
     )
+
+
+# --- §1.3 baseline classification (RECORD-ONLY) --------------------------
+
+
+@dataclass(frozen=True)
+class DuplicateCoordinateCluster:
+    """A group of stations sharing identical ``(lon, lat, elevation)`` coordinates.
+
+    Live example (design.md line 68): ``zhaochen_mc`` has 4 stations at
+    identical coords with ``Z=-9999``. Classification RECORDS this pattern
+    but never repairs or filters it — the mapping algorithm decides how to
+    handle duplicates later.
+    """
+
+    coords: tuple[float, float, float]
+    station_ids: tuple[str, ...]
+    multiplicity: int
+
+
+@dataclass(frozen=True)
+class NonGridBaselineFinding:
+    """A record that a station-prefix cohort does NOT form a regular lat-lon grid.
+
+    Live example: ``zhaochen_wem`` carries filenames ``X1..X5.csv`` at
+    irregular ~0.02° spacing that do not close a regular grid. Downstream
+    stages MUST NOT assume CMFD grid points from these stations.
+    """
+
+    station_prefix: str
+    station_count: int
+    spacing_estimate: float | None
+    pattern_note: str
+
+
+@dataclass(frozen=True)
+class StartdateRecord:
+    """One ``.tsd.forc`` startdate parsed from line 1.
+
+    Live audit lists baseline startdates spanning 1951–2024 across 13 basins;
+    classification records the raw value per ``.tsd.forc`` file so evidence
+    can prove heterogeneity without normalizing the format.
+    """
+
+    path: pathlib.Path
+    startdate: str
+
+
+@dataclass(frozen=True)
+class HarmlessDeviationRecord:
+    """A RECORD-ONLY note of a known-harmless baseline deviation.
+
+    Per tasks.md §1.3 non-goal: "no repair of known-harmless baseline
+    deviations (e.g. `.tsd.forc` line-2 absolute paths); record only." The
+    ``deviation_kind`` slug lets downstream evidence stages tally deviation
+    types without re-parsing the excerpt.
+    """
+
+    path: pathlib.Path
+    deviation_kind: str
+    evidence_excerpt: str
+
+
+@dataclass(frozen=True)
+class BaselineClassificationReport:
+    """Report produced by :func:`classify_baseline` — pure carry, no derived fields.
+
+    Every tuple field is sorted deterministically inside :func:`classify_baseline`
+    so evidence artifacts are reproducible byte-for-byte across reruns.
+    """
+
+    duplicate_coord_clusters: tuple[DuplicateCoordinateCluster, ...]
+    non_grid_findings: tuple[NonGridBaselineFinding, ...]
+    startdate_heterogeneity: tuple[StartdateRecord, ...]
+    domain_shp_checksum: str | None
+    harmless_deviations: tuple[HarmlessDeviationRecord, ...]
+
+
+@dataclass(frozen=True)
+class Inv1EndToEndEvidence:
+    """Pre/post per-file SHA-256 checksums proving INV-1 across every entry point.
+
+    Both fields are sorted ``(relative_path, sha256_hex)`` tuples — identical
+    ordering to :attr:`BaselineIntegrityReport.per_file_checksums` so an
+    orchestrator can diff them directly.
+    """
+
+    pre_checksums: tuple[tuple[str, str], ...]
+    post_checksums: tuple[tuple[str, str], ...]
+
+
+def _find_all_tsd_forc(baseline_root: pathlib.Path) -> list[pathlib.Path]:
+    """Return every ``.tsd.forc`` file under ``baseline_root``, sorted.
+
+    Unlike :func:`_find_optional_tsd_forc`, this helper accepts multiple hits
+    without raising — §1.3 classification records what is there, and the §1.1
+    gate has already vetted the shape at :func:`verify_g0_baseline` call time.
+    """
+    return sorted(
+        p for p in _iter_baseline_files(baseline_root) if p.name.endswith(".tsd.forc")
+    )
+
+
+def _parse_tsd_forc_stations(
+    path: pathlib.Path,
+) -> tuple[str, tuple[tuple[str, float, float, float, str], ...]]:
+    """Return ``(startdate_raw, ((station_id, lon, lat, z, filename), ...))``.
+
+    Column layout (see module docstring): ``ID Lon Lat X Y Z Filename``.
+    ``station_id`` and ``filename`` are kept as strings — the ID is a
+    reference key (not necessarily 1..N) and the filename carries the X1..X5
+    naming convention we need for non-grid detection.
+
+    Rows with too few tokens are skipped silently — §1.3 is RECORD-ONLY and
+    must not raise inside classification; malformed rows are §1.1's job.
+
+    Non-UTF-8 bytes are also swallowed with a sentinel-empty return: the §1.1
+    gate is responsible for decode failures; here we align with the sibling
+    ``_parse_sp_att_station_index`` / ``_detect_harmless_deviations`` helpers
+    so ``classify_baseline`` honors its RECORD-ONLY docstring contract.
+    """
+    try:
+        lines = _read_text_lines(path)
+    except UnparseableMeshError:
+        # RECORD-ONLY — swallow decode errors here; §1.1 gate would raise.
+        return ("", ())
+    if len(lines) < 3:
+        return ("", ())
+    header0_tokens = lines[0].split()
+    startdate_raw = header0_tokens[1] if len(header0_tokens) >= 2 else ""
+
+    stations: list[tuple[str, float, float, float, str]] = []
+    for row_index in range(3, len(lines)):
+        raw_line = lines[row_index]
+        if not raw_line.strip():
+            continue
+        tokens = raw_line.split()
+        if len(tokens) < 7:
+            continue
+        try:
+            lon = float(tokens[1])
+            lat = float(tokens[2])
+            z = float(tokens[5])
+        except ValueError:
+            continue
+        stations.append((tokens[0], lon, lat, z, tokens[6]))
+    return startdate_raw, tuple(stations)
+
+
+def _parse_sp_att_station_index(
+    path: pathlib.Path,
+) -> tuple[tuple[str, float, float, float], ...]:
+    """Extract ``(station_id, lon, lat, z)`` from ``.sp.att`` when the table
+
+    carries station coordinates. The canonical live ``.sp.att`` layout does
+    NOT carry station coords — that lives in ``.tsd.forc``. We provide this
+    helper as a defensive no-op that returns ``()`` unless a lon/lat header
+    is present, so future basin variants that inline station coords still
+    produce a classification record.
+    """
+    try:
+        lines = _read_text_lines(path)
+    except UnparseableMeshError:
+        return ()
+    if len(lines) < 2:
+        return ()
+    header_tokens = [tok.upper() for tok in lines[1].split()]
+    try:
+        lon_col = header_tokens.index("LON")
+        lat_col = header_tokens.index("LAT")
+        z_col = header_tokens.index("Z")
+    except ValueError:
+        return ()
+    id_col = 0
+    stations: list[tuple[str, float, float, float]] = []
+    for row_index in range(2, len(lines)):
+        raw_line = lines[row_index]
+        if not raw_line.strip():
+            continue
+        tokens = raw_line.split()
+        max_col = max(id_col, lon_col, lat_col, z_col)
+        if len(tokens) <= max_col:
+            continue
+        try:
+            lon = float(tokens[lon_col])
+            lat = float(tokens[lat_col])
+            z = float(tokens[z_col])
+        except ValueError:
+            continue
+        stations.append((tokens[id_col], lon, lat, z))
+    return tuple(stations)
+
+
+def _cluster_duplicate_coords(
+    stations: tuple[tuple[str, float, float, float, str], ...],
+) -> tuple[DuplicateCoordinateCluster, ...]:
+    """Group stations by ``(lon, lat, z)`` and return clusters of size >= 2."""
+    by_coords: dict[tuple[float, float, float], list[str]] = {}
+    for station_id, lon, lat, z, _filename in stations:
+        by_coords.setdefault((lon, lat, z), []).append(station_id)
+    clusters: list[DuplicateCoordinateCluster] = []
+    for coords, ids in by_coords.items():
+        if len(ids) >= 2:
+            clusters.append(
+                DuplicateCoordinateCluster(
+                    coords=coords,
+                    station_ids=tuple(ids),
+                    multiplicity=len(ids),
+                )
+            )
+    # Sort deterministically by coords for reproducible evidence.
+    return tuple(sorted(clusters, key=lambda c: c.coords))
+
+
+def _detect_non_grid_findings(
+    stations: tuple[tuple[str, float, float, float, str], ...],
+) -> tuple[NonGridBaselineFinding, ...]:
+    """Return non-grid findings for X-prefix station cohorts.
+
+    A cohort is the set of stations whose ``filename`` matches the pattern
+    ``<PREFIX><digit(s)>.csv`` — e.g. ``X1..X5.csv``. If the cohort has
+    ``count >= 2`` and does NOT form a regular lat-lon grid (see
+    :func:`_looks_like_regular_grid`), classification records a
+    :class:`NonGridBaselineFinding`.
+
+    We estimate spacing as the minimum pairwise absolute lat difference
+    (when at least two lats differ) or the minimum abs lon difference
+    otherwise. This is a heuristic used only for evidence — no downstream
+    computation depends on the number.
+    """
+    import re
+
+    prefix_re = re.compile(r"^([A-Za-z]+)(\d+)\.csv$")
+    cohorts: dict[str, list[tuple[float, float]]] = {}
+    for _station_id, lon, lat, _z, filename in stations:
+        match = prefix_re.match(filename)
+        if match is None:
+            continue
+        prefix = match.group(1)
+        cohorts.setdefault(prefix, []).append((lon, lat))
+
+    findings: list[NonGridBaselineFinding] = []
+    for prefix, coords in sorted(cohorts.items()):
+        if len(coords) < 2:
+            continue
+        if _looks_like_regular_grid(coords):
+            continue
+        spacing = _estimate_spacing(coords)
+        findings.append(
+            NonGridBaselineFinding(
+                station_prefix=prefix,
+                station_count=len(coords),
+                spacing_estimate=spacing,
+                pattern_note=(
+                    f"{len(coords)} stations named {prefix}1..{prefix}{len(coords)} "
+                    f"do not form a regular lat-lon grid"
+                ),
+            )
+        )
+    return tuple(findings)
+
+
+def _looks_like_regular_grid(coords: list[tuple[float, float]]) -> bool:
+    """Return True iff ``coords`` are consistent with a regular lat-lon grid.
+
+    Rule: a set of ``(lon, lat)`` points forms a regular grid iff their
+    unique lon values and unique lat values, when sorted, both have uniform
+    step within 1e-6 tolerance, AND the total point count equals
+    ``len(unique_lons) * len(unique_lats)``. This catches CMFD-style regular
+    grids while flagging zhaochen_wem-style 5-point irregular sets as
+    non-grid.
+
+    Note: ``coords`` is expected to be a small list (few dozen stations at
+    most); we do not optimize for large cohorts.
+    """
+    if len(coords) < 2:
+        return True
+    unique_lons = sorted({round(lon, 10) for lon, _lat in coords})
+    unique_lats = sorted({round(lat, 10) for _lon, lat in coords})
+    if len(unique_lons) * len(unique_lats) != len(coords):
+        # Point count doesn't tile the grid — cannot be a regular grid.
+        # (Points at duplicate (lon,lat) also fail this test; those are
+        # separately captured by _cluster_duplicate_coords.)
+        return False
+    if not _has_uniform_step(unique_lons):
+        return False
+    if not _has_uniform_step(unique_lats):
+        return False
+    return True
+
+
+def _has_uniform_step(sorted_values: list[float], tol: float = 1e-6) -> bool:
+    """Return True iff ``sorted_values`` has a uniform step within ``tol``."""
+    if len(sorted_values) < 2:
+        return True
+    steps = [sorted_values[i + 1] - sorted_values[i] for i in range(len(sorted_values) - 1)]
+    if not steps:
+        return True
+    first = steps[0]
+    return all(abs(step - first) <= tol for step in steps)
+
+
+def _estimate_spacing(coords: list[tuple[float, float]]) -> float | None:
+    """Estimate the smallest positive pairwise coord delta as a spacing proxy."""
+    lons = sorted({lon for lon, _lat in coords})
+    lats = sorted({lat for _lon, lat in coords})
+    candidates: list[float] = []
+    for i in range(len(lons) - 1):
+        delta = lons[i + 1] - lons[i]
+        if delta > 0:
+            candidates.append(delta)
+    for i in range(len(lats) - 1):
+        delta = lats[i + 1] - lats[i]
+        if delta > 0:
+            candidates.append(delta)
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _find_domain_shp(baseline_root: pathlib.Path) -> pathlib.Path | None:
+    """Return the sole ``domain.shp`` under ``baseline_root``, or ``None``.
+
+    We only look for the exact filename ``domain.shp`` (case-sensitive) at
+    any depth. This helper NEVER opens the file as geometry — the caller
+    computes a SHA-256 for presence-only evidence.
+    """
+    candidates = sorted(
+        p for p in _iter_baseline_files(baseline_root) if p.name == "domain.shp"
+    )
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def _detect_harmless_deviations(
+    tsd_forc_paths: list[pathlib.Path],
+) -> tuple[HarmlessDeviationRecord, ...]:
+    """Return RECORD-ONLY notes about known-harmless deviations.
+
+    Currently detects one deviation kind:
+
+    * ``tsd_forc_line2_absolute_path`` — ``.tsd.forc`` line 2 references a
+      build-machine absolute path (e.g. ``/home/ghdc/nwm/...``). The mapping
+      builder MUST NOT rewrite this line; it merely records the excerpt.
+    """
+    records: list[HarmlessDeviationRecord] = []
+    for path in tsd_forc_paths:
+        try:
+            lines = _read_text_lines(path)
+        except UnparseableMeshError:
+            # RECORD-ONLY — swallow read errors here; §1.1 gate would raise.
+            continue
+        if len(lines) < 2:
+            continue
+        line2 = lines[1].strip()
+        if line2.startswith("/"):
+            records.append(
+                HarmlessDeviationRecord(
+                    path=path,
+                    deviation_kind="tsd_forc_line2_absolute_path",
+                    evidence_excerpt=line2,
+                )
+            )
+    return tuple(records)
+
+
+def classify_baseline(baseline_root: pathlib.Path) -> BaselineClassificationReport:
+    """Register RECORD-ONLY baseline classifications.
+
+    Per §1.3, this function inspects the baseline package and returns an
+    immutable report cataloging:
+
+    * duplicate-coordinate station clusters (zhaochen_mc pattern),
+    * non-grid X-station cohorts (zhaochen_wem pattern),
+    * per-``.tsd.forc`` startdate heterogeneity,
+    * ``domain.shp`` presence via SHA-256 (presence-only — MUST NEVER be
+      opened as geometry or element-ID source),
+    * known-harmless deviations (e.g. ``.tsd.forc`` line-2 absolute paths).
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package.
+
+    Returns
+    -------
+    BaselineClassificationReport
+        Immutable, deterministically sorted classification records.
+
+    Notes
+    -----
+    This function is INV-1 read-only: it opens every source file with
+    :func:`_read_text_lines` (binary read + utf-8 decode) and NEVER writes.
+    ``domain.shp`` is checksummed via :func:`_sha256_file` (binary read only).
+    Neither pyproj nor any shapefile reader is invoked on ``domain.shp``.
+
+    Raises
+    ------
+    BaselineIntegrityError
+        Only when ``baseline_root`` is not a directory. All other failures
+        are silently absorbed — §1.3 is RECORD-ONLY and never raises on
+        malformed content.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"classify_baseline expects pathlib.Path, got {type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+
+    tsd_forc_paths = _find_all_tsd_forc(baseline_root)
+
+    # Union station index across all .tsd.forc files (may be empty).
+    all_stations: list[tuple[str, float, float, float, str]] = []
+    startdate_records: list[StartdateRecord] = []
+    for path in tsd_forc_paths:
+        startdate_raw, stations = _parse_tsd_forc_stations(path)
+        all_stations.extend(stations)
+        if startdate_raw:
+            startdate_records.append(
+                StartdateRecord(path=path, startdate=startdate_raw)
+            )
+
+    # Also merge station coords from .sp.att when the variant carries them
+    # (defensive; canonical live packages do not — see helper docstring).
+    for att_path in sorted(
+        p for p in _iter_baseline_files(baseline_root) if p.name.endswith(".sp.att")
+    ):
+        for station_id, lon, lat, z in _parse_sp_att_station_index(att_path):
+            all_stations.append((station_id, lon, lat, z, ""))
+
+    duplicate_clusters = _cluster_duplicate_coords(tuple(all_stations))
+    non_grid_findings = _detect_non_grid_findings(tuple(all_stations))
+
+    domain_shp_path = _find_domain_shp(baseline_root)
+    domain_shp_checksum: str | None = None
+    if domain_shp_path is not None:
+        # NOTE: presence-only checksum. NEVER open as geometry.
+        domain_shp_checksum = _sha256_file(domain_shp_path)
+
+    harmless = _detect_harmless_deviations(tsd_forc_paths)
+
+    return BaselineClassificationReport(
+        duplicate_coord_clusters=duplicate_clusters,
+        non_grid_findings=non_grid_findings,
+        startdate_heterogeneity=tuple(startdate_records),
+        domain_shp_checksum=domain_shp_checksum,
+        harmless_deviations=harmless,
+    )
+
+
+# --- §1.3 INV-1 end-to-end evidence chain --------------------------------
+
+
+def verify_baseline_inv1_end_to_end(
+    baseline_root: pathlib.Path,
+    historical_forcing_dir: pathlib.Path | None = None,
+) -> Inv1EndToEndEvidence:
+    """Prove INV-1 across the full §1.1 + §1.2 + §1.3 stack.
+
+    Computes per-file SHA-256 across every baseline file BEFORE running any
+    integrity / CRS / inventory / classification entry point, then re-computes
+    AFTER all four have completed. Raises :class:`Inv1ViolationError` if any
+    file's bytes changed in between.
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package.
+    historical_forcing_dir:
+        Optional directory carrying historical forcing versions to include
+        in the pre/post checksum sweep. When supplied, every regular file
+        under this directory is snapshot alongside baseline files. When
+        ``None``, only ``baseline_root`` is swept. Duplicates in the rel_path
+        space (e.g. baseline ``history/foo`` colliding with
+        ``historical_forcing_dir/foo`` after the ``history/`` prefix) are
+        handled correctly: both entries live in the checksum sets
+        independently, so drift on either side surfaces the shared rel_path
+        in :attr:`Inv1ViolationError.drifted_paths`.
+
+    Returns
+    -------
+    Inv1EndToEndEvidence
+        Sorted pre and post checksum tuples for orchestrator diffing.
+
+    Raises
+    ------
+    Inv1ViolationError
+        Any file's bytes changed between pre and post snapshots.
+    BaselineIntegrityError
+        Passes through any error raised by :func:`verify_g0_baseline` /
+        :func:`verify_package_crs` / :func:`build_ancillary_inventory` /
+        :func:`classify_baseline`.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"verify_baseline_inv1_end_to_end expects pathlib.Path, got "
+            f"{type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+    if historical_forcing_dir is not None:
+        if not isinstance(historical_forcing_dir, pathlib.Path):
+            raise TypeError(
+                f"historical_forcing_dir expects pathlib.Path, got "
+                f"{type(historical_forcing_dir).__name__}"
+            )
+        if not historical_forcing_dir.exists() or not historical_forcing_dir.is_dir():
+            raise BaselineIntegrityError(
+                f"historical_forcing_dir does not exist or is not a directory: "
+                f"{historical_forcing_dir}"
+            )
+
+    pre_checksums = _compute_end_to_end_checksums(baseline_root, historical_forcing_dir)
+
+    # Run the full stack. Any of these may raise a BaselineIntegrityError
+    # subclass; we deliberately let it propagate — INV-1 evidence is only
+    # meaningful when every subcheck passes.
+    verify_g0_baseline(baseline_root)
+    verify_package_crs(baseline_root)
+    build_ancillary_inventory(baseline_root)
+    classify_baseline(baseline_root)
+
+    post_checksums = _compute_end_to_end_checksums(baseline_root, historical_forcing_dir)
+
+    if pre_checksums != post_checksums:
+        drifted = _diff_drifted_rel_paths(pre_checksums, post_checksums)
+        raise Inv1ViolationError(drifted_paths=drifted)
+
+    return Inv1EndToEndEvidence(
+        pre_checksums=pre_checksums,
+        post_checksums=post_checksums,
+    )
+
+
+def _compute_end_to_end_checksums(
+    baseline_root: pathlib.Path,
+    historical_forcing_dir: pathlib.Path | None,
+) -> tuple[tuple[str, str], ...]:
+    """Compute sorted ``(rel_path, sha256_hex)`` across baseline + optional history.
+
+    Historical forcing files are namespaced with a ``history/`` prefix so their
+    relative paths do not collide with baseline file names.
+    """
+    entries: list[tuple[str, str]] = []
+    for path in _iter_baseline_files(baseline_root):
+        rel = path.relative_to(baseline_root).as_posix()
+        entries.append((rel, _sha256_file(path)))
+    if historical_forcing_dir is not None:
+        for path in _iter_baseline_files(historical_forcing_dir):
+            rel = "history/" + path.relative_to(historical_forcing_dir).as_posix()
+            entries.append((rel, _sha256_file(path)))
+    entries.sort(key=lambda item: item[0])
+    return tuple(entries)
+
+
+def _diff_drifted_rel_paths(
+    pre: tuple[tuple[str, str], ...],
+    post: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    """Return every relative path whose SHA-256 differs (or exists in only one snapshot).
+
+    Implemented as a **set symmetric-difference over ``(rel_path, sha)`` pairs**
+    rather than a dict comparison. Two entries can legitimately share the same
+    relative path — e.g. a baseline package that ships ``history/foo.txt`` while
+    ``historical_forcing_dir`` also contains ``foo.txt`` (prefixed to
+    ``history/foo.txt`` in :func:`_compute_end_to_end_checksums`). A dict-based
+    diff would collapse the pair via last-write-wins and silently report an
+    empty payload when only one of the colliding entries drifts. Set-based
+    diffing preserves both entries independently: any drift on either side
+    surfaces the shared rel_path in the drifted output.
+    """
+    pre_set = set(pre)
+    post_set = set(post)
+    drifted = {rel for (rel, _sha) in pre_set ^ post_set}
+    return tuple(sorted(drifted))

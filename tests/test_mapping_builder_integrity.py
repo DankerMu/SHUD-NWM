@@ -1,6 +1,6 @@
-"""Tests for :mod:`workers.mapping_builder.integrity` (Epic #909 SUB-1, §1.1 and SUB-2, §1.2).
+"""Tests for :mod:`workers.mapping_builder.integrity` (Epic #909 SUB-1/§1.1, SUB-2/§1.2, SUB-3/§1.3).
 
-These tests exercise every §1.1/§1.2 subcheck of the G0 baseline integrity gate:
+These tests exercise every §1.1/§1.2/§1.3 subcheck of the G0 baseline integrity gate:
 
 1. Positive path: a valid fixture yields a populated report.
 2. INV-1 read-only: pre/post baseline file checksums must be equal.
@@ -15,10 +15,17 @@ These tests exercise every §1.1/§1.2 subcheck of the G0 baseline integrity gat
    transform to WGS84; missing/unparseable ``.prj`` fails closed.
 10. §1.2 ancillary inventory: every ``*.tsd.*`` (excluding weather ``.tsd.forc``)
     is enumerated with path + checksum + size; unreadable ancillary fails closed.
+11. §1.3 baseline classification: duplicate-coordinate stations, non-grid X-station
+    cohorts, startdate heterogeneity, ``domain.shp`` presence-only checksum, and
+    known-harmless deviations (``.tsd.forc`` line-2 absolute paths) are all
+    RECORD-ONLY — the baseline is never mutated.
+12. §1.3 INV-1 end-to-end evidence: full §1.1+§1.2+§1.3 stack proves byte-identical
+    baseline before/after; a mid-run mutation is caught and raises.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import inspect
 import os
@@ -33,32 +40,52 @@ from workers.mapping_builder import (
     AncillaryEntry,
     AncillaryInventoryError,
     AncillaryInventoryReport,
+    BaselineClassificationReport,
     BaselineIntegrityError,
     BaselineIntegrityReport,
+    DuplicateCoordinateCluster,
+    HarmlessDeviationRecord,
     IllegalTsdForcReferenceError,
+    Inv1EndToEndEvidence,
+    Inv1ViolationError,
     InvalidForcValueError,
     MissingPrjError,
     NonContiguousElementIdError,
+    NonGridBaselineFinding,
     NonUniqueElementIdError,
     NonWgs84ConvertiblePrjError,
     PackageCrsReport,
+    StartdateRecord,
     UnequalElementCountError,
     UnequalElementIdSetError,
     UnparseableAttError,
     UnparseableMeshError,
     UnparseablePrjError,
     build_ancillary_inventory,
+    classify_baseline,
+    verify_baseline_inv1_end_to_end,
     verify_g0_baseline,
     verify_package_crs,
 )
 
-FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "mapping_builder" / "keliya_minimal"
+_FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures" / "mapping_builder"
+FIXTURE_ROOT = _FIXTURES_DIR / "keliya_minimal"
+DUPLICATE_COORD_FIXTURE = _FIXTURES_DIR / "duplicate_coord_baseline"
+NON_GRID_FIXTURE = _FIXTURES_DIR / "non_grid_baseline"
+HARMLESS_DEVIATION_FIXTURE = _FIXTURES_DIR / "harmless_deviation_baseline"
 
 
 def _copy_fixture(target: pathlib.Path) -> pathlib.Path:
     """Deep-copy the ``keliya_minimal`` fixture into ``target`` and return it."""
     dest = target / "keliya_minimal"
     shutil.copytree(FIXTURE_ROOT, dest)
+    return dest
+
+
+def _copy_named_fixture(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    """Deep-copy an arbitrary fixture directory into ``target/<source_name>``."""
+    dest = target / source.name
+    shutil.copytree(source, dest)
     return dest
 
 
@@ -685,3 +712,415 @@ def test_non_wgs84_convertible_prj_raises_error(tmp_path: pathlib.Path) -> None:
     assert lon == lon and lat == lat, "probe must not be NaN"
     assert lon not in (float("inf"), float("-inf"))
     assert lat not in (float("inf"), float("-inf"))
+
+
+# --- §1.3 baseline classification (RECORD-ONLY) --------------------------
+
+
+def test_classify_duplicate_coord_stations() -> None:
+    """§1.3: zhaochen_mc-style 4 stations at identical coords -> 1 cluster (mult=4).
+
+    The duplicate_coord_baseline fixture places 4 stations at exactly
+    ``(105.50, 38.20, Z=-9999)`` — the zhaochen_mc live-audit pattern.
+    Classification MUST register one :class:`DuplicateCoordinateCluster`
+    with multiplicity=4 and the Z=-9999 sentinel preserved.
+    """
+    report = classify_baseline(DUPLICATE_COORD_FIXTURE)
+    assert isinstance(report, BaselineClassificationReport)
+    assert len(report.duplicate_coord_clusters) == 1
+    cluster = report.duplicate_coord_clusters[0]
+    assert isinstance(cluster, DuplicateCoordinateCluster)
+    assert cluster.multiplicity == 4
+    assert cluster.station_ids == ("1", "2", "3", "4")
+    lon, lat, z = cluster.coords
+    assert lon == pytest.approx(105.50)
+    assert lat == pytest.approx(38.20)
+    assert z == pytest.approx(-9999.0)
+    # A duplicate-only fixture must not trigger non-grid findings or harmless
+    # deviations — this is a clean positive control for the duplicate signal.
+    assert report.non_grid_findings == ()
+    assert report.harmless_deviations == ()
+    assert report.domain_shp_checksum is None
+
+
+def test_classify_non_grid_baseline() -> None:
+    """§1.3: zhaochen_wem-style 5 X1..X5 stations at irregular spacing -> 1 finding.
+
+    The non_grid_baseline fixture carries 5 stations with filenames
+    ``X1..X5.csv`` positioned so they do NOT tile a regular lat-lon grid
+    (3 unique lons × 3 unique lats = 9 possible points ≠ 5 stations).
+    The spacing_estimate must resolve close to the 0.02° step used in the
+    fixture (matching live-audit zhaochen_wem note).
+    """
+    report = classify_baseline(NON_GRID_FIXTURE)
+    assert len(report.non_grid_findings) == 1
+    finding = report.non_grid_findings[0]
+    assert isinstance(finding, NonGridBaselineFinding)
+    assert finding.station_prefix == "X"
+    assert finding.station_count == 5
+    assert finding.spacing_estimate is not None
+    assert finding.spacing_estimate == pytest.approx(0.02, abs=1e-6)
+    assert "regular lat-lon grid" in finding.pattern_note
+    # A pure non-grid cohort with all-distinct coords must not produce
+    # duplicate-coord clusters — signals stay isolated.
+    assert report.duplicate_coord_clusters == ()
+
+
+def test_startdate_heterogeneity_recorded(tmp_path: pathlib.Path) -> None:
+    """§1.3: two baselines with different ``.tsd.forc`` startdates are both recorded.
+
+    We copy two fixtures into a shared parent and classify each independently
+    to prove startdates are RECORDED per file — not normalized, deduped, or
+    reshaped. Live audit lists 1951–2024 heterogeneity across 13 basins;
+    our fixtures cover ``20200101`` (keliya) and ``19510101`` (harmless).
+    """
+    keliya = _copy_fixture(tmp_path)
+    harmless = _copy_named_fixture(HARMLESS_DEVIATION_FIXTURE, tmp_path)
+
+    keliya_report = classify_baseline(keliya)
+    harmless_report = classify_baseline(harmless)
+
+    assert len(keliya_report.startdate_heterogeneity) == 1
+    assert len(harmless_report.startdate_heterogeneity) == 1
+
+    keliya_start = keliya_report.startdate_heterogeneity[0]
+    harmless_start = harmless_report.startdate_heterogeneity[0]
+    assert isinstance(keliya_start, StartdateRecord)
+    assert keliya_start.startdate == "20200101"
+    assert keliya_start.path.name == "keliya.tsd.forc"
+    assert harmless_start.startdate == "19510101"
+    assert harmless_start.path.name == "harmless.tsd.forc"
+
+    # Startdates differ verbatim — no silent normalization.
+    assert keliya_start.startdate != harmless_start.startdate
+
+
+def test_domain_shp_recorded_not_consumed_as_geometry(tmp_path: pathlib.Path) -> None:
+    """§1.3: ``domain.shp`` is checksum-recorded but NEVER opened as geometry.
+
+    Proof by ablation: we (a) classify with ``domain.shp`` present, cache
+    the ``verify_g0_baseline`` output, then (b) delete ``domain.shp`` and
+    re-run ``verify_g0_baseline`` — its report must be byte-identical
+    (element ID set, sp.mesh/sp.att paths, FORC counts unchanged). If
+    verify_g0_baseline had secretly consumed ``domain.shp`` as element-ID
+    or geometry authority, its outputs would drift after the ablation.
+    """
+    baseline = _copy_named_fixture(HARMLESS_DEVIATION_FIXTURE, tmp_path)
+
+    # Step 1: sanity — domain.shp is present and recorded.
+    domain_shp = baseline / "domain.shp"
+    assert domain_shp.is_file(), "fixture must ship domain.shp"
+    report_before = classify_baseline(baseline)
+    assert report_before.domain_shp_checksum is not None
+    hasher = hashlib.sha256()
+    hasher.update(domain_shp.read_bytes())
+    assert report_before.domain_shp_checksum == hasher.hexdigest()
+
+    # Step 2: capture verify_g0_baseline output with domain.shp present.
+    g0_before = verify_g0_baseline(baseline)
+
+    # Step 3: ablate — delete domain.shp — and re-run verify_g0_baseline.
+    domain_shp.unlink()
+    g0_after = verify_g0_baseline(baseline)
+
+    # Step 4: G0 report fields that would encode geometry / element-ID
+    # authority must NOT drift. (per_file_checksums naturally differs since
+    # domain.shp is gone, so we check only the geometry-derived fields.)
+    assert g0_after.element_id_set == g0_before.element_id_set
+    assert g0_after.sp_mesh_path.name == g0_before.sp_mesh_path.name
+    assert g0_after.sp_att_path.name == g0_before.sp_att_path.name
+    assert g0_after.max_forc_value == g0_before.max_forc_value
+    assert g0_after.tsd_forc_reference_count == g0_before.tsd_forc_reference_count
+
+    # Step 5: classification with no domain.shp records None (not error).
+    report_after = classify_baseline(baseline)
+    assert report_after.domain_shp_checksum is None
+
+
+def test_harmless_deviation_recorded_not_repaired(tmp_path: pathlib.Path) -> None:
+    """§1.3: ``.tsd.forc`` line-2 absolute path is RECORDED but never rewritten.
+
+    Non-goal for §1.3: "no repair of known-harmless baseline deviations".
+    We prove classification records the excerpt AND leaves the file bytes
+    identical (INV-1) — even the deviation-carrying line is untouched.
+    """
+    baseline = _copy_named_fixture(HARMLESS_DEVIATION_FIXTURE, tmp_path)
+    tsd_path = baseline / "harmless.tsd.forc"
+    bytes_before = tsd_path.read_bytes()
+
+    report = classify_baseline(baseline)
+    assert len(report.harmless_deviations) == 1
+    record = report.harmless_deviations[0]
+    assert isinstance(record, HarmlessDeviationRecord)
+    assert record.deviation_kind == "tsd_forc_line2_absolute_path"
+    assert record.path == tsd_path
+    assert record.evidence_excerpt.startswith("/home/ghdc/nwm")
+
+    bytes_after = tsd_path.read_bytes()
+    assert bytes_before == bytes_after, "classification must not rewrite the .tsd.forc file"
+
+
+def test_classify_baseline_INV1_read_only(tmp_path: pathlib.Path) -> None:
+    """§1.3: classify_baseline never mutates any baseline file (pre/post SHA-256 equal)."""
+    for fixture in (FIXTURE_ROOT, DUPLICATE_COORD_FIXTURE, NON_GRID_FIXTURE, HARMLESS_DEVIATION_FIXTURE):
+        baseline = _copy_named_fixture(fixture, tmp_path)
+        before = _snapshot_checksums(baseline)
+        classify_baseline(baseline)
+        after = _snapshot_checksums(baseline)
+        assert before == after, f"classify_baseline mutated {fixture.name}"
+
+
+def test_verify_baseline_inv1_end_to_end_positive(tmp_path: pathlib.Path) -> None:
+    """§1.3: full stack (§1.1 + §1.2 + §1.3) proves byte-identical pre/post.
+
+    Happy path: run every entry point in the chain and confirm the returned
+    :class:`Inv1EndToEndEvidence` carries identical pre and post checksum
+    tuples — this is the end-to-end INV-1 receipt.
+    """
+    baseline = _copy_fixture(tmp_path)
+    evidence = verify_baseline_inv1_end_to_end(baseline)
+    assert isinstance(evidence, Inv1EndToEndEvidence)
+    assert evidence.pre_checksums == evidence.post_checksums
+    # Both lists sorted by rel-path, non-empty, valid SHA-256 hex.
+    rel_paths = [rel for rel, _ in evidence.pre_checksums]
+    assert rel_paths == sorted(rel_paths)
+    assert rel_paths, "baseline must contain at least one file"
+    for _rel, sha in evidence.pre_checksums:
+        assert len(sha) == 64
+        int(sha, 16)
+
+
+def test_verify_baseline_inv1_end_to_end_detects_mid_run_mutation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1.3: a mid-run mutation between pre-check and post-check is CAUGHT.
+
+    We monkeypatch ``classify_baseline`` inside the integrity module to first
+    call the real classifier, THEN mutate a baseline file. When
+    ``verify_baseline_inv1_end_to_end`` re-hashes post-run, it must detect the
+    drift and raise :class:`Inv1ViolationError`.
+    """
+    baseline = _copy_fixture(tmp_path)
+    from workers.mapping_builder import integrity as integrity_module
+
+    real_classify = integrity_module.classify_baseline
+
+    def sneaky_classify(root: pathlib.Path) -> BaselineClassificationReport:
+        result = real_classify(root)
+        # Mutate a baseline file to drift the post-checksum.
+        target = root / "keliya.tsd.mf"
+        target.write_bytes(target.read_bytes() + b"\n# sneaky append\n")
+        return result
+
+    monkeypatch.setattr(integrity_module, "classify_baseline", sneaky_classify)
+
+    with pytest.raises(Inv1ViolationError) as exc_info:
+        integrity_module.verify_baseline_inv1_end_to_end(baseline)
+    # Verify the drifted-path list surfaces the exact victim.
+    assert "keliya.tsd.mf" in exc_info.value.drifted_paths
+
+
+def test_classify_baseline_signature_pinned() -> None:
+    """Public API contract — argument name/type and return annotation are pinned."""
+    import typing
+
+    sig = inspect.signature(classify_baseline)
+    assert list(sig.parameters.keys()) == ["baseline_root"]
+    assert sig.parameters["baseline_root"].default is inspect.Parameter.empty
+
+    hints = typing.get_type_hints(classify_baseline)
+    assert hints["baseline_root"] is pathlib.Path
+    assert hints["return"] is BaselineClassificationReport
+
+
+def test_verify_baseline_inv1_end_to_end_signature_pinned() -> None:
+    """Public API contract — arg names/types and return annotation are pinned.
+
+    ``historical_forcing_dir`` is optional and defaults to ``None``; the type
+    hint resolves to ``pathlib.Path | None`` at runtime.
+    """
+    import typing
+
+    sig = inspect.signature(verify_baseline_inv1_end_to_end)
+    params = list(sig.parameters.keys())
+    assert params == ["baseline_root", "historical_forcing_dir"]
+    assert sig.parameters["baseline_root"].default is inspect.Parameter.empty
+    assert sig.parameters["historical_forcing_dir"].default is None
+
+    hints = typing.get_type_hints(verify_baseline_inv1_end_to_end)
+    assert hints["baseline_root"] is pathlib.Path
+    # Optional[pathlib.Path] is represented as pathlib.Path | None.
+    assert hints["historical_forcing_dir"] == (pathlib.Path | None)
+    assert hints["return"] is Inv1EndToEndEvidence
+
+
+def test_classification_report_frozen(tmp_path: pathlib.Path) -> None:
+    """§1.3: BaselineClassificationReport and its record dataclasses are frozen."""
+    baseline = _copy_named_fixture(DUPLICATE_COORD_FIXTURE, tmp_path)
+    report = classify_baseline(baseline)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        report.domain_shp_checksum = "spoofed"  # type: ignore[misc]
+    # The nested record dataclasses are also frozen.
+    cluster = report.duplicate_coord_clusters[0]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cluster.multiplicity = 999  # type: ignore[misc]
+
+    # Cross-check the other record dataclasses on their respective fixtures.
+    non_grid_report = classify_baseline(_copy_named_fixture(NON_GRID_FIXTURE, tmp_path))
+    finding = non_grid_report.non_grid_findings[0]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        finding.station_count = 999  # type: ignore[misc]
+
+    harmless_report = classify_baseline(_copy_named_fixture(HARMLESS_DEVIATION_FIXTURE, tmp_path))
+    harmless_record = harmless_report.harmless_deviations[0]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        harmless_record.deviation_kind = "spoofed"  # type: ignore[misc]
+
+    startdate_record = harmless_report.startdate_heterogeneity[0]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        startdate_record.startdate = "19000101"  # type: ignore[misc]
+
+
+def test_keliya_minimal_classification_zero_findings() -> None:
+    """§1.3: keliya_minimal is a clean baseline — no dups, no non-grid, no domain.shp.
+
+    Positive control: the SUB-1/SUB-2 canonical fixture yields empty tuples
+    on every classification signal except a single startdate record (its
+    baseline .tsd.forc line 1 declares ``20200101``). This proves
+    classification does not misfire on clean packages.
+    """
+    report = classify_baseline(FIXTURE_ROOT)
+    assert report.duplicate_coord_clusters == ()
+    assert report.non_grid_findings == ()
+    assert report.harmless_deviations == ()
+    assert report.domain_shp_checksum is None
+    assert len(report.startdate_heterogeneity) == 1
+    assert report.startdate_heterogeneity[0].startdate == "20200101"
+
+
+def test_classify_baseline_absorbs_non_utf8_tsd_forc(tmp_path: pathlib.Path) -> None:
+    """§1.3 RECORD-ONLY: a non-UTF-8 ``.tsd.forc`` MUST NOT raise from classify_baseline.
+
+    ``classify_baseline``'s docstring promises it never raises on malformed
+    content — only on ``baseline_root`` not being a directory. A ``.tsd.forc``
+    with a non-UTF-8 byte (e.g. ``b"\\xff"``) would trip
+    :func:`_read_text_lines`'s decode into :class:`UnparseableMeshError`;
+    the parser MUST swallow that failure with a sentinel-empty return,
+    matching the sibling ``_parse_sp_att_station_index`` /
+    ``_detect_harmless_deviations`` helpers. The §1.1 gate is the sole
+    authority on decode failures for weather forcing files.
+    """
+    baseline = _copy_fixture(tmp_path)
+    tsd_path = baseline / "keliya.tsd.forc"
+    # Overwrite with header shape plus a non-UTF-8 byte so ``_read_text_lines``
+    # raises inside classification. If the fix is missing, this call re-raises
+    # UnparseableMeshError; if the fix holds, the file's stations/startdate
+    # simply drop out of the aggregate.
+    tsd_path.write_bytes(b"20200101 20200102\n\n\n1 \xff 105.0 0.0 0.0 -9999 X1.csv\n")
+
+    # Must not raise.
+    report = classify_baseline(baseline)
+    assert isinstance(report, BaselineClassificationReport)
+
+    # The malformed .tsd.forc contributes no stations and no startdate:
+    #   - stations excluded => no duplicate-coord clusters, no non-grid findings.
+    #   - startdate excluded => no StartdateRecord for that file.
+    assert report.duplicate_coord_clusters == ()
+    assert report.non_grid_findings == ()
+    for record in report.startdate_heterogeneity:
+        assert record.path != tsd_path, (
+            "malformed .tsd.forc must NOT surface as a startdate record"
+        )
+
+
+def test_verify_baseline_inv1_end_to_end_history_collision_drift_payload(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1.3: rel_path collision between baseline ``history/`` + historical dir MUST NOT hide drift.
+
+    When ``historical_forcing_dir`` is supplied, historical files are namespaced
+    with a ``history/`` prefix by :func:`_compute_end_to_end_checksums`. If a
+    baseline package ALSO carries a real ``history/`` subdirectory, two entries
+    can legitimately share the same rel_path (different SHAs).
+
+    A dict-based drift diff would collapse the pair via last-write-wins and
+    report an empty drift payload when only one colliding entry mutates. The
+    fixed set-based diff MUST surface the shared rel_path in
+    :attr:`Inv1ViolationError.drifted_paths`.
+    """
+    baseline = _copy_fixture(tmp_path)
+    # Baseline contribution: ``history/foo.txt`` with sha=A.
+    history_dir = baseline / "history"
+    history_dir.mkdir()
+    baseline_history_file = history_dir / "foo.txt"
+    baseline_history_file.write_bytes(b"baseline-payload-A")
+
+    # historical_forcing_dir contribution: ``foo.txt`` with sha=B, prefixed to
+    # ``history/foo.txt`` at checksum-time — same rel_path key as above.
+    historical_dir = tmp_path / "historical_forcing"
+    historical_dir.mkdir()
+    (historical_dir / "foo.txt").write_bytes(b"historical-payload-B")
+
+    from workers.mapping_builder import integrity as integrity_module
+
+    real_classify = integrity_module.classify_baseline
+
+    def sneaky_classify(root: pathlib.Path) -> BaselineClassificationReport:
+        result = real_classify(root)
+        # Mid-run mutation of ONLY the baseline-side ``history/foo.txt`` (A -> C).
+        # The historical-side ``foo.txt`` (B) stays put. A dict-collapse would
+        # see {"history/foo.txt": B} on both sides and report drift=() — the
+        # regression this test guards against.
+        victim = root / "history" / "foo.txt"
+        victim.write_bytes(b"mutated-payload-C")
+        return result
+
+    monkeypatch.setattr(integrity_module, "classify_baseline", sneaky_classify)
+
+    with pytest.raises(Inv1ViolationError) as exc_info:
+        integrity_module.verify_baseline_inv1_end_to_end(
+            baseline, historical_forcing_dir=historical_dir
+        )
+    assert "history/foo.txt" in exc_info.value.drifted_paths, (
+        "collision rel_path MUST surface in drifted_paths; empty payload "
+        "indicates the dict-collapse regression is back"
+    )
+
+
+def test_verify_baseline_inv1_end_to_end_positive_with_historical_dir(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§1.3: positive path with ``historical_forcing_dir`` — no drift, evidence tuples equal.
+
+    Complements ``test_verify_baseline_inv1_end_to_end_positive`` by covering
+    the branch where ``historical_forcing_dir`` is supplied. Also proves the
+    set-based drift diff does not spuriously flag rel_path collisions when
+    both entries remain byte-stable across pre/post.
+    """
+    baseline = _copy_fixture(tmp_path)
+    # Include a baseline-side ``history/`` file and a historical dir that will
+    # collide on rel_path ``history/foo.txt`` at checksum-time. Neither side
+    # mutates during the run, so evidence tuples must match end-to-end.
+    history_dir = baseline / "history"
+    history_dir.mkdir()
+    (history_dir / "foo.txt").write_bytes(b"baseline-payload-A")
+
+    historical_dir = tmp_path / "historical_forcing"
+    historical_dir.mkdir()
+    (historical_dir / "foo.txt").write_bytes(b"historical-payload-B")
+
+    evidence = verify_baseline_inv1_end_to_end(
+        baseline, historical_forcing_dir=historical_dir
+    )
+    assert isinstance(evidence, Inv1EndToEndEvidence)
+    assert evidence.pre_checksums == evidence.post_checksums
+    # Both colliding entries live in the tuple independently (different SHAs
+    # under the same rel_path). Counting occurrences of the collision key
+    # proves the checksum sweep does NOT dedupe by rel_path.
+    collisions = [rel for rel, _sha in evidence.pre_checksums if rel == "history/foo.txt"]
+    assert len(collisions) == 2, (
+        "history/foo.txt should appear twice — once from baseline, once from "
+        "historical_forcing_dir (post-prefix). Dedup here indicates a regression."
+    )

@@ -8,7 +8,7 @@
   - Required evidence: tests prove CRS is read from the package `.prj` only, that a `PROJCS["unknown"]` custom Albers and the qhh Transverse Mercator both parse and transform to WGS84, and that a missing/unparseable `.prj` fails closed.
   - Required evidence: tests prove `.sp.mesh` is never used as a CRS source and that the ancillary `*.tsd.*` inventory is complete.
   - Non-goal for 1.2: no EPSG lookup or global CRS default.
-- [ ] 1.3 Implement baseline classification: register duplicate-coordinate stations, classify non-grid baselines, record startdate heterogeneity, exclude `domain.shp` as an algorithm input, and never modify the baseline (INV-1).
+- [x] 1.3 Implement baseline classification: register duplicate-coordinate stations, classify non-grid baselines, record startdate heterogeneity, exclude `domain.shp` as an algorithm input, and never modify the baseline (INV-1).
   - Required evidence: tests prove duplicate-coordinate stations are registered (zhaochen_mc-style 4 stations at identical coords, Z=-9999), a non-grid baseline is classified (zhaochen_wem-style 5 irregular X1..X5 points at 0.02° spacing), and startdate heterogeneity is recorded.
   - Required evidence: tests prove `domain.shp` is never consumed as geometry or element-ID authority and that baseline files are opened read-only with unchanged pre/post checksums.
   - Non-goal for 1.3: no repair of known-harmless baseline deviations (e.g. `.tsd.forc` line-2 absolute paths); record only.
