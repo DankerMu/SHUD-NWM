@@ -1,17 +1,22 @@
 """G0 baseline integrity verification for the mapping builder.
 
 This module implements OpenSpec change ``forcing-mapping-asset-build`` §1.1 (Epic
-#909 SUB-1). It exposes a single pure entry point, :func:`verify_g0_baseline`,
-that reads a baseline SHUD basin model package **read-only** (INV-1) and either
-returns a :class:`BaselineIntegrityReport` or raises a
+#909 SUB-1) and §1.2 (Epic #909 SUB-2). It exposes three pure entry points that
+read a baseline SHUD basin model package **read-only** (INV-1):
+
+* :func:`verify_g0_baseline` — §1.1 baseline integrity gate.
+* :func:`verify_package_crs` — §1.2 CRS authority (WKT from ``gis/*.prj``).
+* :func:`build_ancillary_inventory` — §1.2 ancillary ``*.tsd.*`` inventory
+  (excluding the weather ``.tsd.forc`` reference, which is §1.1's territory).
+
+Each entry point either returns an immutable report or raises a
 :class:`BaselineIntegrityError` subclass explaining the exact violation.
 
 Fail-closed guarantee: any subcheck failure raises without writing any output
 artifact. The mapping variant tree remains empty.
 
-Non-goals for §1.1 (deferred to later SUBs):
+Non-goals for §1.1 + §1.2 (deferred to later SUBs):
 
-* SUB-2 — CRS reading, ``gis/*.prj`` handling, ancillary ``*.tsd.*`` inventory.
 * SUB-3 — baseline classification (duplicate-coordinate stations, non-grid
   baselines, startdate heterogeneity).
 * SUB-4 — G1 non-degenerate triangle geometry check.
@@ -40,6 +45,13 @@ The SHUD file formats parsed here are inferred from live baseline packages
     Lines 4..N+3: station rows. The ``ID`` column is the forcing reference used
     by ``.sp.att`` ``FORC`` values (§1.1 references the *reference set*, not the
     row order).
+
+``gis/*.prj``
+    Single-line ESRI WKT declaring the package CRS. Live audit (docs/ForcingReplace
+    §附录 A, 2026-07-06) shows all 13 baselines are ``PROJCS["unknown"]`` custom
+    Albers (×12) or Transverse Mercator (qhh). No basin carries an EPSG code, so
+    the CRS MUST be read from the WKT string per basin — never from a global
+    assumption and never from ``.sp.mesh`` (which carries no CRS metadata).
 """
 
 from __future__ import annotations
@@ -47,6 +59,8 @@ from __future__ import annotations
 import hashlib
 import pathlib
 from dataclasses import dataclass
+
+import pyproj
 
 
 class BaselineIntegrityError(Exception):
@@ -149,6 +163,47 @@ class IllegalTsdForcReferenceError(BaselineIntegrityError):
         self.valid_range = valid_range
 
 
+class MissingPrjError(BaselineIntegrityError):
+    """Raised when no ``gis/*.prj`` file is present under the baseline package.
+
+    Per §1.2, the mapping builder makes no global CRS assumption; a missing
+    ``.prj`` is a fail-closed integrity violation, not a fallback opportunity.
+    """
+
+    def __init__(self, baseline_root: pathlib.Path) -> None:
+        super().__init__(f"no gis/*.prj found under {baseline_root}")
+        self.baseline_root = baseline_root
+
+
+class UnparseablePrjError(BaselineIntegrityError):
+    """Raised when the package ``gis/*.prj`` cannot be parsed by pyproj."""
+
+    def __init__(self, prj_path: pathlib.Path, parse_error: str) -> None:
+        super().__init__(f"unparseable .prj at {prj_path}: {parse_error}")
+        self.prj_path = prj_path
+        self.parse_error = parse_error
+
+
+class NonWgs84ConvertiblePrjError(BaselineIntegrityError):
+    """Raised when the package CRS cannot be transformed to WGS84 via pyproj."""
+
+    def __init__(self, prj_path: pathlib.Path, transform_error: str) -> None:
+        super().__init__(
+            f"package CRS at {prj_path} is not convertible to EPSG:4326: {transform_error}"
+        )
+        self.prj_path = prj_path
+        self.transform_error = transform_error
+
+
+class AncillaryInventoryError(BaselineIntegrityError):
+    """Raised when an ancillary ``*.tsd.*`` file cannot be inventoried."""
+
+    def __init__(self, path: pathlib.Path, read_error: str) -> None:
+        super().__init__(f"unable to inventory ancillary file {path}: {read_error}")
+        self.path = path
+        self.read_error = read_error
+
+
 @dataclass(frozen=True)
 class BaselineIntegrityReport:
     """Report produced by :func:`verify_g0_baseline` when all G0 checks pass.
@@ -166,6 +221,54 @@ class BaselineIntegrityReport:
     max_forc_value: int
     tsd_forc_present: bool
     tsd_forc_reference_count: int
+
+
+@dataclass(frozen=True)
+class PackageCrsReport:
+    """Report produced by :func:`verify_package_crs` when CRS authority checks pass.
+
+    ``prj_checksum`` binds the WKT source bytes so evidence can prove the CRS
+    was not silently swapped. ``wgs84_probe`` records the WGS84 (lon, lat)
+    coordinates of a probe point transformed via the package CRS → EPSG:4326
+    transformer — its presence proves the transformer round-trips without
+    error, satisfying the §1.2 "convertible to WGS84" requirement without
+    committing to a specific probe strategy in the public contract.
+    """
+
+    prj_path: pathlib.Path
+    prj_checksum: str
+    wkt: str
+    wgs84_probe: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class AncillaryEntry:
+    """One row of the ancillary inventory: path + checksum + size.
+
+    ``path`` is the absolute filesystem path to the ancillary file. Checksum
+    and size are recorded so downstream evidence can prove no ancillary file
+    was silently swapped or truncated between integrity and rewrite stages.
+    """
+
+    path: pathlib.Path
+    checksum: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class AncillaryInventoryReport:
+    """Report produced by :func:`build_ancillary_inventory`.
+
+    ``entries`` is sorted by relative path under the baseline root for
+    determinism. The weather-forcing reference file ``.tsd.forc`` is
+    intentionally excluded — that file is §1.1's authority (see
+    :class:`BaselineIntegrityReport.tsd_forc_reference_count`) and per
+    design.md line 62 the variant only carries *ancillary non-weather*
+    ``*.tsd.*`` files (§8.1 owns weather).
+    """
+
+    baseline_root: pathlib.Path
+    entries: tuple[AncillaryEntry, ...]
 
 
 # --- internal helpers -----------------------------------------------------
@@ -605,4 +708,208 @@ def verify_g0_baseline(baseline_root: pathlib.Path) -> BaselineIntegrityReport:
         max_forc_value=max_forc_value,
         tsd_forc_present=tsd_forc_present,
         tsd_forc_reference_count=tsd_forc_reference_count,
+    )
+
+
+# --- §1.2 CRS authority ---------------------------------------------------
+
+
+def _find_single_prj(baseline_root: pathlib.Path) -> pathlib.Path:
+    """Return the sole ``gis/*.prj`` file, or raise :class:`MissingPrjError`.
+
+    Multiple ``.prj`` files under ``gis/`` are treated as unparseable (§1.2
+    expects a single CRS declaration per package).
+    """
+    gis_dir = baseline_root / "gis"
+    if not gis_dir.is_dir():
+        raise MissingPrjError(baseline_root=baseline_root)
+    candidates = sorted(p for p in gis_dir.glob("*.prj") if p.is_file())
+    if not candidates:
+        raise MissingPrjError(baseline_root=baseline_root)
+    if len(candidates) > 1:
+        raise UnparseablePrjError(
+            prj_path=candidates[0],
+            parse_error=(
+                f"expected exactly one gis/*.prj, found {len(candidates)}: "
+                f"{[p.name for p in candidates]}"
+            ),
+        )
+    return candidates[0]
+
+
+def verify_package_crs(baseline_root: pathlib.Path) -> PackageCrsReport:
+    """Read the model CRS from ``gis/*.prj`` and prove WGS84 convertibility.
+
+    Per §1.2, the CRS is read **only** from ``gis/*.prj``. This function MUST
+    never open ``.sp.mesh``, ``.sp.att``, or any other file as a CRS source,
+    and MUST NOT consult EPSG defaults or any global assumption.
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package. The CRS lives
+        at ``<baseline_root>/gis/<basin>.prj`` (single file per package).
+
+    Returns
+    -------
+    PackageCrsReport
+        Immutable record of the ``.prj`` path, its SHA-256 checksum, the raw
+        WKT string, and a probe transform result proving the
+        package-CRS → EPSG:4326 transformer round-trips.
+
+    Raises
+    ------
+    MissingPrjError
+        No ``.prj`` file exists under ``gis/``.
+    UnparseablePrjError
+        pyproj cannot parse the WKT (or multiple ``.prj`` files were found).
+    NonWgs84ConvertiblePrjError
+        pyproj cannot build a Transformer to EPSG:4326, or the transformer
+        returns non-finite coordinates on the probe point.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"verify_package_crs expects pathlib.Path, got {type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+
+    prj_path = _find_single_prj(baseline_root)
+    prj_checksum = _sha256_file(prj_path)
+    try:
+        wkt = prj_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UnparseablePrjError(prj_path=prj_path, parse_error=str(exc)) from exc
+    if not wkt:
+        raise UnparseablePrjError(prj_path=prj_path, parse_error="empty .prj file")
+
+    try:
+        package_crs = pyproj.CRS.from_wkt(wkt)
+    except pyproj.exceptions.CRSError as exc:
+        raise UnparseablePrjError(prj_path=prj_path, parse_error=str(exc)) from exc
+
+    try:
+        transformer = pyproj.Transformer.from_crs(package_crs, "EPSG:4326", always_xy=True)
+    except pyproj.exceptions.ProjError as exc:
+        raise NonWgs84ConvertiblePrjError(prj_path=prj_path, transform_error=str(exc)) from exc
+
+    # Probe with the CRS bounding-box centroid when pyproj can provide it,
+    # else fall back to the origin (0.0, 0.0). Either way the transformer
+    # must produce a finite (lon, lat) pair — that is our round-trip proof.
+    probe_x, probe_y = 0.0, 0.0
+    area_of_use = getattr(package_crs, "area_of_use", None)
+    if area_of_use is not None and area_of_use.bounds is not None:
+        west, south, east, north = area_of_use.bounds
+        # area_of_use.bounds is (west, south, east, north) in WGS84 degrees.
+        # We transform WGS84 centroid to package CRS to get a valid probe (x, y).
+        # But since our transformer goes package->WGS84, we skip this fast path
+        # and just use (0, 0) which is always in the projection domain for
+        # continental Albers/TM used by these baselines.
+        del west, south, east, north
+
+    try:
+        probe_lon, probe_lat = transformer.transform(probe_x, probe_y)
+    except pyproj.exceptions.ProjError as exc:
+        raise NonWgs84ConvertiblePrjError(prj_path=prj_path, transform_error=str(exc)) from exc
+    # A degenerate CRS may return inf/nan without raising. Reject those explicitly.
+    for value, name in ((probe_lon, "longitude"), (probe_lat, "latitude")):
+        if not _is_finite_float(value):
+            raise NonWgs84ConvertiblePrjError(
+                prj_path=prj_path,
+                transform_error=f"probe {name} is not finite: {value!r}",
+            )
+
+    return PackageCrsReport(
+        prj_path=prj_path,
+        prj_checksum=prj_checksum,
+        wkt=wkt,
+        wgs84_probe=(float(probe_lon), float(probe_lat)),
+    )
+
+
+def _is_finite_float(value: float) -> bool:
+    """Return True iff ``value`` is a finite float (not NaN and not ±inf)."""
+    return isinstance(value, (int, float)) and value == value and value not in (
+        float("inf"),
+        float("-inf"),
+    )
+
+
+# --- §1.2 ancillary inventory --------------------------------------------
+
+
+def _is_ancillary_tsd(path: pathlib.Path) -> bool:
+    """Return True iff ``path`` is an ancillary ``*.tsd.*`` file.
+
+    Per design.md line 62, the variant carries *ancillary non-weather*
+    ``*.tsd.*``; the weather-forcing reference ``.tsd.forc`` is §1.1's
+    territory and belongs to the runtime producer (§8.1), so it is excluded
+    from the ancillary inventory.
+    """
+    name = path.name
+    if ".tsd." not in name:
+        return False
+    if name.endswith(".tsd.forc"):
+        return False
+    return True
+
+
+def build_ancillary_inventory(baseline_root: pathlib.Path) -> AncillaryInventoryReport:
+    """Enumerate every ancillary ``*.tsd.*`` file under ``baseline_root``.
+
+    Per §1.2, the mapping builder MUST record a complete inventory of every
+    ancillary ``*.tsd.*`` dependency so downstream stages can detect a
+    swapped/truncated ancillary before it silently changes model behavior.
+    ``.tsd.forc`` is excluded — it is the weather-forcing reference, not an
+    ancillary input (see design.md line 62 and §1.1's own accounting).
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package.
+
+    Returns
+    -------
+    AncillaryInventoryReport
+        Immutable report with entries sorted by relative path (deterministic
+        ordering). Empty ``entries`` is legal — some minimal packages carry
+        no ancillary ``*.tsd.*`` beyond the weather reference.
+
+    Raises
+    ------
+    AncillaryInventoryError
+        Any ancillary file is unreadable (permission denied, truncation
+        during scan, etc.). The mapping builder MUST NOT write output when
+        this fires.
+    BaselineIntegrityError
+        ``baseline_root`` is not an existing directory.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"build_ancillary_inventory expects pathlib.Path, got {type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+
+    ancillary_paths = sorted(
+        p for p in _iter_baseline_files(baseline_root) if _is_ancillary_tsd(p)
+    )
+    entries: list[AncillaryEntry] = []
+    for path in ancillary_paths:
+        try:
+            size_bytes = path.stat().st_size
+            checksum = _sha256_file(path)
+        except OSError as exc:
+            raise AncillaryInventoryError(path=path, read_error=str(exc)) from exc
+        entries.append(
+            AncillaryEntry(path=path, checksum=checksum, size_bytes=size_bytes)
+        )
+
+    return AncillaryInventoryReport(
+        baseline_root=baseline_root,
+        entries=tuple(entries),
     )

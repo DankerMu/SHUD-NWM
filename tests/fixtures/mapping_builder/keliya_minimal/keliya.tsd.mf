@@ -1,0 +1,4 @@
+1 20200101
+./input/keliya
+ID	MeltFactor
+1	0.0035
