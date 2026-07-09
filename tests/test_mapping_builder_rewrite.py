@@ -1624,6 +1624,162 @@ def test_hydrologic_core_fingerprint_multi_file_category(
     assert fp_a == fp_b
 
 
+def test_hydrologic_core_fingerprint_mismatch_covered_paths_attribute(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Mismatch exception's ``*_covered_paths`` bind to the dataclass field.
+
+    Regression against a SUB-9 review-loop finding: the exception's covered
+    paths attributes MUST name-mirror the source dataclass
+    :class:`HydrologicCoreFingerprint.covered_paths` and carry the same
+    tuples on both sides. Downstream evidence bundlers (SUB-13) rely on
+    this so the mismatch record can be attributed to a covered surface.
+    """
+    # Drift the variant mesh so the fingerprints differ, then catch the raise.
+    variant_stubs = dict(_NON_SP_ATT_STUBS)
+    mesh_filename, mesh_payload = variant_stubs["mesh"]
+    variant_stubs["mesh"] = (mesh_filename, mesh_payload + b"MESH-DRIFT\n")
+    baseline_root, variant_root = _write_baseline_and_variant_packages(
+        tmp_path,
+        variant_stubs=variant_stubs,
+    )
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+
+    # Compute both fingerprints standalone so we know the expected paths.
+    baseline_fp = compute_hydrologic_core_fingerprint(
+        baseline_root,
+        sp_att_path=baseline_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    variant_fp = compute_hydrologic_core_fingerprint(
+        variant_root,
+        sp_att_path=variant_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    assert baseline_fp.hash != variant_fp.hash  # sanity: drift landed
+
+    with pytest.raises(HydrologicCoreFingerprintMismatchError) as exc_info:
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+    # The exception attributes are named after the dataclass field.
+    assert hasattr(exc_info.value, "baseline_covered_paths")
+    assert hasattr(exc_info.value, "variant_covered_paths")
+    # And they carry the exact covered_paths of the source dataclasses.
+    assert exc_info.value.baseline_covered_paths == baseline_fp.covered_paths
+    assert exc_info.value.variant_covered_paths == variant_fp.covered_paths
+    # Message text uses the new "baseline_paths" / "variant_paths" tokens.
+    assert "baseline_paths=" in str(exc_info.value)
+    assert "variant_paths=" in str(exc_info.value)
+
+
+def test_hydrologic_core_fingerprint_missing_baseline_file_names_baseline_side(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Missing baseline file -> MissingPackageFileError(missing_side="baseline").
+
+    Regression: :func:`verify_hydrologic_core_fingerprint_equal` MUST
+    propagate the paired side label into :class:`MissingPackageFileError`
+    so downstream evidence names the correct root. Prior to SUB-9's fix
+    pass the fingerprint path used the standalone ``"package"`` label
+    even in the paired context.
+    """
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    # Remove the baseline mesh file — variant still has it.
+    (baseline_root / _NON_SP_ATT_STUBS["mesh"][0]).unlink()
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(MissingPackageFileError) as exc_info:
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+    assert exc_info.value.missing_side == "baseline"
+    assert exc_info.value.category == "mesh"
+    assert exc_info.value.relative_path == _NON_SP_ATT_STUBS["mesh"][0]
+
+
+def test_hydrologic_core_fingerprint_missing_variant_file_names_variant_side(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Missing variant file -> MissingPackageFileError(missing_side="variant").
+
+    Symmetric to the baseline-side regression: if the variant is missing
+    a declared file, the paired gate MUST report ``missing_side="variant"``.
+    """
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    # Remove the variant river file — baseline still has it.
+    (variant_root / _NON_SP_ATT_STUBS["river"][0]).unlink()
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(MissingPackageFileError) as exc_info:
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+    assert exc_info.value.missing_side == "variant"
+    assert exc_info.value.category == "river"
+    assert exc_info.value.relative_path == _NON_SP_ATT_STUBS["river"][0]
+
+
+def test_compute_hydrologic_core_fingerprint_default_side_label_is_package(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Standalone :func:`compute_hydrologic_core_fingerprint` -> missing_side='package'.
+
+    When called without ``side_label``, the default ``"package"`` label
+    propagates into :class:`MissingPackageFileError`. This documents the
+    standalone contract and pairs with the two paired-gate regressions
+    above.
+    """
+    root = tmp_path / "pkg"
+    _write_stub_package(root)
+    sp_att = _write_sp_att_for_fingerprint(root / "basin.sp.att")
+    # Delete one file so the gate hits missing.
+    (root / _NON_SP_ATT_STUBS["soil"][0]).unlink()
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(MissingPackageFileError) as exc_info:
+        compute_hydrologic_core_fingerprint(
+            root,
+            sp_att_path=sp_att,
+            category_files=_default_category_files(),
+            state_schema_bytes=state_bytes,
+            solver_config_bytes=solver_bytes,
+        )
+    assert exc_info.value.missing_side == "package"
+    assert exc_info.value.category == "soil"
+
+
 # --- §3.3 + §3.4 signature pins + frozen dataclass invariants -------------
 
 
@@ -1655,21 +1811,27 @@ def test_compute_hydrologic_core_fingerprint_signature_pinned() -> None:
         "category_files",
         "state_schema_bytes",
         "solver_config_bytes",
+        "side_label",
     ]
     for kwarg in (
         "sp_att_path",
         "category_files",
         "state_schema_bytes",
         "solver_config_bytes",
+        "side_label",
     ):
         assert (
             sig.parameters[kwarg].kind == inspect.Parameter.KEYWORD_ONLY
         )
+    # side_label defaults to "package" for standalone callers; the paired
+    # equality gate overrides it to "baseline" / "variant".
+    assert sig.parameters["side_label"].default == "package"
     hints = typing.get_type_hints(compute_hydrologic_core_fingerprint)
     assert hints["package_root"] is pathlib.Path
     assert hints["sp_att_path"] is pathlib.Path
     assert hints["state_schema_bytes"] is bytes
     assert hints["solver_config_bytes"] is bytes
+    assert hints["side_label"] is str
     assert hints["return"] is HydrologicCoreFingerprint
 
 

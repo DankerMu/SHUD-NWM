@@ -109,6 +109,22 @@ Historical variants (``check_*``, ``enforce_*``, ``prove_*``) are
 retired — the SUB-6/SUB-7/SUB-8/SUB-9 review loops converged on
 ``verify_*`` as the canonical gate-namespace prefix, and subsequent gates
 SHALL adopt it directly at author time.
+
+Gate orchestration (SUB-8 + SUB-9 -> SUB-13 deferral)
+-----------------------------------------------------
+Several ``verify_*`` gates ship in this module as standalone primitives:
+:func:`verify_non_forc_columns_unchanged` (SUB-8, §3.2),
+:func:`verify_non_sp_att_checksums_equal` (SUB-9, §3.3), and
+:func:`verify_hydrologic_core_fingerprint_equal` (SUB-9, §3.4). They are
+exported for callers (the mapping evidence bundler in SUB-13, standalone
+auditors) but are **not yet** wired into :func:`copy_and_rewrite_sp_att_forc`'s
+write pipeline. The §3.1 orchestrator still only runs its own in-memory
+non-``FORC`` proof (``_verify_non_forc_columns_unchanged_in_memory``)
+before writing the variant. Orchestrated "fail closed BEFORE write"
+invocation of the §3.3 file-checksum gate and the §3.4 fingerprint gate
+lands in SUB-13 when the full variant assembly step is scaffolded and the
+mapping evidence package assembles the ordered gate results (G0–G5) into
+one immutable bundle.
 """
 
 from __future__ import annotations
@@ -409,6 +425,17 @@ class MissingPackageFileError(SpAttRewriteError):
     root, the checksum comparison cannot proceed — fail closed with an
     actionable message identifying the missing file and which side it's
     missing from.
+
+    ``missing_side`` vocabulary:
+
+    * ``"baseline"`` / ``"variant"`` — raised by the paired equality gates
+      (:func:`verify_non_sp_att_checksums_equal`,
+      :func:`verify_hydrologic_core_fingerprint_equal`), which know which
+      of the two package roots owns the missing file.
+    * ``"package"`` — the default when :func:`compute_hydrologic_core_fingerprint`
+      is called standalone (no baseline/variant pairing context). Callers
+      can override this by passing an explicit label to
+      :func:`compute_hydrologic_core_fingerprint`'s ``side_label`` kwarg.
     """
 
     def __init__(
@@ -416,7 +443,7 @@ class MissingPackageFileError(SpAttRewriteError):
         *,
         category: str,
         relative_path: str,
-        missing_side: str,  # "baseline" | "variant"
+        missing_side: str,  # "baseline" | "variant" | "package"
         package_root: pathlib.Path,
     ) -> None:
         super().__init__(
@@ -492,9 +519,11 @@ class HydrologicCoreFingerprintMismatchError(SpAttRewriteError):
 
     Both fingerprint attributes are supplied so a downstream evidence
     bundler (SUB-13) can record the two SHA-256 digests verbatim and, via
-    :attr:`baseline_covered_labels` / :attr:`variant_covered_labels`, prove
+    :attr:`baseline_covered_paths` / :attr:`variant_covered_paths`, prove
     the mismatch was not caused by a coverage discrepancy but by a bytes
-    drift in one of the covered surfaces.
+    drift in one of the covered surfaces. The attribute names mirror the
+    :class:`HydrologicCoreFingerprint` ``covered_paths`` field so the
+    exception carries the raw ``covered_paths`` tuples for both sides.
     """
 
     def __init__(
@@ -502,21 +531,21 @@ class HydrologicCoreFingerprintMismatchError(SpAttRewriteError):
         *,
         baseline_fingerprint_hash: str,
         variant_fingerprint_hash: str,
-        baseline_covered_labels: tuple[str, ...],
-        variant_covered_labels: tuple[str, ...],
+        baseline_covered_paths: tuple[str, ...],
+        variant_covered_paths: tuple[str, ...],
     ) -> None:
         super().__init__(
             f"hydrologic_core_fingerprint mismatch: "
             f"baseline={baseline_fingerprint_hash!r} "
             f"variant={variant_fingerprint_hash!r} "
-            f"(baseline_labels={list(baseline_covered_labels)}, "
-            f"variant_labels={list(variant_covered_labels)}) "
+            f"(baseline_paths={list(baseline_covered_paths)}, "
+            f"variant_paths={list(variant_covered_paths)}) "
             "(G4 asset delta / docs §G10 violation)"
         )
         self.baseline_fingerprint_hash = baseline_fingerprint_hash
         self.variant_fingerprint_hash = variant_fingerprint_hash
-        self.baseline_covered_labels = baseline_covered_labels
-        self.variant_covered_labels = variant_covered_labels
+        self.baseline_covered_paths = baseline_covered_paths
+        self.variant_covered_paths = variant_covered_paths
 
 
 # --- category constants (§3.3 + §3.4 coverage sets) ----------------------
@@ -1264,6 +1293,8 @@ def _compute_file_category_hash(
     package_root: pathlib.Path,
     category: str,
     relative_paths: Sequence[str],
+    *,
+    side_label: str,
 ) -> str:
     """SHA-256 over ``f"{path}\\t{file_sha256}\\n"`` per file, sorted by path.
 
@@ -1271,6 +1302,10 @@ def _compute_file_category_hash(
     per-file hashes into a per-category hash before entering the top-level
     fingerprint. Sorted-path order is the domain separator that prevents
     collisions between adjacent files in the same category.
+
+    ``side_label`` propagates to :class:`MissingPackageFileError` so the
+    paired equality gate can report ``"baseline"`` / ``"variant"`` while a
+    standalone call uses the default ``"package"``.
     """
     per_file_entries: list[str] = []
     for relative_path in sorted(relative_paths):
@@ -1278,7 +1313,7 @@ def _compute_file_category_hash(
             package_root,
             relative_path,
             category=category,
-            missing_side="package",
+            missing_side=side_label,
         )
         per_file_entries.append(f"{relative_path}\t{file_sha}\n")
     joined = "".join(per_file_entries).encode("utf-8")
@@ -1296,7 +1331,8 @@ def _canonicalize_sp_att_non_forc(sp_att_path: pathlib.Path) -> str:
     2. Serialize each row's non-``FORC`` tokens keyed by ``element_id``,
        sorted by ``element_id`` ascending for determinism.
     3. Prefix the schema (all column names minus ``FORC``, in the schema's
-       original order) so a schema-reorder attack cannot silently produce
+       original order) so a column-name drift (e.g. renaming a non-FORC
+       column while preserving its byte payload) cannot silently produce
        the same digest.
     4. SHA-256 the canonicalized string.
 
@@ -1333,6 +1369,7 @@ def compute_hydrologic_core_fingerprint(
     category_files: Mapping[str, Sequence[str]],
     state_schema_bytes: bytes,
     solver_config_bytes: bytes,
+    side_label: str = "package",
 ) -> HydrologicCoreFingerprint:
     """§3.4 / docs §G10 ten-surface ``hydrologic_core_fingerprint`` computation.
 
@@ -1384,6 +1421,13 @@ def compute_hydrologic_core_fingerprint(
         (they hash to the SHA-256 of the empty string) but a caller
         supplying empty bytes on both packages will pass the equality
         gate — the intent is that SUB-13 supplies real bytes.
+    side_label:
+        Label carried into :class:`MissingPackageFileError`'s
+        ``missing_side`` attribute when a declared file is absent under
+        ``package_root``. Defaults to ``"package"`` for standalone
+        callers; :func:`verify_hydrologic_core_fingerprint_equal` overrides
+        this to ``"baseline"`` / ``"variant"`` so paired equality errors
+        name the correct side.
 
     Returns
     -------
@@ -1401,6 +1445,7 @@ def compute_hydrologic_core_fingerprint(
         :data:`NON_SP_ATT_CATEGORIES`.
     MissingPackageFileError
         A declared relative path is absent from ``package_root``.
+        ``missing_side`` reflects ``side_label``.
     SpAttRewriteError
         ``package_root`` is not a directory, ``sp_att_path`` is missing
         or unparseable, or a category maps to an empty sequence.
@@ -1422,7 +1467,10 @@ def compute_hydrologic_core_fingerprint(
     for category in NON_SP_ATT_CATEGORIES:
         relative_paths = tuple(sorted(category_files[category]))
         per_surface_hash[category] = _compute_file_category_hash(
-            package_root, category, relative_paths
+            package_root,
+            category,
+            relative_paths,
+            side_label=side_label,
         )
         per_surface_descriptor[category] = ";".join(relative_paths)
     per_surface_hash["sp_att_non_forc"] = _canonicalize_sp_att_non_forc(
@@ -1515,10 +1563,15 @@ def verify_hydrologic_core_fingerprint_equal(
     HydrologicCoreFingerprintMismatchError
         Baseline and variant fingerprints differ (G4 blocker per §3.4 /
         docs §G10).
-    UnknownCategoryError, MissingCategoryError, MissingPackageFileError,
-    SpAttRewriteError:
+    UnknownCategoryError, MissingCategoryError, SpAttRewriteError:
         Propagated from the underlying
         :func:`compute_hydrologic_core_fingerprint` invocations.
+    MissingPackageFileError
+        A declared relative path is absent from either package root.
+        ``missing_side`` is ``"baseline"`` when the baseline root is
+        missing the file and ``"variant"`` when the variant root is
+        missing it — the paired gate overrides the standalone
+        ``"package"`` default so evidence trails name the correct side.
     """
     baseline_fp = compute_hydrologic_core_fingerprint(
         baseline_package_root,
@@ -1526,6 +1579,7 @@ def verify_hydrologic_core_fingerprint_equal(
         category_files=category_files,
         state_schema_bytes=baseline_state_schema_bytes,
         solver_config_bytes=baseline_solver_config_bytes,
+        side_label="baseline",
     )
     variant_fp = compute_hydrologic_core_fingerprint(
         variant_package_root,
@@ -1533,13 +1587,14 @@ def verify_hydrologic_core_fingerprint_equal(
         category_files=category_files,
         state_schema_bytes=variant_state_schema_bytes,
         solver_config_bytes=variant_solver_config_bytes,
+        side_label="variant",
     )
     if baseline_fp.hash != variant_fp.hash:
         raise HydrologicCoreFingerprintMismatchError(
             baseline_fingerprint_hash=baseline_fp.hash,
             variant_fingerprint_hash=variant_fp.hash,
-            baseline_covered_labels=baseline_fp.covered_paths,
-            variant_covered_labels=variant_fp.covered_paths,
+            baseline_covered_paths=baseline_fp.covered_paths,
+            variant_covered_paths=variant_fp.covered_paths,
         )
     # Both fingerprints match — return one (they are byte-identical).
     return baseline_fp
