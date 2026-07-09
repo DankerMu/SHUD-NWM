@@ -1,14 +1,16 @@
-"""§3.1 + §3.2 + §3.3 + §3.4 ``.sp.att`` FORC rewrite + G4 gates.
+"""§3.1 + §3.2 + §3.3 + §3.4 + §3.5 ``.sp.att`` FORC rewrite + G4 gates.
 
 This module implements OpenSpec change ``forcing-mapping-asset-build`` §3.1
-through §3.4 (Epic #909 SUB-8 + SUB-9). It exposes fail-closed primitives
-that copy the baseline ``.sp.att`` into a variant package, update every
-element's ``FORC`` value **by element ID** via the ownership +
+through §3.5 (Epic #909 SUB-8 + SUB-9 + SUB-10). It exposes fail-closed
+primitives that copy the baseline ``.sp.att`` into a variant package, update
+every element's ``FORC`` value **by element ID** via the ownership +
 ``shud_forcing_index`` produced by ``element-grid-ownership-mapping``, prove
 that no non-``FORC`` byte changes in the process, prove that all non-``.sp.att``
 hydrologic core files are SHA-256 identical between baseline and variant
-(§3.3), and compute + prove equality of the ten-surface
-``hydrologic_core_fingerprint`` (§3.4, docs §Gate G10).
+(§3.3), compute + prove equality of the ten-surface
+``hydrologic_core_fingerprint`` (§3.4, docs §Gate G10), and assert that no
+legacy CMFD weather path leaks into the active variant forcing tree (§3.5,
+docs §Gate G4 + §8.1/§8.2).
 
 Public entry points
 -------------------
@@ -49,6 +51,15 @@ Public entry points
   computes the fingerprint on baseline + variant packages, asserts equality,
   and returns the shared :class:`HydrologicCoreFingerprint` on pass. Raises
   :class:`HydrologicCoreFingerprintMismatchError` on drift.
+* :func:`verify_no_legacy_weather_path_in_active_tree` — §3.5 G4 blocker:
+  walks the variant package's active forcing subtree case-insensitively and
+  refuses when any legacy CMFD weather CSV (``X<lon>Y<lat>.csv`` per docs
+  §8.2 clause A; ``X<n>.csv`` per docs §8.2 clause B) or builder-written
+  cycle-dated ``.tsd.forc`` (docs §8.1 boundary — the runtime producer owns
+  cycle ``.tsd.forc``, the mapping builder never writes one) appears.
+  Green build proof: the active forcing subtree contains only the
+  direct-grid binding artifact reference and non-weather ancillary
+  ``*.tsd.*`` files inventoried by SUB-2.
 * :func:`emit_semantic_diff` — parse-level FORC-only diff artifact from
   two sequences of :class:`SpAttForcRow`; deterministic ordering by
   ``element_id`` ascending for byte-identical reproducibility.
@@ -91,6 +102,7 @@ Applies to:
 :func:`verify_non_forc_columns_unchanged` (this module, §3.2),
 :func:`verify_non_sp_att_checksums_equal` (this module, §3.3),
 :func:`verify_hydrologic_core_fingerprint_equal` (this module, §3.4),
+:func:`verify_no_legacy_weather_path_in_active_tree` (this module, §3.5),
 :func:`workers.mapping_builder.verify_grid_identity_precondition`,
 :func:`workers.mapping_builder.verify_package_crs`,
 :func:`workers.mapping_builder.verify_g0_baseline`,
@@ -114,17 +126,19 @@ Gate orchestration (SUB-8 + SUB-9 -> SUB-13 deferral)
 -----------------------------------------------------
 Several ``verify_*`` gates ship in this module as standalone primitives:
 :func:`verify_non_forc_columns_unchanged` (SUB-8, §3.2),
-:func:`verify_non_sp_att_checksums_equal` (SUB-9, §3.3), and
-:func:`verify_hydrologic_core_fingerprint_equal` (SUB-9, §3.4). They are
-exported for callers (the mapping evidence bundler in SUB-13, standalone
-auditors) but are **not yet** wired into :func:`copy_and_rewrite_sp_att_forc`'s
-write pipeline. The §3.1 orchestrator still only runs its own in-memory
-non-``FORC`` proof (``_verify_non_forc_columns_unchanged_in_memory``)
-before writing the variant. Orchestrated "fail closed BEFORE write"
-invocation of the §3.3 file-checksum gate and the §3.4 fingerprint gate
-lands in SUB-13 when the full variant assembly step is scaffolded and the
-mapping evidence package assembles the ordered gate results (G0–G5) into
-one immutable bundle.
+:func:`verify_non_sp_att_checksums_equal` (SUB-9, §3.3),
+:func:`verify_hydrologic_core_fingerprint_equal` (SUB-9, §3.4), and
+:func:`verify_no_legacy_weather_path_in_active_tree` (SUB-10, §3.5). They
+are exported for callers (the mapping evidence bundler in SUB-13,
+standalone auditors) but are **not yet** wired into
+:func:`copy_and_rewrite_sp_att_forc`'s write pipeline. The §3.1 orchestrator
+still only runs its own in-memory non-``FORC`` proof
+(``_verify_non_forc_columns_unchanged_in_memory``) before writing the
+variant. Orchestrated "fail closed BEFORE write" invocation of the §3.3
+file-checksum gate, the §3.4 fingerprint gate, and the §3.5 no-legacy-
+weather-path gate lands in SUB-13 when the full variant assembly step is
+scaffolded and the mapping evidence package assembles the ordered gate
+results (G0–G5) into one immutable bundle.
 """
 
 from __future__ import annotations
@@ -548,6 +562,82 @@ class HydrologicCoreFingerprintMismatchError(SpAttRewriteError):
         self.variant_covered_paths = variant_covered_paths
 
 
+class LegacyWeatherPathInActiveTreeError(SpAttRewriteError):
+    """A legacy CMFD weather path leaked into the variant's active forcing tree.
+
+    Per spec §"No legacy CMFD weather path appears in the active forcing
+    tree" (§3.5) and docs §Gate G4 + §8.1/§8.2: the mapping builder's
+    variant package MUST NOT carry any legacy CMFD weather CSV in the active
+    forcing subtree (``X<lon>Y<lat>.csv`` per docs §8.2 clause A;
+    ``X<n>.csv`` per docs §8.2 clause B) and MUST NOT carry any
+    builder-written cycle-dated ``.tsd.forc`` — the runtime forcing producer
+    owns cycle ``.tsd.forc``, the mapping builder never writes one (§8.1).
+
+    ``pattern_name`` discriminates the three forbidden-filename categories
+    so downstream evidence (SUB-13) records which class of legacy artifact
+    slipped in:
+
+    * ``"legacy_lonlat_csv"`` — a ``X<lon>Y<lat>.csv`` CMFD station-lat-lon
+      weather CSV (e.g. ``X100.75Y37.65.csv``);
+    * ``"legacy_numbered_csv"`` — a ``X<n>.csv`` CMFD numbered station
+      weather CSV (e.g. ``X6.csv``);
+    * ``"builder_written_cycle_tsd_forc"`` — a cycle-dated ``.tsd.forc``
+      file the mapping builder MUST NOT write (e.g.
+      ``cycle_2020010100.tsd.forc``).
+
+    The scan is case-insensitive on filenames — an uppercase ``X100Y50.CSV``
+    aliases a lowercase ``x100y50.csv`` on any case-insensitive filesystem
+    (macOS APFS/HFS+, Windows NTFS default), so both spellings block.
+    ``matched_path`` records the offending path (absolute, from the walk)
+    so evidence and error messages name the specific file, not just its
+    directory.
+    """
+
+    def __init__(
+        self,
+        *,
+        matched_path: pathlib.Path,
+        pattern_name: str,
+    ) -> None:
+        super().__init__(
+            f"legacy weather path {matched_path} matches forbidden pattern "
+            f"{pattern_name!r} in active variant forcing tree "
+            "(G4 asset delta / docs §8.1 + §8.2 violation)"
+        )
+        self.matched_path = matched_path
+        self.pattern_name = pattern_name
+
+
+class ActiveForcingSubdirNotFoundError(SpAttRewriteError):
+    """The active forcing subdirectory does not exist under the variant root.
+
+    Per §3.5 the gate must scan the variant's active forcing tree. If the
+    caller-supplied ``active_forcing_subdir`` does not resolve to an
+    existing directory under ``package_root``, the gate cannot prove
+    anything and MUST refuse loudly rather than silently passing on a
+    missing tree — a missing active-forcing subtree means the variant
+    package is malformed, and silently declaring "no legacy weather here"
+    would let a downstream evidence bundler bind to a nonexistent tree.
+    """
+
+    def __init__(
+        self,
+        *,
+        package_root: pathlib.Path,
+        active_forcing_subdir: str,
+        resolved_path: pathlib.Path,
+    ) -> None:
+        super().__init__(
+            f"active_forcing_subdir {active_forcing_subdir!r} under "
+            f"package_root {package_root} resolves to {resolved_path} which "
+            "does not exist or is not a directory; the §3.5 gate cannot "
+            "prove absence of legacy weather in a nonexistent tree"
+        )
+        self.package_root = package_root
+        self.active_forcing_subdir = active_forcing_subdir
+        self.resolved_path = resolved_path
+
+
 # --- category constants (§3.3 + §3.4 coverage sets) ----------------------
 
 # The 7 non-``.sp.att`` hydrologic core file categories covered by the G4
@@ -578,6 +668,52 @@ HYDROLOGIC_CORE_FINGERPRINT_LABELS: tuple[str, ...] = (
     "solver_config",
     "sp_att_non_forc",
     "state_schema",
+)
+
+
+# --- §3.5 legacy weather path patterns (G4 no-legacy-weather-path) --------
+
+# Compiled once at import for cheap per-file matching. Case-insensitive
+# because macOS APFS/HFS+ and Windows NTFS default to case-insensitive
+# filesystems — an uppercase ``X100Y50.CSV`` aliases a lowercase
+# ``x100y50.csv`` at the OS layer, so a case-sensitive regex would silently
+# miss the alias and let the legacy path leak through the gate.
+#
+# Pattern rationale:
+#
+# * :data:`_LEGACY_LONLAT_CSV_PATTERN` — docs §8.2 clause A: the CMFD legacy
+#   station-lat-lon-keyed CSV (e.g. ``X100.75Y37.65.csv``). Requires ``X``
+#   then digits (with optional decimal), ``Y``, digits (with optional
+#   decimal), then ``.csv``. The ``Y`` is what distinguishes this from the
+#   numbered pattern below — the two are non-overlapping.
+# * :data:`_LEGACY_NUMBERED_CSV_PATTERN` — docs §8.2 clause B: the CMFD
+#   legacy numbered CSV (e.g. ``X6.csv`` for zhaochen_mc's ``X6..X9`` or
+#   ``X1.csv`` for zhaochen_wem's ``X1..X5``). Requires ``X`` then digits
+#   then ``.csv`` with no ``Y`` in between.
+# * :data:`_CYCLE_TSD_FORC_PATTERN` — docs §8.1 boundary: the runtime
+#   forcing producer owns cycle ``.tsd.forc`` (with an embedded forecast
+#   cycle startdate). The mapping builder MUST NOT write one. A run of 8+
+#   consecutive digits is the reliable date-signature marker (any
+#   ``YYYYMMDD`` or ``YYYYMMDDHH`` cycle stamp qualifies), and it never
+#   collides with baseline standard filenames like ``qhh.tsd.forc`` (no
+#   digits) or per-basin ``.tsd.forc`` with short numeric suffixes (< 8
+#   digits).
+_LEGACY_LONLAT_CSV_PATTERN = re.compile(
+    r"^X\d+(?:\.\d+)?Y\d+(?:\.\d+)?\.csv$", re.IGNORECASE
+)
+_LEGACY_NUMBERED_CSV_PATTERN = re.compile(r"^X\d+\.csv$", re.IGNORECASE)
+_CYCLE_TSD_FORC_PATTERN = re.compile(r"^.*\d{8}.*\.tsd\.forc$", re.IGNORECASE)
+
+
+# Ordered list of (pattern_name, compiled regex). Order determines which
+# pattern name is reported when multiple patterns could match the same
+# filename — the lonlat pattern is checked before the numbered pattern
+# because ``X100Y50.csv`` is more specific than ``X100.csv`` (though they
+# never share a filename in practice due to the required ``Y``).
+_LEGACY_WEATHER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("legacy_lonlat_csv", _LEGACY_LONLAT_CSV_PATTERN),
+    ("legacy_numbered_csv", _LEGACY_NUMBERED_CSV_PATTERN),
+    ("builder_written_cycle_tsd_forc", _CYCLE_TSD_FORC_PATTERN),
 )
 
 
@@ -1924,4 +2060,109 @@ def _verify_non_forc_columns_unchanged_in_memory(
                     column_name=baseline.schema[col_idx],
                     baseline_value=b_row[col_idx],
                     variant_value=v_row[col_idx],
+                )
+
+
+# --- §3.5 no-legacy-weather-path-in-active-tree gate (G4 blocker) --------
+
+
+def verify_no_legacy_weather_path_in_active_tree(
+    package_root: pathlib.Path,
+    *,
+    active_forcing_subdir: str | pathlib.Path,
+) -> None:
+    """§3.5 G4 gate: refuse when any legacy weather path lives in the active tree.
+
+    Walks the variant package's active forcing subtree recursively and
+    fail-closed on the first filename matching any of the three forbidden
+    patterns declared in :data:`_LEGACY_WEATHER_PATTERNS`:
+
+    1. ``X<lon>Y<lat>.csv`` (docs §8.2 clause A) — the legacy CMFD
+       station-lat-lon weather CSV. Runtime SHUD station CSVs live under
+       object-store, not inside the model input package.
+    2. ``X<n>.csv`` (docs §8.2 clause B) — the legacy CMFD numbered station
+       weather CSV (zhaochen_mc / zhaochen_wem baseline shape). Any
+       compatibility copy of these MUST live in a non-runtime directory
+       marked inactive — never in the active forcing tree.
+    3. Builder-written cycle-dated ``.tsd.forc`` (docs §8.1 boundary) — the
+       runtime forcing producer owns cycle ``.tsd.forc``. The mapping
+       builder MUST NOT write one; if it did, the variant would ship a
+       fixed-cycle forcing that shadows the producer's canonical output.
+
+    Match is case-insensitive on filenames (uppercase / mixed-case aliases
+    like ``X100Y50.CSV`` or ``x50Y100.csv`` block equally). The scan
+    descends every subdirectory under ``active_forcing_subdir`` — a nested
+    ``forcing/subdir/X6.csv`` still blocks.
+
+    Green-build proof: the active forcing subtree contains only the
+    direct-grid binding artifact reference plus non-weather ancillary
+    ``*.tsd.*`` files (per SUB-2's ancillary inventory). None of the three
+    patterns match a non-weather ``*.tsd.*`` (e.g. ``precip.tsd.mrms.forc``,
+    ``pet.tsd.hourly.csv``) or the binding artifact — so a clean variant
+    passes with ``None``.
+
+    Fail-closed guarantee: raises :class:`LegacyWeatherPathInActiveTreeError`
+    on first match BEFORE any variant package assembly step commits. SUB-13
+    calls this gate as one of the G4 pre-write checks in the mapping
+    evidence pipeline.
+
+    Parameters
+    ----------
+    package_root:
+        Absolute path to the variant model input package root. MUST be an
+        existing directory.
+    active_forcing_subdir:
+        Relative-path (``str`` or :class:`pathlib.Path`) to the active
+        forcing subtree under ``package_root``. Accepted as a kwarg because
+        docs §8.2 does not fix a canonical layout — the caller (SUB-13
+        orchestrator) knows the variant's forcing subdir per basin / per
+        change. Follows the same "pluggable kwarg" convention SUB-9
+        established for ``state_schema_bytes`` / ``solver_config_bytes``.
+        The resolved path MUST exist under ``package_root`` and be a
+        directory; a missing subtree raises
+        :class:`ActiveForcingSubdirNotFoundError`.
+
+    Raises
+    ------
+    LegacyWeatherPathInActiveTreeError
+        A filename in the active forcing subtree matches one of the three
+        forbidden patterns. ``matched_path`` carries the absolute path;
+        ``pattern_name`` identifies which category.
+    ActiveForcingSubdirNotFoundError
+        ``active_forcing_subdir`` does not resolve to an existing directory
+        under ``package_root``.
+    SpAttRewriteError
+        ``package_root`` is not a directory.
+    """
+    if not isinstance(package_root, pathlib.Path):
+        raise SpAttRewriteError(
+            f"package_root expects pathlib.Path, got "
+            f"{type(package_root).__name__}"
+        )
+    if not package_root.is_dir():
+        raise SpAttRewriteError(
+            f"package_root {package_root} is not a directory"
+        )
+    active_root = package_root / active_forcing_subdir
+    if not active_root.exists() or not active_root.is_dir():
+        raise ActiveForcingSubdirNotFoundError(
+            package_root=package_root,
+            active_forcing_subdir=str(active_forcing_subdir),
+            resolved_path=active_root,
+        )
+    # ``rglob("*")`` recursively enumerates every file + dir under the active
+    # tree. Sort to make the first-mismatch report reproducible across runs /
+    # OS iteration orders (spec §7 determinism). Only regular files are
+    # candidates — directories and symlinks-to-directories are skipped
+    # (symlinks-to-files ARE hashed by intent, so they participate here too
+    # to catch a symlink that spells the legacy name).
+    for candidate in sorted(active_root.rglob("*")):
+        if not candidate.is_file():
+            continue
+        name = candidate.name
+        for pattern_name, pattern in _LEGACY_WEATHER_PATTERNS:
+            if pattern.fullmatch(name):
+                raise LegacyWeatherPathInActiveTreeError(
+                    matched_path=candidate,
+                    pattern_name=pattern_name,
                 )
