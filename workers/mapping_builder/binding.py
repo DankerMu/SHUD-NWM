@@ -1210,10 +1210,11 @@ class DbWriteSpy:
     "I watched, and no ``met.*`` write happened."
 
     Passing ``None`` for ``db_write_spy=`` means the caller is *not*
-    monitoring — the gate fails closed with a
-    :class:`ForbiddenRuntimeProducerArtifactError` demanding explicit
-    boundary monitoring. This turns "we forgot to check" into a loud
-    build failure (SUB-12 fail-closed on unmonitored spy).
+    monitoring — the gate fails closed with an
+    :class:`UnmonitoredBoundaryError` (distinct from the real-violation
+    raise :class:`ForbiddenRuntimeProducerArtifactError`) demanding
+    explicit boundary monitoring. This turns "we forgot to check" into a
+    loud build failure (SUB-12 fail-closed on unmonitored spy).
 
     Attributes
     ----------
@@ -1261,7 +1262,9 @@ class CycleLineageSpy:
     §8.1. The mapping stage never records cycle lineage by design. Same
     contract as :class:`DbWriteSpy`: a fresh spy with an empty
     ``captured_records`` tuple is the §4.3 orchestrator's boundary-monitor
-    proof; ``None`` fails closed as unmonitored.
+    proof. Passing ``None`` fails closed with
+    :class:`UnmonitoredBoundaryError` (distinct from the real-violation
+    :class:`ForbiddenRuntimeProducerArtifactError`).
 
     Attributes
     ----------
@@ -1324,10 +1327,16 @@ class ForbiddenOutputScanResult:
     passed:
         ``True`` iff all three tuples are empty AND the gate ran with
         both spies actively supplied. Note that on ``passed=False`` the
-        gate ALSO raises :class:`ForbiddenRuntimeProducerArtifactError` —
-        the caller never sees ``passed=False`` as a return; the field
-        exists so the same struct persisted into SUB-13 evidence carries
-        the boolean verdict.
+        gate ALSO raises — the caller never sees ``passed=False`` as a
+        return; the field exists so the same struct persisted into SUB-13
+        evidence carries the boolean verdict. Two raise paths:
+
+        - On real violation: :class:`ForbiddenRuntimeProducerArtifactError`
+          raised (offending path, ``met.*`` DB write, or cycle-lineage
+          record actually observed).
+        - On unmonitored spy: :class:`UnmonitoredBoundaryError` raised —
+          caller supplied ``None`` for one of the two spies, so the gate
+          cannot vouch for the §8.1 boundary.
     """
 
     scanned_path_count: int
