@@ -38,6 +38,18 @@ Coverage
   readiness manifest's nested proj_crs_database_version projects through
   the SUB-13 adapter and matches the evidence package identity.
 
+Coverage extras
+---------------
+
+* ``test_mutating_non_excluded_field_changes_evidence_checksum`` — proves
+  every non-``build_timestamp`` field enters the checksum (INV-7).
+* ``test_ownership_svg_carries_truncation_marker_at_production_scale`` —
+  proves the SUB-13 ownership SVG emits the ``truncated n_rendered=X
+  n_total=484`` marker when the 484-element basin exceeds the canvas.
+* ``test_algorithm_id_is_versioned_constant`` — algorithm-identity
+  guardrail: pins ``algorithm.ALGORITHM_ID`` and ``evidence.ALGORITHM_ID``
+  to the same versioned string, blocking silent rename drift.
+
 Fixture
 -------
 
@@ -56,20 +68,27 @@ Baseline package at ``tests/fixtures/mapping_builder/keliya/`` contains:
 Regeneration
 ------------
 
-Rebuilding the fixture from the checked-in ``build.py`` (via
-``uv run python tests/fixtures/mapping_builder/keliya/build.py``) is
-byte-idempotent — the checked-in files are the authoritative test input
-and the test never invokes ``build.py`` at runtime.
+Rebuilding the fixture via
+``uv run python tests/fixtures/mapping_builder/keliya/build.py``
+reproduces the checked-in fixture bytes under a pinned pyproj + PROJ
+database version. Version drift may yield last-decimal drift in the
+``.4f`` node coordinates and the ``.2f`` station X/Y projections, so a
+runtime diff assertion would be flaky across environments. The
+checked-in files are the authoritative test input and the test never
+invokes ``build.py`` at runtime.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import pathlib
 import shutil
 import struct
 from datetime import UTC, datetime
+
+import pytest
 
 from packages.common import grid_signature as grid_signature_module
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
@@ -90,6 +109,7 @@ from workers.mapping_builder import (
     EvidencePackage,
     GateResult,
     GateResults,
+    GridSignatureMismatchError,
     GridSnapshotReference,
     MappingAlgorithmIdentity,
     OwnershipRow,
@@ -119,6 +139,7 @@ from workers.mapping_builder import (
     verify_evidence_checksum_binding,
     verify_g0_baseline,
     verify_g1_non_degenerate_triangles,
+    verify_grid_identity_precondition,
     verify_hydrologic_core_fingerprint_equal,
     verify_manifest_binding_cross_consistent,
     verify_no_forbidden_runtime_producer_artifacts,
@@ -127,6 +148,16 @@ from workers.mapping_builder import (
     verify_non_sp_att_checksums_equal,
     verify_package_crs,
     verify_small_basin_gate,
+)
+
+# Epic #886 readiness manifest — the SUB-13 adapter's canonical input source.
+_EPIC_886_READINESS_MANIFEST = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "openspec"
+    / "changes"
+    / "cmfd-direct-grid-platform-readiness"
+    / "evidence"
+    / "readiness-manifest.v1.json"
 )
 
 # --- fixture constants -----------------------------------------------------
@@ -361,17 +392,19 @@ def _build_pipeline(
 
 
 def _make_forbidden_output_scan(build_result: dict):
-    """Run the §8.1 forbidden-output scan on the emitted artifact set."""
+    """Run the §8.1 forbidden-output scan on the emitted artifact set.
+
+    Walk the actual on-disk artifacts under ``variant_root`` rather than a
+    hardcoded declared list — the SUB-12 gate protects against unexpected
+    files, not just those the pipeline declares upfront. A rogue file
+    dropped in the variant subtree by a future regression must reach the
+    gate so its filename gets checked against the forbidden regexes.
+    """
     variant = build_result["variant_root"]
-    # Only the sp.att variant + notional manifest.json + binding.json +
-    # evidence.json paths — the mapping builder does not write cycle
-    # .tsd.forc or per-station weather CSVs.
-    emitted = [
-        variant / "keliya.sp.att",
-        variant / "manifest.json",
-        variant / "binding.json",
-        variant / "evidence.json",
-    ]
+    emitted = sorted(
+        (p for p in variant.rglob("*") if p.is_file()),
+        key=lambda p: str(p),
+    )
     return verify_no_forbidden_runtime_producer_artifacts(
         emitted,
         db_write_spy=DbWriteSpy(),
@@ -561,14 +594,11 @@ def test_full_pipeline_g0_through_g5_end_to_end(tmp_path: pathlib.Path) -> None:
     assert isinstance(inventory.entries, tuple)
     assert isinstance(classification.startdate_heterogeneity, tuple)
 
-    # G2 grid identity: barycenters lie within snapshot bbox; signature matches.
-    # `nearest_cell_barycenter_geodesic_v1` already exercised the G2 gate;
-    # rerun `verify_grid_identity_precondition` explicitly for evidence
-    # completeness.
-    barycenters_wgs84 = [
-        (o.element_id, 0.0, 0.0) for o in result["ownerships"]
-    ]  # placeholders; only length/count matters for the assert below
-    assert len(barycenters_wgs84) == 484
+    # G2 grid identity was already exercised inside `_build_pipeline` via
+    # `nearest_cell_barycenter_geodesic_v1`, which invokes
+    # `verify_grid_identity_precondition` internally (see
+    # test_g2_grid_identity_via_shared_signature_helper below for the
+    # negative-path proof against a tampered signature).
 
     # G3: 484 ownerships / 8 used cells / shud_forcing_index 1..8.
     assert len(result["ownerships"]) == 484
@@ -839,6 +869,72 @@ def test_checksum_excluded_fields_enumerated_and_never_enter_any_checksum(
 
 
 # =========================================================================
+# 9b. NON-EXCLUDED FIELD REGRESSION GUARD: every non-excluded field enters
+# the checksum. Complements test #9 (which proves excluded fields do NOT
+# enter) by proving the other direction of INV-7.
+# =========================================================================
+
+
+def test_mutating_non_excluded_field_changes_evidence_checksum(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every non-``build_timestamp`` field enters ``evidence_checksum``.
+
+    Test #9 covers half of INV-7 (mutating the enumerated excluded field
+    ``build_timestamp`` preserves the checksum). This test covers the
+    other half: mutating any of a representative sample of non-excluded
+    fields MUST change the checksum. The sample includes at least one
+    field per manifest-, integrity-, and QA-derived surface so a future
+    silent-skip regression on any of them fails loud.
+    """
+    result = _build_pipeline(tmp_path)
+    package = _assemble_full_evidence(
+        tmp_path,
+        result,
+        build_timestamp=datetime(2026, 3, 15, tzinfo=UTC),
+    )
+    baseline_checksum = compute_evidence_checksum(package)
+
+    # distance_qa — QA-derived surface.
+    mutated_distance_qa = dataclasses.replace(
+        package.distance_qa,
+        p50_normalized=package.distance_qa.p50_normalized + 0.1,
+    )
+    mutated_pkg = dataclasses.replace(package, distance_qa=mutated_distance_qa)
+    assert compute_evidence_checksum(mutated_pkg) != baseline_checksum
+
+    # hydrologic_core_fingerprint — G4 integrity surface.
+    mutated_fingerprint = dataclasses.replace(
+        package.hydrologic_core_fingerprint,
+        hash="f" * 64,
+    )
+    mutated_pkg = dataclasses.replace(
+        package, hydrologic_core_fingerprint=mutated_fingerprint
+    )
+    assert compute_evidence_checksum(mutated_pkg) != baseline_checksum
+
+    # sp_att_asset_diff — manifest-adjacent .sp.att surface (the manifest
+    # itself is not a top-level EvidencePackage field; its identity fields
+    # flow through GridSnapshotReference + SpAttAssetDiff + BindingArtifact
+    # cross-checks, and sp_att_asset_diff is the manifest-derived surface
+    # most closely bound to the mapping asset).
+    mutated_diff = dataclasses.replace(
+        package.sp_att_asset_diff,
+        new_sha256_hex="a" * 64,
+    )
+    mutated_pkg = dataclasses.replace(package, sp_att_asset_diff=mutated_diff)
+    assert compute_evidence_checksum(mutated_pkg) != baseline_checksum
+
+    # capacity_report — QA/limits surface.
+    mutated_capacity = dataclasses.replace(
+        package.capacity_report,
+        station_count=package.capacity_report.station_count + 1,
+    )
+    mutated_pkg = dataclasses.replace(package, capacity_report=mutated_capacity)
+    assert compute_evidence_checksum(mutated_pkg) != baseline_checksum
+
+
+# =========================================================================
 # 10. FORBIDDEN OUTPUT SCAN CLEAN ON GREEN PIPELINE
 # =========================================================================
 
@@ -846,11 +942,24 @@ def test_checksum_excluded_fields_enumerated_and_never_enter_any_checksum(
 def test_forbidden_output_scan_clean_on_green_pipeline(
     tmp_path: pathlib.Path,
 ) -> None:
-    """SUB-12 scan passes on the mapping-builder's clean artifact set."""
+    """SUB-12 scan passes on the mapping-builder's clean artifact set.
+
+    Since ``_make_forbidden_output_scan`` walks the actual variant subtree
+    (see helper docstring), the scanned path count MUST equal the on-disk
+    file count under ``variant_root``: 1 rewritten ``.sp.att`` + 1 mesh
+    copy + 6 stub category files (river/lake/soil/geol/land/calibration)
+    = 8 files. The empty ``input/`` directory is filtered out by
+    ``is_file()``.
+    """
     result = _build_pipeline(tmp_path)
     scan = _make_forbidden_output_scan(result)
+    on_disk_files = sorted(
+        (p for p in result["variant_root"].rglob("*") if p.is_file()),
+        key=lambda p: str(p),
+    )
     assert scan.passed is True
-    assert scan.scanned_path_count == 4
+    assert scan.scanned_path_count == len(on_disk_files)
+    assert scan.scanned_path_count == 8
     assert scan.offending_paths == ()
     assert scan.offending_db_writes == ()
     assert scan.cycle_lineage_records == ()
@@ -864,17 +973,58 @@ def test_forbidden_output_scan_clean_on_green_pipeline(
 def test_g2_grid_identity_via_shared_signature_helper(
     tmp_path: pathlib.Path,
 ) -> None:
-    """G2 gate uses the shared ``packages.common.grid_signature.grid_signature_hash`` authority.
+    """G2 gate uses the shared authority and fails closed on signature tamper.
 
-    Recomputing the signature from the snapshot cells via the shared helper
-    MUST equal ``snapshot.grid_signature`` — the same equality the G2 gate
-    checks internally.
+    The positive round-trip recomputes the signature from the loaded
+    snapshot cells via ``packages.common.grid_signature.grid_signature_hash``
+    (the SOLE signature authority, cross-checked at ``make_snapshot``
+    construction). The negative half then stages a tampered snapshot with
+    a divergent signature and asserts the REAL G2 gate
+    ``verify_grid_identity_precondition`` raises
+    :class:`GridSignatureMismatchError` — proving the gate does not
+    silently accept a diverged signature.
     """
-    result = _build_pipeline(tmp_path)
+    # Positive: shared helper on the snapshot cells reproduces the stored
+    # signature. ``_build_pipeline`` already ran the gate inside
+    # ``nearest_cell_barycenter_geodesic_v1`` (the fact the pipeline
+    # succeeded is a positive-path proof).
+    result = _build_pipeline(tmp_path / "positive")
     snapshot = result["snapshot"]
-    cells = result["snapshot_cells"]
-    recomputed = grid_signature_module.grid_signature_hash(cells)
+    snapshot_cells = result["snapshot_cells"]
+    recomputed = grid_signature_module.grid_signature_hash(tuple(snapshot_cells))
     assert snapshot.grid_signature == recomputed
+
+    # Negative: a tampered signature MUST fail the G2 gate closed. Stage a
+    # fresh loader carrying a fabricated signature and invoke the public
+    # gate directly.
+    tampered_cells = make_regular_grid_cells(
+        lon0=_GRID_LON0,
+        lat0=_GRID_LAT0,
+        lon_step=_GRID_STEP,
+        lat_step=_GRID_STEP,
+        lon_count=_GRID_LON_COUNT,
+        lat_count=_GRID_LAT_COUNT,
+    )
+    tampered_snapshot = make_snapshot(
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        cells=tampered_cells,
+        bbox_pad=0.5,
+        grid_signature_override="deadbeef" * 8,
+    )
+    tampered_loader = InMemoryGridSnapshotLoader(
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        snapshot=tampered_snapshot,
+        cells=tampered_cells,
+    )
+    with pytest.raises(GridSignatureMismatchError):
+        verify_grid_identity_precondition(
+            source_id=_SOURCE_ID,
+            grid_id=_GRID_ID,
+            barycenters_wgs84=[(1, 100.25, 36.15)],
+            store=tampered_loader,
+        )
 
 
 # =========================================================================
@@ -887,23 +1037,52 @@ def test_epic_886_readiness_manifest_flows_into_evidence(
 ) -> None:
     """Epic #886 nested ``proj_crs_database_version`` projects into the evidence identity.
 
+    Loads the real Epic #886
+    ``openspec/changes/cmfd-direct-grid-platform-readiness/evidence/readiness-manifest.v1.json``
+    verbatim (not a hand-crafted subset) so the cross-plane contract is
+    exercised against the actual producer output. The full
+    ``proj_db_metadata`` dict from the manifest carries ~15 fields
+    (``EPSG.*``, ``ESRI.*``, ``IGNF.*``, ``NKG.*``, ``PROJ.VERSION``,
+    ``PROJ_DATA.VERSION``, ``DATABASE.LAYOUT.VERSION.MAJOR/MINOR``); the
+    projection reads only the four load-bearing fields and ignores the
+    rest — this test proves the adapter tolerates the extra keys.
+
     The SUB-13 adapter :func:`project_readiness_proj_crs_database_version`
-    projects Epic #886's nested dict to a canonical str. The evidence
-    package's ``MappingAlgorithmIdentity`` records the projected string;
+    projects the nested dict to a canonical str. The evidence package's
+    ``MappingAlgorithmIdentity`` records the projected string;
     :func:`verify_algorithm_and_proj_identity_matches_readiness` accepts
     equal readiness content and returns None.
     """
-    nested = {
-        "proj_version": "9.5.1",
-        "proj_db_metadata": {
-            "DATABASE.LAYOUT.VERSION.MAJOR": "1",
-            "DATABASE.LAYOUT.VERSION.MINOR": "20",
-            "PROJ_DATA.VERSION": "1.19",
-        },
+    assert _EPIC_886_READINESS_MANIFEST.exists(), (
+        f"Epic #886 readiness manifest missing at {_EPIC_886_READINESS_MANIFEST}; "
+        "this test defends the cross-plane contract with the producer's real output"
+    )
+    manifest_dict = json.loads(_EPIC_886_READINESS_MANIFEST.read_text())
+    proj_crs_block = manifest_dict["proj_crs_database_version"]
+
+    # The full block carries the extra ~11 metadata keys the adapter must
+    # tolerate; this assertion pins the surface area.
+    assert set(proj_crs_block["proj_db_metadata"]) >= {
+        "DATABASE.LAYOUT.VERSION.MAJOR",
+        "DATABASE.LAYOUT.VERSION.MINOR",
+        "PROJ_DATA.VERSION",
+        "PROJ.VERSION",
+        "EPSG.VERSION",
+        "ESRI.VERSION",
+        "IGNF.VERSION",
+        "NKG.VERSION",
     }
-    projected = project_readiness_proj_crs_database_version(nested)
-    # Canonical projection is exactly the docstring-declared format.
-    assert projected == "proj:9.5.1 db-major:1 db-minor:20 proj-data:1.19"
+
+    projected = project_readiness_proj_crs_database_version(proj_crs_block)
+    # Canonical projection is exactly the docstring-declared format,
+    # sourced from the real manifest's four load-bearing fields.
+    expected = (
+        f"proj:{proj_crs_block['proj_version']} "
+        f"db-major:{proj_crs_block['proj_db_metadata']['DATABASE.LAYOUT.VERSION.MAJOR']} "
+        f"db-minor:{proj_crs_block['proj_db_metadata']['DATABASE.LAYOUT.VERSION.MINOR']} "
+        f"proj-data:{proj_crs_block['proj_db_metadata']['PROJ_DATA.VERSION']}"
+    )
+    assert projected == expected
 
     result = _build_pipeline(tmp_path)
     package = _assemble_full_evidence(
@@ -916,7 +1095,8 @@ def test_epic_886_readiness_manifest_flows_into_evidence(
         proj_crs_database_version=projected,
         checksum="r" * 64,
     )
-    # Gate returns None on pass.
+    # Gate returns None on pass — cross-plane identity round-trips cleanly
+    # from producer manifest to consumer evidence.
     assert (
         verify_algorithm_and_proj_identity_matches_readiness(
             package, readiness_manifest=readiness
@@ -940,3 +1120,40 @@ def test_algorithm_id_is_versioned_constant() -> None:
     """
     assert algorithm_id == "nearest_cell_barycenter_geodesic_v1"
     assert ALGORITHM_ID == algorithm_id
+
+
+# =========================================================================
+# EXTRA: ownership SVG carries the truncation marker at production scale.
+# =========================================================================
+
+
+def test_ownership_svg_carries_truncation_marker_at_production_scale(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The SUB-13 ownership SVG emits ``truncated n_rendered=X n_total=Y`` at 484 rows.
+
+    The SVG canvas fits ~26 rows before the render loop breaks (SUB-13
+    F-5 truncation discipline). At the keliya production scale (484
+    elements), the vast majority of rows are clipped; the SUB-13 F-5
+    marker is what turns a silent clip into a loud signal for downstream
+    reviewers ("484 elements, only 26 rows visible"). Without this
+    marker at 484 rows, a review pass on the SVG could silently miss
+    99.5% of the ownership table.
+    """
+    result = _build_pipeline(tmp_path)
+    package = _assemble_full_evidence(tmp_path, result)
+
+    old_bytes = package.ownership_images.old_image_bytes
+    new_bytes = package.ownership_images.new_image_bytes
+
+    # The literal marker text MUST appear on both sides; a rendered_count
+    # value is env-dependent (canvas height + font-metric arithmetic),
+    # but the total n_total=484 is fixed by the fixture and asserted.
+    assert b"truncated" in old_bytes, (
+        "old-side ownership SVG missing truncation marker at 484-row scale"
+    )
+    assert b"n_total=484" in old_bytes
+    assert b"truncated" in new_bytes, (
+        "new-side ownership SVG missing truncation marker at 484-row scale"
+    )
+    assert b"n_total=484" in new_bytes
