@@ -1823,3 +1823,56 @@ def verify_g1_non_degenerate_triangles(
         max_observed_area=max_area,
         tolerance=G1_MIN_TRIANGLE_AREA,
     )
+
+
+# --- public mesh geometry accessor (SUB-5 reuse) --------------------------
+
+
+def read_sp_mesh_geometry(
+    baseline_root: pathlib.Path,
+) -> tuple[tuple[tuple[int, int, int, int], ...], dict[int, tuple[float, float]]]:
+    """Read ``.sp.mesh`` element/node geometry from a baseline package.
+
+    Locates the sole ``.sp.mesh`` under ``baseline_root`` (matching
+    :func:`verify_g0_baseline` / :func:`verify_g1_non_degenerate_triangles`
+    conventions) and returns ``(elements, node_xy)``:
+
+    * ``elements`` — file-order tuple of ``(element_id, v1, v2, v3)``.
+    * ``node_xy`` — mapping ``node_id -> (x, y)`` in the package CRS.
+
+    This is a thin public wrapper over the SUB-4 private geometry parser
+    intentionally exposed so downstream mapping stages (SUB-5+) can reuse the
+    parse contract without importing a leading-underscore helper. The parser
+    itself is unchanged; the raised error surface (``UnparseableMeshError``,
+    ``BaselineIntegrityError``) is inherited.
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package.
+
+    Returns
+    -------
+    tuple
+        ``(elements, node_xy)`` — immutable elements tuple + mutable dict
+        (the dict return type mirrors the SUB-4 private helper contract).
+
+    Raises
+    ------
+    BaselineIntegrityError
+        ``baseline_root`` is not a directory or ``.sp.mesh`` is missing / not
+        uniquely resolvable.
+    UnparseableMeshError
+        ``.sp.mesh`` cannot be parsed at the geometry level.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"read_sp_mesh_geometry expects pathlib.Path, got "
+            f"{type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+    mesh_path = _find_single_by_suffix(baseline_root, ".sp.mesh")
+    return _parse_sp_mesh_g1_geometry(mesh_path)
