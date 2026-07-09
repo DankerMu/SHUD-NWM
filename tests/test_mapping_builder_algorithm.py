@@ -35,6 +35,7 @@ from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     make_snapshot,
 )
 from workers.mapping_builder import (
+    SMALL_BASIN_MIN_USED_CELLS,
     DistanceSanityBoundExceededError,
     ElementBarycenterOutOfCoverageError,
     ElementOwnership,
@@ -42,6 +43,9 @@ from workers.mapping_builder import (
     GridSnapshotLoader,
     MappingAlgorithmError,
     RegularGridFastPathParityError,
+    SmallBasinApproval,
+    SmallBasinApprovalMismatchError,
+    SmallBasinBlockedError,
     SupersededGridSnapshotError,
     UnregisteredGridSnapshotError,
     algorithm_id,
@@ -51,6 +55,7 @@ from workers.mapping_builder import (
     resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
     verify_half_cell_diagonal_sanity_bound,
+    verify_small_basin_gate,
 )
 from workers.mapping_builder import algorithm as algorithm_module
 
@@ -1120,3 +1125,253 @@ def test_verify_half_cell_diagonal_sanity_bound_direct() -> None:
     assert err.tolerance_m == 1.0e-3
     assert err.grid_cell_id == "42"
     assert isinstance(err, MappingAlgorithmError)
+
+
+# --- §2.4 small-basin hard gate tests --------------------------------------
+
+
+def _mk_cells(count: int) -> tuple[CanonicalGridCell, ...]:
+    """Build ``count`` distinct :class:`CanonicalGridCell` records.
+
+    Only ``grid_cell_id`` and ``canonical_ordinal`` need to be distinct for
+    :func:`verify_small_basin_gate` — the gate looks at ``len(used_cells)``
+    only. Lon/lat are set to distinct values so the record is well-formed
+    without pretending to be a real snapshot.
+    """
+    return tuple(
+        CanonicalGridCell(
+            grid_cell_id=str(i),
+            longitude=float(i) / 10.0,
+            latitude=20.0,
+            canonical_ordinal=i,
+        )
+        for i in range(1, count + 1)
+    )
+
+
+def test_small_basin_gate_threshold_pinned() -> None:
+    """The pinned constant is 4 and re-exported through the package.
+
+    Guards against a future drift of ``SMALL_BASIN_MIN_USED_CELLS`` without a
+    corresponding spec/docs update — the strict ``<`` comparison in
+    :func:`verify_small_basin_gate` pairs with this value per docs §6.5.
+    """
+    from workers.mapping_builder import (
+        SMALL_BASIN_MIN_USED_CELLS as reexported,
+    )
+    from workers.mapping_builder.algorithm import (
+        SMALL_BASIN_MIN_USED_CELLS as source,
+    )
+
+    assert SMALL_BASIN_MIN_USED_CELLS == 4, (
+        "docs §6.5 pins the threshold at 4 (used-cell < 4 refuses by default)"
+    )
+    assert reexported == SMALL_BASIN_MIN_USED_CELLS
+    assert source == SMALL_BASIN_MIN_USED_CELLS
+
+
+def test_small_basin_gate_refuses_1_cell_default() -> None:
+    """1 used cell + no approval -> SmallBasinBlockedError (zhaochen_wem case).
+
+    Per spec §"Fewer than four used cells refuses by default": the 1-cell
+    case (live: zhaochen_wem = 1 used cell, 附录 A) MUST be refused with no
+    output and no partial state — the exception carries the observed count
+    and pinned threshold as evidence.
+    """
+    used_cells = _mk_cells(1)
+    with pytest.raises(SmallBasinBlockedError) as exc_info:
+        verify_small_basin_gate(used_cells)
+    assert exc_info.value.used_cell_count == 1
+    assert exc_info.value.threshold == SMALL_BASIN_MIN_USED_CELLS
+    assert exc_info.value.threshold == 4
+    assert isinstance(exc_info.value, MappingAlgorithmError)
+
+
+def test_small_basin_gate_refuses_threshold_minus_1_default() -> None:
+    """threshold-1 used cells + no approval -> SmallBasinBlockedError.
+
+    Boundary probe: any count strictly below :data:`SMALL_BASIN_MIN_USED_CELLS`
+    must refuse. Using ``threshold - 1`` locks the ``<`` comparison rather
+    than the constant value.
+    """
+    n = SMALL_BASIN_MIN_USED_CELLS - 1
+    used_cells = _mk_cells(n)
+    with pytest.raises(SmallBasinBlockedError) as exc_info:
+        verify_small_basin_gate(used_cells)
+    assert exc_info.value.used_cell_count == n
+    assert exc_info.value.threshold == SMALL_BASIN_MIN_USED_CELLS
+    assert isinstance(exc_info.value, MappingAlgorithmError)
+
+
+def test_small_basin_gate_passes_at_threshold_default() -> None:
+    """threshold used cells + no approval -> returns None (no approval needed).
+
+    Boundary probe: exactly ``SMALL_BASIN_MIN_USED_CELLS`` cells is NOT
+    "below threshold" under the strict ``<`` comparison (docs §6.5:
+    "used-cell 数 < 4"). This is the zhaochen_mc case (4 used cells, 附录
+    A) — at the boundary, no approval is required.
+    """
+    used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS)
+    result = verify_small_basin_gate(used_cells)
+    assert result is None, (
+        f"used_cell_count == {SMALL_BASIN_MIN_USED_CELLS} is NOT below "
+        "threshold under strict `<` comparison; approval MUST NOT be required"
+    )
+
+
+def test_small_basin_gate_passes_above_threshold_default() -> None:
+    """>threshold used cells + no approval -> returns None.
+
+    Positive smoke test: a normal-sized basin (well above the small-basin
+    threshold) must not require any approval, and the function must not
+    raise. Guards against a regression that would over-trigger the blocker.
+    """
+    used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS + 5)
+    result = verify_small_basin_gate(used_cells)
+    assert result is None
+
+
+def test_small_basin_gate_1_cell_with_approval_proceeds() -> None:
+    """1 used cell + valid approval -> returns the approval verbatim.
+
+    Per spec §"Small-basin override is recorded in evidence": the approval
+    is returned verbatim so the caller can hand it to SUB-13 evidence
+    assembly. The returned instance is the SAME object (frozen dataclass
+    equality) — SUB-13 records the approver identity and declared count as
+    a single approval row in the evidence.
+    """
+    approval = SmallBasinApproval(approver_id="ops-1", used_cell_count=1)
+    used_cells = _mk_cells(1)
+    result = verify_small_basin_gate(used_cells, approval=approval)
+    assert result is approval, (
+        "approval MUST be returned verbatim (same object) so SUB-13 records "
+        "the exact operator sign-off as supplied"
+    )
+    assert result.approver_id == "ops-1"
+    assert result.used_cell_count == 1
+
+
+def test_small_basin_gate_approval_with_empty_approver_id_fails_closed() -> None:
+    """Empty / whitespace-only approver_id -> SmallBasinBlockedError.
+
+    An empty or whitespace-only ``approver_id`` is treated as "no approver
+    identity supplied" and the gate MUST fail closed — a bare
+    :class:`SmallBasinApproval` (perhaps constructed from an unfilled
+    template) does not silently satisfy the small-basin override.
+    """
+    used_cells = _mk_cells(1)
+
+    # Empty string.
+    with pytest.raises(SmallBasinBlockedError) as exc_info:
+        verify_small_basin_gate(
+            used_cells,
+            approval=SmallBasinApproval(approver_id="", used_cell_count=1),
+        )
+    assert exc_info.value.used_cell_count == 1
+    assert exc_info.value.threshold == SMALL_BASIN_MIN_USED_CELLS
+
+    # Whitespace-only string (space / tab / newline mix).
+    with pytest.raises(SmallBasinBlockedError):
+        verify_small_basin_gate(
+            used_cells,
+            approval=SmallBasinApproval(approver_id="   ", used_cell_count=1),
+        )
+    with pytest.raises(SmallBasinBlockedError):
+        verify_small_basin_gate(
+            used_cells,
+            approval=SmallBasinApproval(approver_id="\t\n", used_cell_count=1),
+        )
+
+
+def test_small_basin_gate_approval_ignored_when_above_threshold() -> None:
+    """>=threshold used cells + supplied approval -> returns None (approval discarded).
+
+    Design decision: extra approvals on a large basin are silently discarded
+    so a caller that ALWAYS passes an approval never silently regresses on a
+    large basin. The returned ``None`` makes the discard visible: SUB-13 sees
+    "no approval needed" rather than an approval row that was never required.
+    """
+    approval = SmallBasinApproval(
+        approver_id="ops-1",
+        used_cell_count=SMALL_BASIN_MIN_USED_CELLS + 1,
+    )
+    used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS + 1)
+    result = verify_small_basin_gate(used_cells, approval=approval)
+    assert result is None, (
+        "extra approvals for a large basin MUST be discarded (returned as "
+        "None); the caller's SUB-13 code should see 'no approval needed'"
+    )
+
+
+def test_small_basin_gate_approval_mismatch_raises() -> None:
+    """1-cell basin + approval declaring 3 cells -> SmallBasinApprovalMismatchError.
+
+    Defense-in-depth: an approval declared for a DIFFERENT basin size than
+    the one actually observed at gate time is a copy-paste reuse across
+    basins. The gate MUST refuse rather than silently record a mismatched
+    approval — the exception's declared vs observed counts surface the
+    exact mismatch to the operator.
+    """
+    used_cells = _mk_cells(1)
+    approval = SmallBasinApproval(approver_id="ops-1", used_cell_count=3)
+    with pytest.raises(SmallBasinApprovalMismatchError) as exc_info:
+        verify_small_basin_gate(used_cells, approval=approval)
+    assert exc_info.value.approver_id == "ops-1"
+    assert exc_info.value.declared_used_cell_count == 3
+    assert exc_info.value.observed_used_cell_count == 1
+    assert isinstance(exc_info.value, MappingAlgorithmError)
+
+
+def test_small_basin_gate_default_refusal_returns_no_artifact() -> None:
+    """Fail-closed smoke: after refusal, no ownership record / index / dict is returned.
+
+    The function is stateless (no I/O, no shared state), so the primary
+    fail-closed observable is that the caller obtains a raised exception
+    rather than any downstream artifact. This test wraps the refusal in the
+    exact "acquire an ownership tuple / forcing-index dict" idiom the
+    downstream caller uses and proves the local names remain unbound.
+
+    Also proves the supplied ``approval`` object is not mutated on refusal
+    (frozen dataclass makes this true by construction, but explicit
+    assertion catches a future thaw).
+    """
+    used_cells = _mk_cells(1)
+    approval = SmallBasinApproval(approver_id="", used_cell_count=1)
+    ownership_artifact: object = "unset"
+    forcing_index_artifact: object = "unset"
+    approver_id_before = approval.approver_id
+    used_cell_count_before = approval.used_cell_count
+    try:
+        # Idiomatic caller shape: gate output feeds directly into evidence
+        # bundling; on raise, nothing binds.
+        ownership_artifact = verify_small_basin_gate(
+            used_cells, approval=approval
+        )
+        forcing_index_artifact = {"1": 1}  # would only run on gate pass
+    except SmallBasinBlockedError:
+        pass
+    assert ownership_artifact == "unset", (
+        "ownership_artifact MUST remain unbound after gate refusal — the "
+        "fail-closed guarantee is that no downstream artifact escapes"
+    )
+    assert forcing_index_artifact == "unset", (
+        "forcing_index_artifact MUST remain unbound after gate refusal"
+    )
+    # Approval object was never mutated (frozen invariant).
+    assert approval.approver_id == approver_id_before
+    assert approval.used_cell_count == used_cell_count_before
+
+
+def test_small_basin_approval_frozen() -> None:
+    """``SmallBasinApproval`` is a frozen dataclass; field assignment must raise.
+
+    Matches the immutability pin used elsewhere in this file
+    (``test_element_ownership_frozen``). Frozen is load-bearing: SUB-13
+    evidence assembly records the approval byte-for-byte, so silent
+    post-construction mutation would break the audit trail.
+    """
+    approval = SmallBasinApproval(approver_id="ops-1", used_cell_count=1)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        approval.approver_id = "ops-2"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        approval.used_cell_count = 99  # type: ignore[misc]

@@ -1,6 +1,7 @@
 """Mapping builder worker — offline direct-grid mapping asset producer (Change forcing-mapping-asset-build)."""
 
 from workers.mapping_builder.algorithm import (
+    SMALL_BASIN_MIN_USED_CELLS,
     DistanceSanityBoundExceededError,
     ElementBarycenterOutOfCoverageError,
     ElementOwnership,
@@ -8,6 +9,9 @@ from workers.mapping_builder.algorithm import (
     GridSnapshotLoader,
     MappingAlgorithmError,
     RegularGridFastPathParityError,
+    SmallBasinApproval,
+    SmallBasinApprovalMismatchError,
+    SmallBasinBlockedError,
     SupersededGridSnapshotError,
     UnregisteredGridSnapshotError,
     algorithm_id,
@@ -17,6 +21,7 @@ from workers.mapping_builder.algorithm import (
     resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
     verify_half_cell_diagonal_sanity_bound,
+    verify_small_basin_gate,
 )
 from workers.mapping_builder.integrity import (
     G1_MIN_TRIANGLE_AREA,
@@ -88,6 +93,10 @@ __all__ = [
     "NonWgs84ConvertiblePrjError",
     "PackageCrsReport",
     "RegularGridFastPathParityError",
+    "SMALL_BASIN_MIN_USED_CELLS",
+    "SmallBasinApproval",
+    "SmallBasinApprovalMismatchError",
+    "SmallBasinBlockedError",
     "StartdateRecord",
     "SupersededGridSnapshotError",
     "UnequalElementCountError",
@@ -110,4 +119,5 @@ __all__ = [
     "verify_grid_identity_precondition",
     "verify_half_cell_diagonal_sanity_bound",
     "verify_package_crs",
+    "verify_small_basin_gate",
 ]

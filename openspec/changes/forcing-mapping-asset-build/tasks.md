@@ -32,8 +32,8 @@
 - [x] 2.3 Implement used-cell subset and forcing-index assignment: keep only cells referenced by ≥1 element (every binding cell referenced, one cell = one station), and assign `shud_forcing_index` `1..N` contiguous ordered by canonical ordinal.
   - Required evidence: tests prove zero unused bindings, one-cell-to-one-station, and that `shud_forcing_index` is contiguous, unique, canonical-ordinal-ordered, and reproducible.
   - Non-goal for 2.3: no `.sp.att FORC` writing (that is group 3).
-- [ ] 2.4 Implement the small-basin hard gate: refuse by default when used-cell count < 4, and proceed only when an explicit approval flag is supplied, recording the override in evidence.
-  - Required evidence: tests prove a 1-cell and a 4-cell basin (zhaochen_wem/zhaochen_mc analogues) are refused with no output by default, and that the explicit approval flag proceeds and records the approver identity as an evidence approval.
+- [x] 2.4 Implement the small-basin hard gate: refuse by default when used-cell count < 4, and proceed only when an explicit approval flag is supplied, recording the override in evidence.
+  - Required evidence: tests prove a 1-cell basin (zhaochen_wem analogue) is refused with no output by default, that an at-threshold basin (4 used cells, matching zhaochen_mc) passes without approval under the strict `<` comparison, and that the explicit approval flag proceeds and records the approver identity as an evidence approval for any below-threshold basin.
   - Non-goal for 2.4: no silent override and no partial output when refused.
 
 ## 3. sp.att FORC Rewrite
