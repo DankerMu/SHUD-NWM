@@ -133,8 +133,8 @@ Computation-only helpers (``assign_*``, ``sanitize_*``, ``recompute_*``,
 ``apply_*``, ``emit_*``) use non-``verify_*`` verbs — they never raise on
 "drift", they produce the artifact for a downstream verify_ gate to check.
 
-Gate orchestration (SUB-11 -> SUB-13 deferral)
-----------------------------------------------
+Gate orchestration (SUB-11 + SUB-12 -> SUB-13 deferral)
+-------------------------------------------------------
 :func:`emit_direct_grid_manifest_and_binding` runs the G5 gates inline
 before returning (grid_cell_id uniqueness/membership → checksums →
 cross-artifact consistency → parser round-trip), matching the "fail
@@ -150,15 +150,46 @@ mapping evidence package's G5 slot verbatim. The full rerunnable set:
 * :func:`verify_x_y_recomputable`
 * :func:`verify_station_id_disjoint_across_versions`
 * :func:`verify_sp_att_checksum`
+* :func:`verify_no_forbidden_runtime_producer_artifacts` (§4.3, docs §8.1)
+
+§4.3 §8.1 forbidden-output rule
+-------------------------------
+:func:`verify_no_forbidden_runtime_producer_artifacts` enforces docs §8.1
+"the mapping builder MUST NOT produce the runtime producer's outputs":
+
+1. cycle-dated ``.tsd.forc`` files (docs §8.1) — the runtime forcing
+   producer owns cycle-embedded ``.tsd.forc``, the mapping builder MUST
+   never write one. Pattern reused from SUB-10 via
+   :data:`workers.mapping_builder.rewrite.LEGACY_CYCLE_TSD_FORC_PATTERN`.
+2. per-station weather CSV files (docs §8.2) — the runtime producer /
+   ingest owns the legacy CMFD-shaped station CSV. Patterns reused from
+   SUB-10 via
+   :data:`workers.mapping_builder.rewrite.LEGACY_STATION_LONLAT_CSV_PATTERN`
+   and
+   :data:`workers.mapping_builder.rewrite.LEGACY_STATION_NUMBERED_CSV_PATTERN`.
+3. attempted DB writes to ``met.interp_weight``, ``met.met_station``, or
+   ``met.forcing_version`` — the ingest pipeline owns the ``met.*`` rows.
+   Captured via a caller-supplied :class:`DbWriteSpy` (fail-closed if
+   the caller passes ``None`` — the gate demands an explicitly-monitored
+   spy so an accidental omission never silently passes).
+4. cycle lineage records — the runtime producer owns cycle lineage
+   accounting. Captured via a caller-supplied :class:`CycleLineageSpy`
+   (fail-closed if ``None``).
+
+Reuses SUB-10's compiled regex objects via the public aliases in
+:mod:`workers.mapping_builder.rewrite` so a future change to either
+pattern propagates to both call sites automatically — no drift possible.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import pyproj
@@ -175,6 +206,11 @@ from workers.forcing_producer.direct_grid_contract import (
     DirectGridContractError,
     DirectGridForcingContract,
     load_forcing_mapping_contract_from_manifest,
+)
+from workers.mapping_builder.rewrite import (
+    LEGACY_CYCLE_TSD_FORC_PATTERN,
+    LEGACY_STATION_LONLAT_CSV_PATTERN,
+    LEGACY_STATION_NUMBERED_CSV_PATTERN,
 )
 
 # --- constants ------------------------------------------------------------
@@ -754,6 +790,102 @@ class ReadinessManifestChecksumMissingError(BindingArtifactError):
         self.policy_name = policy_name
 
 
+class ForbiddenRuntimeProducerArtifactError(BindingArtifactError):
+    """The mapping stage emitted a runtime-producer artifact (docs §8.1 blocker).
+
+    Per spec §4.3 and docs §8.1: the mapping builder MUST NOT produce the
+    runtime producer's outputs (cycle-dated ``.tsd.forc``, per-station
+    weather CSV, ``met.interp_weight`` / ``met.met_station`` /
+    ``met.forcing_version`` DB rows, or cycle lineage records). Any of
+    the four forbidden classes appearing in the emitted artifact set
+    means the mapping stage crossed the §8.1 ownership boundary — a G5
+    blocker before SUB-13 records the mapping evidence.
+
+    ``offending_class`` is **strictly one of the four
+    :class:`ForbiddenOutputClass` enum values** (its ``.value`` string
+    token): ``"cycle_dated_tsd_forc"``, ``"station_weather_csv"``,
+    ``"met_row_write"``, or ``"cycle_lineage_record"``. Callers can safely
+    round-trip via ``ForbiddenOutputClass(exc.offending_class)`` to
+    recover the enum member — no sentinel strings ever appear here. The
+    unmonitored-spy case (spy passed as ``None``) is a *separate* failure
+    mode surfaced via :class:`UnmonitoredBoundaryError`, so this exception
+    never carries a ``"..._spy_missing"`` sentinel.
+
+    ``offending_evidence`` is the (path or table+row) tuple that fired;
+    ``scan_summary`` is the same :class:`ForbiddenOutputScanResult`
+    returned on pass, so callers can log the full 4-class breakdown from
+    the raised exception (SUB-13 evidence bundler consumes this attribute
+    verbatim).
+    """
+
+    def __init__(
+        self,
+        *,
+        offending_class: str,
+        offending_evidence: Any,
+        scan_summary: ForbiddenOutputScanResult,
+    ) -> None:
+        super().__init__(
+            f"mapping stage emitted forbidden runtime-producer artifact: "
+            f"class={offending_class!r} evidence={offending_evidence!r} "
+            "(docs §8.1 boundary violation — the runtime producer owns "
+            "cycle .tsd.forc / station weather CSV / met.* rows / cycle "
+            "lineage; the mapping builder MUST NOT emit any of them)"
+        )
+        self.offending_class = offending_class
+        self.offending_evidence = offending_evidence
+        self.scan_summary = scan_summary
+
+
+class UnmonitoredBoundaryError(BindingArtifactError):
+    """§8.1 boundary check invoked without an actively-monitored spy.
+
+    The mapping stage's §8.1 boundary is meaningful only when the caller
+    supplies **live** spy instances (:class:`DbWriteSpy` +
+    :class:`CycleLineageSpy`) that watched the ingest DB session and
+    cycle-lineage recorder for the duration of the mapping build. Passing
+    ``None`` for either spy means "we didn't monitor" — which cannot be
+    distinguished from "we monitored and saw nothing" without a live
+    reference. The gate refuses the ambiguous case rather than silently
+    passing, so an accidentally-omitted spy becomes a loud build failure
+    rather than a false-positive PASS receipt.
+
+    This is a **separate failure mode** from
+    :class:`ForbiddenRuntimeProducerArtifactError`: no forbidden artifact
+    was actually emitted; the gate simply cannot vouch for the §8.1
+    boundary. Keeping the two exceptions distinct means SUB-13's evidence
+    bundler can safely do
+    ``ForbiddenOutputClass(exc.offending_class)`` on a
+    :class:`ForbiddenRuntimeProducerArtifactError` without a
+    :class:`ValueError`.
+
+    Attributes
+    ----------
+    missing_spy_kind:
+        One of ``"db_write_spy"`` / ``"cycle_lineage_spy"`` — names which
+        spy was ``None``.
+    scan_summary:
+        The same :class:`ForbiddenOutputScanResult` shape the pass path
+        returns, with all three offending-tuples empty and ``passed=False``.
+        Surfaced so SUB-13 evidence records the boundary-monitor gap the
+        same way it records a real forbidden emission.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing_spy_kind: str,
+        scan_summary: ForbiddenOutputScanResult,
+    ) -> None:
+        super().__init__(
+            f"§8.1 boundary check requires an actively-monitored "
+            f"{missing_spy_kind}; caller supplied None (pass an empty "
+            f"spy instance to prove nothing was recorded — docs §8.1)"
+        )
+        self.missing_spy_kind = missing_spy_kind
+        self.scan_summary = scan_summary
+
+
 # --- structured output dataclasses ----------------------------------------
 
 
@@ -1029,6 +1161,189 @@ class DirectGridManifest:
                 for station in self.station_bindings
             ],
         }
+
+
+# --- §4.3 §8.1 forbidden-output support types -----------------------------
+
+
+#: Set of DB tables the mapping builder MUST NOT write per docs §8.1 —
+#: the ingest / runtime producer owns these ``met.*`` rows. Any attempted
+#: write captured by a :class:`DbWriteSpy` against one of these tables is
+#: a §8.1 boundary violation.
+FORBIDDEN_MET_TABLES: frozenset[str] = frozenset(
+    {
+        "met.interp_weight",
+        "met.met_station",
+        "met.forcing_version",
+    }
+)
+
+
+class ForbiddenOutputClass(str, Enum):
+    """One of the four forbidden runtime-producer output classes (docs §8.1).
+
+    The mapping stage MUST NOT emit *any* of these classes. Values are
+    string tokens so :class:`ForbiddenOutputScanResult` fields carry
+    plain-string entries (persistable directly into SUB-13's evidence
+    JSON), while the ``str`` mixin lets the enum equal its raw token in
+    ``==`` comparisons — so downstream code can write
+    ``result.offending_paths[0][0] == "cycle_dated_tsd_forc"`` without
+    coercing.
+    """
+
+    CYCLE_DATED_TSD_FORC = "cycle_dated_tsd_forc"
+    STATION_WEATHER_CSV = "station_weather_csv"
+    MET_ROW_WRITE = "met_row_write"
+    CYCLE_LINEAGE_RECORD = "cycle_lineage_record"
+
+
+@dataclass(frozen=True)
+class DbWriteSpy:
+    """Records attempted DB writes so :func:`verify_no_forbidden_runtime_producer_artifacts` can assert none occurred.
+
+    The mapping stage never writes to any ``met.*`` table by design, but
+    the §8.1 boundary is meaningful only when the caller actively monitors
+    the ingest DB session for the duration of the mapping build. This spy
+    is the boundary-monitor contract: a fresh :class:`DbWriteSpy` with an
+    empty ``captured_writes`` tuple is what a §4.3 orchestrator MUST pass
+    to :func:`verify_no_forbidden_runtime_producer_artifacts` to prove
+    "I watched, and no ``met.*`` write happened."
+
+    Passing ``None`` for ``db_write_spy=`` means the caller is *not*
+    monitoring — the gate fails closed with an
+    :class:`UnmonitoredBoundaryError` (distinct from the real-violation
+    raise :class:`ForbiddenRuntimeProducerArtifactError`) demanding
+    explicit boundary monitoring. This turns "we forgot to check" into a
+    loud build failure (SUB-12 fail-closed on unmonitored spy).
+
+    Attributes
+    ----------
+    captured_writes:
+        Immutable tuple of ``(table_name, row_summary)`` pairs. Callers
+        (fixtures, production orchestrators) record every attempted write
+        via :meth:`record_write`; the gate asserts every recorded write
+        is a table NOT in :data:`FORBIDDEN_MET_TABLES`.
+    """
+
+    captured_writes: tuple[tuple[str, str], ...] = ()
+
+    def record_write(self, *, table_name: str, row_summary: str) -> DbWriteSpy:
+        """Return a new spy with one more captured write appended.
+
+        Frozen dataclass means the spy is append-only via replacement —
+        callers cannot mutate ``captured_writes`` in place, which
+        eliminates the "spy silently reset mid-build" failure mode.
+
+        Warning
+        -------
+        Callers MUST reassign the returned spy —
+        ``spy = spy.record_write(table_name=..., row_summary=...)``.
+        Discarding the return value silently drops the recording (the
+        original ``spy`` is unchanged; the appended write lives only in
+        the new object). If a §4.3 orchestrator calls
+        ``spy.record_write(...)`` without reassignment and then hands
+        ``spy`` to :func:`verify_no_forbidden_runtime_producer_artifacts`,
+        the gate will see zero captured writes and pass — a false-negative
+        boundary violation. The frozen-dataclass shape enforces the
+        immutability but cannot enforce the reassignment; the discipline
+        lives in the caller.
+        """
+        return DbWriteSpy(
+            captured_writes=self.captured_writes
+            + ((table_name, row_summary),),
+        )
+
+
+@dataclass(frozen=True)
+class CycleLineageSpy:
+    """Records cycle-lineage insertions so the gate can assert none occurred.
+
+    The runtime forcing producer owns cycle-lineage accounting per docs
+    §8.1. The mapping stage never records cycle lineage by design. Same
+    contract as :class:`DbWriteSpy`: a fresh spy with an empty
+    ``captured_records`` tuple is the §4.3 orchestrator's boundary-monitor
+    proof. Passing ``None`` fails closed with
+    :class:`UnmonitoredBoundaryError` (distinct from the real-violation
+    :class:`ForbiddenRuntimeProducerArtifactError`).
+
+    Attributes
+    ----------
+    captured_records:
+        Immutable tuple of record summaries (opaque strings the caller
+        chose for its accounting — typically a cycle-timestamp or a
+        lineage-row primary-key). Any non-empty tuple raises
+        :class:`ForbiddenRuntimeProducerArtifactError`.
+    """
+
+    captured_records: tuple[str, ...] = ()
+
+    def record_lineage(self, *, record_summary: str) -> CycleLineageSpy:
+        """Return a new spy with one more lineage record appended.
+
+        Warning
+        -------
+        Callers MUST reassign the returned spy —
+        ``spy = spy.record_lineage(record_summary=...)``. Discarding the
+        return silently drops the recording, and the §8.1 gate will see
+        an empty spy and pass. Same footgun as :meth:`DbWriteSpy.record_write`;
+        the immutability enforces the "no in-place mutation" invariant but
+        cannot enforce the reassignment.
+        """
+        return CycleLineageSpy(
+            captured_records=self.captured_records + (record_summary,),
+        )
+
+
+@dataclass(frozen=True)
+class ForbiddenOutputScanResult:
+    """Structured pass/fail result of :func:`verify_no_forbidden_runtime_producer_artifacts`.
+
+    Returned on green (``passed=True``) so SUB-13's evidence bundler can
+    record the 4-class scan verbatim as the §8.1 receipt (the gate ran +
+    saw N paths + none matched any forbidden class). Also attached to
+    :class:`ForbiddenRuntimeProducerArtifactError` via
+    :attr:`ForbiddenRuntimeProducerArtifactError.scan_summary` so on red
+    the caller sees the same 4-class breakdown.
+
+    Frozen so downstream evidence can bind the record byte-for-byte.
+
+    Attributes
+    ----------
+    scanned_path_count:
+        Number of paths inspected against the cycle-dated ``.tsd.forc`` +
+        station-weather-CSV regexes. Reported so the evidence bundler
+        distinguishes "zero paths scanned" (empty artifact set, likely
+        wrong caller input) from "N paths scanned, none matched" (clean
+        build).
+    offending_paths:
+        Tuple of ``(class_name, path)`` pairs for every path matching a
+        forbidden pattern. Ordering follows scan order for reproducibility.
+    offending_db_writes:
+        Tuple of ``(table_name, row_summary)`` for every DB write
+        against a table in :data:`FORBIDDEN_MET_TABLES`.
+    cycle_lineage_records:
+        Tuple of record summaries captured by the
+        :class:`CycleLineageSpy`. Any non-empty tuple is a §8.1 blocker.
+    passed:
+        ``True`` iff all three tuples are empty AND the gate ran with
+        both spies actively supplied. Note that on ``passed=False`` the
+        gate ALSO raises — the caller never sees ``passed=False`` as a
+        return; the field exists so the same struct persisted into SUB-13
+        evidence carries the boolean verdict. Two raise paths:
+
+        - On real violation: :class:`ForbiddenRuntimeProducerArtifactError`
+          raised (offending path, ``met.*`` DB write, or cycle-lineage
+          record actually observed).
+        - On unmonitored spy: :class:`UnmonitoredBoundaryError` raised —
+          caller supplied ``None`` for one of the two spies, so the gate
+          cannot vouch for the §8.1 boundary.
+    """
+
+    scanned_path_count: int
+    offending_paths: tuple[tuple[str, pathlib.Path], ...]
+    offending_db_writes: tuple[tuple[str, str], ...]
+    cycle_lineage_records: tuple[str, ...]
+    passed: bool
 
 
 # --- internal helpers -----------------------------------------------------
@@ -1923,6 +2238,233 @@ def recompute_binding_and_sp_att_checksums(
         _sha256_bytes(binding_artifact_bytes),
         _sha256_bytes(sp_att_bytes),
     )
+
+
+def verify_no_forbidden_runtime_producer_artifacts(
+    emitted_artifact_paths: Iterable[pathlib.Path],
+    *,
+    db_write_spy: DbWriteSpy | None = None,
+    cycle_lineage_spy: CycleLineageSpy | None = None,
+) -> ForbiddenOutputScanResult:
+    """§4.3 §8.1 gate: mapping stage emitted zero forbidden runtime-producer artifacts.
+
+    Per spec §4.3 and docs §8.1: the mapping builder MUST NOT produce any
+    of the four runtime-producer output classes:
+
+    1. **cycle_dated_tsd_forc** — a ``.tsd.forc`` file whose name embeds
+       an 8-digit cycle stamp (``YYYYMMDD`` / ``YYYYMMDDHH``) with a
+       plausible year prefix (``19`` / ``20`` / ``21``). The runtime
+       producer owns cycle ``.tsd.forc``; a mapping-emitted one would
+       shadow the producer's canonical output. Matched with
+       :data:`workers.mapping_builder.rewrite.LEGACY_CYCLE_TSD_FORC_PATTERN`
+       (SUB-10 shared authority — no drift possible).
+    2. **station_weather_csv** — a legacy CMFD station weather CSV named
+       ``X<lon>Y<lat>.csv`` (docs §8.2 clause A) or ``X<n>.csv`` (docs
+       §8.2 clause B). The ingest / runtime producer owns these. Matched
+       with the SUB-10 shared regex objects
+       :data:`workers.mapping_builder.rewrite.LEGACY_STATION_LONLAT_CSV_PATTERN`
+       and
+       :data:`workers.mapping_builder.rewrite.LEGACY_STATION_NUMBERED_CSV_PATTERN`.
+    3. **met_row_write** — an attempted DB write to any table in
+       :data:`FORBIDDEN_MET_TABLES` (``met.interp_weight`` /
+       ``met.met_station`` / ``met.forcing_version``). Captured via the
+       caller-supplied :class:`DbWriteSpy`.
+    4. **cycle_lineage_record** — any cycle-lineage record captured via
+       the caller-supplied :class:`CycleLineageSpy`.
+
+    Fail-closed on unmonitored spies
+    --------------------------------
+    ``db_write_spy=None`` and ``cycle_lineage_spy=None`` are treated as
+    unmonitored boundaries — the gate raises
+    :class:`ForbiddenRuntimeProducerArtifactError` demanding the caller
+    supply an explicit spy. Callers who want to prove "no ``met.*``
+    write happened" MUST pass a fresh :class:`DbWriteSpy()` (empty
+    ``captured_writes``) rather than ``None``. Same for
+    :class:`CycleLineageSpy()`. This design choice turns "forgot to
+    monitor" into a loud build failure instead of a silent pass — the
+    §8.1 boundary is meaningful only when actively monitored.
+
+    Case-insensitive filename match
+    -------------------------------
+    Filename regex matching is case-insensitive (matching SUB-10's
+    :func:`workers.mapping_builder.rewrite.verify_no_legacy_weather_path_in_active_tree`)
+    so an uppercase ``X100Y37.CSV`` on macOS APFS / Windows NTFS is
+    caught the same as the lowercase ``x100y37.csv``.
+
+    Caller obligation
+    -----------------
+    The caller is responsible for ensuring ``emitted_artifact_paths``
+    includes at minimum the direct-grid manifest, the standalone binding
+    artifact, and the variant ``.sp.att`` bytes (or their equivalent
+    paths). Passing an empty iterable returns ``passed=True`` vacuously —
+    the gate does not enforce non-emptiness; SUB-13's evidence
+    orchestrator adds that guard so a caller that "forgot to enumerate"
+    fails there rather than silently producing an empty-set PASS receipt.
+
+    Parameters
+    ----------
+    emitted_artifact_paths:
+        Iterable of the total emitted artifact set produced by the
+        mapping stage (typically the direct-grid manifest path + the
+        standalone binding artifact path + the variant ``.sp.att`` path
+        + any ancillary paths). The caller assembles the set; this gate
+        never walks the filesystem — it only checks names.
+    db_write_spy:
+        Active DB-write monitor. MUST be supplied (``None`` fails
+        closed). An empty spy proves "no writes attempted".
+    cycle_lineage_spy:
+        Active cycle-lineage monitor. MUST be supplied (``None`` fails
+        closed). An empty spy proves "no lineage recorded".
+
+    Returns
+    -------
+    ForbiddenOutputScanResult
+        On pass: ``passed=True``, all three offending-tuples empty, and
+        ``scanned_path_count`` set to the input path count. SUB-13's
+        evidence bundler persists this struct verbatim as the §8.1
+        receipt.
+
+    Raises
+    ------
+    ForbiddenRuntimeProducerArtifactError
+        Any of the four forbidden classes fired (real §8.1 boundary
+        violation). The raised exception carries ``offending_class``
+        (strictly a :class:`ForbiddenOutputClass` enum value token), the
+        specific ``offending_evidence`` (path or table+row), and the same
+        :class:`ForbiddenOutputScanResult` breakdown so SUB-13 can log
+        the full 4-class picture from either the return path or the
+        exception path.
+    UnmonitoredBoundaryError
+        ``db_write_spy=None`` or ``cycle_lineage_spy=None``. Split off
+        from :class:`ForbiddenRuntimeProducerArtifactError` so the
+        latter's ``offending_class`` is strictly a
+        :class:`ForbiddenOutputClass` value (no ``"..._spy_missing"``
+        sentinel strings). The raised exception carries
+        ``missing_spy_kind`` and the same ``scan_summary`` shape (with
+        ``passed=False``) so SUB-13 records the boundary-monitor gap.
+    BindingArtifactError
+        An ``emitted_artifact_paths`` entry is not a
+        :class:`pathlib.Path` (e.g. a ``str`` was passed). Boundary
+        type-guard raised at the scan loop so the gate never .name-fails
+        silently on a mistyped input; the caller sees a loud failure
+        rather than a false-positive PASS.
+    """
+    # Materialize the iterable so we can both count and iterate for the
+    # regex scan. Preserving the caller's ordering makes the result
+    # ``offending_paths`` field reproducible across runs (spec §7
+    # determinism requirement).
+    paths = tuple(emitted_artifact_paths)
+
+    # Fail-closed on unmonitored spies. We compose a scan_summary with
+    # zero offending entries so the raised exception carries the same
+    # 4-class picture the pass path would. Split off as
+    # :class:`UnmonitoredBoundaryError` (not
+    # :class:`ForbiddenRuntimeProducerArtifactError`) so ``offending_class``
+    # on the latter is strictly a :class:`ForbiddenOutputClass` value —
+    # SUB-13's evidence bundler can safely do
+    # ``ForbiddenOutputClass(exc.offending_class)`` without ValueError.
+    if db_write_spy is None:
+        unmonitored_summary = ForbiddenOutputScanResult(
+            scanned_path_count=len(paths),
+            offending_paths=(),
+            offending_db_writes=(),
+            cycle_lineage_records=(),
+            passed=False,
+        )
+        raise UnmonitoredBoundaryError(
+            missing_spy_kind="db_write_spy",
+            scan_summary=unmonitored_summary,
+        )
+    if cycle_lineage_spy is None:
+        unmonitored_summary = ForbiddenOutputScanResult(
+            scanned_path_count=len(paths),
+            offending_paths=(),
+            offending_db_writes=(),
+            cycle_lineage_records=(),
+            passed=False,
+        )
+        raise UnmonitoredBoundaryError(
+            missing_spy_kind="cycle_lineage_spy",
+            scan_summary=unmonitored_summary,
+        )
+
+    # --- (a) + (b): filename scan against the three SUB-10 regexes ------
+    # Ordered so ``station_weather_csv`` covers both the lon/lat-keyed
+    # (§8.2 clause A) and the numbered (§8.2 clause B) shapes under one
+    # class label — SUB-13 evidence records the class, not the sub-shape.
+    offending_paths: list[tuple[str, pathlib.Path]] = []
+    for path in paths:
+        # Guard against non-pathlib inputs at the boundary — a str path
+        # would silently .name-fail on some platforms.
+        if not isinstance(path, pathlib.Path):
+            raise BindingArtifactError(
+                f"emitted_artifact_paths entry {path!r} is not a "
+                f"pathlib.Path (got {type(path).__name__}); §8.1 gate "
+                "requires typed paths for reliable basename extraction"
+            )
+        name = path.name
+        if LEGACY_CYCLE_TSD_FORC_PATTERN.fullmatch(name):
+            offending_paths.append(
+                (ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value, path)
+            )
+            continue
+        if LEGACY_STATION_LONLAT_CSV_PATTERN.fullmatch(
+            name
+        ) or LEGACY_STATION_NUMBERED_CSV_PATTERN.fullmatch(name):
+            offending_paths.append(
+                (ForbiddenOutputClass.STATION_WEATHER_CSV.value, path)
+            )
+
+    # --- (c): DB write spy against the forbidden met.* tables -----------
+    offending_db_writes: list[tuple[str, str]] = []
+    for table_name, row_summary in db_write_spy.captured_writes:
+        if table_name in FORBIDDEN_MET_TABLES:
+            offending_db_writes.append((table_name, row_summary))
+
+    # --- (d): cycle-lineage spy -----------------------------------------
+    cycle_lineage_records: tuple[str, ...] = tuple(
+        cycle_lineage_spy.captured_records
+    )
+
+    passed = (
+        not offending_paths
+        and not offending_db_writes
+        and not cycle_lineage_records
+    )
+    result = ForbiddenOutputScanResult(
+        scanned_path_count=len(paths),
+        offending_paths=tuple(offending_paths),
+        offending_db_writes=tuple(offending_db_writes),
+        cycle_lineage_records=cycle_lineage_records,
+        passed=passed,
+    )
+
+    if not passed:
+        # Report the first-fired class in evaluation order so the
+        # exception message names one concrete cause; the full 4-class
+        # picture is available via scan_summary for SUB-13.
+        if offending_paths:
+            first_class, first_path = offending_paths[0]
+            raise ForbiddenRuntimeProducerArtifactError(
+                offending_class=first_class,
+                offending_evidence=first_path,
+                scan_summary=result,
+            )
+        if offending_db_writes:
+            first_table, first_row = offending_db_writes[0]
+            raise ForbiddenRuntimeProducerArtifactError(
+                offending_class=ForbiddenOutputClass.MET_ROW_WRITE.value,
+                offending_evidence=(first_table, first_row),
+                scan_summary=result,
+            )
+        # cycle_lineage_records — the only remaining path.
+        raise ForbiddenRuntimeProducerArtifactError(
+            offending_class=ForbiddenOutputClass.CYCLE_LINEAGE_RECORD.value,
+            offending_evidence=cycle_lineage_records[0],
+            scan_summary=result,
+        )
+
+    return result
 
 
 # --- public: orchestrator -------------------------------------------------

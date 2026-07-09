@@ -715,6 +715,21 @@ _CYCLE_TSD_FORC_PATTERN = re.compile(
 )
 
 
+# Public aliases for the compiled regex objects above (Epic #909 SUB-12
+# CP-1 shared-authority discipline). Both this module's
+# :func:`verify_no_legacy_weather_path_in_active_tree` (§3.5) and
+# :mod:`workers.mapping_builder.binding`'s
+# :func:`verify_no_forbidden_runtime_producer_artifacts` (§4.3) reference
+# the *same* compiled regex object — no drift is possible because both
+# call sites bind to the same identity. Renaming here follows the
+# ``LEGACY_*_PATTERN`` naming shape SUB-11 established for grid-signature
+# constants, and preserves the underscore-prefixed private names so
+# existing SUB-10 call sites in this file keep working verbatim.
+LEGACY_STATION_LONLAT_CSV_PATTERN: re.Pattern[str] = _LEGACY_LONLAT_CSV_PATTERN
+LEGACY_STATION_NUMBERED_CSV_PATTERN: re.Pattern[str] = _LEGACY_NUMBERED_CSV_PATTERN
+LEGACY_CYCLE_TSD_FORC_PATTERN: re.Pattern[str] = _CYCLE_TSD_FORC_PATTERN
+
+
 # Ordered list of (pattern_name, compiled regex). Order determines which
 # pattern name is reported when multiple patterns could match the same
 # filename — the lonlat pattern is checked before the numbered pattern
