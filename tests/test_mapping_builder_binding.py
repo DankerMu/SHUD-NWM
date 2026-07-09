@@ -33,6 +33,7 @@ import dataclasses
 import hashlib
 import inspect
 import json
+import pathlib
 import typing
 
 import pyproj
@@ -51,6 +52,7 @@ from workers.mapping_builder import (
     CGCS2000_SRID_LABEL,
     COORDINATE_ROUNDING_DECIMALS,
     DIRECT_GRID_FORCING_SECTION_KEY,
+    FORBIDDEN_MET_TABLES,
     RESERVED_FILENAME_PREFIXES,
     RESERVED_FILENAME_SUFFIXES,
     RESERVED_FORCING_FILENAMES,
@@ -61,7 +63,12 @@ from workers.mapping_builder import (
     BindingArtifactError,
     BindingChecksumMismatchError,
     CrossBasisEqualityError,
+    CycleLineageSpy,
+    DbWriteSpy,
     DirectGridManifest,
+    ForbiddenOutputClass,
+    ForbiddenOutputScanResult,
+    ForbiddenRuntimeProducerArtifactError,
     ForcingFilenameCollisionError,
     ForcingFilenameUnsafeError,
     GridCellIdDuplicateError,
@@ -89,6 +96,7 @@ from workers.mapping_builder import (
     verify_binding_round_trips_parser,
     verify_grid_cell_id_unique_and_snapshot_member,
     verify_manifest_binding_cross_consistent,
+    verify_no_forbidden_runtime_producer_artifacts,
     verify_sp_att_checksum,
     verify_station_center_matches_snapshot_under_rounding,
     verify_station_id_disjoint_across_versions,
@@ -1760,3 +1768,464 @@ def test_z_policy_non_string_policy_name_blocks() -> None:
             readiness_manifest_checksum="a" * 64,
             per_cell_z={},
         )
+
+
+# =========================================================================
+# §4.3 §8.1 FORBIDDEN-OUTPUT RULE (Epic #909 SUB-12)
+# =========================================================================
+#
+# Cover per SUB-12 acceptance criteria:
+#   * Green path: empty artifact set (no forbidden paths) + empty spies ->
+#     ForbiddenOutputScanResult(passed=True).
+#   * Negative: one test per forbidden class (4 classes -> 7 negative tests
+#     because the station_weather_csv class covers both lonlat + numbered
+#     shapes AND the cycle_dated_tsd_forc class is separate).
+#   * Fail-closed: db_write_spy=None + cycle_lineage_spy=None both raise.
+#   * Structured result: on green, ForbiddenOutputScanResult fields are
+#     recoverable for SUB-13's evidence bundler.
+#   * Frozen invariant + case-fold scan + signature pin follow the same
+#     SUB-10/SUB-11 patterns.
+
+
+def _binding_root(tmp_path: pathlib.Path) -> pathlib.Path:
+    """Return a fresh directory the tests use as the artifact-root prefix.
+
+    The gate never reads bytes from these paths — it only pattern-matches
+    against ``path.name``. So the fixture doesn't need to actually create
+    the files (tests just build ``pathlib.Path`` objects rooted at
+    ``tmp_path`` for reproducible ordering).
+    """
+    return tmp_path / "variant_root"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_green_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Green build: empty artifact set + empty spies -> passed=True."""
+    manifest, artifact, _, _ = _emit_minimal()
+    # Simulate the mapping stage's total emitted artifact set: the manifest
+    # path + the standalone binding artifact path + the variant .sp.att.
+    # None of these match the forbidden regexes (station_00001.csv, etc.
+    # are not covered by the legacy patterns).
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "binding.json",
+        root / "package" / "keliya.sp.att",
+    ] + [
+        root / "forcing" / b.forcing_filename
+        for b in manifest.station_bindings
+    ]
+    result = verify_no_forbidden_runtime_producer_artifacts(
+        emitted,
+        db_write_spy=DbWriteSpy(),
+        cycle_lineage_spy=CycleLineageSpy(),
+    )
+    assert isinstance(result, ForbiddenOutputScanResult)
+    assert result.passed is True
+    assert result.offending_paths == ()
+    assert result.offending_db_writes == ()
+    assert result.cycle_lineage_records == ()
+    assert result.scanned_path_count == len(emitted)
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_cycle_tsd_forc_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected cycle-dated .tsd.forc -> ForbiddenRuntimeProducerArtifactError."""
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "some" / "20200101.tsd.forc",  # cycle-dated
+    ]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "cycle_dated_tsd_forc"
+    assert exc.value.offending_class == (
+        ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value
+    )
+    assert isinstance(exc.value, BindingArtifactError)
+    # scan_summary carries the full 4-class breakdown for SUB-13.
+    assert isinstance(exc.value.scan_summary, ForbiddenOutputScanResult)
+    assert exc.value.scan_summary.passed is False
+    assert exc.value.scan_summary.offending_paths[0][0] == (
+        "cycle_dated_tsd_forc"
+    )
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_station_lonlat_csv_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected legacy X<lon>Y<lat>.csv -> station_weather_csv blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "forcing" / "X100Y37.csv",  # legacy CMFD lonlat-keyed
+    ]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "station_weather_csv"
+    assert exc.value.offending_class == (
+        ForbiddenOutputClass.STATION_WEATHER_CSV.value
+    )
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_station_numbered_csv_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected legacy X<n>.csv -> station_weather_csv blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "forcing" / "X100.csv",  # legacy CMFD numbered
+    ]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "station_weather_csv"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_met_interp_weight_write_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Spy recorded write to met.interp_weight -> met_row_write blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    spy = DbWriteSpy().record_write(
+        table_name="met.interp_weight",
+        row_summary="station_id=s1, cell=c1, weight=1.0",
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=spy,
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "met_row_write"
+    assert exc.value.offending_class == (
+        ForbiddenOutputClass.MET_ROW_WRITE.value
+    )
+    # The offending_evidence is the (table_name, row_summary) tuple.
+    table, row = exc.value.offending_evidence
+    assert table == "met.interp_weight"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_met_met_station_write_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Spy recorded write to met.met_station -> met_row_write blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    spy = DbWriteSpy().record_write(
+        table_name="met.met_station",
+        row_summary="station_id=s1",
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=spy,
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "met_row_write"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_met_forcing_version_write_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Spy recorded write to met.forcing_version -> met_row_write blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    spy = DbWriteSpy().record_write(
+        table_name="met.forcing_version",
+        row_summary="version_id=v1",
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=spy,
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "met_row_write"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_cycle_lineage_record_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Spy recorded a cycle-lineage record -> cycle_lineage_record blocker."""
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    lineage = CycleLineageSpy().record_lineage(
+        record_summary="cycle=2020010100, mapping=v1",
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=lineage,
+        )
+    assert exc.value.offending_class == "cycle_lineage_record"
+    assert exc.value.offending_class == (
+        ForbiddenOutputClass.CYCLE_LINEAGE_RECORD.value
+    )
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_requires_db_write_spy(
+    tmp_path: pathlib.Path,
+) -> None:
+    """db_write_spy=None fails closed with ForbiddenRuntimeProducerArtifactError.
+
+    The §8.1 boundary is meaningful only when actively monitored. An
+    accidentally-omitted spy MUST NOT silently pass — it MUST raise.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=None,
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "db_write_spy_missing"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_requires_cycle_lineage_spy(
+    tmp_path: pathlib.Path,
+) -> None:
+    """cycle_lineage_spy=None fails closed with ForbiddenRuntimeProducerArtifactError."""
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=None,
+        )
+    assert exc.value.offending_class == "cycle_lineage_spy_missing"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_returns_result_on_pass(
+    tmp_path: pathlib.Path,
+) -> None:
+    """On green: return a ForbiddenOutputScanResult with all expected fields.
+
+    SUB-13 evidence bundler consumes the returned struct verbatim as the
+    §8.1 receipt. Pin the expected shape so future refactors that change
+    field names or types break here first.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "binding.json",
+        root / "package" / "keliya.sp.att",
+    ]
+    result = verify_no_forbidden_runtime_producer_artifacts(
+        emitted,
+        db_write_spy=DbWriteSpy(),
+        cycle_lineage_spy=CycleLineageSpy(),
+    )
+    assert result.scanned_path_count == 3
+    assert result.offending_paths == ()
+    assert result.offending_db_writes == ()
+    assert result.cycle_lineage_records == ()
+    assert result.passed is True
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_result_signature_pinned() -> None:
+    """ForbiddenOutputScanResult field list is pinned (SUB-13 evidence contract).
+
+    The evidence bundler in SUB-13 reads specific field names off this
+    struct. Any refactor that renames or drops a field breaks the
+    downstream evidence contract — pin the field list so the break
+    surfaces here.
+    """
+    fields = {f.name: f.type for f in dataclasses.fields(ForbiddenOutputScanResult)}
+    assert set(fields) == {
+        "scanned_path_count",
+        "offending_paths",
+        "offending_db_writes",
+        "cycle_lineage_records",
+        "passed",
+    }
+
+
+def test_forbidden_output_scan_result_is_frozen() -> None:
+    """ForbiddenOutputScanResult is a frozen dataclass — field assignment raises."""
+    result = ForbiddenOutputScanResult(
+        scanned_path_count=0,
+        offending_paths=(),
+        offending_db_writes=(),
+        cycle_lineage_records=(),
+        passed=True,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.passed = False  # type: ignore[misc]
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_case_insensitive_scan(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Uppercase legacy filename (X100Y37.CSV) is caught the same as lowercase.
+
+    On case-insensitive filesystems (macOS APFS/HFS+, Windows NTFS
+    default) the uppercase alias points to the same inode. The gate MUST
+    catch both — matches SUB-10's :func:`verify_no_legacy_weather_path_in_active_tree`
+    behavior.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "forcing" / "X100Y37.CSV",  # uppercase alias
+    ]
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert exc.value.offending_class == "station_weather_csv"
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_signature_pinned() -> None:
+    """verify_no_forbidden_runtime_producer_artifacts signature is pinned.
+
+    PA-1 codification (Epic #909 SUB-11): a signature pin that checks only
+    parameter names misses a KEYWORD_ONLY -> POSITIONAL_OR_KEYWORD demotion.
+    Pin ``param.kind`` alongside the name list.
+    """
+    sig = inspect.signature(verify_no_forbidden_runtime_producer_artifacts)
+    assert list(sig.parameters) == [
+        "emitted_artifact_paths",
+        "db_write_spy",
+        "cycle_lineage_spy",
+    ]
+    _assert_param_kinds(
+        verify_no_forbidden_runtime_producer_artifacts,
+        keyword_only=frozenset({"db_write_spy", "cycle_lineage_spy"}),
+        positional_or_keyword=frozenset({"emitted_artifact_paths"}),
+    )
+    hints = typing.get_type_hints(verify_no_forbidden_runtime_producer_artifacts)
+    assert hints["return"] is ForbiddenOutputScanResult
+
+
+def test_forbidden_output_class_values_pinned() -> None:
+    """ForbiddenOutputClass enum values are pinned (SUB-13 evidence contract).
+
+    Downstream evidence records the class token verbatim. Any renamed
+    enum member breaks the evidence-side deserialization — pin all four
+    tokens here so the break surfaces at test time.
+    """
+    assert ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value == "cycle_dated_tsd_forc"
+    assert ForbiddenOutputClass.STATION_WEATHER_CSV.value == "station_weather_csv"
+    assert ForbiddenOutputClass.MET_ROW_WRITE.value == "met_row_write"
+    assert ForbiddenOutputClass.CYCLE_LINEAGE_RECORD.value == "cycle_lineage_record"
+
+
+def test_forbidden_met_tables_pinned() -> None:
+    """FORBIDDEN_MET_TABLES contents pinned (docs §8.1 boundary contract)."""
+    assert FORBIDDEN_MET_TABLES == frozenset(
+        {"met.interp_weight", "met.met_station", "met.forcing_version"}
+    )
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_rejects_non_path_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A str (not pathlib.Path) in the artifact set raises BindingArtifactError.
+
+    Boundary guard: the gate extracts basenames via ``path.name`` which
+    silently misbehaves on some str inputs. Type-refuse at the boundary
+    so the caller sees a loud failure rather than a false-positive pass.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json", "not_a_path.csv"]
+    with pytest.raises(BindingArtifactError):
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,  # type: ignore[arg-type]
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_scanned_path_count_zero(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Empty artifact set with active spies -> passed=True, scanned_path_count=0.
+
+    A downstream caller passing an empty iterable is valid (though
+    unusual — a real mapping build always emits at least the manifest).
+    The gate reports the count so SUB-13 evidence distinguishes "zero
+    scanned" from "N scanned, none matched".
+    """
+    result = verify_no_forbidden_runtime_producer_artifacts(
+        [],
+        db_write_spy=DbWriteSpy(),
+        cycle_lineage_spy=CycleLineageSpy(),
+    )
+    assert result.passed is True
+    assert result.scanned_path_count == 0
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_accepts_non_forbidden_db_writes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A DB write to a non-forbidden table (e.g. 'metadata.build_receipt') passes.
+
+    The gate only refuses writes to :data:`FORBIDDEN_MET_TABLES`. A
+    write to any other table is legitimate mapping-stage bookkeeping and
+    MUST NOT trip the gate — otherwise the gate would refuse valid
+    builds that record receipts elsewhere.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [root / "manifest.json"]
+    spy = DbWriteSpy().record_write(
+        table_name="metadata.build_receipt",
+        row_summary="mapping_version=v1",
+    )
+    result = verify_no_forbidden_runtime_producer_artifacts(
+        emitted,
+        db_write_spy=spy,
+        cycle_lineage_spy=CycleLineageSpy(),
+    )
+    assert result.passed is True
+    assert result.offending_db_writes == ()
+
+
+def test_db_write_spy_is_frozen() -> None:
+    """DbWriteSpy is a frozen dataclass — captured_writes assignment raises."""
+    spy = DbWriteSpy()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spy.captured_writes = (("t", "r"),)  # type: ignore[misc]
+
+
+def test_cycle_lineage_spy_is_frozen() -> None:
+    """CycleLineageSpy is a frozen dataclass — captured_records assignment raises."""
+    spy = CycleLineageSpy()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spy.captured_records = ("r",)  # type: ignore[misc]
+
+
+def test_db_write_spy_record_write_appends_immutably() -> None:
+    """DbWriteSpy.record_write returns a NEW spy — original is unchanged."""
+    spy = DbWriteSpy()
+    new_spy = spy.record_write(table_name="met.met_station", row_summary="s1")
+    assert spy.captured_writes == ()
+    assert new_spy.captured_writes == (("met.met_station", "s1"),)
+
+
+def test_cycle_lineage_spy_record_lineage_appends_immutably() -> None:
+    """CycleLineageSpy.record_lineage returns a NEW spy — original unchanged."""
+    spy = CycleLineageSpy()
+    new_spy = spy.record_lineage(record_summary="cycle=2020010100")
+    assert spy.captured_records == ()
+    assert new_spy.captured_records == ("cycle=2020010100",)
