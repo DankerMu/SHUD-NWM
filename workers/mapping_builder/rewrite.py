@@ -1,11 +1,14 @@
-"""§3.1 + §3.2 ``.sp.att`` FORC rewrite + G4 non-``FORC``-unchanged proof.
+"""§3.1 + §3.2 + §3.3 + §3.4 ``.sp.att`` FORC rewrite + G4 gates.
 
-This module implements OpenSpec change ``forcing-mapping-asset-build`` §3.1 and
-§3.2 (Epic #909 SUB-8). It exposes fail-closed primitives that copy the
-baseline ``.sp.att`` into a variant package, update every element's ``FORC``
-value **by element ID** via the ownership + ``shud_forcing_index`` produced by
-``element-grid-ownership-mapping``, and prove that no non-``FORC`` byte changes
-in the process.
+This module implements OpenSpec change ``forcing-mapping-asset-build`` §3.1
+through §3.4 (Epic #909 SUB-8 + SUB-9). It exposes fail-closed primitives
+that copy the baseline ``.sp.att`` into a variant package, update every
+element's ``FORC`` value **by element ID** via the ownership +
+``shud_forcing_index`` produced by ``element-grid-ownership-mapping``, prove
+that no non-``FORC`` byte changes in the process, prove that all non-``.sp.att``
+hydrologic core files are SHA-256 identical between baseline and variant
+(§3.3), and compute + prove equality of the ten-surface
+``hydrologic_core_fingerprint`` (§3.4, docs §Gate G10).
 
 Public entry points
 -------------------
@@ -32,6 +35,20 @@ Public entry points
   baseline + variant and asserts equal schema, row count, element-ID set,
   and byte + semantic equality of all non-``FORC`` column tokens keyed by
   element ID.
+* :func:`verify_non_sp_att_checksums_equal` — §3.3 G4 file-checksum gate:
+  asserts the variant's ``.sp.mesh``, river topology, lake topology, soil,
+  geol, land, and calibration file SHA-256 checksums are byte-identical to
+  the baseline's; fail-closed on any inequality BEFORE any variant asset is
+  written.
+* :func:`compute_hydrologic_core_fingerprint` — §3.4 computation of the
+  domain-separated 10-surface fingerprint (mesh topology, river/lake
+  topology, ``.sp.att`` non-``FORC`` fields, soil/geol/land, calibration,
+  state vector schema, solver-relevant configuration) per docs §Gate G10.
+  Returns :class:`HydrologicCoreFingerprint` for SUB-13 to record verbatim.
+* :func:`verify_hydrologic_core_fingerprint_equal` — §3.4 equality gate:
+  computes the fingerprint on baseline + variant packages, asserts equality,
+  and returns the shared :class:`HydrologicCoreFingerprint` on pass. Raises
+  :class:`HydrologicCoreFingerprintMismatchError` on drift.
 * :func:`emit_semantic_diff` — parse-level FORC-only diff artifact from
   two sequences of :class:`SpAttForcRow`; deterministic ordering by
   ``element_id`` ascending for byte-identical reproducibility.
@@ -71,7 +88,9 @@ Fail-closed invariant gates in :mod:`workers.mapping_builder` use the
 * ``raise`` iff the gate failed.
 
 Applies to:
-:func:`verify_non_forc_columns_unchanged` (this module),
+:func:`verify_non_forc_columns_unchanged` (this module, §3.2),
+:func:`verify_non_sp_att_checksums_equal` (this module, §3.3),
+:func:`verify_hydrologic_core_fingerprint_equal` (this module, §3.4),
 :func:`workers.mapping_builder.verify_grid_identity_precondition`,
 :func:`workers.mapping_builder.verify_package_crs`,
 :func:`workers.mapping_builder.verify_g0_baseline`,
@@ -80,10 +99,16 @@ Applies to:
 :func:`workers.mapping_builder.verify_half_cell_diagonal_sanity_bound`,
 :func:`workers.mapping_builder.verify_small_basin_gate`.
 
+:func:`compute_hydrologic_core_fingerprint` is a computation (not a gate)
+and therefore uses the ``compute_*`` prefix — it never raises on drift, it
+only produces the fingerprint. Drift detection is the caller's job (via
+:func:`verify_hydrologic_core_fingerprint_equal` or a stored-vs-computed
+comparison in SUB-13's evidence bundle).
+
 Historical variants (``check_*``, ``enforce_*``, ``prove_*``) are
-retired — the SUB-6/SUB-7/SUB-8 review loops converged on ``verify_*``
-as the canonical gate-namespace prefix, and subsequent gates SHALL
-adopt it directly at author time.
+retired — the SUB-6/SUB-7/SUB-8/SUB-9 review loops converged on
+``verify_*`` as the canonical gate-namespace prefix, and subsequent gates
+SHALL adopt it directly at author time.
 """
 
 from __future__ import annotations
@@ -339,6 +364,194 @@ class SchemaMismatchError(SpAttRewriteError):
         self.variant_schema = variant_schema
 
 
+class NonSpAttChecksumMismatchError(SpAttRewriteError):
+    """A non-``.sp.att`` hydrologic core file differs between baseline and variant.
+
+    Per spec §"Mesh, river, lake, soil, geol, land, and calibration files are
+    byte-identical to baseline" (§3.3): the variant model input package MUST
+    contain these files byte-identical to the baseline. Any per-category
+    SHA-256 inequality is a G4 blocker.
+
+    ``category`` is the failing category label (one of
+    :data:`NON_SP_ATT_CATEGORIES`). ``relative_path`` identifies the specific
+    file (relative to each package root — the file MUST exist at the same
+    relative path in both packages, otherwise :class:`MissingPackageFileError`
+    is raised BEFORE this check runs). The SHA-256 hex digests carry the
+    fail-closed evidence: a downstream evidence bundler (SUB-13) records the
+    exception attributes verbatim so the review trail names the specific
+    file and the two conflicting digests.
+    """
+
+    def __init__(
+        self,
+        *,
+        category: str,
+        relative_path: str,
+        baseline_sha256: str,
+        variant_sha256: str,
+    ) -> None:
+        super().__init__(
+            f"non-sp.att file checksum mismatch (category={category!r}, "
+            f"path={relative_path!r}): baseline_sha256={baseline_sha256!r} "
+            f"variant_sha256={variant_sha256!r} (G4 asset delta violation)"
+        )
+        self.category = category
+        self.relative_path = relative_path
+        self.baseline_sha256 = baseline_sha256
+        self.variant_sha256 = variant_sha256
+
+
+class MissingPackageFileError(SpAttRewriteError):
+    """A category file declared for §3.3/§3.4 is missing from a package root.
+
+    Per §3.3 the variant MUST contain the same hydrologic core files as the
+    baseline. If a declared relative path is missing under either package
+    root, the checksum comparison cannot proceed — fail closed with an
+    actionable message identifying the missing file and which side it's
+    missing from.
+    """
+
+    def __init__(
+        self,
+        *,
+        category: str,
+        relative_path: str,
+        missing_side: str,  # "baseline" | "variant"
+        package_root: pathlib.Path,
+    ) -> None:
+        super().__init__(
+            f"non-sp.att category={category!r} declared file "
+            f"{relative_path!r} missing from {missing_side} package root "
+            f"{package_root} (G4 asset delta violation — the variant MUST "
+            "carry the same hydrologic core files as the baseline)"
+        )
+        self.category = category
+        self.relative_path = relative_path
+        self.missing_side = missing_side
+        self.package_root = package_root
+
+
+class UnknownCategoryError(SpAttRewriteError):
+    """A supplied category label is not in :data:`NON_SP_ATT_CATEGORIES`.
+
+    Guards against typos and out-of-scope categories: the §3.3 gate covers
+    exactly the seven declared categories, and the §3.4 fingerprint covers
+    those seven plus three (``state_schema``, ``solver_config``,
+    ``sp_att_non_forc``). Any other label indicates a caller bug and is
+    refused before file bytes are read, so downstream SUB-13 evidence never
+    binds to an off-schema fingerprint.
+    """
+
+    def __init__(
+        self,
+        *,
+        supplied_category: str,
+        allowed_categories: tuple[str, ...],
+    ) -> None:
+        super().__init__(
+            f"unknown category {supplied_category!r}; expected one of "
+            f"{list(allowed_categories)!r}"
+        )
+        self.supplied_category = supplied_category
+        self.allowed_categories = allowed_categories
+
+
+class MissingCategoryError(SpAttRewriteError):
+    """A required category is absent from the caller-supplied mapping.
+
+    :func:`verify_non_sp_att_checksums_equal` requires the full set of
+    :data:`NON_SP_ATT_CATEGORIES`; :func:`compute_hydrologic_core_fingerprint`
+    similarly requires the full seven for the file-based portion of the
+    fingerprint. Missing coverage is a caller bug that would silently
+    exclude an in-scope surface from the G4 proof — refuse loudly.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing_categories: tuple[str, ...],
+        required_categories: tuple[str, ...],
+    ) -> None:
+        super().__init__(
+            f"missing category coverage: {list(missing_categories)!r}; "
+            f"required={list(required_categories)!r}"
+        )
+        self.missing_categories = missing_categories
+        self.required_categories = required_categories
+
+
+class HydrologicCoreFingerprintMismatchError(SpAttRewriteError):
+    """Baseline and variant hydrologic core fingerprints differ.
+
+    Per spec §"hydrologic_core_fingerprint equals the baseline's" (§3.4)
+    and docs §Gate G10: the ten-surface fingerprint (mesh topology,
+    river/lake topology, ``.sp.att`` non-``FORC`` fields, soil/geol/land,
+    calibration, state vector schema, solver-relevant configuration) MUST
+    be byte-identical between baseline and variant. Any drift is a G4
+    blocker with no variant asset written.
+
+    Both fingerprint attributes are supplied so a downstream evidence
+    bundler (SUB-13) can record the two SHA-256 digests verbatim and, via
+    :attr:`baseline_covered_labels` / :attr:`variant_covered_labels`, prove
+    the mismatch was not caused by a coverage discrepancy but by a bytes
+    drift in one of the covered surfaces.
+    """
+
+    def __init__(
+        self,
+        *,
+        baseline_fingerprint_hash: str,
+        variant_fingerprint_hash: str,
+        baseline_covered_labels: tuple[str, ...],
+        variant_covered_labels: tuple[str, ...],
+    ) -> None:
+        super().__init__(
+            f"hydrologic_core_fingerprint mismatch: "
+            f"baseline={baseline_fingerprint_hash!r} "
+            f"variant={variant_fingerprint_hash!r} "
+            f"(baseline_labels={list(baseline_covered_labels)}, "
+            f"variant_labels={list(variant_covered_labels)}) "
+            "(G4 asset delta / docs §G10 violation)"
+        )
+        self.baseline_fingerprint_hash = baseline_fingerprint_hash
+        self.variant_fingerprint_hash = variant_fingerprint_hash
+        self.baseline_covered_labels = baseline_covered_labels
+        self.variant_covered_labels = variant_covered_labels
+
+
+# --- category constants (§3.3 + §3.4 coverage sets) ----------------------
+
+# The 7 non-``.sp.att`` hydrologic core file categories covered by the G4
+# checksum-equality gate (§3.3). Alphabetized so the coverage set is a
+# stable, review-friendly tuple.
+NON_SP_ATT_CATEGORIES: tuple[str, ...] = (
+    "calibration",
+    "geol",
+    "lake",
+    "land",
+    "mesh",
+    "river",
+    "soil",
+)
+
+# The 10 covered surfaces of the ``hydrologic_core_fingerprint`` (§3.4 +
+# docs §Gate G10): the 7 file categories above plus ``.sp.att`` non-``FORC``
+# fields, state vector schema, and solver-relevant configuration.
+# Alphabetized for deterministic domain-separated hashing.
+HYDROLOGIC_CORE_FINGERPRINT_LABELS: tuple[str, ...] = (
+    "calibration",
+    "geol",
+    "lake",
+    "land",
+    "mesh",
+    "river",
+    "soil",
+    "solver_config",
+    "sp_att_non_forc",
+    "state_schema",
+)
+
+
 # --- structured output dataclasses ---------------------------------------
 
 
@@ -410,6 +623,37 @@ class SpAttRewriteReport:
     semantic_diff: SemanticDiff
     rewritten_row_count: int
     used_cell_count: int
+
+
+@dataclass(frozen=True)
+class HydrologicCoreFingerprint:
+    """Result of :func:`compute_hydrologic_core_fingerprint` (§3.4 / docs §G10).
+
+    Frozen so downstream evidence (SUB-13 mapping evidence package) can
+    record the two fields verbatim — SUB-13 does not recompute the
+    fingerprint from its inputs; it stores what the builder produced,
+    with the covered_paths tuple providing the audit trail of every
+    surface that fed the hash.
+
+    Attributes
+    ----------
+    hash:
+        The SHA-256 hex digest (64 lowercase hex chars) computed over the
+        domain-separated concatenation of per-surface entries in
+        :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS` order.
+    covered_paths:
+        Immutable tuple of ``f"{label}:{descriptor}"`` strings, one per
+        entry that fed the hash. For file categories the descriptor is
+        the relative path (or a semicolon-joined list of sorted relative
+        paths for multi-file categories). For ``state_schema`` and
+        ``solver_config`` the descriptor is ``"<bytes>"``. For
+        ``sp_att_non_forc`` the descriptor is the ``.sp.att`` relative
+        path. Sorted alphabetically for determinism, so two runs on the
+        same inputs produce a byte-identical dataclass.
+    """
+
+    hash: str
+    covered_paths: tuple[str, ...]
 
 
 # --- internal parser ------------------------------------------------------
@@ -850,6 +1094,455 @@ def verify_non_forc_columns_unchanged(
                     baseline_value=b_row[col_idx],
                     variant_value=v_row[col_idx],
                 )
+
+
+# --- §3.3 non-.sp.att file-checksum equality gate (G4) --------------------
+
+
+def _validate_category_files(
+    category_files: Mapping[str, Sequence[str]],
+    *,
+    required_categories: tuple[str, ...],
+) -> None:
+    """Validate the caller-supplied category-to-relative-paths mapping.
+
+    Raises
+    ------
+    UnknownCategoryError
+        A supplied category is not in ``required_categories``.
+    MissingCategoryError
+        A required category is absent from ``category_files``.
+    SpAttRewriteError
+        A category maps to an empty sequence (the gate has no file to hash).
+    """
+    supplied = set(category_files)
+    required = set(required_categories)
+    unknown = supplied - required
+    if unknown:
+        # Deterministic first-unknown reporting: sort to make the failing
+        # label reproducible across runs / OS iteration orders.
+        raise UnknownCategoryError(
+            supplied_category=sorted(unknown)[0],
+            allowed_categories=required_categories,
+        )
+    missing = required - supplied
+    if missing:
+        raise MissingCategoryError(
+            missing_categories=tuple(sorted(missing)),
+            required_categories=required_categories,
+        )
+    # Empty per-category coverage would silently skip the check.
+    for label in required_categories:
+        if not tuple(category_files[label]):
+            raise SpAttRewriteError(
+                f"category {label!r} has no declared files; the §3.3/§3.4 "
+                "gate requires at least one file per covered category"
+            )
+
+
+def _resolve_and_sha256(
+    package_root: pathlib.Path,
+    relative_path: str,
+    *,
+    category: str,
+    missing_side: str,
+) -> str:
+    """Resolve ``relative_path`` under ``package_root`` and return its SHA-256.
+
+    Raises
+    ------
+    MissingPackageFileError
+        The resolved path does not exist or is not a regular file.
+    """
+    target = package_root / relative_path
+    if not target.exists() or not target.is_file():
+        raise MissingPackageFileError(
+            category=category,
+            relative_path=relative_path,
+            missing_side=missing_side,
+            package_root=package_root,
+        )
+    return _sha256_file(target)
+
+
+def verify_non_sp_att_checksums_equal(
+    baseline_package_root: pathlib.Path,
+    variant_package_root: pathlib.Path,
+    *,
+    category_files: Mapping[str, Sequence[str]],
+) -> None:
+    """§3.3 G4 file-checksum equality gate for the 7 non-``.sp.att`` categories.
+
+    Asserts that every declared file in every declared category has an equal
+    SHA-256 between the baseline and variant packages. Per spec §"Mesh,
+    river, lake, soil, geol, land, and calibration files are byte-identical
+    to baseline" (§3.3): the variant model input package MUST NOT alter any
+    of these files relative to the baseline; only the ``.sp.att`` rewrite,
+    the direct-grid binding artifact, and the manifest are allowed to
+    change.
+
+    Fail-closed guarantee: on any inequality (or on any missing/undeclared
+    category) this function raises BEFORE any downstream variant assembly
+    step runs. Callers MUST invoke this gate *before* writing any variant
+    package output; a G4 blocker raised here means the variant assembly
+    aborts with no partial artifact on disk.
+
+    Parameters
+    ----------
+    baseline_package_root, variant_package_root:
+        Absolute paths to the baseline and variant model input package
+        roots. Both MUST exist and be directories.
+    category_files:
+        Mapping from category label (must be exactly the set
+        :data:`NON_SP_ATT_CATEGORIES`) to a non-empty sequence of relative
+        file paths under each package root. The same relative paths are
+        used for both baseline and variant lookups — the gate proves the
+        variant carries the *same* files as the baseline, not a
+        substituted set.
+
+    Raises
+    ------
+    UnknownCategoryError
+        ``category_files`` contains a category not in
+        :data:`NON_SP_ATT_CATEGORIES`.
+    MissingCategoryError
+        ``category_files`` is missing a required category from
+        :data:`NON_SP_ATT_CATEGORIES`.
+    MissingPackageFileError
+        A declared relative path is absent from either package root.
+    NonSpAttChecksumMismatchError
+        A category file's SHA-256 differs between baseline and variant.
+    SpAttRewriteError
+        ``baseline_package_root`` or ``variant_package_root`` is not a
+        directory, or a category maps to an empty sequence.
+    """
+    if not baseline_package_root.is_dir():
+        raise SpAttRewriteError(
+            f"baseline_package_root {baseline_package_root} is not a directory"
+        )
+    if not variant_package_root.is_dir():
+        raise SpAttRewriteError(
+            f"variant_package_root {variant_package_root} is not a directory"
+        )
+    _validate_category_files(
+        category_files, required_categories=NON_SP_ATT_CATEGORIES
+    )
+    # Iterate categories in deterministic order so the first-mismatch report
+    # is reproducible across runs (spec §7 determinism).
+    for category in NON_SP_ATT_CATEGORIES:
+        for relative_path in sorted(category_files[category]):
+            baseline_sha = _resolve_and_sha256(
+                baseline_package_root,
+                relative_path,
+                category=category,
+                missing_side="baseline",
+            )
+            variant_sha = _resolve_and_sha256(
+                variant_package_root,
+                relative_path,
+                category=category,
+                missing_side="variant",
+            )
+            if baseline_sha != variant_sha:
+                raise NonSpAttChecksumMismatchError(
+                    category=category,
+                    relative_path=relative_path,
+                    baseline_sha256=baseline_sha,
+                    variant_sha256=variant_sha,
+                )
+
+
+# --- §3.4 hydrologic_core_fingerprint (G10 coverage) ----------------------
+
+
+def _sha256_bytes(data: bytes) -> str:
+    """SHA-256 hex digest of an in-memory bytes buffer."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _compute_file_category_hash(
+    package_root: pathlib.Path,
+    category: str,
+    relative_paths: Sequence[str],
+) -> str:
+    """SHA-256 over ``f"{path}\\t{file_sha256}\\n"`` per file, sorted by path.
+
+    Multi-file categories (e.g. river = river.riv + river.rivseg) fold the
+    per-file hashes into a per-category hash before entering the top-level
+    fingerprint. Sorted-path order is the domain separator that prevents
+    collisions between adjacent files in the same category.
+    """
+    per_file_entries: list[str] = []
+    for relative_path in sorted(relative_paths):
+        file_sha = _resolve_and_sha256(
+            package_root,
+            relative_path,
+            category=category,
+            missing_side="package",
+        )
+        per_file_entries.append(f"{relative_path}\t{file_sha}\n")
+    joined = "".join(per_file_entries).encode("utf-8")
+    return _sha256_bytes(joined)
+
+
+def _canonicalize_sp_att_non_forc(sp_att_path: pathlib.Path) -> str:
+    """Return SHA-256 over the ``.sp.att`` non-``FORC`` columns, canonicalized.
+
+    The ``.sp.att`` file cannot be hashed whole because the FORC column
+    changes intentionally between baseline and variant. Instead:
+
+    1. Parse the file with :func:`_parse_sp_att_file` to obtain the schema
+       and per-row tokens (already-validated for schema drift).
+    2. Serialize each row's non-``FORC`` tokens keyed by ``element_id``,
+       sorted by ``element_id`` ascending for determinism.
+    3. Prefix the schema (all column names minus ``FORC``, in the schema's
+       original order) so a schema-reorder attack cannot silently produce
+       the same digest.
+    4. SHA-256 the canonicalized string.
+
+    This is the fingerprint contribution of the ``sp_att_non_forc``
+    surface. It is symmetric to :func:`verify_non_forc_columns_unchanged`
+    (which asserts equality at parse level between baseline and variant),
+    but here we produce a compact hash suitable for the top-level
+    fingerprint entry.
+    """
+    parsed = _parse_sp_att_file(sp_att_path)
+    non_forc_col_indices = [
+        i for i in range(len(parsed.schema)) if i != parsed.forc_col_index
+    ]
+    non_forc_schema = tuple(parsed.schema[i] for i in non_forc_col_indices)
+    lines: list[str] = [
+        "schema\t" + "\t".join(non_forc_schema) + "\n",
+    ]
+    rows_by_id: dict[int, tuple[str, ...]] = {}
+    for row in parsed.parsed_rows:
+        eid = int(row[0])
+        rows_by_id[eid] = row
+    for eid in sorted(rows_by_id):
+        row = rows_by_id[eid]
+        non_forc_tokens = [row[i] for i in non_forc_col_indices]
+        lines.append(f"{eid}\t" + "\t".join(non_forc_tokens) + "\n")
+    joined = "".join(lines).encode("utf-8")
+    return _sha256_bytes(joined)
+
+
+def compute_hydrologic_core_fingerprint(
+    package_root: pathlib.Path,
+    *,
+    sp_att_path: pathlib.Path,
+    category_files: Mapping[str, Sequence[str]],
+    state_schema_bytes: bytes,
+    solver_config_bytes: bytes,
+) -> HydrologicCoreFingerprint:
+    """§3.4 / docs §G10 ten-surface ``hydrologic_core_fingerprint`` computation.
+
+    Computes a domain-separated SHA-256 fingerprint over the ten covered
+    surfaces enumerated in :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS`:
+
+    * ``calibration``, ``geol``, ``lake``, ``land``, ``mesh``, ``river``,
+      ``soil`` — file categories under ``category_files`` (same shape as
+      :func:`verify_non_sp_att_checksums_equal`).
+    * ``sp_att_non_forc`` — non-``FORC`` columns of ``sp_att_path``,
+      canonicalized by element ID (see :func:`_canonicalize_sp_att_non_forc`).
+    * ``state_schema`` — SHA-256 of ``state_schema_bytes`` (pluggable so
+      SUB-13 can wire in the concrete state schema bytes when the runtime
+      piece lands; per docs §G10 this is a shared platform-level surface).
+    * ``solver_config`` — SHA-256 of ``solver_config_bytes`` (same
+      rationale as ``state_schema_bytes``).
+
+    Domain separation
+    -----------------
+    Each surface contributes exactly one line ``f"{label}\\t{hash}\\n"`` to
+    the top-level buffer, sorted by ``label`` alphabetically. The final
+    fingerprint is the SHA-256 of this UTF-8-encoded buffer. Because each
+    entry carries an in-hex sub-hash (not raw bytes) and terminates with
+    ``\\n``, adjacent-surface content shifting cannot collide the digest
+    (raw-bytes concatenation would be collision-attackable — the docs
+    require the fingerprint be a real invariance proof, not a hand-wave).
+
+    The returned :class:`HydrologicCoreFingerprint`'s ``covered_paths``
+    field enumerates ``f"{label}:{descriptor}"`` per surface so SUB-13 can
+    record verbatim which surfaces fed the hash. Multi-file categories
+    join their sorted relative paths with ``";"``; pluggable byte
+    surfaces use ``"<bytes>"`` as the descriptor.
+
+    Parameters
+    ----------
+    package_root:
+        Absolute path to a model input package root (baseline or variant).
+        MUST be an existing directory.
+    sp_att_path:
+        Absolute path to the package's ``.sp.att`` file (may be under
+        ``package_root`` or a variant path; only its bytes matter here).
+        MUST exist and parse cleanly.
+    category_files:
+        Mapping from each of the seven :data:`NON_SP_ATT_CATEGORIES` to a
+        non-empty sequence of relative paths under ``package_root``.
+    state_schema_bytes, solver_config_bytes:
+        In-memory bytes for the state vector schema and solver-relevant
+        configuration surfaces (per docs §G10). Empty bytes ARE legal
+        (they hash to the SHA-256 of the empty string) but a caller
+        supplying empty bytes on both packages will pass the equality
+        gate — the intent is that SUB-13 supplies real bytes.
+
+    Returns
+    -------
+    HydrologicCoreFingerprint
+        Immutable record with the fingerprint SHA-256 hex and the sorted
+        covered_paths tuple.
+
+    Raises
+    ------
+    UnknownCategoryError
+        ``category_files`` contains a category not in
+        :data:`NON_SP_ATT_CATEGORIES`.
+    MissingCategoryError
+        ``category_files`` is missing a required category from
+        :data:`NON_SP_ATT_CATEGORIES`.
+    MissingPackageFileError
+        A declared relative path is absent from ``package_root``.
+    SpAttRewriteError
+        ``package_root`` is not a directory, ``sp_att_path`` is missing
+        or unparseable, or a category maps to an empty sequence.
+    """
+    if not package_root.is_dir():
+        raise SpAttRewriteError(
+            f"package_root {package_root} is not a directory"
+        )
+    if not sp_att_path.exists() or not sp_att_path.is_file():
+        raise SpAttRewriteError(
+            f"sp_att_path {sp_att_path} does not exist or is not a file"
+        )
+    _validate_category_files(
+        category_files, required_categories=NON_SP_ATT_CATEGORIES
+    )
+    # Per-surface hashes and descriptors. Descriptors feed covered_paths.
+    per_surface_hash: dict[str, str] = {}
+    per_surface_descriptor: dict[str, str] = {}
+    for category in NON_SP_ATT_CATEGORIES:
+        relative_paths = tuple(sorted(category_files[category]))
+        per_surface_hash[category] = _compute_file_category_hash(
+            package_root, category, relative_paths
+        )
+        per_surface_descriptor[category] = ";".join(relative_paths)
+    per_surface_hash["sp_att_non_forc"] = _canonicalize_sp_att_non_forc(
+        sp_att_path
+    )
+    per_surface_descriptor["sp_att_non_forc"] = str(sp_att_path.name)
+    per_surface_hash["state_schema"] = _sha256_bytes(state_schema_bytes)
+    per_surface_descriptor["state_schema"] = "<bytes>"
+    per_surface_hash["solver_config"] = _sha256_bytes(solver_config_bytes)
+    per_surface_descriptor["solver_config"] = "<bytes>"
+
+    # Sanity: every declared label appears exactly once.
+    assert set(per_surface_hash) == set(HYDROLOGIC_CORE_FINGERPRINT_LABELS)
+
+    # Domain-separated top-level hash. Iterate labels in alphabetical order
+    # (already the case in HYDROLOGIC_CORE_FINGERPRINT_LABELS) so the
+    # fingerprint is byte-identical across runs.
+    top_lines = [
+        f"{label}\t{per_surface_hash[label]}\n"
+        for label in HYDROLOGIC_CORE_FINGERPRINT_LABELS
+    ]
+    fingerprint_hash = _sha256_bytes("".join(top_lines).encode("utf-8"))
+    covered_paths = tuple(
+        sorted(
+            f"{label}:{per_surface_descriptor[label]}"
+            for label in HYDROLOGIC_CORE_FINGERPRINT_LABELS
+        )
+    )
+    return HydrologicCoreFingerprint(
+        hash=fingerprint_hash, covered_paths=covered_paths
+    )
+
+
+def verify_hydrologic_core_fingerprint_equal(
+    baseline_package_root: pathlib.Path,
+    variant_package_root: pathlib.Path,
+    *,
+    baseline_sp_att_path: pathlib.Path,
+    variant_sp_att_path: pathlib.Path,
+    category_files: Mapping[str, Sequence[str]],
+    baseline_state_schema_bytes: bytes,
+    variant_state_schema_bytes: bytes,
+    baseline_solver_config_bytes: bytes,
+    variant_solver_config_bytes: bytes,
+) -> HydrologicCoreFingerprint:
+    """§3.4 G4 fingerprint-equality gate + shared-fingerprint return.
+
+    Computes :func:`compute_hydrologic_core_fingerprint` on the baseline
+    and variant packages, asserts equality, and returns the shared
+    fingerprint on pass. Per spec §"hydrologic_core_fingerprint equals the
+    baseline's" (§3.4) and docs §Gate G10, drift in any of the ten covered
+    surfaces indicates the variant mutated a hydrologic core surface it
+    was not supposed to touch, and is a G4 blocker with no variant asset
+    written.
+
+    Both packages use the SAME ``category_files`` mapping — the invariant
+    is that the SAME relative paths under both roots hash the same. The
+    ``state_schema_bytes`` and ``solver_config_bytes`` are per-package
+    inputs so callers can inject drift for negative testing (in production
+    both callers supply the same platform-level bytes to both fingerprint
+    computations).
+
+    Parameters
+    ----------
+    baseline_package_root, variant_package_root:
+        Absolute paths to the baseline and variant model input package
+        roots. Both MUST exist and be directories.
+    baseline_sp_att_path, variant_sp_att_path:
+        Absolute paths to the baseline and variant ``.sp.att`` files.
+        Both MUST exist.
+    category_files:
+        Mapping from each of the seven :data:`NON_SP_ATT_CATEGORIES` to a
+        non-empty sequence of relative paths. Same relative paths are
+        used for both roots.
+    baseline_state_schema_bytes, variant_state_schema_bytes:
+        Per-package state vector schema bytes (see
+        :func:`compute_hydrologic_core_fingerprint`).
+    baseline_solver_config_bytes, variant_solver_config_bytes:
+        Per-package solver-relevant configuration bytes (see
+        :func:`compute_hydrologic_core_fingerprint`).
+
+    Returns
+    -------
+    HydrologicCoreFingerprint
+        The shared fingerprint (equal for baseline and variant on pass).
+        SUB-13 records this verbatim in the mapping evidence.
+
+    Raises
+    ------
+    HydrologicCoreFingerprintMismatchError
+        Baseline and variant fingerprints differ (G4 blocker per §3.4 /
+        docs §G10).
+    UnknownCategoryError, MissingCategoryError, MissingPackageFileError,
+    SpAttRewriteError:
+        Propagated from the underlying
+        :func:`compute_hydrologic_core_fingerprint` invocations.
+    """
+    baseline_fp = compute_hydrologic_core_fingerprint(
+        baseline_package_root,
+        sp_att_path=baseline_sp_att_path,
+        category_files=category_files,
+        state_schema_bytes=baseline_state_schema_bytes,
+        solver_config_bytes=baseline_solver_config_bytes,
+    )
+    variant_fp = compute_hydrologic_core_fingerprint(
+        variant_package_root,
+        sp_att_path=variant_sp_att_path,
+        category_files=category_files,
+        state_schema_bytes=variant_state_schema_bytes,
+        solver_config_bytes=variant_solver_config_bytes,
+    )
+    if baseline_fp.hash != variant_fp.hash:
+        raise HydrologicCoreFingerprintMismatchError(
+            baseline_fingerprint_hash=baseline_fp.hash,
+            variant_fingerprint_hash=variant_fp.hash,
+            baseline_covered_labels=baseline_fp.covered_paths,
+            variant_covered_labels=variant_fp.covered_paths,
+        )
+    # Both fingerprints match — return one (they are byte-identical).
+    return baseline_fp
 
 
 def copy_and_rewrite_sp_att_forc(

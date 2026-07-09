@@ -29,6 +29,8 @@ import typing
 import pytest
 
 from workers.mapping_builder import (
+    HYDROLOGIC_CORE_FINGERPRINT_LABELS,
+    NON_SP_ATT_CATEGORIES,
     BaselineImmutabilityViolationError,
     ElementIdSetMismatchError,
     ElementOwnership,
@@ -36,7 +38,12 @@ from workers.mapping_builder import (
     ForcNonIntegerError,
     ForcOutOfRangeError,
     ForcUnmappedError,
+    HydrologicCoreFingerprint,
+    HydrologicCoreFingerprintMismatchError,
+    MissingCategoryError,
+    MissingPackageFileError,
     NonForcColumnChangedError,
+    NonSpAttChecksumMismatchError,
     RowCountMismatchError,
     SchemaMismatchError,
     SemanticDiff,
@@ -45,11 +52,15 @@ from workers.mapping_builder import (
     SpAttForcRow,
     SpAttRewriteError,
     SpAttRewriteReport,
+    UnknownCategoryError,
+    compute_hydrologic_core_fingerprint,
     copy_and_rewrite_sp_att_forc,
     emit_semantic_diff,
     parse_sp_att_forc_rows,
     record_sp_att_checksums,
+    verify_hydrologic_core_fingerprint_equal,
     verify_non_forc_columns_unchanged,
+    verify_non_sp_att_checksums_equal,
 )
 from workers.mapping_builder import rewrite as rewrite_module
 
@@ -1057,3 +1068,668 @@ def test_parse_sp_att_forc_rows_roundtrip(tmp_path: pathlib.Path) -> None:
     assert [r.forc for r in rows] == [3, 1, 2]
     for row in rows:
         assert isinstance(row, SpAttForcRow)
+
+
+# --- §3.3 + §3.4 fixture helpers (SUB-9) ----------------------------------
+
+
+# Stable payloads for each non-.sp.att file category — kept distinct so that
+# mutating a single category's bytes flips its SHA-256 without accidentally
+# colliding with any sibling category's baseline hash. Each category is
+# represented by a single file (all this SUB-9 gate cares about is byte
+# equality; multi-file categories are exercised by
+# :func:`test_hydrologic_core_fingerprint_multi_file_category_category`).
+_NON_SP_ATT_STUBS: dict[str, tuple[str, bytes]] = {
+    "calibration": ("basin.calib", b"calibration-payload-v1\n"),
+    "geol": ("basin.geol", b"geol-payload-v1\n"),
+    "lake": ("basin.lake", b"lake-payload-v1\n"),
+    "land": ("basin.land", b"land-payload-v1\n"),
+    "mesh": ("basin.sp.mesh", b"mesh-payload-v1\n"),
+    "river": ("basin.riv", b"river-payload-v1\n"),
+    "soil": ("basin.soil", b"soil-payload-v1\n"),
+}
+
+
+def _write_stub_package(
+    root: pathlib.Path,
+    *,
+    stubs: dict[str, tuple[str, bytes]] | None = None,
+) -> pathlib.Path:
+    """Create a minimal package tree with one file per non-.sp.att category.
+
+    Returns the package root path. Callers can override individual category
+    payloads by passing a full ``stubs`` dict (the seven-category set) —
+    typically used to inject drift for a negative test.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    payloads = stubs if stubs is not None else _NON_SP_ATT_STUBS
+    for _category, (filename, payload) in payloads.items():
+        (root / filename).write_bytes(payload)
+    return root
+
+
+def _default_category_files() -> dict[str, tuple[str, ...]]:
+    """Return the standard category_files mapping matching :data:`_NON_SP_ATT_STUBS`.
+
+    Every category maps to a single relative file path. Multi-file
+    categories are exercised via a separate fixture.
+    """
+    return {
+        category: (filename,)
+        for category, (filename, _payload) in _NON_SP_ATT_STUBS.items()
+    }
+
+
+def _write_baseline_and_variant_packages(
+    tmp_path: pathlib.Path,
+    *,
+    baseline_stubs: dict[str, tuple[str, bytes]] | None = None,
+    variant_stubs: dict[str, tuple[str, bytes]] | None = None,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Set up ``baseline`` + ``variant`` sibling package roots under ``tmp_path``.
+
+    By default, both packages carry identical bytes across all seven
+    categories. Callers can override either side via a stubs dict to
+    inject drift for a negative test.
+    """
+    baseline_root = tmp_path / "baseline"
+    variant_root = tmp_path / "variant"
+    _write_stub_package(baseline_root, stubs=baseline_stubs)
+    _write_stub_package(variant_root, stubs=variant_stubs)
+    return baseline_root, variant_root
+
+
+# --- §3.3 verify_non_sp_att_checksums_equal (G4 asset delta) --------------
+
+
+def test_g4_non_sp_att_checksums_equal_positive(tmp_path: pathlib.Path) -> None:
+    """Seven categories all byte-identical -> gate returns None (no raise)."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    result = verify_non_sp_att_checksums_equal(
+        baseline_root,
+        variant_root,
+        category_files=_default_category_files(),
+    )
+    assert result is None
+
+
+@pytest.mark.parametrize("mutated_category", list(NON_SP_ATT_CATEGORIES))
+def test_g4_non_sp_att_checksums_equal_per_category_mismatch(
+    tmp_path: pathlib.Path,
+    mutated_category: str,
+) -> None:
+    """Mutating any one of the seven categories in the variant -> G4 blocker.
+
+    Runs seven times (one per category). Each iteration writes identical
+    baselines + variants, then overwrites the variant's file for
+    ``mutated_category`` with a different byte payload; the gate MUST
+    raise :class:`NonSpAttChecksumMismatchError` naming the exact category.
+    """
+    variant_stubs = dict(_NON_SP_ATT_STUBS)
+    filename, original_payload = variant_stubs[mutated_category]
+    # Ensure the mutated payload is byte-distinct from the original.
+    variant_stubs[mutated_category] = (
+        filename,
+        original_payload + b"MUTATED-BY-VARIANT\n",
+    )
+    baseline_root, variant_root = _write_baseline_and_variant_packages(
+        tmp_path,
+        variant_stubs=variant_stubs,
+    )
+    with pytest.raises(NonSpAttChecksumMismatchError) as exc_info:
+        verify_non_sp_att_checksums_equal(
+            baseline_root,
+            variant_root,
+            category_files=_default_category_files(),
+        )
+    assert exc_info.value.category == mutated_category
+    assert exc_info.value.relative_path == filename
+    # Baseline and variant SHA-256 are distinct 64-char lowercase hex strings.
+    assert len(exc_info.value.baseline_sha256) == 64
+    assert len(exc_info.value.variant_sha256) == 64
+    assert exc_info.value.baseline_sha256 != exc_info.value.variant_sha256
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_g4_non_sp_att_missing_file_raises(tmp_path: pathlib.Path) -> None:
+    """Missing category file under either root -> MissingPackageFileError."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    # Delete the variant's calibration file so the gate hits a missing file.
+    (variant_root / _NON_SP_ATT_STUBS["calibration"][0]).unlink()
+    with pytest.raises(MissingPackageFileError) as exc_info:
+        verify_non_sp_att_checksums_equal(
+            baseline_root,
+            variant_root,
+            category_files=_default_category_files(),
+        )
+    assert exc_info.value.category == "calibration"
+    assert exc_info.value.missing_side == "variant"
+    assert exc_info.value.relative_path == "basin.calib"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_g4_non_sp_att_unknown_category_raises(tmp_path: pathlib.Path) -> None:
+    """category_files supplying a non-declared category -> UnknownCategoryError."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    bogus_categories = dict(_default_category_files())
+    bogus_categories["not-a-real-category"] = ("bogus.file",)
+    with pytest.raises(UnknownCategoryError) as exc_info:
+        verify_non_sp_att_checksums_equal(
+            baseline_root,
+            variant_root,
+            category_files=bogus_categories,
+        )
+    assert exc_info.value.supplied_category == "not-a-real-category"
+    assert exc_info.value.allowed_categories == NON_SP_ATT_CATEGORIES
+
+
+def test_g4_non_sp_att_missing_category_raises(tmp_path: pathlib.Path) -> None:
+    """category_files missing a required category -> MissingCategoryError."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    partial_categories = dict(_default_category_files())
+    partial_categories.pop("river")
+    partial_categories.pop("lake")
+    with pytest.raises(MissingCategoryError) as exc_info:
+        verify_non_sp_att_checksums_equal(
+            baseline_root,
+            variant_root,
+            category_files=partial_categories,
+        )
+    assert "lake" in exc_info.value.missing_categories
+    assert "river" in exc_info.value.missing_categories
+
+
+def test_g4_non_sp_att_empty_category_raises(tmp_path: pathlib.Path) -> None:
+    """A category mapping to an empty sequence -> SpAttRewriteError."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    categories = dict(_default_category_files())
+    categories["mesh"] = ()  # empty tuple -> gate has no file to hash
+    with pytest.raises(SpAttRewriteError) as exc_info:
+        verify_non_sp_att_checksums_equal(
+            baseline_root,
+            variant_root,
+            category_files=categories,
+        )
+    assert "mesh" in str(exc_info.value)
+    assert "no declared files" in str(exc_info.value)
+
+
+# --- §3.4 hydrologic_core_fingerprint computation + equality --------------
+
+
+def _default_state_and_solver_bytes() -> tuple[bytes, bytes]:
+    """Return the shared state_schema + solver_config bytes for equality tests."""
+    return (
+        b"state_schema:v1\nfields=[soil_moisture,swe,gw]\n",
+        b"solver_config:v1\ndt=3600\ntol=1e-6\n",
+    )
+
+
+def _write_sp_att_for_fingerprint(
+    path: pathlib.Path,
+    *,
+    forc_values: list[int] | None = None,
+    non_forc_soil: int = 1,
+) -> pathlib.Path:
+    """Write a standard 4-row .sp.att for fingerprint tests.
+
+    ``forc_values``: override the FORC column (default 1..4). Fingerprint
+    is invariant under FORC changes, so passing different lists MUST
+    produce the same sp_att_non_forc hash.
+
+    ``non_forc_soil``: override SOIL to simulate a non-FORC drift for
+    negative tests.
+    """
+    if forc_values is None:
+        forc_values = [1, 2, 3, 4]
+    rows = [
+        (i + 1, non_forc_soil, 1, 11, forc_values[i], 1, 0, 0, 0)
+        for i in range(4)
+    ]
+    return _write_sp_att(path, rows)
+
+
+def test_hydrologic_core_fingerprint_positive(tmp_path: pathlib.Path) -> None:
+    """Green path: identical inputs -> identical fingerprint bytes and covered_paths.
+
+    Two package roots with identical file bytes and identical
+    state/solver bytes MUST produce byte-identical
+    :class:`HydrologicCoreFingerprint` values.
+    """
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(
+        baseline_root / "basin.sp.att", forc_values=[1, 2, 3, 4]
+    )
+    # Variant .sp.att has different FORC values — the fingerprint MUST
+    # still match because sp_att_non_forc excludes FORC.
+    variant_att = _write_sp_att_for_fingerprint(
+        variant_root / "basin.sp.att", forc_values=[4, 3, 2, 1]
+    )
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+
+    baseline_fp = compute_hydrologic_core_fingerprint(
+        baseline_root,
+        sp_att_path=baseline_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    variant_fp = compute_hydrologic_core_fingerprint(
+        variant_root,
+        sp_att_path=variant_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    assert isinstance(baseline_fp, HydrologicCoreFingerprint)
+    assert baseline_fp == variant_fp
+    # Fingerprint hash is a 64-char lowercase hex string.
+    assert len(baseline_fp.hash) == 64
+    assert all(c in "0123456789abcdef" for c in baseline_fp.hash)
+    # covered_paths lists exactly ten entries, alphabetically sorted, one per label.
+    assert len(baseline_fp.covered_paths) == len(HYDROLOGIC_CORE_FINGERPRINT_LABELS)
+    assert list(baseline_fp.covered_paths) == sorted(baseline_fp.covered_paths)
+    label_prefixes = [entry.split(":", 1)[0] for entry in baseline_fp.covered_paths]
+    assert set(label_prefixes) == set(HYDROLOGIC_CORE_FINGERPRINT_LABELS)
+
+
+def test_verify_hydrologic_core_fingerprint_equal_positive(
+    tmp_path: pathlib.Path,
+) -> None:
+    """verify_hydrologic_core_fingerprint_equal returns shared fingerprint on match."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(
+        variant_root / "basin.sp.att", forc_values=[4, 3, 2, 1]
+    )
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    result = verify_hydrologic_core_fingerprint_equal(
+        baseline_root,
+        variant_root,
+        baseline_sp_att_path=baseline_att,
+        variant_sp_att_path=variant_att,
+        category_files=_default_category_files(),
+        baseline_state_schema_bytes=state_bytes,
+        variant_state_schema_bytes=state_bytes,
+        baseline_solver_config_bytes=solver_bytes,
+        variant_solver_config_bytes=solver_bytes,
+    )
+    assert isinstance(result, HydrologicCoreFingerprint)
+    assert len(result.hash) == 64
+
+
+@pytest.mark.parametrize("mutated_category", list(NON_SP_ATT_CATEGORIES))
+def test_hydrologic_core_fingerprint_drift_per_file_category(
+    tmp_path: pathlib.Path,
+    mutated_category: str,
+) -> None:
+    """Drift in any one of the 7 file categories -> fingerprint mismatch + G4 blocker.
+
+    Runs 7 times. Each iteration mutates a single file category's bytes in
+    the variant; :func:`verify_hydrologic_core_fingerprint_equal` MUST
+    raise :class:`HydrologicCoreFingerprintMismatchError`.
+    """
+    variant_stubs = dict(_NON_SP_ATT_STUBS)
+    filename, original_payload = variant_stubs[mutated_category]
+    variant_stubs[mutated_category] = (
+        filename,
+        original_payload + b"DRIFT-INTO-FINGERPRINT\n",
+    )
+    baseline_root, variant_root = _write_baseline_and_variant_packages(
+        tmp_path,
+        variant_stubs=variant_stubs,
+    )
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(HydrologicCoreFingerprintMismatchError) as exc_info:
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+    assert (
+        exc_info.value.baseline_fingerprint_hash
+        != exc_info.value.variant_fingerprint_hash
+    )
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_hydrologic_core_fingerprint_drift_state_schema(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Variant supplies different state_schema_bytes -> fingerprint mismatch."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(HydrologicCoreFingerprintMismatchError):
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes + b"drifted\n",
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+
+
+def test_hydrologic_core_fingerprint_drift_solver_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Variant supplies different solver_config_bytes -> fingerprint mismatch."""
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(HydrologicCoreFingerprintMismatchError):
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes + b"drifted\n",
+        )
+
+
+def test_hydrologic_core_fingerprint_drift_sp_att_non_forc(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Non-FORC column drift in variant .sp.att -> fingerprint mismatch.
+
+    Baseline SOIL=1, variant SOIL=99 with identical FORC. The
+    ``sp_att_non_forc`` surface MUST detect the SOIL change; a FORC-only
+    variant would NOT trigger this (see
+    :func:`test_hydrologic_core_fingerprint_positive`).
+    """
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(
+        baseline_root / "basin.sp.att", non_forc_soil=1
+    )
+    variant_att = _write_sp_att_for_fingerprint(
+        variant_root / "basin.sp.att", non_forc_soil=99
+    )
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    with pytest.raises(HydrologicCoreFingerprintMismatchError):
+        verify_hydrologic_core_fingerprint_equal(
+            baseline_root,
+            variant_root,
+            baseline_sp_att_path=baseline_att,
+            variant_sp_att_path=variant_att,
+            category_files=_default_category_files(),
+            baseline_state_schema_bytes=state_bytes,
+            variant_state_schema_bytes=state_bytes,
+            baseline_solver_config_bytes=solver_bytes,
+            variant_solver_config_bytes=solver_bytes,
+        )
+
+
+def test_hydrologic_core_fingerprint_forc_only_change_matches(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Explicit re-assertion: FORC-only change MUST NOT drift the fingerprint.
+
+    Companion to the drift tests — proves the sp_att_non_forc surface
+    excludes FORC (spec §"the .sp.att non-FORC fields" is the intended
+    scope, not the whole file).
+    """
+    baseline_root, variant_root = _write_baseline_and_variant_packages(tmp_path)
+    baseline_att = _write_sp_att_for_fingerprint(
+        baseline_root / "basin.sp.att", forc_values=[1, 2, 3, 4]
+    )
+    variant_att = _write_sp_att_for_fingerprint(
+        variant_root / "basin.sp.att", forc_values=[7, 8, 9, 10]
+    )
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    result = verify_hydrologic_core_fingerprint_equal(
+        baseline_root,
+        variant_root,
+        baseline_sp_att_path=baseline_att,
+        variant_sp_att_path=variant_att,
+        category_files=_default_category_files(),
+        baseline_state_schema_bytes=state_bytes,
+        variant_state_schema_bytes=state_bytes,
+        baseline_solver_config_bytes=solver_bytes,
+        variant_solver_config_bytes=solver_bytes,
+    )
+    assert isinstance(result, HydrologicCoreFingerprint)
+
+
+def test_hydrologic_core_fingerprint_deterministic(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Two independent computations on the same inputs -> byte-identical dataclass.
+
+    Determinism proof (spec §7): same package + same category_files +
+    same pluggable bytes MUST produce byte-identical
+    :class:`HydrologicCoreFingerprint` on two independent calls.
+    """
+    root = tmp_path / "pkg"
+    _write_stub_package(root)
+    sp_att = _write_sp_att_for_fingerprint(root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+    fp1 = compute_hydrologic_core_fingerprint(
+        root,
+        sp_att_path=sp_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    fp2 = compute_hydrologic_core_fingerprint(
+        root,
+        sp_att_path=sp_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    assert fp1 == fp2
+
+
+def test_hydrologic_core_fingerprint_domain_separated(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Domain separation: swapping bytes between two categories -> different fingerprint.
+
+    Concatenating raw bytes without labels would let ``mesh=A + river=B``
+    collide with ``mesh=B + river=A``. Domain separation via
+    ``label\\tsha256_hex\\n`` prevents this — even swapped-payload
+    packages MUST produce different fingerprints.
+    """
+    # Original baseline: mesh=X, river=Y (default stubs).
+    baseline_root = tmp_path / "baseline"
+    _write_stub_package(baseline_root)
+    baseline_att = _write_sp_att_for_fingerprint(baseline_root / "basin.sp.att")
+    # Swapped variant: mesh bytes get the river payload, river bytes get the mesh
+    # payload (both files still exist, still under the same relative names).
+    swapped_stubs = dict(_NON_SP_ATT_STUBS)
+    mesh_filename, mesh_payload = swapped_stubs["mesh"]
+    river_filename, river_payload = swapped_stubs["river"]
+    swapped_stubs["mesh"] = (mesh_filename, river_payload)
+    swapped_stubs["river"] = (river_filename, mesh_payload)
+    variant_root = tmp_path / "variant"
+    _write_stub_package(variant_root, stubs=swapped_stubs)
+    variant_att = _write_sp_att_for_fingerprint(variant_root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+
+    baseline_fp = compute_hydrologic_core_fingerprint(
+        baseline_root,
+        sp_att_path=baseline_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    swapped_fp = compute_hydrologic_core_fingerprint(
+        variant_root,
+        sp_att_path=variant_att,
+        category_files=_default_category_files(),
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    assert baseline_fp.hash != swapped_fp.hash, (
+        "domain-separated fingerprint MUST differ when payloads are "
+        "swapped between two categories (a raw-bytes concatenation "
+        "would produce the same hash — a collision the spec forbids)"
+    )
+
+
+def test_hydrologic_core_fingerprint_multi_file_category(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Multi-file category (e.g. river with two files) is order-independent.
+
+    Two runs — one supplying river paths in ``(a.riv, b.rivseg)`` order,
+    another in ``(b.rivseg, a.riv)`` order — MUST produce byte-identical
+    fingerprints. The per-category hash sorts filenames internally so
+    caller input order does not affect the digest.
+    """
+    root = tmp_path / "pkg"
+    _write_stub_package(root)
+    # Add a second river file so the "river" category has two files.
+    (root / "extra.rivseg").write_bytes(b"river-segment-payload\n")
+    sp_att = _write_sp_att_for_fingerprint(root / "basin.sp.att")
+    state_bytes, solver_bytes = _default_state_and_solver_bytes()
+
+    category_files_a = dict(_default_category_files())
+    category_files_a["river"] = ("basin.riv", "extra.rivseg")
+    category_files_b = dict(_default_category_files())
+    category_files_b["river"] = ("extra.rivseg", "basin.riv")
+
+    fp_a = compute_hydrologic_core_fingerprint(
+        root,
+        sp_att_path=sp_att,
+        category_files=category_files_a,
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    fp_b = compute_hydrologic_core_fingerprint(
+        root,
+        sp_att_path=sp_att,
+        category_files=category_files_b,
+        state_schema_bytes=state_bytes,
+        solver_config_bytes=solver_bytes,
+    )
+    assert fp_a == fp_b
+
+
+# --- §3.3 + §3.4 signature pins + frozen dataclass invariants -------------
+
+
+def test_verify_non_sp_att_checksums_equal_signature_pinned() -> None:
+    """Signature pin for the §3.3 G4 file-checksum gate."""
+    sig = inspect.signature(verify_non_sp_att_checksums_equal)
+    assert list(sig.parameters) == [
+        "baseline_package_root",
+        "variant_package_root",
+        "category_files",
+    ]
+    # category_files is KEYWORD_ONLY (post-``*``).
+    assert (
+        sig.parameters["category_files"].kind
+        == inspect.Parameter.KEYWORD_ONLY
+    )
+    hints = typing.get_type_hints(verify_non_sp_att_checksums_equal)
+    assert hints["baseline_package_root"] is pathlib.Path
+    assert hints["variant_package_root"] is pathlib.Path
+    assert hints.get("return") is type(None)
+
+
+def test_compute_hydrologic_core_fingerprint_signature_pinned() -> None:
+    """Signature pin for the §3.4 fingerprint computation."""
+    sig = inspect.signature(compute_hydrologic_core_fingerprint)
+    assert list(sig.parameters) == [
+        "package_root",
+        "sp_att_path",
+        "category_files",
+        "state_schema_bytes",
+        "solver_config_bytes",
+    ]
+    for kwarg in (
+        "sp_att_path",
+        "category_files",
+        "state_schema_bytes",
+        "solver_config_bytes",
+    ):
+        assert (
+            sig.parameters[kwarg].kind == inspect.Parameter.KEYWORD_ONLY
+        )
+    hints = typing.get_type_hints(compute_hydrologic_core_fingerprint)
+    assert hints["package_root"] is pathlib.Path
+    assert hints["sp_att_path"] is pathlib.Path
+    assert hints["state_schema_bytes"] is bytes
+    assert hints["solver_config_bytes"] is bytes
+    assert hints["return"] is HydrologicCoreFingerprint
+
+
+def test_verify_hydrologic_core_fingerprint_equal_signature_pinned() -> None:
+    """Signature pin for the §3.4 fingerprint equality gate."""
+    sig = inspect.signature(verify_hydrologic_core_fingerprint_equal)
+    assert list(sig.parameters) == [
+        "baseline_package_root",
+        "variant_package_root",
+        "baseline_sp_att_path",
+        "variant_sp_att_path",
+        "category_files",
+        "baseline_state_schema_bytes",
+        "variant_state_schema_bytes",
+        "baseline_solver_config_bytes",
+        "variant_solver_config_bytes",
+    ]
+    for kwarg in (
+        "baseline_sp_att_path",
+        "variant_sp_att_path",
+        "category_files",
+        "baseline_state_schema_bytes",
+        "variant_state_schema_bytes",
+        "baseline_solver_config_bytes",
+        "variant_solver_config_bytes",
+    ):
+        assert (
+            sig.parameters[kwarg].kind == inspect.Parameter.KEYWORD_ONLY
+        )
+    hints = typing.get_type_hints(verify_hydrologic_core_fingerprint_equal)
+    assert hints["baseline_package_root"] is pathlib.Path
+    assert hints["variant_package_root"] is pathlib.Path
+    assert hints["return"] is HydrologicCoreFingerprint
+
+
+def test_hydrologic_core_fingerprint_frozen() -> None:
+    """HydrologicCoreFingerprint is frozen; field assignment must raise."""
+    fp = HydrologicCoreFingerprint(hash="a" * 64, covered_paths=("mesh:x",))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fp.hash = "b" * 64  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fp.covered_paths = ()  # type: ignore[misc]
+
+
+def test_sub9_exceptions_inherit_from_sp_att_rewrite_error() -> None:
+    """SUB-9 exception subclasses are members of the SpAttRewriteError family.
+
+    Companion to :func:`test_sp_att_rewrite_error_is_distinct_root`
+    covering the new subclasses introduced in SUB-9. Downstream callers
+    that catch ``SpAttRewriteError`` MUST absorb every G4-file-checksum
+    or hydrologic_core_fingerprint failure without a new ``except`` clause.
+    """
+    subclasses = (
+        HydrologicCoreFingerprintMismatchError,
+        MissingCategoryError,
+        MissingPackageFileError,
+        NonSpAttChecksumMismatchError,
+        UnknownCategoryError,
+    )
+    for cls in subclasses:
+        assert issubclass(cls, SpAttRewriteError), (
+            f"{cls.__name__} MUST inherit from SpAttRewriteError"
+        )
