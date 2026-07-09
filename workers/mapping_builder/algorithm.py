@@ -113,6 +113,25 @@ _GEODESIC_TIE_TOLERANCE_M: float = 1.0e-6
 #: floors, never physical-error headroom.
 _HALF_CELL_DIAGONAL_TOLERANCE_M: float = 1.0e-3
 
+#: Minimum used-cell count at or above which a basin does NOT require
+#: small-basin approval. Comparison is strictly ``used_cell_count <``, so a
+#: basin with fewer used cells than this constant is refused by default (a
+#: fail-closed hard gate); the caller must supply an explicit
+#: :class:`SmallBasinApproval` with a non-empty ``approver_id`` to proceed.
+#:
+#: Value pinned to 4 per docs §6.5 "小流域最小 used-cell 规则（hard gate）"
+#: ("used-cell 数 < 4 的流域默认不迁移") and the spec scenario "Fewer than
+#: four used cells refuses by default". Below 4 cells the direct-grid mapping
+#: is effectively point-forcing — spatial variance collapses to zero and the
+#: result carries less information than legacy IDW (multi-neighbor mix), so
+#: proceeding must be an explicit, auditable operator decision rather than
+#: a silent default. Live examples from 附录 A: zhaochen_wem = 1 used cell
+#: (below threshold, refused by default); zhaochen_mc = 4 used cells (AT
+#: threshold, passes by default under the strict ``<`` comparison; it is
+#: still listed alongside zhaochen_wem in the appendix as a live small-basin
+#: exemplar).
+SMALL_BASIN_MIN_USED_CELLS: int = 4
+
 
 class GridSnapshotLoader(Protocol):
     """Structural protocol for the grid-snapshot lookup used by G2.
@@ -1014,3 +1033,190 @@ def assign_shud_forcing_index(
             f"{sorted(result.values())!r} for N={n}"
         )
     return result
+
+
+# --- small-basin hard gate (§2.4) -----------------------------------------
+
+
+@dataclass(frozen=True)
+class SmallBasinApproval:
+    """Structured override for the small-basin hard gate (§2.4).
+
+    Records the operator identity that signed off on proceeding with a
+    used-cell count below :data:`SMALL_BASIN_MIN_USED_CELLS`. Consumed by
+    the evidence bundler (SUB-13) to record the approval verbatim in the
+    ``approvals`` slot of the mapping evidence — the override is auditable
+    and never silent (spec §"Small-basin override is recorded in evidence").
+
+    Frozen so downstream evidence can bind the approval byte-for-byte.
+
+    Attributes
+    ----------
+    approver_id:
+        Non-empty identifier of the human/service that approved the
+        small-basin proceed. An empty or whitespace-only value is treated
+        as absent by :func:`enforce_small_basin_gate` and fails closed.
+    used_cell_count:
+        The used-cell count the approval was granted for. Included so the
+        reviewer can see the exact number the override was granted for
+        (record-verbatim contract for SUB-13). Cross-checked against the
+        actually-observed count at gate time — see
+        :func:`enforce_small_basin_gate` and
+        :class:`SmallBasinApprovalMismatchError`.
+    """
+
+    approver_id: str
+    used_cell_count: int
+
+
+class SmallBasinBlockedError(MappingAlgorithmError):
+    """Raised when the used-cell count is below :data:`SMALL_BASIN_MIN_USED_CELLS`
+    and no valid :class:`SmallBasinApproval` is supplied.
+
+    Per spec §"Fewer than four used cells refuses by default" and docs §6.5,
+    the mapping-asset build MUST refuse a small-basin build by default —
+    no ownership record, no forcing-index assignment, no downstream
+    artifact escapes. The refusal is a hard blocker, not a warning; the
+    only bypass is an explicit :class:`SmallBasinApproval` with a
+    non-empty ``approver_id``.
+
+    Attributes
+    ----------
+    used_cell_count:
+        The observed used-cell count that triggered the refusal.
+    threshold:
+        :data:`SMALL_BASIN_MIN_USED_CELLS` at the time of raise, echoed on
+        the exception so downstream evidence records the pinned value even
+        if a future release changes the constant.
+    """
+
+    def __init__(
+        self,
+        *,
+        used_cell_count: int,
+        threshold: int,
+    ) -> None:
+        super().__init__(
+            f"used_cell_count={used_cell_count} is below small-basin "
+            f"threshold={threshold}; supply a SmallBasinApproval with a "
+            "non-empty approver_id to proceed (docs §6.5)"
+        )
+        self.used_cell_count = used_cell_count
+        self.threshold = threshold
+
+
+class SmallBasinApprovalMismatchError(MappingAlgorithmError):
+    """Raised when an approval's declared ``used_cell_count`` disagrees with
+    the actually-observed count at gate time.
+
+    Defense-in-depth against copy-paste approval reuse across basins: an
+    approval granted for a 1-cell basin MUST NOT silently satisfy the gate
+    for a different-sized basin (spec §"Small-basin override is recorded in
+    evidence" requires the approval record match the exact circumstances
+    it was granted for).
+
+    Attributes
+    ----------
+    approver_id:
+        The approver id from the supplied approval — surfaced on the
+        exception so the operator can see which stale approval was reused.
+    declared_used_cell_count:
+        ``approval.used_cell_count`` (what the approval was granted for).
+    observed_used_cell_count:
+        ``len(used_cells)`` at gate time (the actual basin size).
+    """
+
+    def __init__(
+        self,
+        *,
+        approver_id: str,
+        declared_used_cell_count: int,
+        observed_used_cell_count: int,
+    ) -> None:
+        super().__init__(
+            f"SmallBasinApproval by approver_id={approver_id!r} declares "
+            f"used_cell_count={declared_used_cell_count} but observed "
+            f"used_cell_count={observed_used_cell_count}; the approval MUST "
+            "be granted for the exact basin size it is applied to (docs §6.5)"
+        )
+        self.approver_id = approver_id
+        self.declared_used_cell_count = declared_used_cell_count
+        self.observed_used_cell_count = observed_used_cell_count
+
+
+def enforce_small_basin_gate(
+    used_cells: Sequence[CanonicalGridCell],
+    *,
+    approval: SmallBasinApproval | None = None,
+) -> SmallBasinApproval | None:
+    """Fail-closed hard gate on used-cell count < :data:`SMALL_BASIN_MIN_USED_CELLS`.
+
+    Per spec §"Small basins are refused unless explicitly approved" (§2.4):
+    when the used-cell count is strictly less than
+    :data:`SMALL_BASIN_MIN_USED_CELLS`, the mapping-asset build MUST refuse
+    by default with no output written; the only bypass is an explicit
+    :class:`SmallBasinApproval` with a non-empty ``approver_id`` that is
+    then recorded verbatim in the evidence package (SUB-13).
+
+    The function is stateless: it never writes an artifact, never mutates
+    ``approval``, and either returns a value or raises. On raise, no partial
+    state escapes — the fail-closed guarantee is that a caller who does not
+    catch the exception cannot obtain an ownership record, forcing-index,
+    or downstream artifact bound to a refused small basin.
+
+    Parameters
+    ----------
+    used_cells:
+        The used-cell subset from :func:`derive_used_cell_subset`. Only the
+        length is inspected; individual cells are not validated here.
+    approval:
+        Optional structured approval. When ``len(used_cells) <
+        SMALL_BASIN_MIN_USED_CELLS``, ``approval.approver_id`` MUST be
+        non-empty and non-whitespace-only, and ``approval.used_cell_count``
+        MUST equal ``len(used_cells)``.
+
+    Returns
+    -------
+    SmallBasinApproval | None
+        The supplied :class:`SmallBasinApproval` when it was required and
+        valid — the caller hands this to SUB-13 evidence assembly verbatim.
+        ``None`` when ``len(used_cells) >= SMALL_BASIN_MIN_USED_CELLS`` (no
+        approval needed even if one was supplied — extra approvals are
+        harmless and discarded, so callers that always pass an approval do
+        not silently regress on a large basin).
+
+    Raises
+    ------
+    SmallBasinBlockedError
+        ``len(used_cells) < SMALL_BASIN_MIN_USED_CELLS`` AND ``approval`` is
+        ``None`` or has an empty/whitespace-only ``approver_id``. The
+        exception's ``used_cell_count`` and ``threshold`` attributes carry
+        the fail-closed evidence.
+    SmallBasinApprovalMismatchError
+        ``len(used_cells) < SMALL_BASIN_MIN_USED_CELLS`` AND a valid
+        approval is supplied BUT ``approval.used_cell_count`` differs from
+        ``len(used_cells)`` — indicates a stale/copy-pasted approval being
+        reused for a different-sized basin.
+    """
+    observed_count = len(used_cells)
+    if observed_count >= SMALL_BASIN_MIN_USED_CELLS:
+        # Above threshold: no approval needed. Discard any supplied approval
+        # so a "always pass an approval" caller never silently regresses on a
+        # large basin — the returned None makes the discard visible.
+        return None
+    # Below threshold: fail closed unless a valid approval is supplied.
+    if approval is None or not approval.approver_id.strip():
+        raise SmallBasinBlockedError(
+            used_cell_count=observed_count,
+            threshold=SMALL_BASIN_MIN_USED_CELLS,
+        )
+    # Approval must have been granted for THIS basin size, not a different
+    # one. Copy-pasted approvals across basins are caught here rather than
+    # silently accepted with a mismatched evidence record.
+    if approval.used_cell_count != observed_count:
+        raise SmallBasinApprovalMismatchError(
+            approver_id=approval.approver_id,
+            declared_used_cell_count=approval.used_cell_count,
+            observed_used_cell_count=observed_count,
+        )
+    return approval
