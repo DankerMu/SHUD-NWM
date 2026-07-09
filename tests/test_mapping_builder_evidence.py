@@ -63,23 +63,26 @@ from workers.mapping_builder import (
     BaselineIntegrityError,
     BindingArtifactError,
     CapacityReport,
-    CheckusmExcludedFieldEnteredCheckusmError,
+    ChecksumExcludedFieldEnteredChecksumError,
     DistanceQA,
     EvidenceChecksumBindingError,
     EvidenceChecksumMutationError,
     EvidencePackage,
     EvidencePackageError,
+    ForbiddenOutputScanResult,
     GateFailureRecordedInEvidenceError,
     GateResult,
     GateResults,
     GridSnapshotReference,
     HydrologicCoreFingerprint,
+    ManifestIdentityDivergenceError,
     MappingAlgorithmError,
     MappingAlgorithmIdentity,
     MissingBaselineIdentityError,
     OwnershipImageRenderError,
     OwnershipImages,
     OwnershipRow,
+    ProjCrsDatabaseVersionProjectionError,
     ReadinessManifest,
     RollbackTarget,
     SemanticDiff,
@@ -92,6 +95,7 @@ from workers.mapping_builder import (
     compute_evidence_checksum,
     emit_direct_grid_manifest_and_binding,
     enumerate_checksum_excluded_fields,
+    project_readiness_proj_crs_database_version,
     render_ownership_images,
     verify_algorithm_and_proj_identity_matches_readiness,
     verify_all_g0_through_g5_gates_passed,
@@ -202,24 +206,40 @@ def _make_baseline_identity() -> BaselineIdentity:
     )
 
 
-def _make_grid_snapshot_reference() -> GridSnapshotReference:
+def _make_grid_snapshot_reference(grid_signature: str = "b" * 64) -> GridSnapshotReference:
     return GridSnapshotReference(
         snapshot_id="00000000-0000-0000-0000-000000000001",
-        grid_signature="b" * 64,
+        grid_signature=grid_signature,
         snapshot_checksum="0" * 64,
     )
 
 
-def _make_sp_att_asset_diff() -> SpAttAssetDiff:
+def _make_sp_att_asset_diff(new_sha256_hex: str = "e" * 64) -> SpAttAssetDiff:
     return SpAttAssetDiff(
         old_sha256_hex="d" * 64,
-        new_sha256_hex="e" * 64,
+        new_sha256_hex=new_sha256_hex,
         semantic_diff_summary=SemanticDiff(
             entries=(
                 SemanticDiffEntry(element_id=1, old_forc=1, new_forc=101),
                 SemanticDiffEntry(element_id=2, old_forc=2, new_forc=102),
             )
         ),
+    )
+
+
+def _make_forbidden_output_scan(passed: bool = True) -> ForbiddenOutputScanResult:
+    """§8.1 SUB-12 receipt: clean scan by default (0 offending paths).
+
+    passed=False stub is used ONLY by regression tests that want a
+    typed-field pass-through: this stub does NOT correspond to a real
+    ForbiddenRuntimeProducerArtifactError raise path.
+    """
+    return ForbiddenOutputScanResult(
+        scanned_path_count=8,
+        offending_paths=(),
+        offending_db_writes=(),
+        cycle_lineage_records=(),
+        passed=passed,
     )
 
 
@@ -335,8 +355,17 @@ def _make_ownership_images(
     return render_ownership_images(domain_shp, ownership_table)
 
 
-def _make_approvals(approver: str | None = None) -> Approvals:
-    return Approvals(small_basin_override_approver_id=approver)
+def _make_approvals(
+    approver: str | None = None,
+    *,
+    builder_approver_id: str | None = None,
+    reviewer_approver_id: str | None = None,
+) -> Approvals:
+    return Approvals(
+        builder_approver_id=builder_approver_id,
+        reviewer_approver_id=reviewer_approver_id,
+        small_basin_override_approver_id=approver,
+    )
 
 
 def _make_rollback_target() -> RollbackTarget:
@@ -356,22 +385,32 @@ def _make_evidence_package(
     approver: str | None = None,
     build_timestamp: datetime | None = None,
 ) -> tuple[EvidencePackage, tuple[OwnershipRow, ...]]:
-    """Return a fully-assembled EvidencePackage + the ownership table."""
+    """Return a fully-assembled EvidencePackage + the ownership table.
+
+    The fixture wires manifest identity to the other evidence artifacts
+    so :func:`assemble_evidence_package`'s manifest-identity cross-check
+    (:class:`ManifestIdentityDivergenceError`) passes on the green path.
+    """
     manifest, artifact, used_cells = _emit_manifest_and_binding()
     ownership_table = _make_ownership_table(used_cells)
     ownership_images = _make_ownership_images(tmp_path, ownership_table)
     package = assemble_evidence_package(
         baseline_identity=_make_baseline_identity(),
-        grid_snapshot_reference=_make_grid_snapshot_reference(),
+        grid_snapshot_reference=_make_grid_snapshot_reference(
+            grid_signature=manifest.grid_signature,
+        ),
         ownership_table=ownership_table,
         manifest=manifest,
         binding_artifact=artifact,
-        sp_att_asset_diff=_make_sp_att_asset_diff(),
+        sp_att_asset_diff=_make_sp_att_asset_diff(
+            new_sha256_hex=manifest.sp_att_checksum,
+        ),
         mapping_algorithm_identity=_make_mapping_algorithm_identity(
             algorithm_id=algorithm_id,
             proj_crs_database_version=proj_crs_database_version,
         ),
         hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+        forbidden_output_scan=_make_forbidden_output_scan(),
         distance_qa=_make_distance_qa(),
         capacity_report=_make_capacity_report(),
         gate_results=_make_gate_results(
@@ -438,10 +477,16 @@ def test_evidence_package_section_station_binding_rows_from_sub11(
 
 
 def test_evidence_package_section_sp_att_asset_diff(tmp_path: pathlib.Path) -> None:
-    """Green path: sp_att_asset_diff carries old + new SHA-256 + semantic diff."""
+    """Green path: sp_att_asset_diff carries old + new SHA-256 + semantic diff.
+
+    ``new_sha256_hex`` is wired to the SUB-11 manifest's sp_att_checksum
+    (F-2 cross-check discipline) so the assertion pins the fixture to
+    the real hash rather than a synthetic placeholder.
+    """
+    manifest, _, _ = _emit_manifest_and_binding()
     package, _ = _make_evidence_package(tmp_path)
     assert package.sp_att_asset_diff.old_sha256_hex == "d" * 64
-    assert package.sp_att_asset_diff.new_sha256_hex == "e" * 64
+    assert package.sp_att_asset_diff.new_sha256_hex == manifest.sp_att_checksum
     assert isinstance(package.sp_att_asset_diff.semantic_diff_summary, SemanticDiff)
     assert len(package.sp_att_asset_diff.semantic_diff_summary.entries) == 2
 
@@ -744,16 +789,23 @@ def test_verify_all_g0_through_g5_gates_passed_raises_on_failure(
     tmp_path: pathlib.Path,
     failed_gate_id: str,
 ) -> None:
-    """A recorded gate failure -> GateFailureRecordedInEvidenceError."""
+    """A recorded gate failure -> GateFailureRecordedInEvidenceError names that gate.
+
+    The parametrization thread the failed_gate_id into _make_gate_results
+    so exactly ONE gate fails per invocation, and the gate ID surfaced
+    on the raised exception matches the parametrized gate. Guards
+    against the "first-fired only" regression where every invocation
+    silently degenerates to G0.
+    """
     package, _ = _make_evidence_package(
         tmp_path,
         all_gates_passed=False,
-        failed_gate_id=None,  # all fail
+        failed_gate_id=failed_gate_id,
     )
     with pytest.raises(GateFailureRecordedInEvidenceError) as exc:
         verify_all_g0_through_g5_gates_passed(package)
-    # First-fired = G0 in gate ordering.
-    assert exc.value.failed_gate_id == "G0"
+    # Distinct gate per parametrize invocation (not the always-G0 case).
+    assert exc.value.failed_gate_id == failed_gate_id
 
 
 def test_gate_result_evidence_ref_is_structured_mapping(
@@ -902,7 +954,7 @@ def test_mutating_evidence_and_mapping_asset_both_invalidate(
 def test_enumerate_checksum_excluded_fields_returns_canonical_list() -> None:
     """enumerate_checksum_excluded_fields returns the canonical exclusion list."""
     excluded = enumerate_checksum_excluded_fields()
-    assert excluded == ("build_timestamp", "build_host")
+    assert excluded == ("build_timestamp",)
     assert excluded == EVIDENCE_CHECKSUM_EXCLUDED_FIELDS
 
 
@@ -944,7 +996,40 @@ def test_checksum_excluded_fields_persisted_on_package(
 ) -> None:
     """Package records checksum_excluded_fields verbatim for SUB-14 audit."""
     package, _ = _make_evidence_package(tmp_path)
-    assert package.checksum_excluded_fields == ("build_timestamp", "build_host")
+    assert package.checksum_excluded_fields == ("build_timestamp",)
+
+
+def test_all_enumerated_checksum_excluded_fields_correspond_to_evidencepackage_fields(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every enumerated excluded name is a real EvidencePackage field.
+
+    Regression for F-1 (phantom ``build_host``): SUB-14 audits iterate
+    :func:`enumerate_checksum_excluded_fields` and call
+    ``dataclasses.replace(package, **{name: <mutated>})`` on each name.
+    A name not on :class:`EvidencePackage` would raise ``TypeError`` and
+    break the audit. This test also proves that mutating any excluded
+    name does NOT change :func:`compute_evidence_checksum`.
+    """
+    package, _ = _make_evidence_package(tmp_path)
+    package_field_names = {f.name for f in dataclasses.fields(EvidencePackage)}
+    original_checksum = compute_evidence_checksum(package)
+    for name in enumerate_checksum_excluded_fields():
+        assert name in package_field_names, (
+            f"excluded field {name!r} is not a real EvidencePackage field"
+        )
+        # dataclasses.replace with a sentinel mutation MUST succeed
+        # (no TypeError) and MUST NOT change the checksum.
+        sentinel: object = (
+            datetime(2099, 12, 31, tzinfo=UTC)
+            if name == "build_timestamp"
+            else "mutated-sentinel"
+        )
+        mutated = dataclasses.replace(package, **{name: sentinel})
+        assert compute_evidence_checksum(mutated) == original_checksum, (
+            f"mutating excluded field {name!r} unexpectedly changed the "
+            "evidence checksum"
+        )
 
 
 def test_evidence_checksum_field_itself_never_enters_digest_input(
@@ -1066,13 +1151,18 @@ def test_cross_plane_sub11_station_bindings_pass_through(
     ownership_images = _make_ownership_images(tmp_path, ownership_table)
     package = assemble_evidence_package(
         baseline_identity=_make_baseline_identity(),
-        grid_snapshot_reference=_make_grid_snapshot_reference(),
+        grid_snapshot_reference=_make_grid_snapshot_reference(
+            grid_signature=manifest.grid_signature,
+        ),
         ownership_table=ownership_table,
         manifest=manifest,
         binding_artifact=artifact,
-        sp_att_asset_diff=_make_sp_att_asset_diff(),
+        sp_att_asset_diff=_make_sp_att_asset_diff(
+            new_sha256_hex=manifest.sp_att_checksum,
+        ),
         mapping_algorithm_identity=_make_mapping_algorithm_identity(),
         hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+        forbidden_output_scan=_make_forbidden_output_scan(),
         distance_qa=_make_distance_qa(),
         capacity_report=_make_capacity_report(),
         gate_results=_make_gate_results(),
@@ -1138,13 +1228,18 @@ def test_assemble_missing_baseline_package_sha256_raises(
                 sp_att_sha256_hex="b" * 64,
                 sp_mesh_sha256_hex="c" * 64,
             ),
-            grid_snapshot_reference=_make_grid_snapshot_reference(),
+            grid_snapshot_reference=_make_grid_snapshot_reference(
+                grid_signature=manifest.grid_signature,
+            ),
             ownership_table=ownership_table,
             manifest=manifest,
             binding_artifact=artifact,
-            sp_att_asset_diff=_make_sp_att_asset_diff(),
+            sp_att_asset_diff=_make_sp_att_asset_diff(
+                new_sha256_hex=manifest.sp_att_checksum,
+            ),
             mapping_algorithm_identity=_make_mapping_algorithm_identity(),
             hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+            forbidden_output_scan=_make_forbidden_output_scan(),
             distance_qa=_make_distance_qa(),
             capacity_report=_make_capacity_report(),
             gate_results=_make_gate_results(),
@@ -1166,13 +1261,18 @@ def test_assemble_missing_sp_att_sha256_raises(tmp_path: pathlib.Path) -> None:
                 sp_att_sha256_hex=" ",
                 sp_mesh_sha256_hex="c" * 64,
             ),
-            grid_snapshot_reference=_make_grid_snapshot_reference(),
+            grid_snapshot_reference=_make_grid_snapshot_reference(
+                grid_signature=manifest.grid_signature,
+            ),
             ownership_table=ownership_table,
             manifest=manifest,
             binding_artifact=artifact,
-            sp_att_asset_diff=_make_sp_att_asset_diff(),
+            sp_att_asset_diff=_make_sp_att_asset_diff(
+                new_sha256_hex=manifest.sp_att_checksum,
+            ),
             mapping_algorithm_identity=_make_mapping_algorithm_identity(),
             hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+            forbidden_output_scan=_make_forbidden_output_scan(),
             distance_qa=_make_distance_qa(),
             capacity_report=_make_capacity_report(),
             gate_results=_make_gate_results(),
@@ -1189,16 +1289,21 @@ def test_assemble_empty_algorithm_id_raises(tmp_path: pathlib.Path) -> None:
     with pytest.raises(EvidencePackageError):
         assemble_evidence_package(
             baseline_identity=_make_baseline_identity(),
-            grid_snapshot_reference=_make_grid_snapshot_reference(),
+            grid_snapshot_reference=_make_grid_snapshot_reference(
+                grid_signature=manifest.grid_signature,
+            ),
             ownership_table=ownership_table,
             manifest=manifest,
             binding_artifact=artifact,
-            sp_att_asset_diff=_make_sp_att_asset_diff(),
+            sp_att_asset_diff=_make_sp_att_asset_diff(
+                new_sha256_hex=manifest.sp_att_checksum,
+            ),
             mapping_algorithm_identity=MappingAlgorithmIdentity(
                 algorithm_id="",
                 proj_crs_database_version=_proj_version(),
             ),
             hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+            forbidden_output_scan=_make_forbidden_output_scan(),
             distance_qa=_make_distance_qa(),
             capacity_report=_make_capacity_report(),
             gate_results=_make_gate_results(),
@@ -1223,13 +1328,18 @@ def test_assemble_mislabeled_gate_slot_raises(tmp_path: pathlib.Path) -> None:
     with pytest.raises(EvidencePackageError, match="G5"):
         assemble_evidence_package(
             baseline_identity=_make_baseline_identity(),
-            grid_snapshot_reference=_make_grid_snapshot_reference(),
+            grid_snapshot_reference=_make_grid_snapshot_reference(
+                grid_signature=manifest.grid_signature,
+            ),
             ownership_table=ownership_table,
             manifest=manifest,
             binding_artifact=artifact,
-            sp_att_asset_diff=_make_sp_att_asset_diff(),
+            sp_att_asset_diff=_make_sp_att_asset_diff(
+                new_sha256_hex=manifest.sp_att_checksum,
+            ),
             mapping_algorithm_identity=_make_mapping_algorithm_identity(),
             hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+            forbidden_output_scan=_make_forbidden_output_scan(),
             distance_qa=_make_distance_qa(),
             capacity_report=_make_capacity_report(),
             gate_results=mislabeled_gate_results,
@@ -1355,6 +1465,7 @@ def test_assemble_evidence_package_signature_pinned() -> None:
         "sp_att_asset_diff",
         "mapping_algorithm_identity",
         "hydrologic_core_fingerprint",
+        "forbidden_output_scan",
         "distance_qa",
         "capacity_report",
         "gate_results",
@@ -1457,7 +1568,11 @@ def test_enumerate_checksum_excluded_fields_signature_pinned() -> None:
     sig = inspect.signature(enumerate_checksum_excluded_fields)
     assert list(sig.parameters) == []
     hints = typing.get_type_hints(enumerate_checksum_excluded_fields)
-    assert hints.get("return") is not None
+    # Pin the return type explicitly (tuple[str, ...] via typing.get_type_hints
+    # → parametrized generic form). Sibling `compute_evidence_checksum`
+    # pins `hints["return"] is str`; here we pin the parametrized tuple
+    # against typing.Tuple[str, ...] normalization.
+    assert hints["return"] == tuple[str, ...]
 
 
 # =========================================================================
@@ -1502,9 +1617,26 @@ def test_evidence_package_error_subclasses_are_kwarg_only() -> None:
     with pytest.raises(TypeError):
         EvidenceChecksumMutationError("f", "o", "n")  # type: ignore[misc]
 
-    # CheckusmExcludedFieldEnteredCheckusmError(field_name=)
+    # ChecksumExcludedFieldEnteredChecksumError(field_name=)
     with pytest.raises(TypeError):
-        CheckusmExcludedFieldEnteredCheckusmError("f")  # type: ignore[misc]
+        ChecksumExcludedFieldEnteredChecksumError("f")  # type: ignore[misc]
+
+    # GateFailureRecordedInEvidenceError(failed_gate_id=, gate_result=)
+    dummy_gate_result = GateResult(
+        gate_id="G0", passed=False, evidence_ref={"kind": "dummy"}
+    )
+    with pytest.raises(TypeError):
+        GateFailureRecordedInEvidenceError(  # type: ignore[misc]
+            "G0", dummy_gate_result
+        )
+
+    # ManifestIdentityDivergenceError(divergent_field=, manifest_value=, artifact_value=)
+    with pytest.raises(TypeError):
+        ManifestIdentityDivergenceError("f", "m", "a")  # type: ignore[misc]
+
+    # ProjCrsDatabaseVersionProjectionError(missing_field=)
+    with pytest.raises(TypeError):
+        ProjCrsDatabaseVersionProjectionError("f")  # type: ignore[misc]
 
 
 def test_all_evidence_subclasses_are_evidence_package_error() -> None:
@@ -1516,7 +1648,9 @@ def test_all_evidence_subclasses_are_evidence_package_error() -> None:
         GateFailureRecordedInEvidenceError,
         MissingBaselineIdentityError,
         OwnershipImageRenderError,
-        CheckusmExcludedFieldEnteredCheckusmError,
+        ChecksumExcludedFieldEnteredChecksumError,
+        ManifestIdentityDivergenceError,
+        ProjCrsDatabaseVersionProjectionError,
     )
     for cls in subclasses:
         assert issubclass(cls, EvidencePackageError)
@@ -1733,3 +1867,439 @@ def test_mutating_rollback_target_invalidates_evidence_checksum(
     )
     poisoned = dataclasses.replace(package, rollback_target=poisoned_rb)
     assert compute_evidence_checksum(poisoned) != package.evidence_checksum
+
+
+# =========================================================================
+# §5.1 + §5.2 MANIFEST IDENTITY CROSS-CHECK (F-2 regression)
+# =========================================================================
+
+
+def _assemble_with_divergent_manifest(
+    tmp_path: pathlib.Path,
+    *,
+    divergent_field: str,
+    divergent_value: str,
+) -> None:
+    """Helper: assemble evidence with one manifest field diverging by design.
+
+    Every other identity field is wired to the manifest so exactly one
+    cross-check fires per invocation.
+    """
+    manifest, artifact, used_cells = _emit_manifest_and_binding()
+    ownership_table = _make_ownership_table(used_cells)
+    ownership_images = _make_ownership_images(tmp_path, ownership_table)
+    # Consistent-by-default identity artifacts.
+    grid_snapshot_reference = _make_grid_snapshot_reference(
+        grid_signature=manifest.grid_signature,
+    )
+    sp_att_asset_diff = _make_sp_att_asset_diff(
+        new_sha256_hex=manifest.sp_att_checksum,
+    )
+    if divergent_field == "grid_signature":
+        grid_snapshot_reference = _make_grid_snapshot_reference(
+            grid_signature=divergent_value,
+        )
+    elif divergent_field == "sp_att_checksum":
+        sp_att_asset_diff = _make_sp_att_asset_diff(
+            new_sha256_hex=divergent_value,
+        )
+    binding_artifact_arg = artifact
+    if divergent_field == "binding_checksum":
+        # Rewrap the artifact with a different `checksum` field. The
+        # binding_artifact.station_bindings still get consumed downstream,
+        # so we keep them intact.
+        binding_artifact_arg = dataclasses.replace(
+            artifact, checksum=divergent_value
+        )
+    assemble_evidence_package(
+        baseline_identity=_make_baseline_identity(),
+        grid_snapshot_reference=grid_snapshot_reference,
+        ownership_table=ownership_table,
+        manifest=manifest,
+        binding_artifact=binding_artifact_arg,
+        sp_att_asset_diff=sp_att_asset_diff,
+        mapping_algorithm_identity=_make_mapping_algorithm_identity(),
+        hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+        forbidden_output_scan=_make_forbidden_output_scan(),
+        distance_qa=_make_distance_qa(),
+        capacity_report=_make_capacity_report(),
+        gate_results=_make_gate_results(),
+        ownership_images=ownership_images,
+        approvals=_make_approvals(),
+        rollback_target=_make_rollback_target(),
+    )
+
+
+@pytest.mark.parametrize(
+    "divergent_field",
+    ["grid_signature", "binding_checksum", "sp_att_checksum"],
+)
+def test_assemble_evidence_package_manifest_identity_divergence_raises(
+    tmp_path: pathlib.Path,
+    divergent_field: str,
+) -> None:
+    """Diverging any of the three manifest identity fields raises."""
+    with pytest.raises(ManifestIdentityDivergenceError) as exc:
+        _assemble_with_divergent_manifest(
+            tmp_path,
+            divergent_field=divergent_field,
+            divergent_value="Z" * 64,
+        )
+    assert exc.value.divergent_field == divergent_field
+    assert exc.value.artifact_value == "Z" * 64
+
+
+def test_manifest_identity_divergence_kwarg_only_construction() -> None:
+    """ManifestIdentityDivergenceError rejects positional args."""
+    exc = ManifestIdentityDivergenceError(
+        divergent_field="grid_signature",
+        manifest_value="a" * 64,
+        artifact_value="b" * 64,
+    )
+    assert exc.divergent_field == "grid_signature"
+    assert exc.manifest_value == "a" * 64
+    assert exc.artifact_value == "b" * 64
+    assert isinstance(exc, EvidencePackageError)
+
+
+# =========================================================================
+# §5.2 OWNERSHIP SVG TRUNCATION MARKER (F-5 regression)
+# =========================================================================
+
+
+def _make_many_rows(count: int) -> tuple[OwnershipRow, ...]:
+    """Build a synthetic ownership table of ``count`` rows."""
+    rows: list[OwnershipRow] = []
+    for i in range(1, count + 1):
+        rows.append(
+            OwnershipRow(
+                element_id=i,
+                old_forc=str(i),
+                new_forc=str(i + 1),
+                grid_cell_id=f"cell-{i:04d}",
+                distance_meters=float(i * 0.5),
+            )
+        )
+    return tuple(rows)
+
+
+def test_ownership_svg_truncation_marker_present_when_overflow(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Large ownership table -> SVG carries a red truncation marker text.
+
+    Docs-baseline basin (6290 rows) would otherwise silently visualize
+    ~0.4% of ownership. Guard: the marker is explicit + deterministic.
+    """
+    domain_shp = _write_valid_domain_shp(tmp_path)
+    rows = _make_many_rows(200)
+    images = render_ownership_images(domain_shp, rows)
+    assert b"truncated" in images.old_image_bytes
+    assert b"n_total=200" in images.old_image_bytes
+    assert b"truncated" in images.new_image_bytes
+    assert b"n_total=200" in images.new_image_bytes
+
+
+def test_ownership_svg_truncation_marker_absent_when_no_overflow(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Small ownership table -> no truncation marker (only visible rows fit)."""
+    domain_shp = _write_valid_domain_shp(tmp_path)
+    rows = _make_many_rows(6)  # 6 rows fit trivially
+    images = render_ownership_images(domain_shp, rows)
+    assert b"truncated" not in images.old_image_bytes
+    assert b"n_total=6" not in images.old_image_bytes
+
+
+def test_ownership_svg_truncation_deterministic_across_calls(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Truncated SVG bytes are deterministic across repeated calls."""
+    domain_shp = _write_valid_domain_shp(tmp_path)
+    rows = _make_many_rows(500)
+    images1 = render_ownership_images(domain_shp, rows)
+    images2 = render_ownership_images(domain_shp, rows)
+    assert images1.old_image_bytes == images2.old_image_bytes
+    assert images1.new_image_bytes == images2.new_image_bytes
+
+
+# =========================================================================
+# §5.1 APPROVALS: builder + reviewer + small-basin (F-6 regression)
+# =========================================================================
+
+
+def test_approvals_defaults_to_all_none() -> None:
+    """Default-constructed Approvals has all three approver ids None."""
+    approvals = Approvals()
+    assert approvals.builder_approver_id is None
+    assert approvals.reviewer_approver_id is None
+    assert approvals.small_basin_override_approver_id is None
+
+
+def test_approvals_records_builder_and_reviewer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Builder + reviewer approver ids recorded verbatim on the evidence package."""
+    manifest, artifact, used_cells = _emit_manifest_and_binding()
+    ownership_table = _make_ownership_table(used_cells)
+    ownership_images = _make_ownership_images(tmp_path, ownership_table)
+    approvals = Approvals(
+        builder_approver_id="builder@example.com",
+        reviewer_approver_id="reviewer@example.com",
+    )
+    package = assemble_evidence_package(
+        baseline_identity=_make_baseline_identity(),
+        grid_snapshot_reference=_make_grid_snapshot_reference(
+            grid_signature=manifest.grid_signature,
+        ),
+        ownership_table=ownership_table,
+        manifest=manifest,
+        binding_artifact=artifact,
+        sp_att_asset_diff=_make_sp_att_asset_diff(
+            new_sha256_hex=manifest.sp_att_checksum,
+        ),
+        mapping_algorithm_identity=_make_mapping_algorithm_identity(),
+        hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+        forbidden_output_scan=_make_forbidden_output_scan(),
+        distance_qa=_make_distance_qa(),
+        capacity_report=_make_capacity_report(),
+        gate_results=_make_gate_results(),
+        ownership_images=ownership_images,
+        approvals=approvals,
+        rollback_target=_make_rollback_target(),
+    )
+    assert package.approvals.builder_approver_id == "builder@example.com"
+    assert package.approvals.reviewer_approver_id == "reviewer@example.com"
+    assert package.approvals.small_basin_override_approver_id is None
+
+
+def test_approvals_records_all_three_when_supplied(
+    tmp_path: pathlib.Path,
+) -> None:
+    """All three approver ids (builder + reviewer + small-basin) recorded verbatim."""
+    manifest, artifact, used_cells = _emit_manifest_and_binding()
+    ownership_table = _make_ownership_table(used_cells)
+    ownership_images = _make_ownership_images(tmp_path, ownership_table)
+    approvals = Approvals(
+        builder_approver_id="builder@example.com",
+        reviewer_approver_id="reviewer@example.com",
+        small_basin_override_approver_id="ops@example.com",
+    )
+    package = assemble_evidence_package(
+        baseline_identity=_make_baseline_identity(),
+        grid_snapshot_reference=_make_grid_snapshot_reference(
+            grid_signature=manifest.grid_signature,
+        ),
+        ownership_table=ownership_table,
+        manifest=manifest,
+        binding_artifact=artifact,
+        sp_att_asset_diff=_make_sp_att_asset_diff(
+            new_sha256_hex=manifest.sp_att_checksum,
+        ),
+        mapping_algorithm_identity=_make_mapping_algorithm_identity(),
+        hydrologic_core_fingerprint=_make_hydrologic_core_fingerprint(),
+        forbidden_output_scan=_make_forbidden_output_scan(),
+        distance_qa=_make_distance_qa(),
+        capacity_report=_make_capacity_report(),
+        gate_results=_make_gate_results(),
+        ownership_images=ownership_images,
+        approvals=approvals,
+        rollback_target=_make_rollback_target(),
+    )
+    assert package.approvals.builder_approver_id == "builder@example.com"
+    assert package.approvals.reviewer_approver_id == "reviewer@example.com"
+    assert package.approvals.small_basin_override_approver_id == "ops@example.com"
+
+
+def test_mutating_builder_approver_id_invalidates_evidence_checksum(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Mutating builder_approver_id -> different digest."""
+    package, _ = _make_evidence_package(tmp_path)
+    poisoned_appr = dataclasses.replace(
+        package.approvals, builder_approver_id="new-builder@example.com"
+    )
+    poisoned = dataclasses.replace(package, approvals=poisoned_appr)
+    assert compute_evidence_checksum(poisoned) != package.evidence_checksum
+
+
+# =========================================================================
+# §5.1 Epic #886 PROJ_CRS_DATABASE_VERSION PROJECTION (F-7 regression)
+# =========================================================================
+
+
+def _make_epic886_proj_dict(
+    *,
+    proj_version: str = "9.5.1",
+    db_major: str = "1",
+    db_minor: str = "20",
+    proj_data_version: str = "1.19",
+) -> dict[str, object]:
+    """Return the Epic #886 nested dict shape for proj_crs_database_version."""
+    return {
+        "proj_version": proj_version,
+        "proj_db_metadata": {
+            "DATABASE.LAYOUT.VERSION.MAJOR": db_major,
+            "DATABASE.LAYOUT.VERSION.MINOR": db_minor,
+            "PROJ_DATA.VERSION": proj_data_version,
+        },
+    }
+
+
+def test_project_readiness_proj_crs_database_version_deterministic() -> None:
+    """Same input dict -> byte-identical projected str across calls."""
+    source = _make_epic886_proj_dict()
+    first = project_readiness_proj_crs_database_version(source)
+    second = project_readiness_proj_crs_database_version(source)
+    assert first == second
+    # Canonical form contains all four fields.
+    assert "proj:9.5.1" in first
+    assert "db-major:1" in first
+    assert "db-minor:20" in first
+    assert "proj-data:1.19" in first
+
+
+def test_project_readiness_proj_crs_database_version_input_dependent() -> None:
+    """Changing any input field changes the projected str."""
+    baseline = project_readiness_proj_crs_database_version(_make_epic886_proj_dict())
+    for field_name, override in [
+        ("proj_version", "9.5.2"),
+        ("db_major", "2"),
+        ("db_minor", "21"),
+        ("proj_data_version", "1.20"),
+    ]:
+        mutated = project_readiness_proj_crs_database_version(
+            _make_epic886_proj_dict(**{field_name: override})
+        )
+        assert mutated != baseline, (
+            f"mutating {field_name!r} to {override!r} did not change the "
+            "projected str"
+        )
+
+
+@pytest.mark.parametrize(
+    "missing_field, source_mutator",
+    [
+        ("proj_version", lambda d: {**d, "proj_version": None}),
+        ("proj_db_metadata", lambda d: {k: v for k, v in d.items() if k != "proj_db_metadata"}),
+        (
+            "proj_db_metadata.DATABASE.LAYOUT.VERSION.MAJOR",
+            lambda d: {
+                **d,
+                "proj_db_metadata": {
+                    k: v
+                    for k, v in d["proj_db_metadata"].items()
+                    if k != "DATABASE.LAYOUT.VERSION.MAJOR"
+                },
+            },
+        ),
+        (
+            "proj_db_metadata.DATABASE.LAYOUT.VERSION.MINOR",
+            lambda d: {
+                **d,
+                "proj_db_metadata": {
+                    k: v
+                    for k, v in d["proj_db_metadata"].items()
+                    if k != "DATABASE.LAYOUT.VERSION.MINOR"
+                },
+            },
+        ),
+        (
+            "proj_db_metadata.PROJ_DATA.VERSION",
+            lambda d: {
+                **d,
+                "proj_db_metadata": {
+                    k: v
+                    for k, v in d["proj_db_metadata"].items()
+                    if k != "PROJ_DATA.VERSION"
+                },
+            },
+        ),
+    ],
+)
+def test_project_readiness_proj_crs_database_version_rejects_missing_field(
+    missing_field: str,
+    source_mutator,
+) -> None:
+    """Missing any load-bearing field raises ProjCrsDatabaseVersionProjectionError."""
+    source = _make_epic886_proj_dict()
+    mutated: dict[str, object]
+    if missing_field == "proj_version":
+        mutated = {**source, "proj_version": None}
+        # `None` is treated as missing per the helper contract; drop the key
+        # entirely to reach the same error path.
+        del mutated["proj_version"]
+    else:
+        mutated = source_mutator(source)
+    with pytest.raises(ProjCrsDatabaseVersionProjectionError) as exc:
+        project_readiness_proj_crs_database_version(mutated)
+    assert exc.value.missing_field == missing_field
+
+
+def test_project_readiness_proj_crs_database_version_rejects_non_mapping_metadata() -> None:
+    """proj_db_metadata that isn't a Mapping raises the projection error."""
+    bad_source = {"proj_version": "9.5.1", "proj_db_metadata": "not-a-dict"}
+    with pytest.raises(ProjCrsDatabaseVersionProjectionError) as exc:
+        project_readiness_proj_crs_database_version(bad_source)
+    assert exc.value.missing_field == "proj_db_metadata"
+
+
+# =========================================================================
+# §5.2 SUB-12 FORBIDDEN OUTPUT SCAN AS TYPED FIELD (F-8 regression)
+# =========================================================================
+
+
+def test_forbidden_output_scan_typed_field_pass_through(
+    tmp_path: pathlib.Path,
+) -> None:
+    """ForbiddenOutputScanResult recorded verbatim as a typed EvidencePackage field."""
+    package, _ = _make_evidence_package(tmp_path)
+    assert isinstance(package.forbidden_output_scan, ForbiddenOutputScanResult)
+    assert package.forbidden_output_scan.passed is True
+    assert package.forbidden_output_scan.scanned_path_count == 8
+    assert package.forbidden_output_scan.offending_paths == ()
+
+
+def test_mutating_forbidden_output_scan_invalidates_evidence_checksum(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Mutating forbidden_output_scan -> different digest."""
+    package, _ = _make_evidence_package(tmp_path)
+    poisoned_scan = dataclasses.replace(
+        package.forbidden_output_scan, scanned_path_count=999
+    )
+    poisoned = dataclasses.replace(package, forbidden_output_scan=poisoned_scan)
+    assert compute_evidence_checksum(poisoned) != package.evidence_checksum
+
+
+def test_forbidden_output_scan_recorded_as_dataclass_not_untyped_mapping(
+    tmp_path: pathlib.Path,
+) -> None:
+    """forbidden_output_scan is dataclass-typed, mirroring hydrologic_core_fingerprint.
+
+    Regression against SUB-12 devolution to ``evidence_ref: Mapping[str, Any]``.
+    Both hydrologic_core_fingerprint and forbidden_output_scan should be
+    typed fields so SUB-14 audits can bind pass/fail verdicts without
+    decoding an untyped mapping.
+    """
+    package, _ = _make_evidence_package(tmp_path)
+    hints = typing.get_type_hints(EvidencePackage)
+    assert hints["forbidden_output_scan"] is ForbiddenOutputScanResult
+    assert hints["hydrologic_core_fingerprint"] is HydrologicCoreFingerprint
+
+
+# =========================================================================
+# §7.1 SUPERSEDED SUB-9 EXCEPTION NOT RE-EXPORTED FROM EVIDENCE (Note-3 regression)
+# =========================================================================
+
+
+def test_hydrologic_core_fingerprint_mismatch_error_not_reexported_from_evidence() -> None:
+    """SUB-9 exception is NOT a member of the evidence module namespace.
+
+    Note-3 regression: prior code re-imported
+    :class:`HydrologicCoreFingerprintMismatchError` inside evidence.py as
+    a namespace re-export. Callers already import it via
+    ``workers.mapping_builder`` (top-level, from rewrite), so the
+    re-export is dead weight.
+    """
+    assert not hasattr(evidence_module, "HydrologicCoreFingerprintMismatchError")

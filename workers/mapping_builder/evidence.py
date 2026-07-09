@@ -26,9 +26,9 @@ Immutability discipline
 can bind every record byte-for-byte.
 
 Mutating any field other than the enumerated
-:data:`EVIDENCE_CHECKSUM_EXCLUDED_FIELDS` (``build_timestamp``,
-``build_host``) invalidates :attr:`EvidencePackage.evidence_checksum`. The
-canonical use pattern for "record but don't checksum" metadata is:
+:data:`EVIDENCE_CHECKSUM_EXCLUDED_FIELDS` (``build_timestamp``) invalidates
+:attr:`EvidencePackage.evidence_checksum`. The canonical use pattern for
+"record but don't checksum" metadata is:
 
     dataclasses.replace(package, build_timestamp=new_ts)
 
@@ -100,6 +100,18 @@ differentiate the five families with dedicated ``except`` clauses.
 is REUSED verbatim — this module never redefines it. SUB-13's evidence
 bundler records the fingerprint from SUB-9's computation; a mismatch
 surfaces as SUB-9's own exception with SUB-9's own error family.
+
+Epic #886 ↔ SUB-13 projection adapter
+--------------------------------------
+Epic #886's readiness manifest stores ``proj_crs_database_version`` as a
+nested dict (``{"proj_version": ..., "proj_db_metadata": {...}}``) while
+:class:`ReadinessManifest` and :class:`MappingAlgorithmIdentity` here
+hold ``proj_crs_database_version`` as a bare string (canonical projected
+form). :func:`project_readiness_proj_crs_database_version` is the SINGLE
+canonical adapter that produces the string from the nested dict; any
+independent orchestrator that projects the dict by a different rule
+would produce a divergent string and fail
+:func:`verify_algorithm_and_proj_identity_matches_readiness`.
 """
 
 from __future__ import annotations
@@ -108,7 +120,7 @@ import dataclasses
 import hashlib
 import pathlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -118,11 +130,11 @@ from packages.common.grid_signature import (
 from workers.mapping_builder.binding import (
     BindingArtifact,
     DirectGridManifest,
+    ForbiddenOutputScanResult,
     StationBinding,
 )
 from workers.mapping_builder.rewrite import (
     HydrologicCoreFingerprint,
-    HydrologicCoreFingerprintMismatchError,  # re-exported for callers
     SemanticDiff,
 )
 
@@ -139,12 +151,14 @@ ALGORITHM_ID: str = "nearest_cell_barycenter_geodesic_v1"
 #: Per §5.2 Required-evidence: mutating any of these fields MUST NOT
 #: change any checksum. The list is intentionally minimal — only build-
 #: environment metadata that legitimately varies across otherwise-
-#: identical builds (build timestamp, build host) belongs here. Adding
-#: fields here is a load-bearing decision; each addition weakens the
-#: audit surface by one dimension.
+#: identical builds (build timestamp) belongs here, and every enumerated
+#: name MUST correspond to an actual :class:`EvidencePackage` field so
+#: :func:`enumerate_checksum_excluded_fields` consumers can iterate and
+#: mutate each one without a :class:`TypeError`. Adding fields here is a
+#: load-bearing decision; each addition weakens the audit surface by one
+#: dimension.
 EVIDENCE_CHECKSUM_EXCLUDED_FIELDS: tuple[str, ...] = (
     "build_timestamp",
-    "build_host",
 )
 
 #: The six G0–G5 gate IDs recorded in :class:`GateResults`. Order matches
@@ -311,7 +325,7 @@ class MissingBaselineIdentityError(EvidencePackageError):
         self.missing_field = missing_field
 
 
-class CheckusmExcludedFieldEnteredCheckusmError(EvidencePackageError):
+class ChecksumExcludedFieldEnteredChecksumError(EvidencePackageError):
     """An excluded field's value entered the evidence checksum computation.
 
     Belt-and-braces regression guard: if a field enumerated in
@@ -320,9 +334,6 @@ class CheckusmExcludedFieldEnteredCheckusmError(EvidencePackageError):
     :func:`compute_evidence_checksum` (the exclusion filter mis-fired).
     Callers do not typically raise this directly; it exists so regression
     tests can pin the invariant explicitly.
-
-    (Name preserved from the §5.2 task spec — the typo is intentional
-    per the task-defined public API surface.)
     """
 
     def __init__(self, *, field_name: str) -> None:
@@ -331,6 +342,59 @@ class CheckusmExcludedFieldEnteredCheckusmError(EvidencePackageError):
             f"computation (§5.2 excluded-field leak violation)"
         )
         self.field_name = field_name
+
+
+class ManifestIdentityDivergenceError(EvidencePackageError):
+    """The SUB-11 manifest's identity fields diverge from other evidence artifacts.
+
+    Per §5.1 + §5.2 cross-artifact identity: the
+    :class:`DirectGridManifest` fed into :func:`assemble_evidence_package`
+    records ``grid_signature`` / ``binding_checksum`` / ``sp_att_checksum``
+    that MUST match the parallel fields on :class:`GridSnapshotReference`
+    (``grid_signature``), :class:`BindingArtifact` (``checksum``), and
+    :class:`SpAttAssetDiff` (``new_sha256_hex``). A divergence between
+    the manifest and any of the other three artifacts would silently ship
+    an evidence package whose orchestrator inputs disagree on identity —
+    caught loudly here at assembly time.
+    """
+
+    def __init__(
+        self,
+        *,
+        divergent_field: str,
+        manifest_value: str,
+        artifact_value: str,
+    ) -> None:
+        super().__init__(
+            f"manifest identity field {divergent_field!r} diverges from "
+            f"parallel evidence artifact: manifest={manifest_value!r} "
+            f"artifact={artifact_value!r} (§5.1 + §5.2 manifest-identity "
+            "cross-check violation)"
+        )
+        self.divergent_field = divergent_field
+        self.manifest_value = manifest_value
+        self.artifact_value = artifact_value
+
+
+class ProjCrsDatabaseVersionProjectionError(EvidencePackageError):
+    """A required Epic #886 ``proj_crs_database_version`` field is missing.
+
+    Per §5.1 + Epic #886 cross-plane wiring: the readiness manifest's
+    ``proj_crs_database_version`` is a nested dict whose canonical
+    projection to a single str requires ``proj_version``,
+    ``proj_db_metadata.DATABASE.LAYOUT.VERSION.MAJOR``,
+    ``proj_db_metadata.DATABASE.LAYOUT.VERSION.MINOR``, and
+    ``proj_db_metadata.PROJ_DATA.VERSION`` — every field is load-bearing
+    for identity and none can be silently defaulted.
+    """
+
+    def __init__(self, *, missing_field: str) -> None:
+        super().__init__(
+            f"proj_crs_database_version projection missing required "
+            f"field {missing_field!r} (§5.1 + Epic #886 canonical-"
+            "projection completeness violation)"
+        )
+        self.missing_field = missing_field
 
 
 # --- support dataclasses (all frozen, kwarg-only via caller convention) ---
@@ -627,19 +691,33 @@ class OwnershipImages:
 
 @dataclass(frozen=True)
 class Approvals:
-    """Optional operator approvals recorded on the evidence package.
+    """Operator approvals recorded on the evidence package.
 
-    Currently carries the SUB-7 small-basin override approver id
-    (``None`` when the basin does NOT trigger the small-basin gate, or
-    when the gate passed at the default 4-used-cell threshold).
+    Mirrors docs §14 line 968 approval enumeration
+    (``builder`` / ``reviewer`` / ``scientific approver``), MINUS the
+    scientific approver (Change 6 scope per §5.1 non-goal — this change
+    does NOT perform scientific A/B validation, so the scientific approver
+    identity has nothing to bind to in Change 3). The SUB-7 small-basin
+    override approver id is orthogonal: it fires ONLY on basins that
+    trigger the < 4-used-cell hard gate (§6.5), so it is recorded here
+    (``None`` otherwise) rather than in a separate override struct.
 
     Attributes
     ----------
+    builder_approver_id:
+        Operator identity of the mapping-builder run owner (typically a
+        Slurm job submitter or a checked-in author). ``None`` iff no
+        builder approval was supplied at assembly time.
+    reviewer_approver_id:
+        Independent reviewer identity for the mapping build. ``None`` iff
+        the mapping build has not yet cleared reviewer sign-off.
     small_basin_override_approver_id:
         Non-empty approver identity string iff SUB-7's small-basin
         override was invoked; ``None`` otherwise.
     """
 
+    builder_approver_id: str | None = None
+    reviewer_approver_id: str | None = None
     small_basin_override_approver_id: str | None = None
 
 
@@ -718,11 +796,17 @@ class EvidencePackage:
     ----------
     baseline_identity, grid_snapshot_reference, ownership_table,
     station_binding_rows, sp_att_asset_diff,
-    mapping_algorithm_identity, hydrologic_core_fingerprint, distance_qa,
+    mapping_algorithm_identity, hydrologic_core_fingerprint,
+    forbidden_output_scan, distance_qa,
     capacity_report, gate_results, ownership_images, approvals,
     rollback_target:
         The §14 evidence sections; see the individual dataclass
-        docstrings for details.
+        docstrings for details. ``forbidden_output_scan`` is the SUB-12
+        :class:`ForbiddenOutputScanResult` receipt of the §8.1 4-class
+        scan — recorded verbatim as a typed field (parallel treatment
+        with ``hydrologic_core_fingerprint``) so SUB-14 audits can
+        deserialize the pass/fail verdict without decoding an untyped
+        ``evidence_ref`` mapping.
     checksum_excluded_fields:
         Enumeration of field names excluded from
         :func:`compute_evidence_checksum` input. Set from
@@ -753,6 +837,7 @@ class EvidencePackage:
     sp_att_asset_diff: SpAttAssetDiff
     mapping_algorithm_identity: MappingAlgorithmIdentity
     hydrologic_core_fingerprint: HydrologicCoreFingerprint
+    forbidden_output_scan: ForbiddenOutputScanResult
     distance_qa: DistanceQA
     capacity_report: CapacityReport
     gate_results: GateResults
@@ -1008,6 +1093,15 @@ def _render_single_ownership_svg(
       variation across environments cannot shift a rectangle by a
       fractional pixel.
     * The header + trailer are byte-identical strings.
+
+    Truncation discipline
+    ---------------------
+    Rows beyond the canvas edge are dropped from the visible band, but a
+    red ``truncated n_rendered=X n_total=Y`` marker text is emitted at
+    the bottom of the SVG so downstream reviewers can tell "small basin,
+    all rows visible" from "6290-element basin, only 27 rows visible".
+    Without this marker a docs-baseline basin would ship an SVG that
+    silently shows 0.4% of ownership rows.
     """
     if which not in ("old", "new"):
         raise ValueError(f"which must be 'old' or 'new', got {which!r}")
@@ -1026,17 +1120,29 @@ def _render_single_ownership_svg(
     ]
     # Rows laid out top-to-bottom, ownership per row: element_id -> forc.
     row_height = 16
-    for i, row in enumerate(sorted_rows):
-        y = 30 + i * row_height
+    rendered_count = 0
+    for row in sorted_rows:
+        y = 30 + rendered_count * row_height
         # Clip rendering at the canvas edge — SUB-13 evidence packages
         # rarely carry more than a few hundred elements, but a
         # 6290-element basin would run off the canvas without this guard.
-        if y + row_height > _SVG_CANVAS_HEIGHT - 4:
+        # The truncation marker below turns this silent clip into a loud
+        # signal for downstream reviewers.
+        if y + row_height > _SVG_CANVAS_HEIGHT - 20:
             break
         forc_value = row.old_forc if which == "old" else row.new_forc
         lines.append(
             f'<text x="10" y="{y}" font-family="monospace" font-size="10">'
             f'e{row.element_id}|c{row.grid_cell_id}|f{forc_value}</text>'
+        )
+        rendered_count += 1
+    if rendered_count < n:
+        # Fixed footer position so the marker is deterministic across
+        # different ownership_table sizes (no font-height layout drift).
+        lines.append(
+            f'<text x="10" y="{_SVG_CANVAS_HEIGHT - 8}" '
+            f'font-family="monospace" font-size="10" fill="red">'
+            f'truncated n_rendered={rendered_count} n_total={n}</text>'
         )
     lines.append("</svg>")
     return "\n".join(lines).encode("utf-8")
@@ -1152,6 +1258,15 @@ def verify_algorithm_and_proj_identity_matches_readiness(
     2. :attr:`MappingAlgorithmIdentity.proj_crs_database_version` equals
        :attr:`ReadinessManifest.proj_crs_database_version`.
 
+    Both fields on both structs are bare strings; Epic #886 stores
+    ``proj_crs_database_version`` as a nested dict, and the caller MUST
+    project it via
+    :func:`project_readiness_proj_crs_database_version` before
+    populating :class:`ReadinessManifest`. The single canonical
+    projection helper is the ONLY producer of the projected string on
+    the mapping-builder side — divergent projection rules would defeat
+    this gate.
+
     Either mismatch raises :class:`AlgorithmIdentityMismatchError` with
     the readiness manifest's ``checksum`` recorded on the exception so
     downstream evidence can name the exact readiness bundle the mapping
@@ -1233,6 +1348,7 @@ def assemble_evidence_package(
     sp_att_asset_diff: SpAttAssetDiff,
     mapping_algorithm_identity: MappingAlgorithmIdentity,
     hydrologic_core_fingerprint: HydrologicCoreFingerprint,
+    forbidden_output_scan: ForbiddenOutputScanResult,
     distance_qa: DistanceQA,
     capacity_report: CapacityReport,
     gate_results: GateResults,
@@ -1254,19 +1370,24 @@ def assemble_evidence_package(
 
     1. Validate baseline identity completeness
        (:class:`MissingBaselineIdentityError` on empty field).
-    2. Sort :attr:`ownership_table` by ``element_id`` ascending for
+    2. Enforce SUB-11 manifest identity cross-check against
+       :class:`GridSnapshotReference` / :class:`BindingArtifact` /
+       :class:`SpAttAssetDiff` — a divergence raises
+       :class:`ManifestIdentityDivergenceError` (§5.1 + §5.2
+       cross-artifact identity discipline).
+    3. Sort :attr:`ownership_table` by ``element_id`` ascending for
        deterministic tuple layout.
-    3. Copy SUB-11's ``station_bindings`` verbatim into
+    4. Copy SUB-11's ``station_bindings`` verbatim into
        :attr:`station_binding_rows`.
-    4. Assemble the :class:`EvidencePackage` with
+    5. Assemble the :class:`EvidencePackage` with
        :data:`EVIDENCE_CHECKSUM_EXCLUDED_FIELDS` recorded as
        :attr:`checksum_excluded_fields` and a placeholder
        ``bound_mapping_asset_checksum`` ("" sentinel — the caller MUST
        call :func:`bind_evidence_to_mapping_asset` before shipping the
        package).
-    5. Compute :attr:`evidence_checksum` via
+    6. Compute :attr:`evidence_checksum` via
        :func:`compute_evidence_checksum` (over the ordered contents
-       excluding ``build_timestamp`` and ``build_host``).
+       excluding ``build_timestamp``).
 
     Parameters
     ----------
@@ -1281,10 +1402,13 @@ def assemble_evidence_package(
         SUB-11's emitted :class:`DirectGridManifest` +
         :class:`BindingArtifact`. Only the ``station_bindings`` tuple
         from ``binding_artifact`` is recorded verbatim on the evidence
-        package (the manifest is not stored — its
-        ``binding_checksum`` + ``grid_signature`` are already reflected
-        in :class:`GridSnapshotReference` and
-        :attr:`bound_mapping_asset_checksum`).
+        package. The manifest is NOT stored, but its identity fields
+        (``grid_signature``, ``binding_checksum``, ``sp_att_checksum``)
+        are cross-checked against :class:`GridSnapshotReference` +
+        :class:`BindingArtifact` + :class:`SpAttAssetDiff` here so a
+        drift between orchestrator inputs surfaces as
+        :class:`ManifestIdentityDivergenceError` rather than a silent
+        divergence in :attr:`bound_mapping_asset_checksum`.
     sp_att_asset_diff:
         SUB-8's :class:`SpAttAssetDiff` (old + new checksums + semantic
         diff).
@@ -1294,6 +1418,11 @@ def assemble_evidence_package(
         manifest by :func:`verify_algorithm_and_proj_identity_matches_readiness`.
     hydrologic_core_fingerprint:
         SUB-9's :class:`HydrologicCoreFingerprint`. Recorded verbatim.
+    forbidden_output_scan:
+        SUB-12's :class:`ForbiddenOutputScanResult` receipt of the §8.1
+        4-class scan. Recorded verbatim as a typed field so SUB-14
+        integration tests can bind the pass/fail verdict + offending
+        path breakdown without decoding an untyped mapping.
     distance_qa, capacity_report:
         §5.2 QA + capacity structs.
     gate_results:
@@ -1302,7 +1431,8 @@ def assemble_evidence_package(
         :class:`OwnershipImages` (INV-3 visualization only, from
         :func:`render_ownership_images`).
     approvals:
-        :class:`Approvals` — SUB-7 override approver id or ``None``.
+        :class:`Approvals` — builder + reviewer + SUB-7 small-basin
+        override approver ids (each ``None`` unless supplied).
     rollback_target:
         :class:`RollbackTarget` — the previous mapping asset (or
         initial-build sentinel).
@@ -1322,6 +1452,11 @@ def assemble_evidence_package(
     ------
     MissingBaselineIdentityError
         Any :class:`BaselineIdentity` field is blank / missing.
+    ManifestIdentityDivergenceError
+        The SUB-11 manifest's ``grid_signature`` /
+        ``binding_checksum`` / ``sp_att_checksum`` diverges from the
+        parallel field on :class:`GridSnapshotReference` /
+        :class:`BindingArtifact` / :class:`SpAttAssetDiff`.
     EvidencePackageError
         A caller-supplied :class:`GateResult` has a ``gate_id`` outside
         :data:`G0_THROUGH_G5` (order violation), or the
@@ -1335,6 +1470,32 @@ def assemble_evidence_package(
         raise MissingBaselineIdentityError(missing_field="sp_att_sha256_hex")
     if not baseline_identity.sp_mesh_sha256_hex.strip():
         raise MissingBaselineIdentityError(missing_field="sp_mesh_sha256_hex")
+
+    # --- manifest identity cross-check ----------------------------------
+    # SUB-11 emits `manifest.grid_signature` / `.binding_checksum` /
+    # `.sp_att_checksum` derived from the same source-of-truth artifacts
+    # the evidence bundler already receives independently. A divergence
+    # would silently ship an evidence package whose orchestrator inputs
+    # disagreed on identity — surfaced loudly here rather than sneaking
+    # into a downstream checksum failure with no field-name breadcrumb.
+    if manifest.grid_signature != grid_snapshot_reference.grid_signature:
+        raise ManifestIdentityDivergenceError(
+            divergent_field="grid_signature",
+            manifest_value=manifest.grid_signature,
+            artifact_value=grid_snapshot_reference.grid_signature,
+        )
+    if manifest.binding_checksum != binding_artifact.checksum:
+        raise ManifestIdentityDivergenceError(
+            divergent_field="binding_checksum",
+            manifest_value=manifest.binding_checksum,
+            artifact_value=binding_artifact.checksum,
+        )
+    if manifest.sp_att_checksum != sp_att_asset_diff.new_sha256_hex:
+        raise ManifestIdentityDivergenceError(
+            divergent_field="sp_att_checksum",
+            manifest_value=manifest.sp_att_checksum,
+            artifact_value=sp_att_asset_diff.new_sha256_hex,
+        )
 
     # --- gate results: enforce G0..G5 order + label discipline ------------
     ordered_gates = gate_results.iter_ordered()
@@ -1379,6 +1540,7 @@ def assemble_evidence_package(
         sp_att_asset_diff=sp_att_asset_diff,
         mapping_algorithm_identity=mapping_algorithm_identity,
         hydrologic_core_fingerprint=hydrologic_core_fingerprint,
+        forbidden_output_scan=forbidden_output_scan,
         distance_qa=distance_qa,
         capacity_report=capacity_report,
         gate_results=gate_results,
@@ -1397,14 +1559,91 @@ def assemble_evidence_package(
     )
 
 
-# Silence the unused-import warning without hiding the re-export from
-# static analyzers: the exception class is exported so callers can catch
-# SUB-9's hydrologic-fingerprint-mismatch under the evidence-package
-# module's namespace.
-_ = HydrologicCoreFingerprintMismatchError
+# --- public: Epic #886 canonical projection helper ------------------------
 
-# --- silence unused-import lint warnings ---------------------------------
-# ``field`` is not used at runtime but the module keeps the import so a
-# future refactor that needs a per-cell default factory can add it
-# without touching the import block.
-_ = field
+
+def project_readiness_proj_crs_database_version(
+    readiness_proj_crs_database_version_dict: Mapping[str, Any],
+) -> str:
+    """Project Epic #886 nested ``proj_crs_database_version`` dict to canonical str.
+
+    Epic #886 ``readiness-manifest.v1.json`` stores
+    ``proj_crs_database_version`` as a nested dict, e.g.::
+
+        {
+          "proj_version": "9.5.1",
+          "proj_db_metadata": {
+            "DATABASE.LAYOUT.VERSION.MAJOR": "1",
+            "DATABASE.LAYOUT.VERSION.MINOR": "20",
+            "PROJ_DATA.VERSION": "1.19"
+          }
+        }
+
+    :class:`ReadinessManifest` and :class:`MappingAlgorithmIdentity` on
+    this evidence package hold ``proj_crs_database_version`` as a bare
+    string (canonical projected form) so
+    :func:`verify_algorithm_and_proj_identity_matches_readiness` can
+    compare byte-identically. Without a single canonical projection
+    rule, independent orchestrators could produce divergent strings from
+    the same source dict — this helper is the SUB-13 side of the Epic
+    #886 ↔ SUB-13 adapter, and it MUST be the ONLY producer of the
+    projected string on the mapping-builder side.
+
+    Canonical rule (space-separated, order fixed for byte determinism)::
+
+        proj:{proj_version} db-major:{MAJOR} db-minor:{MINOR} proj-data:{PROJ_DATA.VERSION}
+
+    All four fields are load-bearing for identity; any missing field
+    raises :class:`ProjCrsDatabaseVersionProjectionError`.
+
+    Parameters
+    ----------
+    readiness_proj_crs_database_version_dict:
+        The nested dict shape emitted by Epic #886's readiness manifest.
+        MUST have ``proj_version`` and
+        ``proj_db_metadata.{DATABASE.LAYOUT.VERSION.MAJOR,
+        DATABASE.LAYOUT.VERSION.MINOR, PROJ_DATA.VERSION}``.
+
+    Returns
+    -------
+    str
+        Canonical projected form (see rule above).
+
+    Raises
+    ------
+    ProjCrsDatabaseVersionProjectionError
+        Any load-bearing field is missing from the input dict.
+    """
+    proj_version = readiness_proj_crs_database_version_dict.get("proj_version")
+    if proj_version is None:
+        raise ProjCrsDatabaseVersionProjectionError(
+            missing_field="proj_version"
+        )
+    proj_db_metadata = readiness_proj_crs_database_version_dict.get(
+        "proj_db_metadata"
+    )
+    if not isinstance(proj_db_metadata, Mapping):
+        raise ProjCrsDatabaseVersionProjectionError(
+            missing_field="proj_db_metadata"
+        )
+    db_major = proj_db_metadata.get("DATABASE.LAYOUT.VERSION.MAJOR")
+    if db_major is None:
+        raise ProjCrsDatabaseVersionProjectionError(
+            missing_field="proj_db_metadata.DATABASE.LAYOUT.VERSION.MAJOR"
+        )
+    db_minor = proj_db_metadata.get("DATABASE.LAYOUT.VERSION.MINOR")
+    if db_minor is None:
+        raise ProjCrsDatabaseVersionProjectionError(
+            missing_field="proj_db_metadata.DATABASE.LAYOUT.VERSION.MINOR"
+        )
+    proj_data_version = proj_db_metadata.get("PROJ_DATA.VERSION")
+    if proj_data_version is None:
+        raise ProjCrsDatabaseVersionProjectionError(
+            missing_field="proj_db_metadata.PROJ_DATA.VERSION"
+        )
+    return (
+        f"proj:{proj_version} "
+        f"db-major:{db_major} "
+        f"db-minor:{db_minor} "
+        f"proj-data:{proj_data_version}"
+    )
