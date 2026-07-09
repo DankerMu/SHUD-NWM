@@ -85,6 +85,7 @@ from workers.mapping_builder import (
     StationCenterMismatchError,
     StationIdReuseError,
     StationIdSeparatorConflictError,
+    UnmonitoredBoundaryError,
     XyRecomputationMismatchError,
     ZPolicy,
     ZPolicyCellMissingError,
@@ -1983,35 +1984,247 @@ def test_verify_no_forbidden_runtime_producer_artifacts_cycle_lineage_record_blo
 def test_verify_no_forbidden_runtime_producer_artifacts_requires_db_write_spy(
     tmp_path: pathlib.Path,
 ) -> None:
-    """db_write_spy=None fails closed with ForbiddenRuntimeProducerArtifactError.
+    """db_write_spy=None fails closed with UnmonitoredBoundaryError.
 
     The §8.1 boundary is meaningful only when actively monitored. An
-    accidentally-omitted spy MUST NOT silently pass — it MUST raise.
+    accidentally-omitted spy MUST NOT silently pass — it MUST raise. The
+    unmonitored case is a *separate* failure mode from a real forbidden
+    emission: no artifact was actually produced; the gate simply cannot
+    vouch for the boundary. Keeping :class:`UnmonitoredBoundaryError`
+    distinct from :class:`ForbiddenRuntimeProducerArtifactError` means
+    SUB-13's evidence bundler can safely round-trip the latter's
+    ``offending_class`` through :class:`ForbiddenOutputClass` without a
+    ``ValueError`` on an unmonitored-spy sentinel.
     """
     root = _binding_root(tmp_path)
     emitted = [root / "manifest.json"]
-    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+    with pytest.raises(UnmonitoredBoundaryError) as exc:
         verify_no_forbidden_runtime_producer_artifacts(
             emitted,
             db_write_spy=None,
             cycle_lineage_spy=CycleLineageSpy(),
         )
-    assert exc.value.offending_class == "db_write_spy_missing"
+    assert exc.value.missing_spy_kind == "db_write_spy"
+    # UnmonitoredBoundaryError is still a BindingArtifactError subclass
+    # so a caller catching the broad root type still catches it.
+    assert isinstance(exc.value, BindingArtifactError)
+    # scan_summary carries passed=False so SUB-13 evidence records the
+    # boundary-monitor gap identically to a real forbidden emission —
+    # closes the docstring "iff...AND with spies actively supplied" clause.
+    assert isinstance(exc.value.scan_summary, ForbiddenOutputScanResult)
+    assert exc.value.scan_summary.passed is False
 
 
 def test_verify_no_forbidden_runtime_producer_artifacts_requires_cycle_lineage_spy(
     tmp_path: pathlib.Path,
 ) -> None:
-    """cycle_lineage_spy=None fails closed with ForbiddenRuntimeProducerArtifactError."""
+    """cycle_lineage_spy=None fails closed with UnmonitoredBoundaryError."""
     root = _binding_root(tmp_path)
     emitted = [root / "manifest.json"]
-    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+    with pytest.raises(UnmonitoredBoundaryError) as exc:
         verify_no_forbidden_runtime_producer_artifacts(
             emitted,
             db_write_spy=DbWriteSpy(),
             cycle_lineage_spy=None,
         )
-    assert exc.value.offending_class == "cycle_lineage_spy_missing"
+    assert exc.value.missing_spy_kind == "cycle_lineage_spy"
+    assert isinstance(exc.value, BindingArtifactError)
+    assert isinstance(exc.value.scan_summary, ForbiddenOutputScanResult)
+    assert exc.value.scan_summary.passed is False
+
+
+def test_forbidden_runtime_producer_artifact_error_offending_class_round_trips_through_enum(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every real-violation raise carries an ``offending_class`` that is exactly one of :class:`ForbiddenOutputClass`.
+
+    SUB-13's evidence bundler does
+    ``ForbiddenOutputClass(exc.offending_class)`` to recover the enum
+    member. If any raise path smuggled in a sentinel string (e.g.
+    ``"db_write_spy_missing"``), that call would ``ValueError``. Pin the
+    invariant by round-tripping the value through the enum constructor
+    for each of the four real-violation classes (cycle-dated ``.tsd.forc``,
+    both station-CSV shapes, all three ``met.*`` tables, cycle-lineage
+    record). The unmonitored-spy case is a *separate*
+    :class:`UnmonitoredBoundaryError` so it is not covered here — that is
+    the whole point of the split.
+    """
+    root = _binding_root(tmp_path)
+
+    # Class 1: cycle_dated_tsd_forc
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as cycle_exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            [root / "manifest.json", root / "20200101.tsd.forc"],
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert (
+        ForbiddenOutputClass(cycle_exc.value.offending_class)
+        is ForbiddenOutputClass.CYCLE_DATED_TSD_FORC
+    )
+
+    # Class 2 (lonlat shape): station_weather_csv
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as lonlat_exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            [root / "manifest.json", root / "X100Y37.csv"],
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert (
+        ForbiddenOutputClass(lonlat_exc.value.offending_class)
+        is ForbiddenOutputClass.STATION_WEATHER_CSV
+    )
+
+    # Class 2 (numbered shape): same enum member
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as numbered_exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            [root / "manifest.json", root / "X100.csv"],
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    assert (
+        ForbiddenOutputClass(numbered_exc.value.offending_class)
+        is ForbiddenOutputClass.STATION_WEATHER_CSV
+    )
+
+    # Class 3 (all three forbidden met.* tables): met_row_write
+    for table_name in ("met.interp_weight", "met.met_station", "met.forcing_version"):
+        met_spy = DbWriteSpy().record_write(
+            table_name=table_name, row_summary="row"
+        )
+        with pytest.raises(ForbiddenRuntimeProducerArtifactError) as met_exc:
+            verify_no_forbidden_runtime_producer_artifacts(
+                [root / "manifest.json"],
+                db_write_spy=met_spy,
+                cycle_lineage_spy=CycleLineageSpy(),
+            )
+        assert (
+            ForbiddenOutputClass(met_exc.value.offending_class)
+            is ForbiddenOutputClass.MET_ROW_WRITE
+        )
+
+    # Class 4: cycle_lineage_record
+    lineage_spy = CycleLineageSpy().record_lineage(
+        record_summary="cycle=2020010100"
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as lineage_exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            [root / "manifest.json"],
+            db_write_spy=DbWriteSpy(),
+            cycle_lineage_spy=lineage_spy,
+        )
+    assert (
+        ForbiddenOutputClass(lineage_exc.value.offending_class)
+        is ForbiddenOutputClass.CYCLE_LINEAGE_RECORD
+    )
+
+
+def test_unmonitored_boundary_error_is_kwarg_only() -> None:
+    """UnmonitoredBoundaryError refuses positional args (kwarg-only ctor).
+
+    Same discipline as :class:`ForbiddenRuntimeProducerArtifactError`:
+    the exception's field set is the SUB-13 evidence contract, so
+    positional construction is refused to prevent argument-order drift.
+    """
+    scan_summary = ForbiddenOutputScanResult(
+        scanned_path_count=0,
+        offending_paths=(),
+        offending_db_writes=(),
+        cycle_lineage_records=(),
+        passed=False,
+    )
+    with pytest.raises(TypeError):
+        UnmonitoredBoundaryError(
+            "db_write_spy",  # type: ignore[misc]
+            scan_summary,  # type: ignore[misc]
+        )
+    # kwarg construction works.
+    exc = UnmonitoredBoundaryError(
+        missing_spy_kind="db_write_spy",
+        scan_summary=scan_summary,
+    )
+    assert exc.missing_spy_kind == "db_write_spy"
+    assert exc.scan_summary is scan_summary
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_multiple_classes_fire_simultaneously(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Multi-class violation: scan_summary carries every class per docs §8.1.
+
+    The exception message names the *first-fired* class in evaluation
+    order (paths -> db_writes -> lineage) — that is by design. But the
+    docstring on ``scan_summary`` promises the 4-class breakdown is
+    comprehensive so SUB-13 evidence can log every violation, not just
+    the first one. Inject a cycle-dated ``.tsd.forc`` AND a forbidden
+    ``met.interp_weight`` write in the same call and assert
+    :attr:`ForbiddenOutputScanResult.offending_paths` and
+    :attr:`ForbiddenOutputScanResult.offending_db_writes` are both
+    non-empty on the raised exception's ``scan_summary``.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        root / "20200101.tsd.forc",  # cycle-dated .tsd.forc
+    ]
+    spy = DbWriteSpy().record_write(
+        table_name="met.interp_weight",
+        row_summary="station_id=s1, cell=c1, weight=1.0",
+    )
+    with pytest.raises(ForbiddenRuntimeProducerArtifactError) as exc:
+        verify_no_forbidden_runtime_producer_artifacts(
+            emitted,
+            db_write_spy=spy,
+            cycle_lineage_spy=CycleLineageSpy(),
+        )
+    # First-fired class in evaluation order: paths run before db_writes,
+    # so the raised offending_class is cycle_dated_tsd_forc. That's fine —
+    # we're proving scan_summary is comprehensive, not that a specific
+    # class fires first.
+    assert (
+        ForbiddenOutputClass(exc.value.offending_class)
+        is ForbiddenOutputClass.CYCLE_DATED_TSD_FORC
+    )
+    scan = exc.value.scan_summary
+    assert scan.passed is False
+    # BOTH tuples carry their respective violations — the comprehensive
+    # 4-class picture promised by the docstring at §8.1.
+    assert len(scan.offending_paths) == 1
+    assert scan.offending_paths[0][0] == (
+        ForbiddenOutputClass.CYCLE_DATED_TSD_FORC.value
+    )
+    assert len(scan.offending_db_writes) == 1
+    assert scan.offending_db_writes[0][0] == "met.interp_weight"
+    # cycle_lineage_records tuple is empty because that class did not fire.
+    assert scan.cycle_lineage_records == ()
+
+
+def test_verify_no_forbidden_runtime_producer_artifacts_realistic_8_digit_basin_id_passes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Realistic 8-digit basin id (e.g. ``basin12345678.tsd.forc``) does NOT match the cycle-dated regex.
+
+    SUB-12-owned mirror of the SUB-10 regex identity check: the cycle
+    regex requires an 8- or 10-digit stamp with a year prefix in
+    ``19``/``20``/``21`` — an 8-digit basin id embedded in a filename
+    like ``basin12345678.tsd.forc`` must NOT fire. Defense-in-depth: if
+    a future SUB-10 change loosens the regex without updating its own
+    test, this SUB-12 mirror catches the regression at the mapping stage
+    boundary.
+    """
+    root = _binding_root(tmp_path)
+    emitted = [
+        root / "manifest.json",
+        # basin12345678 = literal 8-digit id "12345678"; doesn't start with 19/20/21.
+        root / "variant" / "basin12345678.tsd.forc",
+    ]
+    result = verify_no_forbidden_runtime_producer_artifacts(
+        emitted,
+        db_write_spy=DbWriteSpy(),
+        cycle_lineage_spy=CycleLineageSpy(),
+    )
+    assert result.passed is True
+    assert result.offending_paths == ()
 
 
 def test_verify_no_forbidden_runtime_producer_artifacts_returns_result_on_pass(

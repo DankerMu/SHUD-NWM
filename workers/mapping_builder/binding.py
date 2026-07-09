@@ -801,12 +801,21 @@ class ForbiddenRuntimeProducerArtifactError(BindingArtifactError):
     means the mapping stage crossed the §8.1 ownership boundary — a G5
     blocker before SUB-13 records the mapping evidence.
 
-    ``offending_class`` names which of :class:`ForbiddenOutputClass`
-    tripped the gate; ``offending_evidence`` is the (path or table+row)
-    tuple that fired; ``scan_summary`` is the same
-    :class:`ForbiddenOutputScanResult` returned on pass, so callers can
-    log the full 4-class breakdown from the raised exception (SUB-13
-    evidence bundler consumes this attribute verbatim).
+    ``offending_class`` is **strictly one of the four
+    :class:`ForbiddenOutputClass` enum values** (its ``.value`` string
+    token): ``"cycle_dated_tsd_forc"``, ``"station_weather_csv"``,
+    ``"met_row_write"``, or ``"cycle_lineage_record"``. Callers can safely
+    round-trip via ``ForbiddenOutputClass(exc.offending_class)`` to
+    recover the enum member — no sentinel strings ever appear here. The
+    unmonitored-spy case (spy passed as ``None``) is a *separate* failure
+    mode surfaced via :class:`UnmonitoredBoundaryError`, so this exception
+    never carries a ``"..._spy_missing"`` sentinel.
+
+    ``offending_evidence`` is the (path or table+row) tuple that fired;
+    ``scan_summary`` is the same :class:`ForbiddenOutputScanResult`
+    returned on pass, so callers can log the full 4-class breakdown from
+    the raised exception (SUB-13 evidence bundler consumes this attribute
+    verbatim).
     """
 
     def __init__(
@@ -825,6 +834,55 @@ class ForbiddenRuntimeProducerArtifactError(BindingArtifactError):
         )
         self.offending_class = offending_class
         self.offending_evidence = offending_evidence
+        self.scan_summary = scan_summary
+
+
+class UnmonitoredBoundaryError(BindingArtifactError):
+    """§8.1 boundary check invoked without an actively-monitored spy.
+
+    The mapping stage's §8.1 boundary is meaningful only when the caller
+    supplies **live** spy instances (:class:`DbWriteSpy` +
+    :class:`CycleLineageSpy`) that watched the ingest DB session and
+    cycle-lineage recorder for the duration of the mapping build. Passing
+    ``None`` for either spy means "we didn't monitor" — which cannot be
+    distinguished from "we monitored and saw nothing" without a live
+    reference. The gate refuses the ambiguous case rather than silently
+    passing, so an accidentally-omitted spy becomes a loud build failure
+    rather than a false-positive PASS receipt.
+
+    This is a **separate failure mode** from
+    :class:`ForbiddenRuntimeProducerArtifactError`: no forbidden artifact
+    was actually emitted; the gate simply cannot vouch for the §8.1
+    boundary. Keeping the two exceptions distinct means SUB-13's evidence
+    bundler can safely do
+    ``ForbiddenOutputClass(exc.offending_class)`` on a
+    :class:`ForbiddenRuntimeProducerArtifactError` without a
+    :class:`ValueError`.
+
+    Attributes
+    ----------
+    missing_spy_kind:
+        One of ``"db_write_spy"`` / ``"cycle_lineage_spy"`` — names which
+        spy was ``None``.
+    scan_summary:
+        The same :class:`ForbiddenOutputScanResult` shape the pass path
+        returns, with all three offending-tuples empty and ``passed=False``.
+        Surfaced so SUB-13 evidence records the boundary-monitor gap the
+        same way it records a real forbidden emission.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing_spy_kind: str,
+        scan_summary: ForbiddenOutputScanResult,
+    ) -> None:
+        super().__init__(
+            f"§8.1 boundary check requires an actively-monitored "
+            f"{missing_spy_kind}; caller supplied None (pass an empty "
+            f"spy instance to prove nothing was recorded — docs §8.1)"
+        )
+        self.missing_spy_kind = missing_spy_kind
         self.scan_summary = scan_summary
 
 
@@ -1174,6 +1232,20 @@ class DbWriteSpy:
         Frozen dataclass means the spy is append-only via replacement —
         callers cannot mutate ``captured_writes`` in place, which
         eliminates the "spy silently reset mid-build" failure mode.
+
+        Warning
+        -------
+        Callers MUST reassign the returned spy —
+        ``spy = spy.record_write(table_name=..., row_summary=...)``.
+        Discarding the return value silently drops the recording (the
+        original ``spy`` is unchanged; the appended write lives only in
+        the new object). If a §4.3 orchestrator calls
+        ``spy.record_write(...)`` without reassignment and then hands
+        ``spy`` to :func:`verify_no_forbidden_runtime_producer_artifacts`,
+        the gate will see zero captured writes and pass — a false-negative
+        boundary violation. The frozen-dataclass shape enforces the
+        immutability but cannot enforce the reassignment; the discipline
+        lives in the caller.
         """
         return DbWriteSpy(
             captured_writes=self.captured_writes
@@ -1203,7 +1275,17 @@ class CycleLineageSpy:
     captured_records: tuple[str, ...] = ()
 
     def record_lineage(self, *, record_summary: str) -> CycleLineageSpy:
-        """Return a new spy with one more lineage record appended."""
+        """Return a new spy with one more lineage record appended.
+
+        Warning
+        -------
+        Callers MUST reassign the returned spy —
+        ``spy = spy.record_lineage(record_summary=...)``. Discarding the
+        return silently drops the recording, and the §8.1 gate will see
+        an empty spy and pass. Same footgun as :meth:`DbWriteSpy.record_write`;
+        the immutability enforces the "no in-place mutation" invariant but
+        cannot enforce the reassignment.
+        """
         return CycleLineageSpy(
             captured_records=self.captured_records + (record_summary,),
         )
@@ -2200,6 +2282,16 @@ def verify_no_forbidden_runtime_producer_artifacts(
     so an uppercase ``X100Y37.CSV`` on macOS APFS / Windows NTFS is
     caught the same as the lowercase ``x100y37.csv``.
 
+    Caller obligation
+    -----------------
+    The caller is responsible for ensuring ``emitted_artifact_paths``
+    includes at minimum the direct-grid manifest, the standalone binding
+    artifact, and the variant ``.sp.att`` bytes (or their equivalent
+    paths). Passing an empty iterable returns ``passed=True`` vacuously —
+    the gate does not enforce non-emptiness; SUB-13's evidence
+    orchestrator adds that guard so a caller that "forgot to enumerate"
+    fails there rather than silently producing an empty-set PASS receipt.
+
     Parameters
     ----------
     emitted_artifact_paths:
@@ -2226,12 +2318,27 @@ def verify_no_forbidden_runtime_producer_artifacts(
     Raises
     ------
     ForbiddenRuntimeProducerArtifactError
-        Any of the four classes fired, OR either spy was ``None``. The
-        raised exception carries ``offending_class``, the specific
-        ``offending_evidence`` (path or table+row), and the same
+        Any of the four forbidden classes fired (real §8.1 boundary
+        violation). The raised exception carries ``offending_class``
+        (strictly a :class:`ForbiddenOutputClass` enum value token), the
+        specific ``offending_evidence`` (path or table+row), and the same
         :class:`ForbiddenOutputScanResult` breakdown so SUB-13 can log
         the full 4-class picture from either the return path or the
         exception path.
+    UnmonitoredBoundaryError
+        ``db_write_spy=None`` or ``cycle_lineage_spy=None``. Split off
+        from :class:`ForbiddenRuntimeProducerArtifactError` so the
+        latter's ``offending_class`` is strictly a
+        :class:`ForbiddenOutputClass` value (no ``"..._spy_missing"``
+        sentinel strings). The raised exception carries
+        ``missing_spy_kind`` and the same ``scan_summary`` shape (with
+        ``passed=False``) so SUB-13 records the boundary-monitor gap.
+    BindingArtifactError
+        An ``emitted_artifact_paths`` entry is not a
+        :class:`pathlib.Path` (e.g. a ``str`` was passed). Boundary
+        type-guard raised at the scan loop so the gate never .name-fails
+        silently on a mistyped input; the caller sees a loud failure
+        rather than a false-positive PASS.
     """
     # Materialize the iterable so we can both count and iterate for the
     # regex scan. Preserving the caller's ordering makes the result
@@ -2241,7 +2348,12 @@ def verify_no_forbidden_runtime_producer_artifacts(
 
     # Fail-closed on unmonitored spies. We compose a scan_summary with
     # zero offending entries so the raised exception carries the same
-    # 4-class picture the pass path would.
+    # 4-class picture the pass path would. Split off as
+    # :class:`UnmonitoredBoundaryError` (not
+    # :class:`ForbiddenRuntimeProducerArtifactError`) so ``offending_class``
+    # on the latter is strictly a :class:`ForbiddenOutputClass` value —
+    # SUB-13's evidence bundler can safely do
+    # ``ForbiddenOutputClass(exc.offending_class)`` without ValueError.
     if db_write_spy is None:
         unmonitored_summary = ForbiddenOutputScanResult(
             scanned_path_count=len(paths),
@@ -2250,13 +2362,8 @@ def verify_no_forbidden_runtime_producer_artifacts(
             cycle_lineage_records=(),
             passed=False,
         )
-        raise ForbiddenRuntimeProducerArtifactError(
-            offending_class="db_write_spy_missing",
-            offending_evidence=(
-                "db_write_spy is None; the §8.1 boundary check requires an "
-                "actively-monitored DbWriteSpy (pass DbWriteSpy() to prove no "
-                "met.* writes attempted)"
-            ),
+        raise UnmonitoredBoundaryError(
+            missing_spy_kind="db_write_spy",
             scan_summary=unmonitored_summary,
         )
     if cycle_lineage_spy is None:
@@ -2267,13 +2374,8 @@ def verify_no_forbidden_runtime_producer_artifacts(
             cycle_lineage_records=(),
             passed=False,
         )
-        raise ForbiddenRuntimeProducerArtifactError(
-            offending_class="cycle_lineage_spy_missing",
-            offending_evidence=(
-                "cycle_lineage_spy is None; the §8.1 boundary check requires "
-                "an actively-monitored CycleLineageSpy (pass CycleLineageSpy() "
-                "to prove no cycle lineage recorded)"
-            ),
+        raise UnmonitoredBoundaryError(
+            missing_spy_kind="cycle_lineage_spy",
             scan_summary=unmonitored_summary,
         )
 
