@@ -1,4 +1,4 @@
-"""Tests for :mod:`workers.mapping_builder.rewrite` (Epic #909 SUB-8, §3.1 + §3.2).
+"""Tests for :mod:`workers.mapping_builder.rewrite` (Epic #909 SUB-8/9/10, §3.1-§3.5).
 
 Coverage
 --------
@@ -11,6 +11,15 @@ Coverage
   monkey-patched SHA-256.
 * §3.2 :func:`verify_non_forc_columns_unchanged` — schema/row count/element
   ID/non-FORC column change blockers.
+* §3.3 :func:`verify_non_sp_att_checksums_equal` + §3.4
+  :func:`compute_hydrologic_core_fingerprint` +
+  :func:`verify_hydrologic_core_fingerprint_equal` — the G4 file-checksum
+  equality gate and the ten-surface fingerprint (positive gate, per-category
+  drift matrix, missing / unknown / missing / empty category negatives).
+* §3.5 :func:`verify_no_legacy_weather_path_in_active_tree` — G4 blocker
+  refusing legacy CMFD weather CSV (``X<lon>Y<lat>.csv`` / ``X<n>.csv``) or
+  builder-written cycle ``.tsd.forc`` in the variant's active forcing tree;
+  green build passes; case-insensitivity + recursive scan proved.
 * :func:`emit_semantic_diff` — deterministic ordering by element_id and
   FORC-only content.
 * :func:`record_sp_att_checksums` — SHA-256 recorded correctly for both
@@ -31,6 +40,7 @@ import pytest
 from workers.mapping_builder import (
     HYDROLOGIC_CORE_FINGERPRINT_LABELS,
     NON_SP_ATT_CATEGORIES,
+    ActiveForcingSubdirNotFoundError,
     BaselineImmutabilityViolationError,
     ElementIdSetMismatchError,
     ElementOwnership,
@@ -40,6 +50,7 @@ from workers.mapping_builder import (
     ForcUnmappedError,
     HydrologicCoreFingerprint,
     HydrologicCoreFingerprintMismatchError,
+    LegacyWeatherPathInActiveTreeError,
     MissingCategoryError,
     MissingPackageFileError,
     NonForcColumnChangedError,
@@ -59,6 +70,7 @@ from workers.mapping_builder import (
     parse_sp_att_forc_rows,
     record_sp_att_checksums,
     verify_hydrologic_core_fingerprint_equal,
+    verify_no_legacy_weather_path_in_active_tree,
     verify_non_forc_columns_unchanged,
     verify_non_sp_att_checksums_equal,
 )
@@ -1895,3 +1907,457 @@ def test_sub9_exceptions_inherit_from_sp_att_rewrite_error() -> None:
         assert issubclass(cls, SpAttRewriteError), (
             f"{cls.__name__} MUST inherit from SpAttRewriteError"
         )
+
+
+# --- §3.5 no-legacy-weather-path-in-active-tree gate (G4 blocker) ---------
+
+
+_ACTIVE_FORCING_SUBDIR = "forcing"
+
+
+def _write_active_forcing_tree(
+    package_root: pathlib.Path,
+    *,
+    active_forcing_subdir: str = _ACTIVE_FORCING_SUBDIR,
+    files: dict[str, bytes] | None = None,
+) -> pathlib.Path:
+    """Materialize a variant active forcing subtree under ``package_root``.
+
+    ``files`` maps relative POSIX paths (under the active forcing subdir)
+    to byte payloads. Missing = create only the empty subdir. The subdir
+    itself is always created (matches the "green build has an active
+    forcing tree containing only allowed content" scenario — an empty tree
+    also passes the gate).
+    """
+    active_root = package_root / active_forcing_subdir
+    active_root.mkdir(parents=True, exist_ok=True)
+    if files:
+        for rel, payload in files.items():
+            target = active_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+    return active_root
+
+
+def _make_variant_package(tmp_path: pathlib.Path) -> pathlib.Path:
+    """Create a variant package directory shell under ``tmp_path``."""
+    root = tmp_path / "variant"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_no_legacy_weather_path_green_build_passes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Green build: only binding artifact + non-weather ``*.tsd.*`` -> gate returns None.
+
+    Positive proof matching §3.5's green-build requirement: the active
+    forcing subtree contains only the direct-grid binding artifact
+    reference and non-weather ancillary ``*.tsd.*`` inventory copied from
+    baseline (per SUB-2). None of the three forbidden patterns match, so
+    the gate returns ``None`` and permits variant assembly to continue.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "binding.direct_grid.json": b'{"binding": true}\n',
+            "precip.tsd.mrms.forc": b"precip payload\n",
+            "pet.tsd.hourly.csv": b"pet payload\n",
+            "qhh.tsd.ancillary": b"qhh ancillary payload\n",
+        },
+    )
+    result = verify_no_legacy_weather_path_in_active_tree(
+        root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+    )
+    assert result is None
+
+
+def test_no_legacy_weather_path_empty_active_tree_passes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Empty active forcing tree -> gate returns None (nothing forbidden inside)."""
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(root)
+    assert (
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+        is None
+    )
+
+
+def test_no_legacy_weather_path_lonlat_csv_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected ``X<lon>Y<lat>.csv`` -> G4 blocker + no variant output.
+
+    Per issue #919 PR boundary: a legacy ``X100.75Y37.65.csv`` in the
+    variant's active forcing directory MUST fail closed with
+    :class:`LegacyWeatherPathInActiveTreeError` and pattern name
+    ``legacy_lonlat_csv``. No further variant assembly step commits.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "binding.direct_grid.json": b'{"binding": true}\n',
+            "X100.75Y37.65.csv": b"Time_Day,Precip\n0,0\n",
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == "legacy_lonlat_csv"
+    assert exc_info.value.matched_path.name == "X100.75Y37.65.csv"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_no_legacy_weather_path_numbered_csv_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected ``X<n>.csv`` (e.g. zhaochen ``X6.csv``) -> G4 blocker.
+
+    Per issue #919 PR boundary: a legacy ``X6.csv`` (matching the
+    zhaochen_mc / zhaochen_wem baseline numbering shape) MUST fail closed
+    with pattern name ``legacy_numbered_csv``.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "binding.direct_grid.json": b'{"binding": true}\n',
+            "X6.csv": b"Time_Day,Precip\n0,0\n",
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == "legacy_numbered_csv"
+    assert exc_info.value.matched_path.name == "X6.csv"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_no_legacy_weather_path_builder_cycle_tsd_forc_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Injected cycle-dated ``.tsd.forc`` -> G4 blocker (docs §8.1).
+
+    Per issue #919 PR boundary: a builder-written cycle ``.tsd.forc`` like
+    ``cycle_2020010100.tsd.forc`` MUST fail closed with pattern name
+    ``builder_written_cycle_tsd_forc``. The runtime producer owns cycle
+    ``.tsd.forc`` — the mapping builder never writes one.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "binding.direct_grid.json": b'{"binding": true}\n',
+            "cycle_2020010100.tsd.forc": b"cycle forcing payload\n",
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == "builder_written_cycle_tsd_forc"
+    assert exc_info.value.matched_path.name == "cycle_2020010100.tsd.forc"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_pattern"),
+    [
+        ("X100Y50.CSV", "legacy_lonlat_csv"),
+        ("x50Y100.csv", "legacy_lonlat_csv"),
+        ("X100.75y37.65.CSV", "legacy_lonlat_csv"),
+        ("x100.csv", "legacy_numbered_csv"),
+        ("X6.CSV", "legacy_numbered_csv"),
+        ("CYCLE_2020010100.TSD.FORC", "builder_written_cycle_tsd_forc"),
+        ("cycle_2020010100.Tsd.Forc", "builder_written_cycle_tsd_forc"),
+    ],
+)
+def test_no_legacy_weather_path_case_insensitive_blocks(
+    tmp_path: pathlib.Path,
+    filename: str,
+    expected_pattern: str,
+) -> None:
+    """Case-insensitive scan: uppercase/mixed-case aliases block equally.
+
+    macOS APFS/HFS+ and Windows NTFS default to case-insensitive
+    filesystems, so ``X100Y50.CSV`` aliases ``x100y50.csv`` at the OS
+    layer. A case-sensitive regex would silently miss the alias and let
+    the legacy path leak through the gate — the §3.5 gate MUST fold case
+    before matching.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={filename: b"legacy payload\n"},
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == expected_pattern
+    assert exc_info.value.matched_path.name == filename
+
+
+def test_no_legacy_weather_path_non_weather_tsd_files_pass(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Non-weather ``*.tsd.*`` files (SUB-2 ancillary inventory) do NOT block.
+
+    Per SUB-2's ancillary inventory: non-weather ``*.tsd.*`` files
+    (``precip.tsd.mrms.forc``, ``pet.tsd.hourly.csv``, ``qhh.tsd.ancillary``,
+    etc.) are LEGAL in the active forcing tree — they are the ancillary
+    non-weather dependencies the variant carries forward from baseline.
+    The §3.5 gate MUST NOT confuse them with the three forbidden patterns.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "precip.tsd.mrms.forc": b"precip ancillary\n",
+            "pet.tsd.hourly.csv": b"pet ancillary\n",
+            "qhh.tsd.ancillary": b"qhh ancillary\n",
+            "baseline.tsd.forc": b"non-cycle baseline forc\n",  # no digits
+            "basin123.tsd.forc": b"3-digit suffix, not cycle\n",  # < 8 digits
+        },
+    )
+    result = verify_no_legacy_weather_path_in_active_tree(
+        root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+    )
+    assert result is None
+
+
+def test_no_legacy_weather_path_basin_id_with_8_digits_passes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """8-digit non-cycle basin ID (e.g. ``basin12345678.tsd.forc``) does NOT block.
+
+    Regression for the SUB-10 Phase 6 fix pass tightening of
+    :data:`workers.mapping_builder.rewrite._CYCLE_TSD_FORC_PATTERN`. The
+    original pattern ``^.*\\d{8}.*\\.tsd\\.forc$`` treated ANY 8-digit run
+    as a cycle-date signature and false-blocked realistic non-cycle names
+    that embed long basin/station IDs (``basin12345678.tsd.forc``). The
+    tightened pattern requires the 8-digit run to start with ``19``,
+    ``20``, or ``21`` (a plausible cycle-year prefix), so an embedded ID
+    lacking that prefix passes the gate — the file is a legal
+    per-basin ``.tsd.forc`` the variant may carry forward, not a
+    cycle-dated runtime artifact.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "basin12345678.tsd.forc": b"basin id, 8 digits, non-cycle\n",
+            # Two extra non-cycle names whose 8-digit runs also lack the
+            # year prefix — the fix must not regress these either.
+            "station98765432.tsd.forc": b"station id, 8 digits\n",
+            "sensor12341234.tsd.forc": b"sensor id, 8 digits\n",
+        },
+    )
+    result = verify_no_legacy_weather_path_in_active_tree(
+        root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+    )
+    assert result is None
+
+
+def test_no_legacy_weather_path_cycle_stamped_tsd_forc_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Pure date-stamped ``20200101.tsd.forc`` still blocks after tightening.
+
+    Regression for the SUB-10 Phase 6 fix pass. The tightening must NOT
+    weaken coverage for real cycle-dated ``.tsd.forc`` names. Two
+    canonical shapes MUST still fail closed:
+
+    * ``20200101.tsd.forc`` — pure ``YYYYMMDD`` filename (a runtime
+      producer artifact) — the 8-digit run leads the name and its
+      first two digits are ``20`` (year prefix).
+    * ``19990101.tsd.forc`` — the ``19`` year prefix is also covered so
+      Y2K-vintage cycle stamps are still caught.
+
+    This complements
+    :func:`test_no_legacy_weather_path_builder_cycle_tsd_forc_blocks`
+    (which exercises the ``cycle_<STAMP>.tsd.forc`` prefixed shape).
+    Together they pin both name shapes across the year-prefix set.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "20200101.tsd.forc": b"pure date cycle forcing\n",
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == "builder_written_cycle_tsd_forc"
+    assert exc_info.value.matched_path.name == "20200101.tsd.forc"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+    # Y2K-vintage cycle stamp: leading ``19`` prefix. Fresh variant to
+    # avoid file-order dependencies with the ``20`` case above.
+    root2 = _make_variant_package(tmp_path / "y2k")
+    _write_active_forcing_tree(
+        root2,
+        files={
+            "19990101.tsd.forc": b"y2k-vintage cycle forcing\n",
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info_y2k:
+        verify_no_legacy_weather_path_in_active_tree(
+            root2, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert (
+        exc_info_y2k.value.pattern_name == "builder_written_cycle_tsd_forc"
+    )
+    assert exc_info_y2k.value.matched_path.name == "19990101.tsd.forc"
+
+
+def test_no_legacy_weather_path_recursive_scan_blocks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Nested-subdirectory legacy file -> recursive scan still blocks.
+
+    Injection at a deep sub-path (not top-level) MUST also block —
+    ``rglob("*")`` descends every subdirectory under the active forcing
+    root. A perpetrator hiding the legacy file at
+    ``forcing/subdir/nested/X6.csv`` MUST NOT sneak past the gate.
+    """
+    root = _make_variant_package(tmp_path)
+    _write_active_forcing_tree(
+        root,
+        files={
+            "subdir/nested/X6.csv": b"buried legacy\n",
+            "binding.direct_grid.json": b'{"binding": true}\n',
+        },
+    )
+    with pytest.raises(LegacyWeatherPathInActiveTreeError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir=_ACTIVE_FORCING_SUBDIR
+        )
+    assert exc_info.value.pattern_name == "legacy_numbered_csv"
+    # Verify the raised path is the buried one, not a top-level probe.
+    assert exc_info.value.matched_path.name == "X6.csv"
+    assert "subdir" in exc_info.value.matched_path.parts
+    assert "nested" in exc_info.value.matched_path.parts
+
+
+def test_no_legacy_weather_path_missing_subdir_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Missing active_forcing_subdir -> ActiveForcingSubdirNotFoundError.
+
+    A malformed variant with no active forcing tree at
+    ``package_root / active_forcing_subdir`` MUST NOT silently pass — the
+    gate refuses loudly so downstream evidence cannot bind to a
+    nonexistent tree.
+    """
+    root = _make_variant_package(tmp_path)
+    # Do NOT create the active forcing subdir.
+    with pytest.raises(ActiveForcingSubdirNotFoundError) as exc_info:
+        verify_no_legacy_weather_path_in_active_tree(
+            root, active_forcing_subdir="forcing"
+        )
+    assert exc_info.value.active_forcing_subdir == "forcing"
+    assert exc_info.value.package_root == root
+    assert exc_info.value.resolved_path == root / "forcing"
+    assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_no_legacy_weather_path_missing_package_root_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Missing / non-directory ``package_root`` -> SpAttRewriteError."""
+    non_existent = tmp_path / "does" / "not" / "exist"
+    with pytest.raises(SpAttRewriteError):
+        verify_no_legacy_weather_path_in_active_tree(
+            non_existent, active_forcing_subdir="forcing"
+        )
+
+
+def test_no_legacy_weather_path_accepts_pathlib_subdir(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``active_forcing_subdir`` accepts both str and pathlib.Path.
+
+    Signature declares ``str | pathlib.Path`` — the gate MUST resolve
+    either without a type coercion bug. Uses a
+    :class:`pathlib.Path` here with a nested subdir to cover the
+    non-str-flat-string path.
+    """
+    root = _make_variant_package(tmp_path)
+    nested_subdir = pathlib.Path("layer1") / "forcing"
+    _write_active_forcing_tree(
+        root,
+        active_forcing_subdir=str(nested_subdir),
+        files={"clean.tsd.ancillary": b"clean payload\n"},
+    )
+    result = verify_no_legacy_weather_path_in_active_tree(
+        root, active_forcing_subdir=nested_subdir
+    )
+    assert result is None
+
+
+def test_no_legacy_weather_path_signature_pinned() -> None:
+    """Signature pin for the §3.5 gate: (package_root, *, active_forcing_subdir)."""
+    sig = inspect.signature(verify_no_legacy_weather_path_in_active_tree)
+    assert list(sig.parameters) == ["package_root", "active_forcing_subdir"]
+    assert (
+        sig.parameters["active_forcing_subdir"].kind
+        == inspect.Parameter.KEYWORD_ONLY
+    )
+    hints = typing.get_type_hints(verify_no_legacy_weather_path_in_active_tree)
+    assert hints["package_root"] is pathlib.Path
+    # ``str | pathlib.Path`` -> at runtime this is a types.UnionType; check
+    # its args cover both.
+    subdir_hint = hints["active_forcing_subdir"]
+    assert typing.get_origin(subdir_hint) in (typing.Union, __import__("types").UnionType)
+    assert set(typing.get_args(subdir_hint)) == {str, pathlib.Path}
+    assert hints.get("return") is type(None)
+
+
+def test_sub10_exception_inherits_from_sp_att_rewrite_error() -> None:
+    """SUB-10 exception subclasses belong to the SpAttRewriteError family.
+
+    Companion to :func:`test_sub9_exceptions_inherit_from_sp_att_rewrite_error`:
+    downstream callers that catch ``SpAttRewriteError`` MUST absorb the
+    §3.5 no-legacy-weather-path failures without adding a new ``except``
+    clause.
+    """
+    subclasses = (
+        LegacyWeatherPathInActiveTreeError,
+        ActiveForcingSubdirNotFoundError,
+    )
+    for cls in subclasses:
+        assert issubclass(cls, SpAttRewriteError), (
+            f"{cls.__name__} MUST inherit from SpAttRewriteError"
+        )
+
+
+def test_sub10_legacy_pattern_constants_present() -> None:
+    """Module-level pattern constants are compiled regexes with IGNORECASE.
+
+    Internal detail check — the pattern registry
+    :data:`workers.mapping_builder.rewrite._LEGACY_WEATHER_PATTERNS`
+    carries the three (name, compiled pattern) pairs in the documented
+    order. Any addition/reorder would silently change the reported
+    ``pattern_name`` on a match, so pin the shape.
+    """
+    import re
+
+    pattern_names = [name for name, _p in rewrite_module._LEGACY_WEATHER_PATTERNS]
+    assert pattern_names == [
+        "legacy_lonlat_csv",
+        "legacy_numbered_csv",
+        "builder_written_cycle_tsd_forc",
+    ]
+    for _name, pattern in rewrite_module._LEGACY_WEATHER_PATTERNS:
+        assert isinstance(pattern, re.Pattern)
+        assert pattern.flags & re.IGNORECASE

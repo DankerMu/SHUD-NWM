@@ -64,6 +64,7 @@ from workers.mapping_builder.integrity import (
 from workers.mapping_builder.rewrite import (
     HYDROLOGIC_CORE_FINGERPRINT_LABELS,
     NON_SP_ATT_CATEGORIES,
+    ActiveForcingSubdirNotFoundError,
     BaselineImmutabilityViolationError,
     ElementIdSetMismatchError,
     ForcMultisetMismatchError,
@@ -72,6 +73,7 @@ from workers.mapping_builder.rewrite import (
     ForcUnmappedError,
     HydrologicCoreFingerprint,
     HydrologicCoreFingerprintMismatchError,
+    LegacyWeatherPathInActiveTreeError,
     MissingCategoryError,
     MissingPackageFileError,
     NonForcColumnChangedError,
@@ -91,11 +93,13 @@ from workers.mapping_builder.rewrite import (
     parse_sp_att_forc_rows,
     record_sp_att_checksums,
     verify_hydrologic_core_fingerprint_equal,
+    verify_no_legacy_weather_path_in_active_tree,
     verify_non_forc_columns_unchanged,
     verify_non_sp_att_checksums_equal,
 )
 
 __all__ = [
+    "ActiveForcingSubdirNotFoundError",
     "AncillaryEntry",
     "AncillaryInventoryError",
     "AncillaryInventoryReport",
@@ -127,6 +131,7 @@ __all__ = [
     "Inv1EndToEndEvidence",
     "Inv1ViolationError",
     "InvalidForcValueError",
+    "LegacyWeatherPathInActiveTreeError",
     "MappingAlgorithmError",
     "MissingCategoryError",
     "MissingPackageFileError",
@@ -180,6 +185,7 @@ __all__ = [
     "verify_grid_identity_precondition",
     "verify_half_cell_diagonal_sanity_bound",
     "verify_hydrologic_core_fingerprint_equal",
+    "verify_no_legacy_weather_path_in_active_tree",
     "verify_non_forc_columns_unchanged",
     "verify_non_sp_att_checksums_equal",
     "verify_package_crs",
