@@ -38,6 +38,7 @@ import typing
 import pyproj
 import pytest
 
+from packages.common import grid_signature as grid_signature_module
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     make_regular_grid_cells,
 )
@@ -53,6 +54,7 @@ from workers.mapping_builder import (
     RESERVED_FILENAME_PREFIXES,
     RESERVED_FILENAME_SUFFIXES,
     RESERVED_FORCING_FILENAMES,
+    STATION_ID_SEPARATOR,
     WGS84_COORDINATE_BASIS,
     BaselineIntegrityError,
     BindingArtifact,
@@ -70,10 +72,13 @@ from workers.mapping_builder import (
     MappingAlgorithmError,
     ParserRoundTripError,
     ReadinessManifestChecksumMissingError,
+    SpAttChecksumMismatchError,
     SpAttRewriteError,
     StationBinding,
     StationCenterMismatchError,
     StationIdReuseError,
+    StationIdSeparatorConflictError,
+    XyRecomputationMismatchError,
     ZPolicy,
     ZPolicyCellMissingError,
     apply_z_policy_from_readiness,
@@ -84,7 +89,10 @@ from workers.mapping_builder import (
     verify_binding_round_trips_parser,
     verify_grid_cell_id_unique_and_snapshot_member,
     verify_manifest_binding_cross_consistent,
+    verify_sp_att_checksum,
     verify_station_center_matches_snapshot_under_rounding,
+    verify_station_id_disjoint_across_versions,
+    verify_x_y_recomputable,
 )
 from workers.mapping_builder import binding as binding_module
 
@@ -1160,10 +1168,48 @@ def test_emit_direct_grid_manifest_and_binding_signature_pinned() -> None:
         )
 
 
+def _assert_param_kinds(
+    func,
+    *,
+    keyword_only: frozenset[str],
+    positional_or_keyword: frozenset[str],
+) -> None:
+    """Assert each parameter of ``func`` has the expected ``inspect.Parameter.kind``.
+
+    Silent-loosening exposure guard (Epic #909 SUB-11 PA-1): a signature
+    pin that checks only the parameter *name list* misses a refactor that
+    demotes a KEYWORD_ONLY parameter to POSITIONAL_OR_KEYWORD (or vice
+    versa). Every signature pin below MUST assert ``param.kind`` alongside
+    the name list.
+    """
+    sig = inspect.signature(func)
+    for name, param in sig.parameters.items():
+        if name in keyword_only:
+            assert param.kind == inspect.Parameter.KEYWORD_ONLY, (
+                f"{func.__name__}: parameter {name!r} kind={param.kind!r}; "
+                f"expected KEYWORD_ONLY"
+            )
+        elif name in positional_or_keyword:
+            assert param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD, (
+                f"{func.__name__}: parameter {name!r} kind={param.kind!r}; "
+                f"expected POSITIONAL_OR_KEYWORD"
+            )
+        else:
+            raise AssertionError(
+                f"{func.__name__}: parameter {name!r} not in either "
+                "keyword_only or positional_or_keyword; update the pin"
+            )
+
+
 def test_verify_binding_round_trips_parser_signature_pinned() -> None:
     """verify_binding_round_trips_parser signature is pinned."""
     sig = inspect.signature(verify_binding_round_trips_parser)
     assert list(sig.parameters) == ["resource_profile", "source_id"]
+    _assert_param_kinds(
+        verify_binding_round_trips_parser,
+        keyword_only=frozenset({"source_id"}),
+        positional_or_keyword=frozenset({"resource_profile"}),
+    )
     hints = typing.get_type_hints(verify_binding_round_trips_parser)
     assert hints["return"] is DirectGridForcingContract
 
@@ -1172,6 +1218,11 @@ def test_verify_grid_cell_id_unique_and_snapshot_member_signature_pinned() -> No
     """verify_grid_cell_id_unique_and_snapshot_member signature is pinned."""
     sig = inspect.signature(verify_grid_cell_id_unique_and_snapshot_member)
     assert list(sig.parameters) == ["station_bindings", "snapshot_cells"]
+    _assert_param_kinds(
+        verify_grid_cell_id_unique_and_snapshot_member,
+        keyword_only=frozenset(),
+        positional_or_keyword=frozenset({"station_bindings", "snapshot_cells"}),
+    )
     hints = typing.get_type_hints(verify_grid_cell_id_unique_and_snapshot_member)
     assert hints.get("return") is type(None)
 
@@ -1180,6 +1231,11 @@ def test_verify_manifest_binding_cross_consistent_signature_pinned() -> None:
     """verify_manifest_binding_cross_consistent signature is pinned."""
     sig = inspect.signature(verify_manifest_binding_cross_consistent)
     assert list(sig.parameters) == ["manifest", "binding_artifact"]
+    _assert_param_kinds(
+        verify_manifest_binding_cross_consistent,
+        keyword_only=frozenset(),
+        positional_or_keyword=frozenset({"manifest", "binding_artifact"}),
+    )
     hints = typing.get_type_hints(verify_manifest_binding_cross_consistent)
     assert hints["manifest"] is DirectGridManifest
     assert hints["binding_artifact"] is BindingArtifact
@@ -1190,6 +1246,13 @@ def test_recompute_binding_and_sp_att_checksums_signature_pinned() -> None:
     """recompute_binding_and_sp_att_checksums signature is pinned."""
     sig = inspect.signature(recompute_binding_and_sp_att_checksums)
     assert list(sig.parameters) == ["binding_artifact_bytes", "sp_att_bytes"]
+    _assert_param_kinds(
+        recompute_binding_and_sp_att_checksums,
+        keyword_only=frozenset(),
+        positional_or_keyword=frozenset(
+            {"binding_artifact_bytes", "sp_att_bytes"}
+        ),
+    )
     hints = typing.get_type_hints(recompute_binding_and_sp_att_checksums)
     assert hints["binding_artifact_bytes"] is bytes
     assert hints["sp_att_bytes"] is bytes
@@ -1231,6 +1294,11 @@ def test_verify_station_center_matches_snapshot_under_rounding_signature_pinned(
         "snapshot_basis",
         "station_basis",
     ]
+    _assert_param_kinds(
+        verify_station_center_matches_snapshot_under_rounding,
+        keyword_only=frozenset({"snapshot_basis", "station_basis"}),
+        positional_or_keyword=frozenset({"station", "snapshot_cell"}),
+    )
     hints = typing.get_type_hints(
         verify_station_center_matches_snapshot_under_rounding
     )
@@ -1242,6 +1310,11 @@ def test_apply_z_policy_from_readiness_signature_pinned() -> None:
     """apply_z_policy_from_readiness signature is pinned."""
     sig = inspect.signature(apply_z_policy_from_readiness)
     assert list(sig.parameters) == ["z_policy", "grid_cell_id"]
+    _assert_param_kinds(
+        apply_z_policy_from_readiness,
+        keyword_only=frozenset(),
+        positional_or_keyword=frozenset({"z_policy", "grid_cell_id"}),
+    )
     hints = typing.get_type_hints(apply_z_policy_from_readiness)
     assert hints["z_policy"] is ZPolicy
     assert hints["grid_cell_id"] is str
@@ -1270,3 +1343,420 @@ def test_emit_is_deterministic_on_identical_inputs() -> None:
 def test_coordinate_rounding_decimals_pinned_to_12() -> None:
     """Coordinate rounding is pinned to 12 decimals (docs §7.3)."""
     assert COORDINATE_ROUNDING_DECIMALS == 12
+
+
+# =========================================================================
+# CP-1: shared canonical serializer + shared rounding constant
+# =========================================================================
+
+
+def test_coordinate_rounding_decimals_shared_between_grid_signature_and_binding() -> None:
+    """binding.COORDINATE_ROUNDING_DECIMALS re-exports the shared authority.
+
+    Per Epic #909 SUB-11 CP-1: the 12-decimal rounding rule MUST be a
+    single shared constant. Any drift between the binding module's local
+    constant and the shared authority in
+    :mod:`packages.common.grid_signature` is a §4.2 non-goal violation.
+    """
+    assert (
+        binding_module.COORDINATE_ROUNDING_DECIMALS
+        is grid_signature_module.COORDINATE_ROUNDING_DECIMALS
+    )
+    assert (
+        COORDINATE_ROUNDING_DECIMALS
+        == grid_signature_module.COORDINATE_ROUNDING_DECIMALS
+    )
+
+
+def test_canonical_json_bytes_matches_shared_helper_on_datetime() -> None:
+    """binding._canonical_json_bytes serializes datetimes via the shared helper.
+
+    Per Epic #909 SUB-11 CP-1: the local helper's docstring claims
+    verbatim parity with :func:`packages.common.grid_signature._json_bytes`
+    — but before the fold, the local implementation omitted the
+    ``default=_json_default`` handler and would crash on a datetime value
+    while the shared helper serialized it. Assert byte-for-byte parity on
+    a payload containing a datetime.
+    """
+    from datetime import UTC, datetime
+
+    payload = {
+        "grid_id": "GFS_0p1",
+        "generated_at": datetime(2026, 7, 1, 12, 0, tzinfo=UTC),
+        "count": 3,
+        "coordinate_reference_system": "EPSG:4326",
+    }
+    from packages.common.grid_signature import canonical_json_bytes
+
+    shared = canonical_json_bytes(payload)
+    local = binding_module._canonical_json_bytes(payload)
+    assert local == shared
+    # And also sanity-check that the datetime was actually rendered
+    # (i.e. the shared helper ran, not that both crashed the same way).
+    assert b"2026-07-01T12:00:00Z" in shared
+
+
+def test_canonical_json_bytes_matches_shared_helper_on_plain_payload() -> None:
+    """Byte-for-byte parity on a plain payload (no datetime)."""
+    payload = {
+        "z": 1,
+        "a": [3, 2, 1],
+        "b": {"nested": True},
+    }
+    from packages.common.grid_signature import canonical_json_bytes
+
+    shared = canonical_json_bytes(payload)
+    local = binding_module._canonical_json_bytes(payload)
+    assert local == shared
+
+
+# =========================================================================
+# CP-2: z_policy provenance persistence in emitted artifact bytes
+# =========================================================================
+
+
+def test_binding_artifact_bytes_carry_policy_name_and_readiness_manifest_checksum() -> None:
+    """Emitted binding artifact bytes embed z_policy provenance verbatim.
+
+    Per Epic #909 SUB-11 CP-2: SUB-13's evidence bundler MUST be able to
+    audit the approved policy_name + readiness_manifest_checksum from
+    artifact bytes alone. Persist both in the binding artifact JSON so
+    the bytes are self-describing.
+    """
+    _, artifact, _, _ = _emit_minimal()
+    # Both provenance fields present in the raw bytes.
+    assert b"policy_name" in artifact.bytes
+    assert b"readiness_manifest_checksum" in artifact.bytes
+    # And the actual sentinel values from _make_z_policy.
+    assert b"sentinel" in artifact.bytes
+    assert b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" in artifact.bytes
+    # BindingArtifact attribute round-trips.
+    assert artifact.z_policy == {
+        "policy_name": "sentinel",
+        "readiness_manifest_checksum": "a" * 64,
+    }
+
+
+def test_manifest_section_carries_z_policy_provenance() -> None:
+    """Manifest section dict exposes z_policy for downstream audit."""
+    manifest, _, _, _ = _emit_minimal()
+    section = manifest.to_contract_section_dict()
+    assert "z_policy" in section
+    assert section["z_policy"] == {
+        "policy_name": "sentinel",
+        "readiness_manifest_checksum": "a" * 64,
+    }
+
+
+def test_manifest_z_policy_provenance_attribute_persists() -> None:
+    """DirectGridManifest.z_policy attribute is populated from ZPolicy verbatim."""
+    manifest, _, _, _ = _emit_minimal()
+    assert manifest.z_policy == {
+        "policy_name": "sentinel",
+        "readiness_manifest_checksum": "a" * 64,
+    }
+
+
+def test_manifest_binding_z_policy_provenance_divergence_blocks_g5() -> None:
+    """Diverging manifest vs artifact z_policy -> ManifestBindingDivergenceError.
+
+    Per Epic #909 SUB-11 CP-2: the cross-consistency gate MUST catch a
+    z_policy mismatch between manifest and binding artifact — otherwise
+    a caller could ship an artifact backed by policy A while the manifest
+    advertises policy B, hiding the provenance.
+    """
+    manifest, artifact, _, _ = _emit_minimal()
+    poisoned = dataclasses.replace(
+        manifest,
+        z_policy={
+            "policy_name": "canonical_orography",  # differs from sentinel
+            "readiness_manifest_checksum": "a" * 64,
+        },
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned, artifact)
+    assert exc.value.divergent_field == "z_policy"
+
+
+def test_manifest_round_trips_through_parser_with_z_policy_extension() -> None:
+    """Adding z_policy to the section does NOT break the parser round-trip.
+
+    The direct-grid parser reads named fields and ignores extras — so
+    embedding z_policy under the section MUST NOT change the parser's
+    behavior. Guard the invariant explicitly.
+    """
+    manifest, _, _, _ = _emit_minimal()
+    contract = verify_binding_round_trips_parser(
+        manifest.to_resource_profile_dict(),
+        source_id="GFS",
+    )
+    assert isinstance(contract, DirectGridForcingContract)
+    assert contract.forcing_mapping_mode == "direct_grid"
+
+
+# =========================================================================
+# CP-3: verify_x_y_recomputable + verify_station_id_disjoint_across_versions
+# =========================================================================
+
+
+def test_verify_x_y_recomputable_green_path() -> None:
+    """A freshly-emitted binding artifact passes verify_x_y_recomputable."""
+    _, artifact, _, _ = _emit_minimal()
+    assert (
+        verify_x_y_recomputable(artifact, model_crs_wkt=_MODEL_CRS_WKT) is None
+    )
+
+
+def test_verify_x_y_recomputable_noise_within_tolerance_passes() -> None:
+    """Sub-tolerance x/y noise (1e-9 m) is absorbed by the gate."""
+    _, artifact, _, _ = _emit_minimal()
+    # Perturb x by 1e-9 (well below the 1e-6 default tolerance).
+    perturbed_bindings = list(artifact.station_bindings)
+    perturbed_bindings[0] = dataclasses.replace(
+        perturbed_bindings[0], x=perturbed_bindings[0].x + 1e-9
+    )
+    perturbed = dataclasses.replace(
+        artifact, station_bindings=tuple(perturbed_bindings)
+    )
+    assert (
+        verify_x_y_recomputable(perturbed, model_crs_wkt=_MODEL_CRS_WKT) is None
+    )
+
+
+def test_verify_x_y_recomputable_drift_beyond_tolerance_raises() -> None:
+    """x drift beyond the 1e-6 m tolerance -> XyRecomputationMismatchError."""
+    _, artifact, _, _ = _emit_minimal()
+    poisoned_bindings = list(artifact.station_bindings)
+    poisoned_bindings[0] = dataclasses.replace(
+        poisoned_bindings[0], x=poisoned_bindings[0].x + 1.0  # 1 m drift
+    )
+    poisoned = dataclasses.replace(
+        artifact, station_bindings=tuple(poisoned_bindings)
+    )
+    with pytest.raises(XyRecomputationMismatchError) as exc:
+        verify_x_y_recomputable(poisoned, model_crs_wkt=_MODEL_CRS_WKT)
+    assert exc.value.station_id == poisoned_bindings[0].station_id
+    assert isinstance(exc.value, BindingArtifactError)
+
+
+def test_verify_x_y_recomputable_rejects_unparseable_crs() -> None:
+    """A malformed model_crs_wkt -> BindingArtifactError."""
+    _, artifact, _, _ = _emit_minimal()
+    with pytest.raises(BindingArtifactError):
+        verify_x_y_recomputable(artifact, model_crs_wkt="NOT_A_VALID_WKT")
+
+
+def test_verify_station_id_disjoint_across_versions_green_path() -> None:
+    """Two disjoint station_id sets pass the gate."""
+    v1, _, _, _ = _emit_minimal(mapping_asset_identity="mapping-v1-abc")
+    v2, _, _, _ = _emit_minimal(mapping_asset_identity="mapping-v2-def")
+    v1_ids = frozenset(b.station_id for b in v1.station_bindings)
+    v2_ids = frozenset(b.station_id for b in v2.station_bindings)
+    assert (
+        verify_station_id_disjoint_across_versions(
+            v2_ids,
+            v1_ids,
+            current_mapping_asset_identity="mapping-v2-def",
+            previous_mapping_asset_identity="mapping-v1-abc",
+        )
+        is None
+    )
+
+
+def test_verify_station_id_disjoint_across_versions_collision_raises() -> None:
+    """Overlapping station_id sets -> StationIdReuseError."""
+    v1, _, _, _ = _emit_minimal(mapping_asset_identity="mapping-v1-abc")
+    v1_ids = frozenset(b.station_id for b in v1.station_bindings)
+    # Same v1 emit reused as v2 to force overlap.
+    with pytest.raises(StationIdReuseError) as exc:
+        verify_station_id_disjoint_across_versions(
+            v1_ids,
+            v1_ids,
+            current_mapping_asset_identity="mapping-v1-abc",
+            previous_mapping_asset_identity="mapping-v1-abc",
+        )
+    assert set(exc.value.overlapping_station_ids) == set(v1_ids)
+
+
+# =========================================================================
+# CP-4: reject STATION_ID_SEPARATOR ("::cell:") inside identity tokens
+# =========================================================================
+
+
+def test_assign_station_id_reject_separator_in_mapping_asset_identity() -> None:
+    """Separator inside mapping_asset_identity -> StationIdSeparatorConflictError."""
+    with pytest.raises(StationIdSeparatorConflictError) as exc:
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="foo::cell:X",
+            grid_cell_id="Y",
+        )
+    assert exc.value.separator == STATION_ID_SEPARATOR
+    assert isinstance(exc.value, BindingArtifactError)
+
+
+def test_assign_station_id_reject_separator_in_grid_cell_id() -> None:
+    """Separator inside grid_cell_id -> StationIdSeparatorConflictError."""
+    with pytest.raises(StationIdSeparatorConflictError):
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="foo",
+            grid_cell_id="X::cell:Y",
+        )
+
+
+def test_assign_station_id_reject_collision_demonstration_prevented() -> None:
+    """The exact collision the reviewer probed is now impossible.
+
+    Before the fix, both of these produced ``'foo::cell:X::cell:Y'`` and
+    the station_id namespace collapsed. Both must now raise loudly.
+    """
+    with pytest.raises(StationIdSeparatorConflictError):
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="foo::cell:X",
+            grid_cell_id="Y",
+        )
+    with pytest.raises(StationIdSeparatorConflictError):
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="foo",
+            grid_cell_id="X::cell:Y",
+        )
+
+
+def test_station_id_separator_constant_matches_docstring() -> None:
+    """STATION_ID_SEPARATOR constant equals the ``::cell:`` sentinel."""
+    assert STATION_ID_SEPARATOR == "::cell:"
+
+
+# =========================================================================
+# CR-1: verify_sp_att_checksum
+# =========================================================================
+
+
+def test_verify_sp_att_checksum_green_path() -> None:
+    """Correct expected hex passes."""
+    payload = b"MOCK_SP_ATT_BYTES\n"
+    expected = hashlib.sha256(payload).hexdigest()
+    assert verify_sp_att_checksum(payload, expected_sha256_hex=expected) is None
+
+
+def test_verify_sp_att_checksum_mismatch_raises() -> None:
+    """Bytes SHA-256 != expected -> SpAttChecksumMismatchError."""
+    payload = b"MOCK_SP_ATT_BYTES\n"
+    with pytest.raises(SpAttChecksumMismatchError) as exc:
+        verify_sp_att_checksum(payload, expected_sha256_hex="0" * 64)
+    assert exc.value.recomputed_checksum == hashlib.sha256(payload).hexdigest()
+    assert exc.value.manifest_checksum == "0" * 64
+    assert isinstance(exc.value, BindingArtifactError)
+
+
+def test_verify_sp_att_checksum_bit_flip_detected() -> None:
+    """A single-byte corruption is detected by the gate."""
+    baseline = b"BASELINE\n"
+    baseline_hex = hashlib.sha256(baseline).hexdigest()
+    corrupted = b"BASELIN!\n"  # single byte flipped
+    with pytest.raises(SpAttChecksumMismatchError):
+        verify_sp_att_checksum(corrupted, expected_sha256_hex=baseline_hex)
+
+
+# =========================================================================
+# CR-2: cross-consistency gate compares coordinate_reference_system
+# =========================================================================
+
+
+def test_verify_manifest_binding_cross_consistency_coordinate_reference_system_divergence() -> None:
+    """CRS divergence between manifest and binding artifact -> divergence error.
+
+    Per Epic #909 SUB-11 CR-2: the cross-consistency gate MUST fail
+    closed if the manifest declares one basis while the artifact bytes
+    declare another. Guard the invariant with a mutation on the manifest
+    side (the artifact declaration is baked into the emitted bytes so
+    cannot be mutated post-emit without changing checksum).
+    """
+    manifest, artifact, _, _ = _emit_minimal()
+    poisoned = dataclasses.replace(
+        manifest, coordinate_reference_system=CGCS2000_SRID_LABEL
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned, artifact)
+    assert exc.value.divergent_field == "coordinate_reference_system"
+
+
+# =========================================================================
+# CR-3: latitude divergence negative test (symmetric to longitude)
+# =========================================================================
+
+
+def test_verify_manifest_binding_cross_consistency_latitude_divergence_at_12_decimal() -> None:
+    """Divergent lat past 12-decimal rounding -> ManifestBindingDivergenceError.
+
+    Symmetric to the existing longitude divergence test at
+    :func:`test_verify_manifest_binding_cross_consistency_lonlat_divergence_at_12_decimal`.
+    Per Epic #909 SUB-11 CR-3: the latitude branch of the gate must
+    have equal test coverage to the longitude branch.
+    """
+    manifest, artifact, _, _ = _emit_minimal()
+    bindings = list(manifest.station_bindings)
+    bindings[0] = dataclasses.replace(
+        bindings[0], latitude=bindings[0].latitude + 1e-6
+    )
+    poisoned = dataclasses.replace(manifest, station_bindings=tuple(bindings))
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned, artifact)
+    assert exc.value.divergent_field == "latitude"
+
+
+# =========================================================================
+# CR-4: harden ZPolicy.__post_init__ isinstance guard
+# =========================================================================
+
+
+def test_z_policy_missing_readiness_manifest_checksum_none_blocks() -> None:
+    """readiness_manifest_checksum=None -> ReadinessManifestChecksumMissingError.
+
+    Per Epic #909 SUB-11 CR-4: a caller that JSON-loaded a verdict where
+    the field is missing would pass ``None`` here; the pre-fold code hit
+    ``None.strip()`` and leaked an AttributeError, breaking the
+    :class:`BindingArtifactError` distinct-root discipline. The
+    isinstance guard now catches non-string inputs and raises the
+    dedicated exception.
+    """
+    with pytest.raises(ReadinessManifestChecksumMissingError):
+        ZPolicy(
+            policy_name="sentinel",
+            readiness_manifest_checksum=None,  # type: ignore[arg-type]
+            per_cell_z={},
+        )
+
+
+def test_z_policy_missing_readiness_manifest_checksum_int_blocks() -> None:
+    """readiness_manifest_checksum=0 -> ReadinessManifestChecksumMissingError."""
+    with pytest.raises(ReadinessManifestChecksumMissingError):
+        ZPolicy(
+            policy_name="sentinel",
+            readiness_manifest_checksum=0,  # type: ignore[arg-type]
+            per_cell_z={},
+        )
+
+
+def test_z_policy_missing_readiness_manifest_checksum_list_blocks() -> None:
+    """readiness_manifest_checksum=[] -> ReadinessManifestChecksumMissingError."""
+    with pytest.raises(ReadinessManifestChecksumMissingError):
+        ZPolicy(
+            policy_name="sentinel",
+            readiness_manifest_checksum=[],  # type: ignore[arg-type]
+            per_cell_z={},
+        )
+
+
+def test_z_policy_non_string_policy_name_blocks() -> None:
+    """policy_name=None -> InvalidZPolicyError (not AttributeError).
+
+    Same distinct-root discipline as the checksum guard: any non-string
+    ``policy_name`` MUST raise :class:`InvalidZPolicyError` rather than
+    leaking a raw TypeError from the ``in ALLOWED_Z_POLICIES`` check.
+    """
+    with pytest.raises(InvalidZPolicyError):
+        ZPolicy(
+            policy_name=None,  # type: ignore[arg-type]
+            readiness_manifest_checksum="a" * 64,
+            per_cell_z={},
+        )

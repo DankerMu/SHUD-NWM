@@ -13,6 +13,17 @@ via ``json.dumps(sort_keys=True, separators=(",", ":"))``. The serialization
 helpers ``_json_bytes`` and ``_json_default`` are exposed for producer
 re-export so the 8 non-signature producer call sites continue to resolve to
 this module's implementations.
+
+Public canonical helpers
+------------------------
+* :data:`COORDINATE_ROUNDING_DECIMALS` — the single shared 12-decimal
+  rounding rule used by the signature and by
+  :mod:`workers.mapping_builder.binding` (§4.2, docs §7.3). Callers MUST
+  import this constant rather than hand-copying the literal ``12``.
+* :func:`canonical_json_bytes` — public alias for :func:`_json_bytes` so
+  external callers (e.g. the mapping builder's binding-artifact emitter,
+  Epic #909 SUB-11) can serialize payloads via the single shared authority
+  and never hand-roll their own ``json.dumps(sort_keys=True, ...)`` call.
 """
 
 from __future__ import annotations
@@ -23,6 +34,12 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from packages.common.object_store import sha256_bytes
+
+#: Shared 12-decimal rounding precision for grid signature tuples and any
+#: downstream binding coordinate comparison (see docs §7.3 and Epic #909
+#: SUB-11 §4.2). Promoted to a public constant so callers never hand-copy
+#: the literal ``12``.
+COORDINATE_ROUNDING_DECIMALS: int = 12
 
 
 class GridPoint(Protocol):
@@ -52,10 +69,26 @@ def _json_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")
 
 
+def canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Serialize ``payload`` to canonical JSON bytes.
+
+    Public authority alias for :func:`_json_bytes`. Callers such as the
+    mapping builder's binding-artifact emitter (Epic #909 SUB-11) MUST use
+    this helper instead of hand-rolling ``json.dumps(sort_keys=True, ...)``
+    so a datetime or other non-JSON-native value serializes via the shared
+    :func:`_json_default` rather than crashing or silently diverging.
+    """
+    return _json_bytes(payload)
+
+
 def grid_signature_tuples(grid_points: Sequence[GridPoint]) -> tuple[tuple[str, float, float], ...]:
     """Return the ordered ``(grid_cell_id, round(lon,12), round(lat,12))`` tuples."""
     return tuple(
-        (point.grid_cell_id, round(float(point.longitude), 12), round(float(point.latitude), 12))
+        (
+            point.grid_cell_id,
+            round(float(point.longitude), COORDINATE_ROUNDING_DECIMALS),
+            round(float(point.latitude), COORDINATE_ROUNDING_DECIMALS),
+        )
         for point in grid_points
     )
 

@@ -84,6 +84,17 @@ Public entry points
   gate: asserts ``round(station.lon, 12) == round(cell.lon, 12)`` and
   same for latitude, and asserts the snapshot cell basis is WGS84 (any
   SRID 4490 / CGCS2000 basis raises :class:`CrossBasisEqualityError`).
+* :func:`verify_x_y_recomputable` — G5 gate: rebuilds a pyproj
+  transformer from ``model_crs_wkt`` and asserts each recorded
+  ``(x, y)`` is within tolerance of the recomputed value; drift raises
+  :class:`XyRecomputationMismatchError`.
+* :func:`verify_station_id_disjoint_across_versions` — G5 gate:
+  compares two mapping versions' station_id sets set-theoretically;
+  any intersection raises :class:`StationIdReuseError` (identity leak
+  before the mapping hits the DB mirror).
+* :func:`verify_sp_att_checksum` — G5 gate: recomputes SHA-256 of the
+  variant ``.sp.att`` bytes and compares against the manifest's
+  declared checksum; mismatch raises :class:`SpAttChecksumMismatchError`.
 * :func:`apply_z_policy_from_readiness` — computation: reads the ``z``
   value verbatim from an approved :class:`ZPolicy` (Epic #886 verdict)
   for the given ``grid_cell_id``.
@@ -109,7 +120,10 @@ invariant gates. The return value discriminates outcome:
 * ``None`` iff the gate passed with no artifact needed
   (e.g. :func:`verify_grid_cell_id_unique_and_snapshot_member`,
   :func:`verify_manifest_binding_cross_consistent`,
-  :func:`verify_station_center_matches_snapshot_under_rounding`);
+  :func:`verify_station_center_matches_snapshot_under_rounding`,
+  :func:`verify_x_y_recomputable`,
+  :func:`verify_station_id_disjoint_across_versions`,
+  :func:`verify_sp_att_checksum`);
 * a dataclass / artifact iff the gate passed with a caller-visible
   payload (e.g. :func:`verify_binding_round_trips_parser` returns the
   parsed :class:`DirectGridForcingContract`);
@@ -127,7 +141,15 @@ cross-artifact consistency → parser round-trip), matching the "fail
 closed BEFORE write" pattern from §3.1's ``copy_and_rewrite_sp_att_forc``.
 The individual ``verify_*`` gates are exported so SUB-13's evidence
 bundler can rerun them post-hoc and record their pass/fail into the
-mapping evidence package's G5 slot verbatim.
+mapping evidence package's G5 slot verbatim. The full rerunnable set:
+
+* :func:`verify_grid_cell_id_unique_and_snapshot_member`
+* :func:`verify_station_center_matches_snapshot_under_rounding`
+* :func:`verify_manifest_binding_cross_consistent`
+* :func:`verify_binding_round_trips_parser`
+* :func:`verify_x_y_recomputable`
+* :func:`verify_station_id_disjoint_across_versions`
+* :func:`verify_sp_att_checksum`
 """
 
 from __future__ import annotations
@@ -142,6 +164,12 @@ from typing import Any
 import pyproj
 
 from packages.common.grid_registry_store import CanonicalGridCell
+from packages.common.grid_signature import (
+    COORDINATE_ROUNDING_DECIMALS as _SHARED_COORDINATE_ROUNDING_DECIMALS,
+)
+from packages.common.grid_signature import (
+    canonical_json_bytes as _shared_canonical_json_bytes,
+)
 from workers.forcing_producer.direct_grid_contract import (
     DIRECT_GRID_MODE,
     DirectGridContractError,
@@ -175,8 +203,11 @@ CGCS2000_SRID_LABEL: str = "SRID:4490"
 #: :func:`packages.common.grid_signature.grid_signature_tuples`. Station
 #: lon/lat must equal the registered cell center after this rounding —
 #: never raw float-literal equality, because live coordinates carry
-#: ~1e-7° floating-point noise.
-COORDINATE_ROUNDING_DECIMALS: int = 12
+#: ~1e-7° floating-point noise. Re-exported from
+#: :data:`packages.common.grid_signature.COORDINATE_ROUNDING_DECIMALS` so
+#: any future change to the shared authority propagates here automatically
+#: (Epic #909 SUB-11 CP-1 shared-authority discipline).
+COORDINATE_ROUNDING_DECIMALS: int = _SHARED_COORDINATE_ROUNDING_DECIMALS
 
 #: Approved ``z_policy`` verdicts per docs §7.5. Any other value indicates
 #: a caller bug or an Epic #886 verdict escape — refused loudly.
@@ -187,6 +218,14 @@ ALLOWED_Z_POLICIES: frozenset[str] = frozenset(
         "sentinel",
     }
 )
+
+#: Separator token used by :func:`assign_station_id_from_mapping_asset_identity`
+#: to compose ``station_id = f"{mapping_asset_identity}::cell:{grid_cell_id}"``.
+#: The separator MUST NOT appear inside either input token — otherwise
+#: two different ``(identity, cell)`` pairs can produce the same
+#: concatenated ``station_id`` string. Enforced at construction by
+#: :class:`StationIdSeparatorConflictError` (Epic #909 SUB-11 CP-4).
+STATION_ID_SEPARATOR: str = "::cell:"
 
 #: Reserved forcing filenames that MUST NOT be produced. Anchored on docs
 #: §7.3 clause "filename must not collide with `qhh.tsd.forc`, the manifest,
@@ -462,6 +501,43 @@ class StationIdReuseError(BindingArtifactError):
         self.overlapping_station_ids = overlapping_station_ids
         self.first_mapping_asset_identity = first_mapping_asset_identity
         self.second_mapping_asset_identity = second_mapping_asset_identity
+
+
+class StationIdSeparatorConflictError(BindingArtifactError):
+    """The ``::cell:`` separator appears inside one of the identity tokens.
+
+    Per Epic #909 SUB-11 CP-4 defensive-input discipline: the concatenation
+    ``f"{mapping_asset_identity}::cell:{grid_cell_id}"`` in
+    :func:`assign_station_id_from_mapping_asset_identity` is safe only if
+    the separator token ``::cell:`` never occurs inside either input;
+    otherwise two different ``(identity, cell)`` pairs can produce the
+    same ``station_id`` string (e.g. ``identity='foo::cell:X', cell='Y'``
+    vs ``identity='foo', cell='X::cell:Y'`` both yield
+    ``'foo::cell:X::cell:Y'``).
+
+    Production callers pass SHA-256 hex or UUIDs so the collision is
+    unreachable today, but rejecting the separator loudly at construction
+    turns a silent invariant into an enforced one — no future refactor
+    can accidentally introduce the collision.
+    """
+
+    def __init__(
+        self,
+        *,
+        mapping_asset_identity: str,
+        grid_cell_id: str,
+        separator: str,
+    ) -> None:
+        super().__init__(
+            f"station_id separator {separator!r} MUST NOT appear inside "
+            f"mapping_asset_identity={mapping_asset_identity!r} or "
+            f"grid_cell_id={grid_cell_id!r}; the separator's purpose is to "
+            "make (identity, cell) pairs unambiguously recoverable from "
+            "the concatenated station_id (G5 identity-collision violation)"
+        )
+        self.mapping_asset_identity = mapping_asset_identity
+        self.grid_cell_id = grid_cell_id
+        self.separator = separator
 
 
 class ForcingFilenameCollisionError(BindingArtifactError):
@@ -778,13 +854,23 @@ class ZPolicy:
 
     def __post_init__(self) -> None:
         # Validate at construction so a malformed ZPolicy never propagates
-        # into the binding emission pipeline.
+        # into the binding emission pipeline. isinstance guards ensure a
+        # None / int / list value raises a dedicated BindingArtifactError
+        # subclass rather than a raw AttributeError (Epic #909 SUB-11 CR-4).
+        if not isinstance(self.policy_name, str):
+            raise InvalidZPolicyError(
+                supplied_policy=repr(self.policy_name),
+                allowed_policies=tuple(sorted(ALLOWED_Z_POLICIES)),
+            )
         if self.policy_name not in ALLOWED_Z_POLICIES:
             raise InvalidZPolicyError(
                 supplied_policy=self.policy_name,
                 allowed_policies=tuple(sorted(ALLOWED_Z_POLICIES)),
             )
-        if not self.readiness_manifest_checksum.strip():
+        if (
+            not isinstance(self.readiness_manifest_checksum, str)
+            or not self.readiness_manifest_checksum.strip()
+        ):
             raise ReadinessManifestChecksumMissingError(
                 policy_name=self.policy_name,
             )
@@ -822,6 +908,12 @@ class BindingArtifact:
     coordinate_reference_system:
         WGS84 basis declaration per docs §7.3 (always
         :data:`WGS84_COORDINATE_BASIS`).
+    z_policy:
+        Provenance mapping ``{"policy_name": ..., "readiness_manifest_checksum": ...}``
+        pinning the approved Epic #886 verdict used to fill each station's
+        ``z`` value. Persisted verbatim into the emitted bytes so SUB-13's
+        evidence bundler can audit z-policy provenance from artifact bytes
+        alone (Epic #909 SUB-11 CP-2).
     """
 
     bytes: bytes
@@ -830,6 +922,7 @@ class BindingArtifact:
     grid_id: str
     grid_signature: str
     coordinate_reference_system: str
+    z_policy: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -877,6 +970,12 @@ class DirectGridManifest:
     coordinate_reference_system:
         WGS84 basis declaration per docs §7.3 (always
         :data:`WGS84_COORDINATE_BASIS` at build time).
+    z_policy:
+        Provenance mapping ``{"policy_name": ..., "readiness_manifest_checksum": ...}``
+        pinning the approved Epic #886 verdict used to fill each station's
+        ``z`` value. Persisted verbatim into the manifest section so
+        SUB-13's evidence bundler can audit z-policy provenance without
+        re-reading the readiness manifest (Epic #909 SUB-11 CP-2).
     """
 
     forcing_mapping_mode: str
@@ -890,6 +989,7 @@ class DirectGridManifest:
     grid_signature: str
     station_bindings: tuple[StationBinding, ...]
     coordinate_reference_system: str
+    z_policy: Mapping[str, str]
 
     def to_resource_profile_dict(self) -> dict[str, Any]:
         """Return the outer ``resource_profile`` dict with the nested contract.
@@ -923,6 +1023,7 @@ class DirectGridManifest:
             "grid_id": self.grid_id,
             "grid_signature": self.grid_signature,
             "coordinate_reference_system": self.coordinate_reference_system,
+            "z_policy": dict(self.z_policy),
             "station_bindings": [
                 _station_binding_to_dict(station)
                 for station in self.station_bindings
@@ -964,14 +1065,14 @@ def _station_binding_to_dict(station: StationBinding) -> dict[str, Any]:
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
     """Serialize ``payload`` to canonical JSON bytes.
 
-    Matches :func:`packages.common.grid_signature._json_bytes` verbatim:
-    ``sort_keys=True`` for order-invariance and ``separators=(',', ':')``
-    for whitespace-invariance. Two runs on identical inputs produce
-    byte-identical output.
+    Delegates to the single shared authority
+    :func:`packages.common.grid_signature.canonical_json_bytes` so this
+    module never hand-rolls its own serialization. §4.2 non-goal explicitly
+    forbids independent serialization logic — divergence between this
+    helper and the shared authority is a G5 blocker. See Epic #909 SUB-11
+    CP-1.
     """
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    return _shared_canonical_json_bytes(payload)
 
 
 def _binding_artifact_payload(
@@ -979,6 +1080,7 @@ def _binding_artifact_payload(
     grid_id: str,
     grid_signature: str,
     coordinate_reference_system: str,
+    z_policy: Mapping[str, str],
     station_bindings: Sequence[StationBinding],
 ) -> dict[str, Any]:
     """Return the JSON-shaped payload for the standalone binding artifact.
@@ -986,6 +1088,11 @@ def _binding_artifact_payload(
     Ordering: station_bindings sorted by ``shud_forcing_index`` ascending
     (matches the parser's post-sort ordering in
     :func:`workers.forcing_producer.direct_grid_contract._station_bindings`).
+
+    The ``z_policy`` provenance mapping is embedded verbatim under a
+    top-level ``z_policy`` key so SUB-13's evidence bundler can audit the
+    approved policy_name + readiness_manifest_checksum from the artifact
+    bytes alone (Epic #909 SUB-11 CP-2).
     """
     sorted_bindings = sorted(
         station_bindings, key=lambda binding: binding.shud_forcing_index
@@ -994,6 +1101,7 @@ def _binding_artifact_payload(
         "grid_id": grid_id,
         "grid_signature": grid_signature,
         "coordinate_reference_system": coordinate_reference_system,
+        "z_policy": dict(z_policy),
         "station_bindings": [
             _station_binding_to_dict(binding) for binding in sorted_bindings
         ],
@@ -1066,7 +1174,8 @@ def _round_coord(value: float) -> float:
 
     Matches :func:`packages.common.grid_signature.grid_signature_tuples`
     verbatim so binding station coordinates and the grid signature share
-    the same rounding rule.
+    the same rounding rule. The precision constant is re-exported from
+    :mod:`packages.common.grid_signature` — the shared authority.
     """
     return round(float(value), COORDINATE_ROUNDING_DECIMALS)
 
@@ -1086,8 +1195,11 @@ def assign_station_id_from_mapping_asset_identity(
     (typically the mapping variant's SHA-256 or a UUID) so two different
     mapping versions produce disjoint ``station_id`` sets. This function
     concatenates the identity with the ``grid_cell_id`` under an explicit
-    separator that never occurs in either token (``"::"``), yielding an
-    immutable, per-cell station identifier.
+    separator (:data:`STATION_ID_SEPARATOR` = ``"::cell:"``) that MUST NOT
+    occur inside either input — the separator's presence in either token
+    would allow two different ``(identity, cell)`` pairs to produce the
+    same string. Enforced by raising
+    :class:`StationIdSeparatorConflictError` (Epic #909 SUB-11 CP-4).
 
     The DB mirror's collision policy (docs §7.4) fails closed when the
     same ``station_id`` maps to different ``binding_checksum`` /
@@ -1098,22 +1210,30 @@ def assign_station_id_from_mapping_asset_identity(
     Parameters
     ----------
     mapping_asset_identity:
-        Version-unique identity token (non-empty, no whitespace-only).
-        The caller (SUB-13 mapping evidence bundler) selects the token.
+        Version-unique identity token (non-empty, non-whitespace, and
+        MUST NOT contain :data:`STATION_ID_SEPARATOR`). The caller
+        (SUB-13 mapping evidence bundler) selects the token; production
+        callers pass SHA-256 hex or UUIDs so the separator constraint is
+        trivially satisfied.
     grid_cell_id:
-        Snapshot cell identifier this station binds to.
+        Snapshot cell identifier this station binds to; MUST NOT contain
+        :data:`STATION_ID_SEPARATOR`.
 
     Returns
     -------
     str
-        ``f"{mapping_asset_identity}::cell:{grid_cell_id}"`` — always
-        non-empty and unique per (identity, cell) pair.
+        ``f"{mapping_asset_identity}{STATION_ID_SEPARATOR}{grid_cell_id}"``
+        — always non-empty and unambiguously recoverable per (identity,
+        cell) pair.
 
     Raises
     ------
     BindingArtifactError
         Either ``mapping_asset_identity`` or ``grid_cell_id`` is empty
         or whitespace-only.
+    StationIdSeparatorConflictError
+        The separator :data:`STATION_ID_SEPARATOR` appears inside either
+        input token (defense-in-depth against silent collisions).
     """
     identity = mapping_asset_identity.strip()
     cell = grid_cell_id.strip()
@@ -1127,7 +1247,13 @@ def assign_station_id_from_mapping_asset_identity(
             "grid_cell_id must be non-empty and non-whitespace-only "
             "(G5 identity-token missing)"
         )
-    return f"{identity}::cell:{cell}"
+    if STATION_ID_SEPARATOR in identity or STATION_ID_SEPARATOR in cell:
+        raise StationIdSeparatorConflictError(
+            mapping_asset_identity=identity,
+            grid_cell_id=cell,
+            separator=STATION_ID_SEPARATOR,
+        )
+    return f"{identity}{STATION_ID_SEPARATOR}{cell}"
 
 
 def sanitize_station_forcing_filename(
@@ -1386,21 +1512,37 @@ def verify_manifest_binding_cross_consistent(
     """Fail-closed G5 gate: manifest ``station_bindings`` == binding artifact rows.
 
     Per spec §"Manifest and binding artifact are cross-consistent (G5)"
-    (§4.1) and docs §Gate G5: the manifest's ``station_bindings`` row set
-    MUST equal the standalone binding artifact's row set element-for-
-    element (same ``station_id``, ``shud_forcing_index``, ``grid_cell_id``,
-    and 12-decimal-rounded lon/lat). Divergence is a G5 blocker; the
-    :class:`ManifestBindingDivergenceError` names the offending row + field.
+    (§4.1) and docs §Gate G5: the following fields MUST agree between the
+    manifest and the standalone binding artifact — any divergence raises
+    a G5 blocker.
 
-    Additionally: the manifest's ``binding_checksum`` MUST equal the
-    binding artifact's ``checksum`` (both are SHA-256 of the same
-    canonical JSON bytes); a mismatch raises
-    :class:`BindingChecksumMismatchError`.
+    Per-row checks (:class:`ManifestBindingDivergenceError`)
+        * ``shud_forcing_index`` (integer equality)
+        * ``grid_cell_id`` (string equality)
+        * ``station_id`` set membership (set-diff on station_id keys)
+        * ``longitude`` under 12-decimal rounding
+        * ``latitude`` under 12-decimal rounding
 
-    Also: the manifest's ``grid_id`` and ``grid_signature`` MUST equal
-    the binding artifact's; divergence raises
-    :class:`ManifestBindingDivergenceError` with
-    ``divergent_field="grid_id"`` / ``"grid_signature"``.
+    Manifest-level checks (:class:`ManifestBindingDivergenceError`)
+        * ``grid_id`` equality
+        * ``grid_signature`` equality
+        * ``coordinate_reference_system`` equality
+        * ``z_policy`` mapping equality (policy_name +
+          readiness_manifest_checksum)
+
+    Checksum check (:class:`BindingChecksumMismatchError`)
+        * ``manifest.binding_checksum`` == ``binding_artifact.checksum``
+
+    Not compared here (trusted verbatim under the orchestrator's
+    construction discipline):
+        * ``forcing_filename`` — the manifest carries the same rows the
+          binding artifact was serialized from; a divergence here would
+          require a mid-orchestrator memory mutation which cannot happen
+          under the frozen dataclass invariant.
+        * ``x`` / ``y`` / ``z`` / per-row ``grid_id`` — verified by
+          :func:`verify_x_y_recomputable` (x/y) and
+          :func:`verify_station_center_matches_snapshot_under_rounding`
+          (WGS84 center) and the parser's own grid_id equality gate.
 
     Parameters
     ----------
@@ -1414,7 +1556,8 @@ def verify_manifest_binding_cross_consistent(
     BindingChecksumMismatchError
         ``manifest.binding_checksum`` differs from ``binding_artifact.checksum``.
     ManifestBindingDivergenceError
-        Any per-row or grid-identity divergence between the two artifacts.
+        Any per-row, grid-identity, coordinate-basis, or z-policy
+        provenance divergence between the two artifacts.
     """
     # Checksum first — the fastest failure and the most consequential (a
     # divergent binding_checksum means the runtime consumer would read the
@@ -1437,6 +1580,28 @@ def verify_manifest_binding_cross_consistent(
             station_id="<manifest_level>",
             manifest_value=manifest.grid_signature,
             binding_value=binding_artifact.grid_signature,
+        )
+    if (
+        manifest.coordinate_reference_system
+        != binding_artifact.coordinate_reference_system
+    ):
+        raise ManifestBindingDivergenceError(
+            divergent_field="coordinate_reference_system",
+            station_id="<manifest_level>",
+            manifest_value=manifest.coordinate_reference_system,
+            binding_value=binding_artifact.coordinate_reference_system,
+        )
+    # z_policy provenance equality — the manifest MUST reference the same
+    # approved verdict that authored the artifact's z values, or SUB-13's
+    # evidence bundler cannot audit z-policy provenance (CP-2).
+    manifest_z_policy = dict(manifest.z_policy)
+    binding_z_policy = dict(binding_artifact.z_policy)
+    if manifest_z_policy != binding_z_policy:
+        raise ManifestBindingDivergenceError(
+            divergent_field="z_policy",
+            station_id="<manifest_level>",
+            manifest_value=manifest_z_policy,
+            binding_value=binding_z_policy,
         )
 
     # Now parse the binding artifact bytes independently (the G5 spec
@@ -1504,6 +1669,161 @@ def verify_manifest_binding_cross_consistent(
                 manifest_value=_round_coord(m_row.latitude),
                 binding_value=_round_coord(b_row.latitude),
             )
+
+
+def verify_x_y_recomputable(
+    binding_artifact: BindingArtifact,
+    *,
+    model_crs_wkt: str,
+    tolerance: float = 1e-6,
+) -> None:
+    """Fail-closed G5 gate: each station's ``x``/``y`` recompute from lon/lat + CRS.
+
+    Per spec §"x/y are recomputable" (§4.2) and docs §7.3: ``x`` and ``y``
+    MUST be recomputable from ``longitude``, ``latitude``, and the model
+    CRS supplied by SUB-2. Given a re-parsed ``model_crs_wkt``, this gate
+    builds a ``pyproj.Transformer`` and recomputes ``(x, y)`` for every
+    binding row; any per-row drift beyond ``tolerance`` raises
+    :class:`XyRecomputationMismatchError`.
+
+    Exported as a standalone gate so SUB-13's evidence bundler can rerun
+    it post-hoc from artifact bytes + the checksum-bound package CRS WKT,
+    matching the "verify_* gates rerunnable by SUB-13" pattern.
+
+    Parameters
+    ----------
+    binding_artifact:
+        The emitted :class:`BindingArtifact`. Each contained
+        :class:`StationBinding` supplies ``longitude`` / ``latitude`` /
+        ``x`` / ``y``.
+    model_crs_wkt:
+        WKT of the model CRS (from the checksum-bound package ``.prj``,
+        supplied by SUB-2). Same CRS used at build time.
+    tolerance:
+        Absolute tolerance (in the model CRS's linear unit — meters for
+        the qhh baseline). Defaults to ``1e-6`` meters. Any per-row drift
+        exceeding this bound raises.
+
+    Raises
+    ------
+    BindingArtifactError
+        ``model_crs_wkt`` cannot be parsed as a CRS.
+    XyRecomputationMismatchError
+        A station's recorded ``x``/``y`` do not recompute from its
+        ``longitude``/``latitude`` within ``tolerance``.
+    """
+    try:
+        model_crs = pyproj.CRS.from_wkt(model_crs_wkt)
+    except pyproj.exceptions.CRSError as exc:
+        raise BindingArtifactError(
+            f"model_crs_wkt cannot be parsed as a CRS: {exc} "
+            "(G5 model-CRS parse violation)"
+        ) from exc
+    lonlat_to_model = pyproj.Transformer.from_crs(
+        "EPSG:4326", model_crs, always_xy=True
+    )
+    for binding in binding_artifact.station_bindings:
+        recomputed_x, recomputed_y = lonlat_to_model.transform(
+            float(binding.longitude), float(binding.latitude)
+        )
+        delta_x = abs(float(binding.x) - float(recomputed_x))
+        delta_y = abs(float(binding.y) - float(recomputed_y))
+        if delta_x > tolerance or delta_y > tolerance:
+            raise XyRecomputationMismatchError(
+                station_id=binding.station_id,
+                recorded_x=float(binding.x),
+                recorded_y=float(binding.y),
+                recomputed_x=float(recomputed_x),
+                recomputed_y=float(recomputed_y),
+                tolerance=tolerance,
+            )
+
+
+def verify_station_id_disjoint_across_versions(
+    current_station_ids: frozenset[str],
+    previous_station_ids: frozenset[str],
+    *,
+    current_mapping_asset_identity: str,
+    previous_mapping_asset_identity: str,
+) -> None:
+    """Fail-closed G5 gate: two mapping versions produce disjoint station_id sets.
+
+    Per spec §"station_id is never reused across mapping versions" (§4.2)
+    and docs §7.4: the DB mirror fails closed on ``station_id`` collision
+    when the referenced ``binding_checksum`` / ``model_input_package_id``
+    / ``grid_signature`` differ. This gate catches the same violation
+    *before* the mapping hits the mirror — comparing the two version's
+    station_id sets set-theoretically.
+
+    Exported as a standalone gate so SUB-13's evidence bundler can rerun
+    it against a persisted "previous mapping version" station_id set
+    when auditing a new mapping build, matching the "verify_* gates
+    rerunnable by SUB-13" pattern.
+
+    Parameters
+    ----------
+    current_station_ids:
+        Station_id set from the new mapping build (e.g.
+        ``frozenset(b.station_id for b in artifact.station_bindings)``).
+    previous_station_ids:
+        Station_id set from the prior mapping version.
+    current_mapping_asset_identity:
+        Identity token embedded in ``current_station_ids`` (for error
+        provenance).
+    previous_mapping_asset_identity:
+        Identity token embedded in ``previous_station_ids`` (for error
+        provenance).
+
+    Raises
+    ------
+    StationIdReuseError
+        The two sets intersect non-empty; identity leaked across mapping
+        versions.
+    """
+    collisions = current_station_ids & previous_station_ids
+    if collisions:
+        raise StationIdReuseError(
+            overlapping_station_ids=tuple(sorted(collisions)),
+            first_mapping_asset_identity=previous_mapping_asset_identity,
+            second_mapping_asset_identity=current_mapping_asset_identity,
+        )
+
+
+def verify_sp_att_checksum(
+    sp_att_bytes: bytes,
+    *,
+    expected_sha256_hex: str,
+) -> None:
+    """Fail-closed G5 gate: ``sp_att`` bytes SHA-256 matches the manifest checksum.
+
+    Per spec §"sp_att_checksum equals the SHA-256 of the emitted variant
+    .sp.att bytes" (§4.1) and docs §Gate G5: recomputes SHA-256 of the
+    supplied bytes and compares against ``expected_sha256_hex`` (from
+    :attr:`DirectGridManifest.sp_att_checksum`). Any mismatch raises
+    :class:`SpAttChecksumMismatchError` — a G5 blocker.
+
+    Exported as a standalone gate so SUB-13's evidence bundler can rerun
+    it from the artifact bytes + the manifest's declared checksum,
+    matching the "verify_* gates rerunnable by SUB-13" pattern.
+
+    Parameters
+    ----------
+    sp_att_bytes:
+        Bytes of the emitted variant ``.sp.att`` file (from SUB-8/9).
+    expected_sha256_hex:
+        Expected SHA-256 hex from :attr:`DirectGridManifest.sp_att_checksum`.
+
+    Raises
+    ------
+    SpAttChecksumMismatchError
+        Recomputed SHA-256 differs from ``expected_sha256_hex``.
+    """
+    recomputed = _sha256_bytes(sp_att_bytes)
+    if recomputed != expected_sha256_hex:
+        raise SpAttChecksumMismatchError(
+            manifest_checksum=expected_sha256_hex,
+            recomputed_checksum=recomputed,
+        )
 
 
 def verify_binding_round_trips_parser(
@@ -1826,11 +2146,21 @@ def emit_direct_grid_manifest_and_binding(
             station_basis=coordinate_reference_system,
         )
 
+    # --- z_policy provenance mapping (SUB-13 evidence bundler audit) ----
+    # Persisted verbatim into both artifacts so the approved policy_name +
+    # readiness_manifest_checksum are recoverable from artifact bytes
+    # alone (Epic #909 SUB-11 CP-2).
+    z_policy_provenance: dict[str, str] = {
+        "policy_name": z_policy.policy_name,
+        "readiness_manifest_checksum": z_policy.readiness_manifest_checksum,
+    }
+
     # --- serialize binding artifact + compute checksums -----------------
     binding_payload = _binding_artifact_payload(
         grid_id=grid_id,
         grid_signature=grid_signature,
         coordinate_reference_system=coordinate_reference_system,
+        z_policy=z_policy_provenance,
         station_bindings=station_bindings_tuple,
     )
     binding_bytes = _canonical_json_bytes(binding_payload)
@@ -1844,6 +2174,7 @@ def emit_direct_grid_manifest_and_binding(
         grid_id=grid_id,
         grid_signature=grid_signature,
         coordinate_reference_system=coordinate_reference_system,
+        z_policy=z_policy_provenance,
     )
 
     # --- assemble manifest ---------------------------------------------
@@ -1859,6 +2190,7 @@ def emit_direct_grid_manifest_and_binding(
         grid_signature=grid_signature,
         station_bindings=station_bindings_tuple,
         coordinate_reference_system=coordinate_reference_system,
+        z_policy=z_policy_provenance,
     )
 
     # --- G5 inline gates: cross-consistency + parser round-trip --------
