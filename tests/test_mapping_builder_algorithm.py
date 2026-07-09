@@ -48,7 +48,9 @@ from workers.mapping_builder import (
     assign_shud_forcing_index,
     derive_used_cell_subset,
     nearest_cell_barycenter_geodesic_v1,
+    resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
+    verify_half_cell_diagonal_sanity_bound,
 )
 from workers.mapping_builder import algorithm as algorithm_module
 
@@ -1040,3 +1042,81 @@ def test_shud_forcing_index_reproducible_across_runs() -> None:
     assert result_reversed == result_1, (
         "shud_forcing_index MUST be independent of input cell order"
     )
+
+
+# --- direct unit tests for §2.2 helpers -----------------------------------
+
+
+def test_resolve_tie_by_canonical_ordinal_empty_raises() -> None:
+    """Empty candidate sequence -> MappingAlgorithmError.
+
+    Guards the caller-owned "non-empty" contract documented on
+    :func:`workers.mapping_builder.resolve_tie_by_canonical_ordinal`. The
+    entry-point path (``nearest_cell_barycenter_geodesic_v1``) always passes at
+    least the picked cell itself, so the empty branch is unreachable in
+    production — but the helper is public API and must fail loudly rather than
+    ``min()`` on an empty sequence when a future caller mis-wires it.
+    """
+    with pytest.raises(MappingAlgorithmError) as exc_info:
+        resolve_tie_by_canonical_ordinal([])
+    assert "at least one candidate" in str(exc_info.value)
+
+
+def test_verify_half_cell_diagonal_sanity_bound_direct() -> None:
+    """Direct within-/exceeding-bound coverage bypassing the entry point.
+
+    Constructs a minimal ownership + cell + snapshot inline so the sanity-bound
+    invariant gate is exercised without the mesh / CRS / G2 stack in the way.
+    Symmetrically mirrors the direct coverage of :func:`derive_used_cell_subset`
+    and :func:`assign_shud_forcing_index`.
+    """
+    cell = CanonicalGridCell(
+        grid_cell_id="42",
+        longitude=10.0,
+        latitude=20.0,
+        canonical_ordinal=1,
+    )
+    snapshot = make_snapshot(
+        source_id="ifs",
+        grid_id="direct_bound_grid",
+        cells=[cell],
+        bbox_pad=0.5,
+        native_resolution=0.1,
+    )
+    # within-bound: mm-scale distance << km-scale half-diagonal for 0.1° step.
+    ok_ownership = ElementOwnership(
+        element_id=1,
+        grid_cell_id=cell.grid_cell_id,
+        canonical_ordinal=int(cell.canonical_ordinal),
+        geodesic_distance_m=1.0e-4,
+        tie_status="unique",
+        candidate_count=1,
+    )
+    assert (
+        verify_half_cell_diagonal_sanity_bound(
+            ownership=ok_ownership, cell=cell, snapshot=snapshot
+        )
+        is None
+    ), "within-bound distance must pass the sanity gate with no return value"
+
+    # exceeding-bound: 99 km distance vs ~7.6 km half-diagonal at 20°N / 0.1°.
+    bad_ownership = ElementOwnership(
+        element_id=7,
+        grid_cell_id=cell.grid_cell_id,
+        canonical_ordinal=int(cell.canonical_ordinal),
+        geodesic_distance_m=99_000.0,
+        tie_status="unique",
+        candidate_count=1,
+    )
+    with pytest.raises(DistanceSanityBoundExceededError) as exc_info:
+        verify_half_cell_diagonal_sanity_bound(
+            ownership=bad_ownership, cell=cell, snapshot=snapshot
+        )
+    err = exc_info.value
+    assert err.element_id == 7
+    assert err.distance_m == 99_000.0
+    # Half-diagonal at 20°N for 0.1° step is ~7.6 km.
+    assert 6_000.0 < err.half_cell_diagonal_m < 10_000.0
+    assert err.tolerance_m == 1.0e-3
+    assert err.grid_cell_id == "42"
+    assert isinstance(err, MappingAlgorithmError)

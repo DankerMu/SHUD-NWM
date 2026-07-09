@@ -638,7 +638,7 @@ def resolve_tie_by_canonical_ordinal(
     return min(candidates, key=lambda item: int(item[0].canonical_ordinal))
 
 
-def check_half_cell_diagonal_sanity_bound(
+def verify_half_cell_diagonal_sanity_bound(
     ownership: ElementOwnership,
     cell: CanonicalGridCell,
     snapshot: CanonicalGridSnapshot,
@@ -791,11 +791,16 @@ def nearest_cell_barycenter_geodesic_v1(
        geodesic pick. The reported ``geodesic_distance_m`` is always the
        geodesic value — the fast path is a defense-in-depth cross-check,
        never a silent shortcut.
-    7. Apply :func:`check_half_cell_diagonal_sanity_bound` per element (spec
+    7. Apply :func:`verify_half_cell_diagonal_sanity_bound` per element (spec
        §2.2): raise :class:`DistanceSanityBoundExceededError` if the picked
        geodesic distance exceeds ``local_half_cell_diagonal +
        _HALF_CELL_DIAGONAL_TOLERANCE_M``. The bound only blocks; there is
        no auto-correction.
+
+    The recorded ``geodesic_distance_m`` per element is the picked cell's own
+    distance; on true ties this may differ from the strict global minimum by up
+    to :data:`_GEODESIC_TIE_TOLERANCE_M`. The sanity bound (mm-scale) is
+    unaffected.
 
     Parameters
     ----------
@@ -889,7 +894,7 @@ def nearest_cell_barycenter_geodesic_v1(
             candidate_count=candidate_count,
         )
         # §2.2 sanity bound — raises before the ownership escapes.
-        check_half_cell_diagonal_sanity_bound(
+        verify_half_cell_diagonal_sanity_bound(
             ownership=ownership,
             cell=cell,
             snapshot=snapshot,
@@ -1000,6 +1005,9 @@ def assign_shud_forcing_index(
             )
         result[cell.grid_cell_id] = index
     n = len(sorted_cells)
+    # defense-in-depth: unreachable given the enumerate(sorted_cells, start=1)
+    # loop above (each iteration assigns a unique 1..n value), kept as a
+    # future-refactor guard against subtle changes to the loop shape.
     if set(result.values()) != set(range(1, n + 1)):
         raise MappingAlgorithmError(
             f"assign_shud_forcing_index produced non-contiguous values "

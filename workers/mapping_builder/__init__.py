@@ -1,7 +1,6 @@
 """Mapping builder worker — offline direct-grid mapping asset producer (Change forcing-mapping-asset-build)."""
 
 from workers.mapping_builder.algorithm import (
-    _HALF_CELL_DIAGONAL_TOLERANCE_M,
     DistanceSanityBoundExceededError,
     ElementBarycenterOutOfCoverageError,
     ElementOwnership,
@@ -13,11 +12,11 @@ from workers.mapping_builder.algorithm import (
     UnregisteredGridSnapshotError,
     algorithm_id,
     assign_shud_forcing_index,
-    check_half_cell_diagonal_sanity_bound,
     derive_used_cell_subset,
     nearest_cell_barycenter_geodesic_v1,
     resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
+    verify_half_cell_diagonal_sanity_bound,
 )
 from workers.mapping_builder.integrity import (
     G1_MIN_TRIANGLE_AREA,
@@ -97,11 +96,9 @@ __all__ = [
     "UnparseableMeshError",
     "UnparseablePrjError",
     "UnregisteredGridSnapshotError",
-    "_HALF_CELL_DIAGONAL_TOLERANCE_M",
     "algorithm_id",
     "assign_shud_forcing_index",
     "build_ancillary_inventory",
-    "check_half_cell_diagonal_sanity_bound",
     "classify_baseline",
     "derive_used_cell_subset",
     "nearest_cell_barycenter_geodesic_v1",
@@ -111,5 +108,6 @@ __all__ = [
     "verify_g0_baseline",
     "verify_g1_non_degenerate_triangles",
     "verify_grid_identity_precondition",
+    "verify_half_cell_diagonal_sanity_bound",
     "verify_package_crs",
 ]
