@@ -1,0 +1,1272 @@
+"""Tests for :mod:`workers.mapping_builder.binding` (Epic #909 SUB-11, §4.1 + §4.2).
+
+Coverage
+--------
+
+* §4.1 :func:`emit_direct_grid_manifest_and_binding` — positive path
+  (manifest + binding emitted, checksums recomputed, cross-consistent);
+  round-trips through the existing direct-grid contract parser; required
+  manifest + station fields pinned; grid_cell_id uniqueness + snapshot
+  membership; manifest ↔ binding cross-consistency G5 gate (station_id /
+  shud_forcing_index / grid_cell_id / lon-lat divergence blockers);
+  binding_checksum + sp_att_checksum mismatch blockers.
+* §4.2 station identity — station_id embeds mapping-asset identity and is
+  never reused across mapping versions.
+* §4.2 filename safety — case-fold uniqueness; never collides with
+  reserved names (qhh.tsd.forc / manifest.json / debug / model-input
+  suffixes) on case-insensitive filesystems; regex-matches the parser's
+  _SAFE_STATION_FORCING_FILENAME; not derived from rounded coordinates.
+* §4.2 coordinate rules — station lon/lat equal cell center under
+  12-decimal rounding (positive + ~1e-7° noise blocker); WGS84 basis
+  declared; cross-basis (SRID 4490 / CGCS2000) equality forbidden;
+  x/y recomputable from lon/lat + model CRS.
+* §4.2 z_policy — read verbatim from an approved :class:`ZPolicy`
+  (Epic #886 verdict); missing-cell + invalid-policy + missing-provenance
+  blockers.
+* Signature pin + frozen dataclass invariants matching the SUB-8/9/10
+  style.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import inspect
+import json
+import typing
+
+import pyproj
+import pytest
+
+from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
+    make_regular_grid_cells,
+)
+from workers.forcing_producer.direct_grid_contract import (
+    DIRECT_GRID_MODE,
+    DirectGridForcingContract,
+)
+from workers.mapping_builder import (
+    ALLOWED_Z_POLICIES,
+    CGCS2000_SRID_LABEL,
+    COORDINATE_ROUNDING_DECIMALS,
+    DIRECT_GRID_FORCING_SECTION_KEY,
+    RESERVED_FILENAME_PREFIXES,
+    RESERVED_FILENAME_SUFFIXES,
+    RESERVED_FORCING_FILENAMES,
+    WGS84_COORDINATE_BASIS,
+    BaselineIntegrityError,
+    BindingArtifact,
+    BindingArtifactError,
+    BindingChecksumMismatchError,
+    CrossBasisEqualityError,
+    DirectGridManifest,
+    ForcingFilenameCollisionError,
+    ForcingFilenameUnsafeError,
+    GridCellIdDuplicateError,
+    GridCellIdNotInSnapshotError,
+    InvalidZPolicyError,
+    ManifestBindingDivergenceError,
+    ManifestFieldMissingError,
+    MappingAlgorithmError,
+    ParserRoundTripError,
+    ReadinessManifestChecksumMissingError,
+    SpAttRewriteError,
+    StationBinding,
+    StationCenterMismatchError,
+    StationIdReuseError,
+    ZPolicy,
+    ZPolicyCellMissingError,
+    apply_z_policy_from_readiness,
+    assign_station_id_from_mapping_asset_identity,
+    emit_direct_grid_manifest_and_binding,
+    recompute_binding_and_sp_att_checksums,
+    sanitize_station_forcing_filename,
+    verify_binding_round_trips_parser,
+    verify_grid_cell_id_unique_and_snapshot_member,
+    verify_manifest_binding_cross_consistent,
+    verify_station_center_matches_snapshot_under_rounding,
+)
+from workers.mapping_builder import binding as binding_module
+
+# --- fixture helpers ------------------------------------------------------
+
+
+# Deterministic model CRS: a Transverse Mercator projection based on the
+# qhh baseline PROJCS from docs (§附录 A), simplified to a self-contained
+# WKT. Chosen so ``pyproj.CRS.from_wkt`` accepts it without external
+# resources and produces a stable forward/inverse transform.
+_MODEL_CRS_WKT = (
+    'PROJCS["Custom_TM",GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+    'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+    'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],'
+    'PROJECTION["Transverse_Mercator"],'
+    'PARAMETER["False_Easting",500000.0],'
+    'PARAMETER["False_Northing",0.0],'
+    'PARAMETER["Central_Meridian",99.0],'
+    'PARAMETER["Scale_Factor",0.9996],'
+    'PARAMETER["Latitude_Of_Origin",0.0],'
+    'UNIT["Meter",1.0]]'
+)
+
+
+def _make_used_cells_and_snapshot(
+    *,
+    lon0: float = 100.0,
+    lat0: float = 37.0,
+    lon_step: float = 0.1,
+    lat_step: float = 0.1,
+    lon_count: int = 4,
+    lat_count: int = 4,
+    used_count: int = 4,
+) -> tuple[list, list]:
+    """Return ``(used_cells, snapshot_cells)`` for a regular grid.
+
+    ``used_cells`` is the first ``used_count`` cells of the full snapshot
+    (canonical_ordinal ascending) so ``verify_grid_cell_id_unique_and_snapshot_member``
+    passes by construction.
+    """
+    snapshot_cells = make_regular_grid_cells(
+        lon0=lon0,
+        lat0=lat0,
+        lon_step=lon_step,
+        lat_step=lat_step,
+        lon_count=lon_count,
+        lat_count=lat_count,
+    )
+    if used_count > len(snapshot_cells):
+        raise ValueError(
+            f"used_count={used_count} exceeds snapshot size {len(snapshot_cells)}"
+        )
+    used = sorted(snapshot_cells, key=lambda c: int(c.canonical_ordinal))[
+        :used_count
+    ]
+    return used, snapshot_cells
+
+
+def _make_z_policy(cells) -> ZPolicy:
+    """Return a valid ZPolicy with one z value per used cell."""
+    return ZPolicy(
+        policy_name="sentinel",
+        readiness_manifest_checksum="a" * 64,
+        per_cell_z={cell.grid_cell_id: -9999.0 for cell in cells},
+    )
+
+
+def _make_shud_forcing_index(cells) -> dict[str, int]:
+    """Return contiguous 1..N shud_forcing_index for cells in canonical order."""
+    sorted_cells = sorted(cells, key=lambda c: int(c.canonical_ordinal))
+    return {cell.grid_cell_id: idx for idx, cell in enumerate(sorted_cells, start=1)}
+
+
+def _emit_minimal(
+    *,
+    used_count: int = 4,
+    mapping_asset_identity: str = "mapping-v1-abc",
+    sp_att_bytes: bytes = b"MOCK_SP_ATT_BYTES\n",
+    coordinate_reference_system: str = WGS84_COORDINATE_BASIS,
+) -> tuple[DirectGridManifest, BindingArtifact, list, list]:
+    """Emit a green-path manifest + binding and return everything needed for follow-up checks."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(
+        used_count=used_count
+    )
+    shud_forcing_index = _make_shud_forcing_index(used_cells)
+    z_policy = _make_z_policy(used_cells)
+    manifest, artifact = emit_direct_grid_manifest_and_binding(
+        used_cells=used_cells,
+        snapshot_cells=snapshot_cells,
+        shud_forcing_index=shud_forcing_index,
+        mapping_asset_identity=mapping_asset_identity,
+        model_input_package_id="pkg-v1-abc",
+        sp_att_path="package/keliya.sp.att",
+        sp_att_bytes=sp_att_bytes,
+        applicable_source_ids=("GFS",),
+        grid_id="GFS_0p1",
+        grid_signature="b" * 64,
+        z_policy=z_policy,
+        binding_uri="s3://bucket/mapping-v1-abc/binding.json",
+        model_crs_wkt=_MODEL_CRS_WKT,
+        coordinate_reference_system=coordinate_reference_system,
+    )
+    return manifest, artifact, used_cells, snapshot_cells
+
+
+# =========================================================================
+# §4.1 GREEN PATH
+# =========================================================================
+
+
+def test_emit_direct_grid_manifest_and_binding_positive_path() -> None:
+    """Green build: manifest + binding artifact emit and cross-consistent."""
+    manifest, artifact, used_cells, snapshot_cells = _emit_minimal()
+
+    # Manifest identity fields set to arguments.
+    assert manifest.forcing_mapping_mode == DIRECT_GRID_MODE
+    assert manifest.forcing_mapping_mode == "direct_grid"
+    assert manifest.binding_uri == "s3://bucket/mapping-v1-abc/binding.json"
+    assert manifest.model_input_package_id == "pkg-v1-abc"
+    assert manifest.sp_att_path == "package/keliya.sp.att"
+    assert manifest.applicable_source_ids == ("GFS",)
+    assert manifest.grid_id == "GFS_0p1"
+    assert manifest.grid_signature == "b" * 64
+    assert manifest.coordinate_reference_system == WGS84_COORDINATE_BASIS
+
+    # Manifest carries one station binding per used cell.
+    assert len(manifest.station_bindings) == len(used_cells)
+
+    # Manifest.binding_checksum matches SHA-256 of artifact bytes.
+    assert manifest.binding_checksum == hashlib.sha256(artifact.bytes).hexdigest()
+    assert manifest.binding_checksum == artifact.checksum
+
+    # Manifest.sp_att_checksum matches SHA-256 of the provided sp_att bytes.
+    assert manifest.sp_att_checksum == hashlib.sha256(b"MOCK_SP_ATT_BYTES\n").hexdigest()
+
+    # Artifact carries the identical grid metadata.
+    assert artifact.grid_id == manifest.grid_id
+    assert artifact.grid_signature == manifest.grid_signature
+    assert artifact.coordinate_reference_system == WGS84_COORDINATE_BASIS
+
+
+# =========================================================================
+# §4.1 REQUIRED MANIFEST + STATION FIELDS (parser contract shape)
+# =========================================================================
+
+
+def test_manifest_carries_all_ten_required_fields() -> None:
+    """Manifest emits every field required by the parser + canonical extras.
+
+    Docs §7.2 declares the required manifest field set. The parser's
+    ``REQUIRED_MANIFEST_FIELDS`` is 8 fields (without forcing_mapping_mode
+    and without station_bindings). Adding those two brings the count to
+    10 as declared by the spec.
+    """
+    manifest, _, _, _ = _emit_minimal()
+    section = manifest.to_contract_section_dict()
+    for field_name in (
+        "forcing_mapping_mode",
+        "binding_uri",
+        "binding_checksum",
+        "model_input_package_id",
+        "sp_att_path",
+        "sp_att_checksum",
+        "applicable_source_ids",
+        "grid_id",
+        "grid_signature",
+        "station_bindings",
+    ):
+        assert field_name in section, f"manifest missing required field {field_name!r}"
+        # Non-empty for the string fields; positive-length for list fields.
+        value = section[field_name]
+        if isinstance(value, str):
+            assert value, f"manifest field {field_name!r} is empty string"
+        elif isinstance(value, list):
+            assert len(value) > 0, f"manifest field {field_name!r} is empty list"
+
+
+def test_station_bindings_carry_all_ten_required_fields() -> None:
+    """Every station binding row provides the parser's 10 required station fields."""
+    manifest, _, _, _ = _emit_minimal()
+    section = manifest.to_contract_section_dict()
+    stations = section["station_bindings"]
+    assert len(stations) > 0
+    for row in stations:
+        for field_name in (
+            "station_id",
+            "shud_forcing_index",
+            "forcing_filename",
+            "longitude",
+            "latitude",
+            "x",
+            "y",
+            "z",
+            "grid_id",
+            "grid_cell_id",
+        ):
+            assert field_name in row, f"station missing required field {field_name!r}"
+
+
+def test_manifest_placed_in_nested_direct_grid_forcing_section() -> None:
+    """Manifest is placed under `resource_profile.direct_grid_forcing` (docs §7.1)."""
+    manifest, _, _, _ = _emit_minimal()
+    outer = manifest.to_resource_profile_dict()
+    assert DIRECT_GRID_FORCING_SECTION_KEY in outer
+    section = outer[DIRECT_GRID_FORCING_SECTION_KEY]
+    assert section["forcing_mapping_mode"] == "direct_grid"
+
+
+# =========================================================================
+# §4.1 PARSER ROUND-TRIP (G5 contract-shape)
+# =========================================================================
+
+
+def test_verify_binding_round_trips_parser_positive() -> None:
+    """Emitted manifest parses cleanly through the existing direct-grid parser."""
+    manifest, _, _, _ = _emit_minimal()
+    contract = verify_binding_round_trips_parser(
+        manifest.to_resource_profile_dict(),
+        source_id="GFS",
+    )
+    assert isinstance(contract, DirectGridForcingContract)
+    assert contract.forcing_mapping_mode == "direct_grid"
+    assert contract.grid_id == manifest.grid_id
+    assert contract.grid_signature == manifest.grid_signature
+    assert len(contract.stations) == len(manifest.station_bindings)
+
+
+def test_verify_binding_round_trips_parser_mutated_manifest_blocks() -> None:
+    """Missing required manifest field -> ParserRoundTripError."""
+    manifest, _, _, _ = _emit_minimal()
+    outer = manifest.to_resource_profile_dict()
+    del outer[DIRECT_GRID_FORCING_SECTION_KEY]["binding_uri"]
+    with pytest.raises(ParserRoundTripError):
+        verify_binding_round_trips_parser(outer, source_id="GFS")
+
+
+# =========================================================================
+# §4.1 grid_cell_id UNIQUENESS + SNAPSHOT MEMBERSHIP
+# =========================================================================
+
+
+def test_grid_cell_id_pairwise_unique() -> None:
+    """Every emitted grid_cell_id is pairwise unique in the binding."""
+    manifest, _, _, _ = _emit_minimal()
+    cell_ids = [b.grid_cell_id for b in manifest.station_bindings]
+    assert len(cell_ids) == len(set(cell_ids))
+
+
+def test_grid_cell_id_all_snapshot_members() -> None:
+    """Every emitted grid_cell_id is a member of the loaded snapshot cell set."""
+    manifest, _, _, snapshot_cells = _emit_minimal()
+    snapshot_ids = {c.grid_cell_id for c in snapshot_cells}
+    for b in manifest.station_bindings:
+        assert b.grid_cell_id in snapshot_ids
+
+
+def test_verify_grid_cell_id_gate_positive() -> None:
+    """Green-path gate passes on a valid binding + snapshot pair."""
+    manifest, _, _, snapshot_cells = _emit_minimal()
+    # None on pass (per gate return convention).
+    assert (
+        verify_grid_cell_id_unique_and_snapshot_member(
+            manifest.station_bindings, snapshot_cells
+        )
+        is None
+    )
+
+
+def test_verify_grid_cell_id_gate_duplicate_blocks() -> None:
+    """Duplicate grid_cell_id in bindings -> GridCellIdDuplicateError."""
+    manifest, _, _, snapshot_cells = _emit_minimal()
+    # Corrupt one binding to duplicate another's grid_cell_id.
+    bindings = list(manifest.station_bindings)
+    poisoned = dataclasses.replace(
+        bindings[1], grid_cell_id=bindings[0].grid_cell_id
+    )
+    bindings[1] = poisoned
+    with pytest.raises(GridCellIdDuplicateError) as exc:
+        verify_grid_cell_id_unique_and_snapshot_member(bindings, snapshot_cells)
+    assert exc.value.grid_cell_id == bindings[0].grid_cell_id
+    assert isinstance(exc.value, BindingArtifactError)
+
+
+def test_verify_grid_cell_id_gate_snapshot_membership_blocks() -> None:
+    """grid_cell_id absent from snapshot -> GridCellIdNotInSnapshotError."""
+    manifest, _, _, snapshot_cells = _emit_minimal()
+    bindings = list(manifest.station_bindings)
+    poisoned = dataclasses.replace(bindings[1], grid_cell_id="NOT_IN_SNAPSHOT")
+    bindings[1] = poisoned
+    with pytest.raises(GridCellIdNotInSnapshotError) as exc:
+        verify_grid_cell_id_unique_and_snapshot_member(bindings, snapshot_cells)
+    assert exc.value.grid_cell_id == "NOT_IN_SNAPSHOT"
+    assert isinstance(exc.value, BindingArtifactError)
+
+
+# =========================================================================
+# §4.1 MANIFEST ↔ BINDING CROSS-CONSISTENCY (G5)
+# =========================================================================
+
+
+def test_verify_manifest_binding_cross_consistent_positive() -> None:
+    """Green-path cross-consistency gate returns None (pass)."""
+    manifest, artifact, _, _ = _emit_minimal()
+    assert verify_manifest_binding_cross_consistent(manifest, artifact) is None
+
+
+def test_verify_manifest_binding_cross_consistency_binding_checksum_mismatch() -> None:
+    """Divergent binding_checksum -> BindingChecksumMismatchError (G5 blocker)."""
+    manifest, artifact, _, _ = _emit_minimal()
+    poisoned = dataclasses.replace(manifest, binding_checksum="f" * 64)
+    with pytest.raises(BindingChecksumMismatchError):
+        verify_manifest_binding_cross_consistent(poisoned, artifact)
+
+
+def test_verify_manifest_binding_cross_consistency_station_id_divergence() -> None:
+    """Manifest station_id set differs from binding -> ManifestBindingDivergenceError."""
+    manifest, artifact, _, _ = _emit_minimal()
+    # Replace one manifest station_id but keep the binding artifact untouched.
+    bindings = list(manifest.station_bindings)
+    bindings[0] = dataclasses.replace(bindings[0], station_id="INJECTED_DIFFERENT_ID")
+    poisoned_manifest = dataclasses.replace(
+        manifest, station_bindings=tuple(bindings)
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned_manifest, artifact)
+    assert exc.value.divergent_field == "station_id_set"
+
+
+def test_verify_manifest_binding_cross_consistency_shud_forcing_index_divergence() -> None:
+    """Divergent shud_forcing_index -> ManifestBindingDivergenceError."""
+    manifest, artifact, _, _ = _emit_minimal()
+    # Same station_ids, but manifest has a different shud_forcing_index.
+    bindings = list(manifest.station_bindings)
+    bindings[0] = dataclasses.replace(bindings[0], shud_forcing_index=999)
+    poisoned_manifest = dataclasses.replace(
+        manifest, station_bindings=tuple(bindings)
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned_manifest, artifact)
+    assert exc.value.divergent_field == "shud_forcing_index"
+
+
+def test_verify_manifest_binding_cross_consistency_grid_cell_id_divergence() -> None:
+    """Divergent grid_cell_id -> ManifestBindingDivergenceError."""
+    manifest, artifact, _, snapshot_cells = _emit_minimal()
+    bindings = list(manifest.station_bindings)
+    # Pick a different grid_cell_id that still exists in the snapshot to
+    # keep this test focused on the manifest-binding gate (not the
+    # grid_cell_id snapshot-membership gate).
+    other_cell = next(
+        c
+        for c in snapshot_cells
+        if c.grid_cell_id != bindings[0].grid_cell_id
+    )
+    bindings[0] = dataclasses.replace(bindings[0], grid_cell_id=other_cell.grid_cell_id)
+    poisoned_manifest = dataclasses.replace(
+        manifest, station_bindings=tuple(bindings)
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned_manifest, artifact)
+    assert exc.value.divergent_field == "grid_cell_id"
+
+
+def test_verify_manifest_binding_cross_consistency_lonlat_divergence_at_12_decimal() -> None:
+    """Divergent lon/lat past 12-decimal rounding -> ManifestBindingDivergenceError.
+
+    An injected divergence larger than the 12-decimal-rounding tolerance
+    (~1e-12°) MUST fail closed. Sub-1e-12 noise MUST NOT be flagged (see
+    :func:`test_lonlat_equality_at_12_decimals_absorbs_1em13_noise`).
+    """
+    manifest, artifact, _, _ = _emit_minimal()
+    bindings = list(manifest.station_bindings)
+    # Perturb longitude by 1e-6° (well past the 12-decimal tolerance).
+    bindings[0] = dataclasses.replace(
+        bindings[0], longitude=bindings[0].longitude + 1e-6
+    )
+    poisoned_manifest = dataclasses.replace(
+        manifest, station_bindings=tuple(bindings)
+    )
+    with pytest.raises(ManifestBindingDivergenceError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned_manifest, artifact)
+    assert exc.value.divergent_field == "longitude"
+
+
+# =========================================================================
+# §4.1 CHECKSUM MISMATCH BLOCKERS
+# =========================================================================
+
+
+def test_binding_checksum_equals_sha256_of_emitted_bytes() -> None:
+    """manifest.binding_checksum equals SHA-256 of the emitted binding artifact bytes."""
+    manifest, artifact, _, _ = _emit_minimal()
+    expected = hashlib.sha256(artifact.bytes).hexdigest()
+    assert manifest.binding_checksum == expected
+
+
+def test_sp_att_checksum_equals_sha256_of_emitted_variant_bytes() -> None:
+    """manifest.sp_att_checksum equals SHA-256 of the supplied variant .sp.att bytes."""
+    payload = b"DIFFERENT_VARIANT_BYTES\n"
+    manifest, _, _, _ = _emit_minimal(sp_att_bytes=payload)
+    expected = hashlib.sha256(payload).hexdigest()
+    assert manifest.sp_att_checksum == expected
+
+
+def test_recompute_binding_and_sp_att_checksums_returns_pair() -> None:
+    """recompute_binding_and_sp_att_checksums returns (binding_sha, sp_att_sha)."""
+    binding_bytes = b'{"grid_id":"x"}'
+    sp_att_bytes = b"row_data\n"
+    binding_sha, sp_att_sha = recompute_binding_and_sp_att_checksums(
+        binding_bytes, sp_att_bytes
+    )
+    assert binding_sha == hashlib.sha256(binding_bytes).hexdigest()
+    assert sp_att_sha == hashlib.sha256(sp_att_bytes).hexdigest()
+
+
+def test_binding_checksum_mismatch_blocks_g5() -> None:
+    """Injected binding_checksum mismatch -> BindingChecksumMismatchError."""
+    manifest, artifact, _, _ = _emit_minimal()
+    poisoned = dataclasses.replace(manifest, binding_checksum="0" * 64)
+    with pytest.raises(BindingChecksumMismatchError) as exc:
+        verify_manifest_binding_cross_consistent(poisoned, artifact)
+    assert exc.value.manifest_checksum == "0" * 64
+    assert exc.value.recomputed_checksum == artifact.checksum
+
+
+def test_sp_att_checksum_mismatch_blocks_g5() -> None:
+    """Independent test: manifest.sp_att_checksum drift is detectable by recompute."""
+    manifest, _, _, _ = _emit_minimal(sp_att_bytes=b"BASELINE\n")
+    poisoned = dataclasses.replace(manifest, sp_att_checksum="0" * 64)
+    # Recompute reveals the drift.
+    _, recomputed_sp_att = recompute_binding_and_sp_att_checksums(
+        b"IGNORED", b"BASELINE\n"
+    )
+    assert poisoned.sp_att_checksum != recomputed_sp_att
+
+
+# =========================================================================
+# §4.2 STATION IDENTITY (non-reuse across mapping versions)
+# =========================================================================
+
+
+def test_assign_station_id_embeds_mapping_asset_identity() -> None:
+    """station_id embeds the mapping_asset_identity verbatim + grid_cell_id."""
+    station_id = assign_station_id_from_mapping_asset_identity(
+        mapping_asset_identity="mapping-v1-abc",
+        grid_cell_id="42",
+    )
+    assert "mapping-v1-abc" in station_id
+    assert "42" in station_id
+    # Deterministic: same inputs -> same station_id.
+    same = assign_station_id_from_mapping_asset_identity(
+        mapping_asset_identity="mapping-v1-abc",
+        grid_cell_id="42",
+    )
+    assert station_id == same
+
+
+def test_station_id_never_reused_across_mapping_versions() -> None:
+    """Two mapping versions produce disjoint station_id sets."""
+    v1, _, _, _ = _emit_minimal(mapping_asset_identity="mapping-v1-abc")
+    v2, _, _, _ = _emit_minimal(mapping_asset_identity="mapping-v2-def")
+    v1_ids = {b.station_id for b in v1.station_bindings}
+    v2_ids = {b.station_id for b in v2.station_bindings}
+    # Disjoint: no station_id from v1 appears in v2 (or vice versa).
+    assert not v1_ids & v2_ids, (
+        f"station_id reuse across mapping versions: overlap="
+        f"{v1_ids & v2_ids}"
+    )
+
+
+def test_station_id_reuse_error_is_binding_artifact_family() -> None:
+    """StationIdReuseError is a BindingArtifactError subclass (exception family)."""
+    err = StationIdReuseError(
+        overlapping_station_ids=("s1",),
+        first_mapping_asset_identity="v1",
+        second_mapping_asset_identity="v2",
+    )
+    assert isinstance(err, BindingArtifactError)
+
+
+def test_assign_station_id_rejects_empty_identity() -> None:
+    """Empty/whitespace-only mapping_asset_identity -> BindingArtifactError."""
+    with pytest.raises(BindingArtifactError):
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="",
+            grid_cell_id="42",
+        )
+    with pytest.raises(BindingArtifactError):
+        assign_station_id_from_mapping_asset_identity(
+            mapping_asset_identity="   ",
+            grid_cell_id="42",
+        )
+
+
+# =========================================================================
+# §4.2 FILENAME SAFETY
+# =========================================================================
+
+
+def test_sanitize_filename_derives_from_shud_forcing_index_only() -> None:
+    """Filename is derived from shud_forcing_index; contains no coord digits."""
+    fname = sanitize_station_forcing_filename(shud_forcing_index=7)
+    assert fname == "station_00007.csv"
+
+
+def test_sanitize_filename_matches_parser_regex() -> None:
+    """Emitted filenames match the parser's _SAFE_STATION_FORCING_FILENAME regex."""
+    for idx in (1, 5, 42, 999, 12345, 99999):
+        fname = sanitize_station_forcing_filename(shud_forcing_index=idx)
+        assert binding_module._SAFE_STATION_FORCING_FILENAME.fullmatch(fname), (
+            f"filename {fname!r} fails parser regex"
+        )
+
+
+def test_sanitize_filename_rejects_non_positive_index() -> None:
+    """Zero or negative index -> BindingArtifactError (not silently accepted)."""
+    for bad in (0, -1, -999):
+        with pytest.raises(BindingArtifactError):
+            sanitize_station_forcing_filename(shud_forcing_index=bad)
+
+
+def test_sanitize_filename_rejects_bool_and_float() -> None:
+    """bool and float are NOT ints for our purposes; refuse loudly."""
+    with pytest.raises(BindingArtifactError):
+        sanitize_station_forcing_filename(shud_forcing_index=True)  # type: ignore[arg-type]
+    with pytest.raises(BindingArtifactError):
+        sanitize_station_forcing_filename(shud_forcing_index=1.5)  # type: ignore[arg-type]
+
+
+def test_emitted_filenames_case_fold_unique_across_binding() -> None:
+    """Every emitted filename is case-fold unique across all station bindings."""
+    manifest, _, _, _ = _emit_minimal()
+    lowered = [b.forcing_filename.lower() for b in manifest.station_bindings]
+    assert len(lowered) == len(set(lowered))
+
+
+def test_emitted_filenames_never_collide_with_reserved_names() -> None:
+    """No emitted filename collides with any reserved name (case-insensitive)."""
+    manifest, _, _, _ = _emit_minimal()
+    reserved_lower = {name.lower() for name in RESERVED_FORCING_FILENAMES}
+    for b in manifest.station_bindings:
+        assert b.forcing_filename.lower() not in reserved_lower
+        for prefix in RESERVED_FILENAME_PREFIXES:
+            assert not b.forcing_filename.lower().startswith(prefix.lower()), (
+                f"filename {b.forcing_filename!r} collides with reserved prefix {prefix!r}"
+            )
+        for suffix in RESERVED_FILENAME_SUFFIXES:
+            assert not b.forcing_filename.lower().endswith(suffix.lower()), (
+                f"filename {b.forcing_filename!r} collides with reserved suffix {suffix!r}"
+            )
+
+
+def test_emitter_rejects_reserved_filename_injection() -> None:
+    """Emitter refuses if a reserved name is injected via a monkey-patched sanitizer.
+
+    Structural safety proof: even if a downstream sanitize helper were
+    somehow rewired to produce ``qhh.tsd.forc``, the emitter's inline
+    reserved-name check catches it.
+    """
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    shud_forcing_index = _make_shud_forcing_index(used_cells)
+    z_policy = _make_z_policy(used_cells)
+
+    # Monkey-patch the internal reserved classifier's input to inject a
+    # collision — done at the module level so the emit call reads it.
+    original = binding_module.sanitize_station_forcing_filename
+
+    def injected_sanitizer(*, shud_forcing_index: int) -> str:
+        return "qhh.tsd.forc" if shud_forcing_index == 1 else original(
+            shud_forcing_index=shud_forcing_index
+        )
+
+    binding_module.sanitize_station_forcing_filename = injected_sanitizer
+    try:
+        with pytest.raises(ForcingFilenameCollisionError) as exc:
+            emit_direct_grid_manifest_and_binding(
+                used_cells=used_cells,
+                snapshot_cells=snapshot_cells,
+                shud_forcing_index=shud_forcing_index,
+                mapping_asset_identity="mapping-v1-abc",
+                model_input_package_id="pkg-v1-abc",
+                sp_att_path="package/keliya.sp.att",
+                sp_att_bytes=b"MOCK",
+                applicable_source_ids=("GFS",),
+                grid_id="GFS_0p1",
+                grid_signature="b" * 64,
+                z_policy=z_policy,
+                binding_uri="s3://bucket/binding.json",
+                model_crs_wkt=_MODEL_CRS_WKT,
+            )
+        # Should be classified as reserved (either exact match or suffix).
+        assert exc.value.collision_kind in {
+            "reserved_exact_match",
+            "reserved_suffix",
+        }
+    finally:
+        binding_module.sanitize_station_forcing_filename = original
+
+
+def test_forcing_filename_unsafe_error_is_binding_artifact_family() -> None:
+    """ForcingFilenameUnsafeError inherits from BindingArtifactError."""
+    err = ForcingFilenameUnsafeError(forcing_filename="bad name.txt")
+    assert isinstance(err, BindingArtifactError)
+
+
+def test_emitted_filenames_not_derived_from_rounded_coordinates() -> None:
+    """Filenames contain no coordinate digits (positive proof of no coord derivation).
+
+    Since our derivation is purely from shud_forcing_index, the emitted
+    names never include lon/lat digits like ``100`` or ``37``. Guard the
+    property by inspecting all emitted filenames.
+    """
+    manifest, _, _, _ = _emit_minimal()
+    for b in manifest.station_bindings:
+        # Longitude 100.x / latitude 37.x would emit as ``X100.xY37.x.csv``
+        # in the legacy naming; our emitted name should have neither.
+        assert "X" not in b.forcing_filename
+        assert "Y" not in b.forcing_filename
+
+
+# =========================================================================
+# §4.2 COORDINATE RULES (12-decimal rounding + WGS84 basis)
+# =========================================================================
+
+
+def test_verify_station_center_gate_positive() -> None:
+    """Green-path center-matches gate returns None."""
+    manifest, _, used_cells, _ = _emit_minimal()
+    used_by_id = {c.grid_cell_id: c for c in used_cells}
+    for b in manifest.station_bindings:
+        result = verify_station_center_matches_snapshot_under_rounding(
+            b, used_by_id[b.grid_cell_id]
+        )
+        assert result is None
+
+
+def test_lonlat_equality_at_12_decimals_absorbs_1em13_noise() -> None:
+    """Sub-1e-12° noise between station lon and cell center is absorbed by rounding."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    sample_cell = used_cells[0]
+    # Inject 1e-13° noise — below the 12-decimal-rounding threshold, so
+    # after round(x, 12) both operands are equal.
+    noisy_binding = StationBinding(
+        station_id="noisy",
+        shud_forcing_index=1,
+        forcing_filename="station_00001.csv",
+        longitude=sample_cell.longitude + 1e-13,
+        latitude=sample_cell.latitude + 1e-13,
+        x=0.0,
+        y=0.0,
+        z=-9999.0,
+        grid_id="GFS_0p1",
+        grid_cell_id=sample_cell.grid_cell_id,
+    )
+    # Passes: rounded-to-12 values are equal even with 1e-13 noise.
+    assert (
+        verify_station_center_matches_snapshot_under_rounding(
+            noisy_binding, sample_cell
+        )
+        is None
+    )
+
+
+def test_lonlat_equality_realistic_1em7_noise_blocks_after_rounding() -> None:
+    """Realistic 1e-7° noise between station and cell center BLOCKS after 12-decimal rounding.
+
+    Docs §7.3 pins the rounding at 12 decimals — noise of ~1e-7° is well
+    ABOVE this threshold and MUST be caught by the gate. This is the
+    ``float-literal equality never works because live coords carry ~1e-7°
+    noise'' invariant — 12-decimal rounding does NOT absorb 1e-7° drift.
+    """
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    sample_cell = used_cells[0]
+    noisy_binding = StationBinding(
+        station_id="noisy",
+        shud_forcing_index=1,
+        forcing_filename="station_00001.csv",
+        longitude=sample_cell.longitude + 1e-7,
+        latitude=sample_cell.latitude,
+        x=0.0,
+        y=0.0,
+        z=-9999.0,
+        grid_id="GFS_0p1",
+        grid_cell_id=sample_cell.grid_cell_id,
+    )
+    with pytest.raises(StationCenterMismatchError) as exc:
+        verify_station_center_matches_snapshot_under_rounding(
+            noisy_binding, sample_cell
+        )
+    assert exc.value.grid_cell_id == sample_cell.grid_cell_id
+
+
+def test_coordinate_reference_system_declared_as_wgs84() -> None:
+    """Emitted binding + manifest declare an explicit WGS84 basis (docs §7.3)."""
+    manifest, artifact, _, _ = _emit_minimal()
+    assert manifest.coordinate_reference_system == "EPSG:4326"
+    assert artifact.coordinate_reference_system == "EPSG:4326"
+    # Serialized binding artifact bytes also carry the declaration.
+    payload = json.loads(artifact.bytes)
+    assert payload["coordinate_reference_system"] == "EPSG:4326"
+
+
+def test_verify_station_center_cross_basis_blocks_srid_4490() -> None:
+    """SRID 4490 (CGCS2000) snapshot basis -> CrossBasisEqualityError."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    sample_cell = used_cells[0]
+    binding = StationBinding(
+        station_id="test",
+        shud_forcing_index=1,
+        forcing_filename="station_00001.csv",
+        longitude=sample_cell.longitude,
+        latitude=sample_cell.latitude,
+        x=0.0,
+        y=0.0,
+        z=-9999.0,
+        grid_id="GFS_0p1",
+        grid_cell_id=sample_cell.grid_cell_id,
+    )
+    with pytest.raises(CrossBasisEqualityError) as exc:
+        verify_station_center_matches_snapshot_under_rounding(
+            binding, sample_cell, snapshot_basis=CGCS2000_SRID_LABEL
+        )
+    assert exc.value.expected_basis == WGS84_COORDINATE_BASIS
+    assert exc.value.supplied_basis == CGCS2000_SRID_LABEL
+
+
+def test_verify_station_center_cross_basis_blocks_srid_4490_from_station_side() -> None:
+    """Station basis SRID 4490 -> CrossBasisEqualityError (both sides checked)."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    sample_cell = used_cells[0]
+    binding = StationBinding(
+        station_id="test",
+        shud_forcing_index=1,
+        forcing_filename="station_00001.csv",
+        longitude=sample_cell.longitude,
+        latitude=sample_cell.latitude,
+        x=0.0,
+        y=0.0,
+        z=-9999.0,
+        grid_id="GFS_0p1",
+        grid_cell_id=sample_cell.grid_cell_id,
+    )
+    with pytest.raises(CrossBasisEqualityError):
+        verify_station_center_matches_snapshot_under_rounding(
+            binding, sample_cell, station_basis=CGCS2000_SRID_LABEL
+        )
+
+
+def test_x_y_are_recomputable_from_lonlat_and_model_crs() -> None:
+    """x/y in each binding match a fresh pyproj transform of lon/lat."""
+    manifest, _, _, _ = _emit_minimal()
+    lonlat_to_model = pyproj.Transformer.from_crs(
+        "EPSG:4326", pyproj.CRS.from_wkt(_MODEL_CRS_WKT), always_xy=True
+    )
+    for b in manifest.station_bindings:
+        expected_x, expected_y = lonlat_to_model.transform(
+            float(b.longitude), float(b.latitude)
+        )
+        # Numeric tolerance for pyproj round-trip: sub-mm on the model CRS.
+        assert abs(b.x - expected_x) < 1e-6, (
+            f"binding.x={b.x!r} does not recompute to {expected_x!r} "
+            f"from lon={b.longitude!r} + model CRS"
+        )
+        assert abs(b.y - expected_y) < 1e-6, (
+            f"binding.y={b.y!r} does not recompute to {expected_y!r} "
+            f"from lat={b.latitude!r} + model CRS"
+        )
+
+
+# =========================================================================
+# §4.2 z_policy (verbatim from Epic #886 readiness)
+# =========================================================================
+
+
+def test_apply_z_policy_returns_per_cell_value_verbatim() -> None:
+    """z_policy returns the verbatim per-cell z from the readiness verdict."""
+    policy = ZPolicy(
+        policy_name="model_dem_at_cell_center",
+        readiness_manifest_checksum="c" * 64,
+        per_cell_z={"0": 1234.5, "1": 4321.0, "2": 999.0},
+    )
+    assert apply_z_policy_from_readiness(policy, "0") == 1234.5
+    assert apply_z_policy_from_readiness(policy, "1") == 4321.0
+    assert apply_z_policy_from_readiness(policy, "2") == 999.0
+
+
+def test_apply_z_policy_missing_cell_blocks() -> None:
+    """A missing grid_cell_id coverage entry -> ZPolicyCellMissingError."""
+    policy = ZPolicy(
+        policy_name="sentinel",
+        readiness_manifest_checksum="c" * 64,
+        per_cell_z={"0": -9999.0},
+    )
+    with pytest.raises(ZPolicyCellMissingError) as exc:
+        apply_z_policy_from_readiness(policy, "SOME_MISSING_ID")
+    assert exc.value.grid_cell_id == "SOME_MISSING_ID"
+    assert exc.value.policy_name == "sentinel"
+
+
+def test_z_policy_invalid_name_blocks_at_construction() -> None:
+    """z_policy with a non-approved name -> InvalidZPolicyError at construction."""
+    with pytest.raises(InvalidZPolicyError):
+        ZPolicy(
+            policy_name="invented_policy",
+            readiness_manifest_checksum="c" * 64,
+            per_cell_z={},
+        )
+
+
+def test_z_policy_missing_readiness_manifest_checksum_blocks() -> None:
+    """z_policy without readiness manifest checksum -> ReadinessManifestChecksumMissingError."""
+    with pytest.raises(ReadinessManifestChecksumMissingError):
+        ZPolicy(
+            policy_name="sentinel",
+            readiness_manifest_checksum="",
+            per_cell_z={},
+        )
+    with pytest.raises(ReadinessManifestChecksumMissingError):
+        ZPolicy(
+            policy_name="sentinel",
+            readiness_manifest_checksum="   ",
+            per_cell_z={},
+        )
+
+
+def test_allowed_z_policies_matches_docs_verdict() -> None:
+    """ALLOWED_Z_POLICIES exactly matches the three docs §7.5 verdicts."""
+    assert ALLOWED_Z_POLICIES == frozenset(
+        {"canonical_orography", "model_dem_at_cell_center", "sentinel"}
+    )
+
+
+def test_emitted_z_values_are_verbatim_from_policy() -> None:
+    """Emitted station.z values match the per-cell z from the supplied policy verbatim."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=4)
+    # Assign distinct z values to each used cell.
+    z_map = {
+        c.grid_cell_id: float(idx * 100.0)
+        for idx, c in enumerate(used_cells, start=1)
+    }
+    policy = ZPolicy(
+        policy_name="canonical_orography",
+        readiness_manifest_checksum="c" * 64,
+        per_cell_z=z_map,
+    )
+    manifest, _ = emit_direct_grid_manifest_and_binding(
+        used_cells=used_cells,
+        snapshot_cells=snapshot_cells,
+        shud_forcing_index=_make_shud_forcing_index(used_cells),
+        mapping_asset_identity="mapping-v1-abc",
+        model_input_package_id="pkg-v1",
+        sp_att_path="package/keliya.sp.att",
+        sp_att_bytes=b"MOCK",
+        applicable_source_ids=("GFS",),
+        grid_id="GFS_0p1",
+        grid_signature="b" * 64,
+        z_policy=policy,
+        binding_uri="s3://bucket/binding.json",
+        model_crs_wkt=_MODEL_CRS_WKT,
+    )
+    for b in manifest.station_bindings:
+        expected_z = z_map[b.grid_cell_id]
+        assert b.z == expected_z, (
+            f"emitted z={b.z} for cell {b.grid_cell_id} != policy z={expected_z}"
+        )
+
+
+# =========================================================================
+# EXCEPTION-FAMILY (BindingArtifactError distinct root)
+# =========================================================================
+
+
+def test_binding_artifact_error_is_distinct_root() -> None:
+    """BindingArtifactError does NOT inherit from G0/G1, G2/G3, or G4 exception roots."""
+    assert not issubclass(BindingArtifactError, BaselineIntegrityError)
+    assert not issubclass(BindingArtifactError, MappingAlgorithmError)
+    assert not issubclass(BindingArtifactError, SpAttRewriteError)
+    # All named subclasses are BindingArtifactError instances.
+    subclasses = (
+        BindingChecksumMismatchError,
+        CrossBasisEqualityError,
+        ForcingFilenameCollisionError,
+        ForcingFilenameUnsafeError,
+        GridCellIdDuplicateError,
+        GridCellIdNotInSnapshotError,
+        InvalidZPolicyError,
+        ManifestBindingDivergenceError,
+        ManifestFieldMissingError,
+        ParserRoundTripError,
+        ReadinessManifestChecksumMissingError,
+        StationCenterMismatchError,
+        StationIdReuseError,
+        ZPolicyCellMissingError,
+    )
+    for cls in subclasses:
+        assert issubclass(cls, BindingArtifactError), (
+            f"{cls.__name__} MUST inherit from BindingArtifactError"
+        )
+
+
+# =========================================================================
+# EMPTY-INPUT + FIELD-REQUIRED BLOCKERS
+# =========================================================================
+
+
+def test_empty_applicable_source_ids_blocks() -> None:
+    """Empty applicable_source_ids -> ManifestFieldMissingError."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    with pytest.raises(ManifestFieldMissingError) as exc:
+        emit_direct_grid_manifest_and_binding(
+            used_cells=used_cells,
+            snapshot_cells=snapshot_cells,
+            shud_forcing_index=_make_shud_forcing_index(used_cells),
+            mapping_asset_identity="mapping-v1-abc",
+            model_input_package_id="pkg-v1",
+            sp_att_path="package/keliya.sp.att",
+            sp_att_bytes=b"MOCK",
+            applicable_source_ids=(),
+            grid_id="GFS_0p1",
+            grid_signature="b" * 64,
+            z_policy=_make_z_policy(used_cells),
+            binding_uri="s3://bucket/binding.json",
+            model_crs_wkt=_MODEL_CRS_WKT,
+        )
+    assert exc.value.field_name == "applicable_source_ids"
+
+
+def test_empty_used_cells_blocks() -> None:
+    """Empty used_cells -> BindingArtifactError."""
+    _, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    with pytest.raises(BindingArtifactError):
+        emit_direct_grid_manifest_and_binding(
+            used_cells=[],
+            snapshot_cells=snapshot_cells,
+            shud_forcing_index={},
+            mapping_asset_identity="mapping-v1-abc",
+            model_input_package_id="pkg-v1",
+            sp_att_path="package/keliya.sp.att",
+            sp_att_bytes=b"MOCK",
+            applicable_source_ids=("GFS",),
+            grid_id="GFS_0p1",
+            grid_signature="b" * 64,
+            z_policy=ZPolicy(
+                policy_name="sentinel",
+                readiness_manifest_checksum="c" * 64,
+                per_cell_z={},
+            ),
+            binding_uri="s3://bucket/binding.json",
+            model_crs_wkt=_MODEL_CRS_WKT,
+        )
+
+
+def test_missing_grid_id_blocks() -> None:
+    """Empty grid_id -> ManifestFieldMissingError."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    with pytest.raises(ManifestFieldMissingError) as exc:
+        emit_direct_grid_manifest_and_binding(
+            used_cells=used_cells,
+            snapshot_cells=snapshot_cells,
+            shud_forcing_index=_make_shud_forcing_index(used_cells),
+            mapping_asset_identity="mapping-v1-abc",
+            model_input_package_id="pkg-v1",
+            sp_att_path="package/keliya.sp.att",
+            sp_att_bytes=b"MOCK",
+            applicable_source_ids=("GFS",),
+            grid_id="",
+            grid_signature="b" * 64,
+            z_policy=_make_z_policy(used_cells),
+            binding_uri="s3://bucket/binding.json",
+            model_crs_wkt=_MODEL_CRS_WKT,
+        )
+    assert exc.value.field_name == "grid_id"
+
+
+def test_shud_forcing_index_missing_entry_blocks() -> None:
+    """A used cell absent from shud_forcing_index -> BindingArtifactError."""
+    used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
+    partial_index = {used_cells[0].grid_cell_id: 1}  # missing entry for cell[1]
+    with pytest.raises(BindingArtifactError):
+        emit_direct_grid_manifest_and_binding(
+            used_cells=used_cells,
+            snapshot_cells=snapshot_cells,
+            shud_forcing_index=partial_index,
+            mapping_asset_identity="mapping-v1-abc",
+            model_input_package_id="pkg-v1",
+            sp_att_path="package/keliya.sp.att",
+            sp_att_bytes=b"MOCK",
+            applicable_source_ids=("GFS",),
+            grid_id="GFS_0p1",
+            grid_signature="b" * 64,
+            z_policy=_make_z_policy(used_cells),
+            binding_uri="s3://bucket/binding.json",
+            model_crs_wkt=_MODEL_CRS_WKT,
+        )
+
+
+# =========================================================================
+# FROZEN INVARIANT
+# =========================================================================
+
+
+def test_station_binding_is_frozen() -> None:
+    """StationBinding is a frozen dataclass — field assignment raises."""
+    b = StationBinding(
+        station_id="s1",
+        shud_forcing_index=1,
+        forcing_filename="station_00001.csv",
+        longitude=100.0,
+        latitude=37.0,
+        x=1.0,
+        y=2.0,
+        z=-9999.0,
+        grid_id="g1",
+        grid_cell_id="0",
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        b.station_id = "s2"  # type: ignore[misc]
+
+
+def test_direct_grid_manifest_is_frozen() -> None:
+    """DirectGridManifest is a frozen dataclass — field assignment raises."""
+    manifest, _, _, _ = _emit_minimal()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        manifest.forcing_mapping_mode = "idw"  # type: ignore[misc]
+
+
+def test_binding_artifact_is_frozen() -> None:
+    """BindingArtifact is a frozen dataclass — field assignment raises."""
+    _, artifact, _, _ = _emit_minimal()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        artifact.checksum = "0" * 64  # type: ignore[misc]
+
+
+def test_z_policy_is_frozen() -> None:
+    """ZPolicy is a frozen dataclass — field assignment raises."""
+    policy = ZPolicy(
+        policy_name="sentinel",
+        readiness_manifest_checksum="c" * 64,
+        per_cell_z={"0": -9999.0},
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.policy_name = "canonical_orography"  # type: ignore[misc]
+
+
+# =========================================================================
+# SIGNATURE PIN TESTS (all 9 public functions)
+# =========================================================================
+
+
+def test_emit_direct_grid_manifest_and_binding_signature_pinned() -> None:
+    """emit_direct_grid_manifest_and_binding signature is pinned (all kwargs, order)."""
+    sig = inspect.signature(emit_direct_grid_manifest_and_binding)
+    assert list(sig.parameters) == [
+        "used_cells",
+        "snapshot_cells",
+        "shud_forcing_index",
+        "mapping_asset_identity",
+        "model_input_package_id",
+        "sp_att_path",
+        "sp_att_bytes",
+        "applicable_source_ids",
+        "grid_id",
+        "grid_signature",
+        "z_policy",
+        "binding_uri",
+        "model_crs_wkt",
+        "coordinate_reference_system",
+    ]
+    # All parameters are keyword-only.
+    for name, param in sig.parameters.items():
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"parameter {name!r} MUST be keyword-only"
+        )
+
+
+def test_verify_binding_round_trips_parser_signature_pinned() -> None:
+    """verify_binding_round_trips_parser signature is pinned."""
+    sig = inspect.signature(verify_binding_round_trips_parser)
+    assert list(sig.parameters) == ["resource_profile", "source_id"]
+    hints = typing.get_type_hints(verify_binding_round_trips_parser)
+    assert hints["return"] is DirectGridForcingContract
+
+
+def test_verify_grid_cell_id_unique_and_snapshot_member_signature_pinned() -> None:
+    """verify_grid_cell_id_unique_and_snapshot_member signature is pinned."""
+    sig = inspect.signature(verify_grid_cell_id_unique_and_snapshot_member)
+    assert list(sig.parameters) == ["station_bindings", "snapshot_cells"]
+    hints = typing.get_type_hints(verify_grid_cell_id_unique_and_snapshot_member)
+    assert hints.get("return") is type(None)
+
+
+def test_verify_manifest_binding_cross_consistent_signature_pinned() -> None:
+    """verify_manifest_binding_cross_consistent signature is pinned."""
+    sig = inspect.signature(verify_manifest_binding_cross_consistent)
+    assert list(sig.parameters) == ["manifest", "binding_artifact"]
+    hints = typing.get_type_hints(verify_manifest_binding_cross_consistent)
+    assert hints["manifest"] is DirectGridManifest
+    assert hints["binding_artifact"] is BindingArtifact
+    assert hints.get("return") is type(None)
+
+
+def test_recompute_binding_and_sp_att_checksums_signature_pinned() -> None:
+    """recompute_binding_and_sp_att_checksums signature is pinned."""
+    sig = inspect.signature(recompute_binding_and_sp_att_checksums)
+    assert list(sig.parameters) == ["binding_artifact_bytes", "sp_att_bytes"]
+    hints = typing.get_type_hints(recompute_binding_and_sp_att_checksums)
+    assert hints["binding_artifact_bytes"] is bytes
+    assert hints["sp_att_bytes"] is bytes
+
+
+def test_assign_station_id_from_mapping_asset_identity_signature_pinned() -> None:
+    """assign_station_id_from_mapping_asset_identity signature is pinned."""
+    sig = inspect.signature(assign_station_id_from_mapping_asset_identity)
+    assert list(sig.parameters) == ["mapping_asset_identity", "grid_cell_id"]
+    for name, param in sig.parameters.items():
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"parameter {name!r} MUST be keyword-only"
+        )
+    hints = typing.get_type_hints(assign_station_id_from_mapping_asset_identity)
+    assert hints["mapping_asset_identity"] is str
+    assert hints["grid_cell_id"] is str
+    assert hints["return"] is str
+
+
+def test_sanitize_station_forcing_filename_signature_pinned() -> None:
+    """sanitize_station_forcing_filename signature is pinned."""
+    sig = inspect.signature(sanitize_station_forcing_filename)
+    assert list(sig.parameters) == ["shud_forcing_index"]
+    for name, param in sig.parameters.items():
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"parameter {name!r} MUST be keyword-only"
+        )
+    hints = typing.get_type_hints(sanitize_station_forcing_filename)
+    assert hints["shud_forcing_index"] is int
+    assert hints["return"] is str
+
+
+def test_verify_station_center_matches_snapshot_under_rounding_signature_pinned() -> None:
+    """verify_station_center_matches_snapshot_under_rounding signature is pinned."""
+    sig = inspect.signature(verify_station_center_matches_snapshot_under_rounding)
+    assert list(sig.parameters) == [
+        "station",
+        "snapshot_cell",
+        "snapshot_basis",
+        "station_basis",
+    ]
+    hints = typing.get_type_hints(
+        verify_station_center_matches_snapshot_under_rounding
+    )
+    assert hints["station"] is StationBinding
+    assert hints.get("return") is type(None)
+
+
+def test_apply_z_policy_from_readiness_signature_pinned() -> None:
+    """apply_z_policy_from_readiness signature is pinned."""
+    sig = inspect.signature(apply_z_policy_from_readiness)
+    assert list(sig.parameters) == ["z_policy", "grid_cell_id"]
+    hints = typing.get_type_hints(apply_z_policy_from_readiness)
+    assert hints["z_policy"] is ZPolicy
+    assert hints["grid_cell_id"] is str
+    assert hints["return"] is float
+
+
+# =========================================================================
+# DETERMINISM (spec §7)
+# =========================================================================
+
+
+def test_emit_is_deterministic_on_identical_inputs() -> None:
+    """Two runs on the same inputs produce byte-identical binding artifact bytes.
+
+    Determinism requirement of spec §7: same baseline + same grid snapshot
+    + same algorithm version -> byte-identical binding + manifest.
+    """
+    manifest1, artifact1, _, _ = _emit_minimal(mapping_asset_identity="det-v1")
+    manifest2, artifact2, _, _ = _emit_minimal(mapping_asset_identity="det-v1")
+    assert artifact1.bytes == artifact2.bytes
+    assert artifact1.checksum == artifact2.checksum
+    assert manifest1.binding_checksum == manifest2.binding_checksum
+    assert manifest1.station_bindings == manifest2.station_bindings
+
+
+def test_coordinate_rounding_decimals_pinned_to_12() -> None:
+    """Coordinate rounding is pinned to 12 decimals (docs §7.3)."""
+    assert COORDINATE_ROUNDING_DECIMALS == 12
