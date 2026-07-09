@@ -41,6 +41,7 @@ from workers.mapping_builder import (
     GridSnapshotLoader,
     MappingAlgorithmError,
     RegularGridFastPathParityError,
+    SupersededGridSnapshotError,
     UnregisteredGridSnapshotError,
     algorithm_id,
     nearest_cell_barycenter_geodesic_v1,
@@ -271,6 +272,53 @@ def test_g2_unregistered_grid_fails_closed() -> None:
         )
     assert exc_info.value.source_id == "ifs"
     assert exc_info.value.grid_id == "different_grid"
+    assert isinstance(exc_info.value, MappingAlgorithmError)
+
+
+def test_g2_superseded_snapshot_fails_closed() -> None:
+    """Snapshot with non-NULL ``superseded_at`` -> SupersededGridSnapshotError.
+
+    Cross-change contract from ``grid-drift-lifecycle/spec.md`` §"Consumers
+    of a superseded snapshot fail closed": the mapping-asset build MUST fail
+    closed when the loaded snapshot has a non-NULL ``superseded_at``, never
+    silently producing mapping output bound to a stale grid identity. The
+    guard runs BEFORE signature recomputation, so a superseded snapshot
+    cannot slip through by still having a matching signature.
+    """
+    import datetime as _dt
+
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    base_snapshot = make_snapshot(
+        source_id="ifs",
+        grid_id="test_grid_v1",
+        cells=cells,
+        bbox_pad=0.5,
+    )
+    superseded_at = _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC)
+    superseded_snapshot = dataclasses.replace(
+        base_snapshot, superseded_at=superseded_at
+    )
+    loader = InMemoryGridSnapshotLoader(
+        source_id="ifs",
+        grid_id="test_grid_v1",
+        snapshot=superseded_snapshot,
+        cells=cells,
+    )
+
+    with pytest.raises(SupersededGridSnapshotError) as exc_info:
+        verify_grid_identity_precondition(
+            source_id="ifs",
+            grid_id="test_grid_v1",
+            # Barycenter is well inside the bbox and cells match the stored
+            # signature — the ONLY reason to fail is superseded_at.
+            barycenters_wgs84=[(1, 10.0, 20.0)],
+            store=loader,
+        )
+    assert exc_info.value.source_id == "ifs"
+    assert exc_info.value.grid_id == "test_grid_v1"
+    assert exc_info.value.superseded_at == superseded_at
     assert isinstance(exc_info.value, MappingAlgorithmError)
 
 

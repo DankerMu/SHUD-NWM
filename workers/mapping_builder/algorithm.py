@@ -49,6 +49,16 @@ than the SUB-5-writer-scoped
 :meth:`packages.common.grid_registry_store.PsycopgGridRegistryStore.find_snapshot_by_identity`
 (which returns only a ``UUID`` for idempotency checks); the mapping builder
 needs the full snapshot + cell rows to reach the shared signature helper.
+
+.. warning::
+    The method names collide: ``PsycopgGridRegistryStore.find_snapshot_by_identity``
+    (writer-scoped, arity 3, returns UUID) and ``GridSnapshotLoader.find_snapshot_by_identity``
+    (mapping-builder-scoped, arity 2, returns snapshot+cells) share a name but not
+    a signature. A future integrator MUST supply a dedicated adapter — direct
+    structural assignment ``store: GridSnapshotLoader = PsycopgGridRegistryStore(...)``
+    passes non-strict type-check but fails at runtime with
+    ``TypeError: find_snapshot_by_identity() missing 1 required positional argument:
+    'grid_signature'`` at the first call site.
 """
 
 from __future__ import annotations
@@ -99,6 +109,15 @@ class GridSnapshotLoader(Protocol):
     returning ``(CanonicalGridSnapshot, list[CanonicalGridCell])`` or
     ``None`` satisfies this protocol. Tests use an in-memory loader; the
     production wiring is a thin adapter over the DB store.
+
+    ``source_id`` contract: implementations MUST normalize the caller-supplied
+    ``source_id`` via :func:`packages.common.source_identity.normalize_source_id`
+    before comparing against stored rows — mirroring the concrete
+    :meth:`packages.common.grid_registry_store.PsycopgGridRegistryStore.find_snapshot_by_identity`
+    (which does the same at ``grid_registry_store.py:838``). Raw-case forms
+    (``"ifs"``, ``"GFS"``) MUST still match rows stored as ``"IFS"``, ``"gfs"``.
+    The in-memory test fixture is exempted only because its constructor
+    receives the already-normalized ``source_id`` under test.
     """
 
     def find_snapshot_by_identity(
@@ -136,6 +155,32 @@ class UnregisteredGridSnapshotError(MappingAlgorithmError):
         )
         self.source_id = source_id
         self.grid_id = grid_id
+
+
+class SupersededGridSnapshotError(MappingAlgorithmError):
+    """Raised when the loaded snapshot has ``superseded_at`` non-NULL.
+
+    Per cross-change contract in ``grid-drift-lifecycle/spec.md`` §"Consumers
+    of a superseded snapshot fail closed": the mapping-asset build MUST fail
+    closed when reading a superseded snapshot for production use — never
+    silently produce mapping output bound to a stale grid identity.
+    """
+
+    def __init__(
+        self,
+        source_id: str,
+        grid_id: str,
+        superseded_at: object,  # datetime; typed loose to avoid extra import
+    ) -> None:
+        super().__init__(
+            f"snapshot for source_id={source_id!r} grid_id={grid_id!r} "
+            f"is superseded at {superseded_at!r}; mapping-asset build "
+            "MUST fail closed on superseded snapshots (cross-change contract "
+            "grid-drift-lifecycle §\"Consumers of a superseded snapshot fail closed\")"
+        )
+        self.source_id = source_id
+        self.grid_id = grid_id
+        self.superseded_at = superseded_at
 
 
 class GridSignatureMismatchError(MappingAlgorithmError):
@@ -253,16 +298,21 @@ def verify_grid_identity_precondition(
 ) -> tuple[CanonicalGridSnapshot, tuple[CanonicalGridCell, ...]]:
     """Verify the G2 grid-identity precondition and return the loaded snapshot.
 
-    Executes the three §2.0 subchecks in order and fail-closed:
+    Executes the four §2.0 subchecks in order and fail-closed:
 
     1. ``store.find_snapshot_by_identity(source_id, grid_id)`` MUST return a
        non-``None`` ``(snapshot, cells)`` pair; else raises
        :class:`UnregisteredGridSnapshotError`.
-    2. :func:`packages.common.grid_signature.grid_signature_hash` (the SOLE
+    2. ``snapshot.superseded_at`` MUST be ``None`` (cross-change contract
+       ``grid-drift-lifecycle`` §"Consumers of a superseded snapshot fail
+       closed"); else raises :class:`SupersededGridSnapshotError`. This check
+       runs BEFORE signature recomputation so a superseded snapshot cannot
+       silently satisfy the signature invariant.
+    3. :func:`packages.common.grid_signature.grid_signature_hash` (the SOLE
        signature authority) is invoked over the loaded cells; its result
        MUST equal ``snapshot.grid_signature``; else raises
        :class:`GridSignatureMismatchError`.
-    3. Every ``(element_id, lon, lat)`` in ``barycenters_wgs84`` MUST lie
+    4. Every ``(element_id, lon, lat)`` in ``barycenters_wgs84`` MUST lie
        inside the snapshot's bbox (inclusive endpoints); the first violation
        raises :class:`ElementBarycenterOutOfCoverageError`.
 
@@ -288,6 +338,9 @@ def verify_grid_identity_precondition(
     ------
     UnregisteredGridSnapshotError
         No snapshot registered for the identity pair.
+    SupersededGridSnapshotError
+        Loaded snapshot has a non-NULL ``superseded_at`` (cross-change
+        contract with ``grid-drift-lifecycle``).
     GridSignatureMismatchError
         Recomputed signature differs from the stored value.
     ElementBarycenterOutOfCoverageError
@@ -297,6 +350,17 @@ def verify_grid_identity_precondition(
     if lookup is None:
         raise UnregisteredGridSnapshotError(source_id=source_id, grid_id=grid_id)
     snapshot, cells = lookup
+
+    # Cross-change contract with ``grid-drift-lifecycle`` §"Consumers of a
+    # superseded snapshot fail closed": a superseded snapshot MUST NOT
+    # produce mapping output — checked BEFORE signature recomputation so a
+    # superseded snapshot cannot silently satisfy the signature invariant.
+    if snapshot.superseded_at is not None:
+        raise SupersededGridSnapshotError(
+            source_id=source_id,
+            grid_id=grid_id,
+            superseded_at=snapshot.superseded_at,
+        )
 
     # Shared helper is the SOLE signature authority (never hand-rolled).
     recomputed = grid_signature_hash(cells)
@@ -593,6 +657,9 @@ def nearest_cell_barycenter_geodesic_v1(
         ``.sp.mesh``).
     UnregisteredGridSnapshotError
         No snapshot registered for ``(source_id, grid_id)``.
+    SupersededGridSnapshotError
+        Loaded snapshot has a non-NULL ``superseded_at`` (cross-change
+        contract with ``grid-drift-lifecycle``).
     GridSignatureMismatchError
         Recomputed signature differs from the stored value.
     ElementBarycenterOutOfCoverageError
