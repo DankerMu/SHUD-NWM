@@ -90,12 +90,27 @@
 
 ## 6. Keliya Integration Fixture and Verification
 
-- [ ] 6.1 Add a compact keliya integration fixture (484 elements / 32 stations / ~8 used cells, per 附录 A) exercising the full builder from G0 through G5 to binding, `.sp.att` rewrite, and evidence, using in-memory/on-disk fixtures without a real grid download or Slurm. The grid snapshot is provided via the same in-memory `GridSnapshot` fixture under `tests/fixtures/mapping_builder/` used by Task 4.1, populated through the shared loader that reuses `packages/common/grid_signature.py`.
+- [x] 6.1 Add a compact keliya integration fixture (484 elements / 32 stations / ~8 used cells, per 附录 A) exercising the full builder from G0 through G5 to binding, `.sp.att` rewrite, and evidence, using in-memory/on-disk fixtures without a real grid download or Slurm. The grid snapshot is provided via the same in-memory `GridSnapshot` fixture under `tests/fixtures/mapping_builder/` used by Task 4.1, populated through the shared loader that reuses `packages/common/grid_signature.py`.
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_integration.py` builds the keliya variant end to end, proving G0–G5 pass (G2 grid identity via the shared signature helper, G4 asset delta including `hydrologic_core_fingerprint` equality, and G5 manifest ↔ binding artifact cross-consistency), the emitted binding parses through the existing contract parser, the G4 non-`FORC`-unchanged proof holds, and the evidence checksum binds to the mapping-asset checksum.
+    - `test_full_pipeline_g0_through_g5_end_to_end` — asserts G0/G1/G2/G3/G4/G5 pass end-to-end with 484 elements / 8 used cells / shud_forcing_index 1..8 and evidence assembly recording all six gate results.
+    - `test_g2_grid_identity_via_shared_signature_helper` — recomputes the snapshot signature via `packages.common.grid_signature.grid_signature_hash` and asserts equality with the loaded snapshot's stored value.
+    - `test_g4_hydrologic_core_fingerprint_equal` — proves fingerprint(variant) == fingerprint(baseline) across the ten §3.4/§G10 covered surfaces.
+    - `test_g5_manifest_and_binding_cross_consistent` — proves `manifest.grid_signature == snapshot.grid_signature`, `manifest.binding_checksum == sha256(binding_bytes)`, `manifest.sp_att_checksum == sha256(variant_sp_att_bytes)`, and per-station rows map 1:1 with the binding artifact.
+    - `test_binding_round_trips_through_forcing_producer_contract_parser` — emitted manifest resolves through `workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest` without error.
+    - `test_g4_asset_delta_only_forc_changed` — variant `.sp.att` differs from baseline only in the `FORC` column; semantic diff records FORC deltas only.
+    - `test_evidence_checksum_binds_to_mapping_asset_checksum` — `bind_evidence_to_mapping_asset` sets `bound_mapping_asset_checksum` and `verify_evidence_checksum_binding` returns `None`.
+    - `test_epic_886_readiness_manifest_flows_into_evidence` — `project_readiness_proj_crs_database_version` projects the nested dict into the identity string and `verify_algorithm_and_proj_identity_matches_readiness` returns `None`.
+    - `test_used_cell_subset_shrinks_stations_to_cells` — asserts 32 stations shrink to 8 used cells (~4× reduction, docs §14 framing).
   - Required evidence: the fixture proves determinism per the algorithm version — building twice from the same baseline package, the same grid snapshot, and the same algorithm version yields byte-identical binding, `.sp.att`, and evidence bundles (bytes and checksums), while any `checksum_excluded_fields` (e.g. a build timestamp) are enumerated and never enter any checksum.
+    - `test_two_consecutive_builds_yield_byte_identical_output` — two builds against the same baseline + snapshot + algorithm version produce byte-identical binding, `.sp.att`, and (mod. `build_timestamp`) evidence bundles.
+    - `test_checksum_excluded_fields_enumerated_and_never_enter_any_checksum` — `enumerate_checksum_excluded_fields()` returns `("build_timestamp",)`; mutating `build_timestamp` preserves the evidence checksum.
+    - `test_forbidden_output_scan_clean_on_green_pipeline` — `verify_no_forbidden_runtime_producer_artifacts` returns `passed=True` on the clean artifact set (no cycle-dated `.tsd.forc`, no station weather CSVs, no `met.*` DB writes, no cycle-lineage records).
   - Non-goal for 6.1: no basin activation, no scheduler routing, no state or display change.
-- [ ] 6.2 Run the full change verification suite and OpenSpec validation.
+- [x] 6.2 Run the full change verification suite and OpenSpec validation.
   - Required evidence: `uv run pytest -q tests/test_mapping_builder*.py` passes.
+    - `uv run pytest -q tests/test_mapping_builder_integrity.py tests/test_mapping_builder_algorithm.py tests/test_mapping_builder_rewrite.py tests/test_mapping_builder_binding.py tests/test_mapping_builder_evidence.py tests/test_mapping_builder_integration.py` reports `441 passed`.
   - Required evidence: `uv run ruff check .` passes.
+    - `uv run ruff check .` reports `All checks passed!`.
   - Required evidence: `openspec validate forcing-mapping-asset-build --strict --no-interactive` passes.
+    - `openspec validate forcing-mapping-asset-build --strict --no-interactive` reports `Change 'forcing-mapping-asset-build' is valid`.
   - Non-goal for 6.2: no node-27 live receipt is required, since this change builds inert offline assets and touches no display or live DB path.
