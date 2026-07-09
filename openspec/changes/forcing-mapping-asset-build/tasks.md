@@ -26,10 +26,10 @@
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_algorithm.py` proves the barycenter is the mesh three-vertex mean and that nearest selection uses geodesic distance, not undeclared planar-degree distance.
   - Required evidence: tests prove that for a regular lat/lon grid the independent lon/lat rounding fast path yields the identical cell and tie behavior as the geodesic definition.
   - Non-goal for 2.1: no used-cell subsetting, no index assignment, no binding emission.
-- [ ] 2.2 Implement tie-break and the distance sanity bound: resolve ties within tolerance by smallest canonical ordinal, and reject as a blocker any in-coverage centroid whose nearest-center distance exceeds the local half-cell-diagonal plus numeric tolerance.
+- [x] 2.2 Implement tie-break and the distance sanity bound: resolve ties within tolerance by smallest canonical ordinal, and reject as a blocker any in-coverage centroid whose nearest-center distance exceeds the local half-cell-diagonal plus numeric tolerance.
   - Required evidence: tests prove a tie is resolved to the smallest canonical ordinal reproducibly, and that an in-coverage centroid beyond the half-cell-diagonal bound fails closed as a blocker.
   - Non-goal for 2.2: no CRS/clip auto-correction; the bound only blocks.
-- [ ] 2.3 Implement used-cell subset and forcing-index assignment: keep only cells referenced by ≥1 element (every binding cell referenced, one cell = one station), and assign `shud_forcing_index` `1..N` contiguous ordered by canonical ordinal.
+- [x] 2.3 Implement used-cell subset and forcing-index assignment: keep only cells referenced by ≥1 element (every binding cell referenced, one cell = one station), and assign `shud_forcing_index` `1..N` contiguous ordered by canonical ordinal.
   - Required evidence: tests prove zero unused bindings, one-cell-to-one-station, and that `shud_forcing_index` is contiguous, unique, canonical-ordinal-ordered, and reproducible.
   - Non-goal for 2.3: no `.sp.att FORC` writing (that is group 3).
 - [ ] 2.4 Implement the small-basin hard gate: refuse by default when used-cell count < 4, and proceed only when an explicit approval flag is supplied, recording the override in evidence.

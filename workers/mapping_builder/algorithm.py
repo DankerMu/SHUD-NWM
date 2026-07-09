@@ -63,7 +63,6 @@ needs the full snapshot + cell rows to reach the shared signature helper.
 
 from __future__ import annotations
 
-import math
 import pathlib
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -96,10 +95,23 @@ _REGULAR_GRID_STEP_TOLERANCE: float = 1e-6
 
 #: Geodesic-distance tolerance (meters) for detecting ties at the min distance.
 #: Distances below this threshold are treated as equal; the spec §2.1 records
-#: tie status alongside geodesic distance, and §2.2 (a later sibling task)
-#: pins the tolerance for the tie-BREAK rule. This value is intentionally
-#: small — it only classifies exact-repeat coordinates as tied.
+#: tie status alongside geodesic distance, and §2.2 pins the tolerance for
+#: the tie-BREAK rule. This value is intentionally small — it only classifies
+#: exact-repeat coordinates as tied.
 _GEODESIC_TIE_TOLERANCE_M: float = 1.0e-6
+
+#: Half-cell-diagonal sanity-bound tolerance (meters, WGS84 ellipsoid).
+#: Spec §2.2 "Distance sanity bound rejects CRS or grid errors": an
+#: in-coverage barycenter whose nearest-cell geodesic distance exceeds the
+#: local half-cell-diagonal plus this tolerance is a CRS/clip/grid error and
+#: MUST fail closed. The bound itself is typically km-scale (e.g. ~7.6 km at
+#: 20°N for a 0.1° grid, ~55 km at 20°N for a 0.5° grid), so a mm-scale
+#: tolerance absorbs pyproj / float-arithmetic roundoff between the
+#: barycenter-to-cell-center distance and the corner-to-corner diagonal
+#: computations without opening any real-world gap. The value pairs with
+#: :data:`_GEODESIC_TIE_TOLERANCE_M`: both are conservative numeric-noise
+#: floors, never physical-error headroom.
+_HALF_CELL_DIAGONAL_TOLERANCE_M: float = 1.0e-3
 
 
 class GridSnapshotLoader(Protocol):
@@ -261,6 +273,41 @@ class RegularGridFastPathParityError(MappingAlgorithmError):
         self.element_id = element_id
         self.geodesic_grid_cell_id = geodesic_grid_cell_id
         self.fast_path_grid_cell_id = fast_path_grid_cell_id
+
+
+class DistanceSanityBoundExceededError(MappingAlgorithmError):
+    """Raised when a picked cell's geodesic distance blows the half-cell-diagonal sanity bound.
+
+    Per spec §"Distance sanity bound rejects CRS or grid errors" (§2.2):
+    when an element barycenter lies within valid grid coverage yet the
+    nearest-cell geodesic distance exceeds the local half-cell-diagonal
+    plus :data:`_HALF_CELL_DIAGONAL_TOLERANCE_M`, the distance is diagnostic
+    of a CRS transform, clip, or grid-definition error — not a legitimate
+    ownership. The builder fails closed with no mapping output; the sanity
+    bound only blocks and never auto-corrects.
+    """
+
+    def __init__(
+        self,
+        *,
+        element_id: int,
+        distance_m: float,
+        half_cell_diagonal_m: float,
+        tolerance_m: float,
+        grid_cell_id: str,
+    ) -> None:
+        super().__init__(
+            f"element_id={element_id} nearest-cell geodesic distance "
+            f"{distance_m}m to grid_cell_id={grid_cell_id!r} exceeds local "
+            f"half-cell-diagonal {half_cell_diagonal_m}m plus tolerance "
+            f"{tolerance_m}m; this indicates a CRS, clip, or grid-definition "
+            "error, not a legitimate ownership"
+        )
+        self.element_id = element_id
+        self.distance_m = distance_m
+        self.half_cell_diagonal_m = half_cell_diagonal_m
+        self.tolerance_m = tolerance_m
+        self.grid_cell_id = grid_cell_id
 
 
 # --- result records -------------------------------------------------------
@@ -544,6 +591,122 @@ def _select_cell_by_lonlat_round(
     return structure.cell_by_coord[(nearest_lon, nearest_lat)]
 
 
+# --- tie-break + sanity bound (§2.2) --------------------------------------
+
+
+def resolve_tie_by_canonical_ordinal(
+    candidates: Sequence[tuple[CanonicalGridCell, float]],
+) -> tuple[CanonicalGridCell, float]:
+    """Return the tied candidate whose cell has the smallest canonical ordinal.
+
+    Per spec §"Ties are resolved by smallest canonical ordinal" (§2.2):
+    given a non-empty sequence of ``(cell, geodesic_distance_m)`` tuples all
+    within the tie tolerance of the minimum geodesic distance, return the
+    ``(cell, distance)`` whose ``cell.canonical_ordinal`` is smallest.
+
+    The function is deterministic AND idempotent: two calls on the same
+    (unordered) input return equal results — because ``canonical_ordinal`` is
+    unique within a snapshot (registry invariant), the "smallest ordinal"
+    is well-defined regardless of input iteration order.
+
+    Parameters
+    ----------
+    candidates:
+        Non-empty sequence of ``(cell, distance_m)`` tuples. Input ordering
+        is caller-owned; the function keys off ``cell.canonical_ordinal``
+        only.
+
+    Returns
+    -------
+    tuple[CanonicalGridCell, float]
+        The ``(cell, distance_m)`` whose ``cell.canonical_ordinal`` is
+        smallest.
+
+    Raises
+    ------
+    MappingAlgorithmError
+        ``candidates`` is empty — the caller must guarantee at least one
+        tied candidate (the geodesic scan always includes the picked cell
+        itself as a tied candidate).
+    """
+    if not candidates:
+        raise MappingAlgorithmError(
+            "resolve_tie_by_canonical_ordinal requires at least one candidate"
+        )
+    # `min` with a keyed callable is deterministic and independent of input
+    # ordering because canonical_ordinal is unique per snapshot.
+    return min(candidates, key=lambda item: int(item[0].canonical_ordinal))
+
+
+def verify_half_cell_diagonal_sanity_bound(
+    ownership: ElementOwnership,
+    cell: CanonicalGridCell,
+    snapshot: CanonicalGridSnapshot,
+    *,
+    geod: pyproj.Geod | None = None,
+) -> None:
+    """Assert an ownership's geodesic distance is within the sanity bound.
+
+    Per spec §"Distance sanity bound rejects CRS or grid errors" (§2.2):
+    if the picked cell's geodesic distance from the element barycenter
+    exceeds the local half-cell-diagonal plus
+    :data:`_HALF_CELL_DIAGONAL_TOLERANCE_M`, the discrepancy is diagnostic
+    of a CRS, clip, or grid-definition error. Raises
+    :class:`DistanceSanityBoundExceededError` in that case; the bound only
+    blocks and never auto-corrects.
+
+    The local half-cell-diagonal is computed as half the geodesic length of
+    the cell's SW-corner-to-NE-corner segment, where corners are the cell
+    center offset by ``±0.5 * snapshot.native_resolution`` in both longitude
+    and latitude. This reuses the WGS84 ``Geod.inv`` primitive that the
+    ownership distance itself is measured in, so the bound and the measured
+    value are compared in consistent units without any planar-degree proxy.
+    For a snapshot with ``native_resolution == 0`` (single-cell degenerate
+    fixtures), the bound collapses to :data:`_HALF_CELL_DIAGONAL_TOLERANCE_M`
+    — any ownership at the cell center still passes.
+
+    Parameters
+    ----------
+    ownership:
+        The picked ownership record whose ``geodesic_distance_m`` is
+        checked.
+    cell:
+        The registered cell that ``ownership`` references. Its latitude sets
+        the ``cos(latitude)`` contribution to the longitude arc.
+    snapshot:
+        The loaded snapshot; ``snapshot.native_resolution`` supplies the
+        assumed cell step in both dimensions.
+    geod:
+        Optional pre-constructed ``pyproj.Geod`` (WGS84). If ``None`` a
+        fresh WGS84 instance is built. Callers processing many elements
+        SHOULD amortize construction by passing a single instance.
+
+    Raises
+    ------
+    DistanceSanityBoundExceededError
+        Distance exceeds ``half_cell_diagonal + _HALF_CELL_DIAGONAL_TOLERANCE_M``.
+    """
+    if geod is None:
+        geod = pyproj.Geod(ellps="WGS84")
+    step = float(snapshot.native_resolution)
+    lon = float(cell.longitude)
+    lat = float(cell.latitude)
+    lon0 = lon - 0.5 * step
+    lon1 = lon + 0.5 * step
+    lat0 = lat - 0.5 * step
+    lat1 = lat + 0.5 * step
+    _, _, diagonal_m = geod.inv(lon0, lat0, lon1, lat1)
+    half_diagonal_m = 0.5 * float(diagonal_m)
+    if ownership.geodesic_distance_m > half_diagonal_m + _HALF_CELL_DIAGONAL_TOLERANCE_M:
+        raise DistanceSanityBoundExceededError(
+            element_id=ownership.element_id,
+            distance_m=float(ownership.geodesic_distance_m),
+            half_cell_diagonal_m=half_diagonal_m,
+            tolerance_m=_HALF_CELL_DIAGONAL_TOLERANCE_M,
+            grid_cell_id=cell.grid_cell_id,
+        )
+
+
 # --- geodesic O(M) scan ---------------------------------------------------
 
 
@@ -555,46 +718,42 @@ def _select_nearest_cell_geodesic(
 ) -> tuple[CanonicalGridCell, float, str, int]:
     """Return ``(cell, geodesic_distance_m, tie_status, candidate_count)``.
 
-    Iterates ``cells`` in the caller-supplied order (spec §2.1 canonical-
-    ordinal order — the caller feeds sorted cells). Ties (distances within
-    :data:`_GEODESIC_TIE_TOLERANCE_M` of the running minimum) are counted
-    but not broken here; §2.2 owns the smallest-canonical-ordinal tie-break.
-    Iteration order + strict ``<`` comparison implicitly picks the FIRST
-    cell at the min distance, which is the canonical-ordinal-smallest cell
-    when the caller sorts by canonical_ordinal.
+    Computes the geodesic distance to every ``cell``, identifies the minimum,
+    collects all cells within :data:`_GEODESIC_TIE_TOLERANCE_M` of that
+    minimum, and delegates tie-break to
+    :func:`resolve_tie_by_canonical_ordinal` (smallest canonical ordinal
+    wins on tie, per spec §2.2). Making the tie-break explicit rather than
+    implicit-via-iteration-order removes any silent dependence on the
+    caller-supplied cell ordering — the picked cell is provably the
+    smallest-canonical-ordinal tied cell even if callers reorder the input.
 
-    ``tie_status`` is ``"unique"`` when exactly one cell is within the tie
+    ``tie_status`` is ``"unique"`` when exactly one cell is within tie
     tolerance of the min distance; else ``f"tied_with_{N}"`` where ``N`` is
     the number of tied cells (including the picked one, so ``N >= 2``).
     ``candidate_count`` is the total number of cells scanned.
     """
-    best_cell: CanonicalGridCell | None = None
-    best_distance = math.inf
-    for cell in cells:
-        # pyproj.Geod.inv returns (forward_azimuth, back_azimuth, distance_m).
-        _, _, distance_m = geod.inv(lon, lat, float(cell.longitude), float(cell.latitude))
-        if distance_m < best_distance:
-            best_distance = distance_m
-            best_cell = cell
-    if best_cell is None:
-        # `cells` was empty; caller MUST guarantee non-empty (G2 loaded a
-        # populated snapshot). We surface a controlled error rather than a
-        # KeyError so tests can assert on the message.
+    if not cells:
+        # Caller MUST guarantee non-empty (G2 loaded a populated snapshot).
+        # We surface a controlled error rather than a KeyError so tests can
+        # assert on the message.
         raise MappingAlgorithmError(
             "cannot select nearest cell: no candidate cells supplied"
         )
-    # Count ties on a second pass — we cannot count during the first pass
-    # because ties are relative to the FINAL best_distance.
-    tied_count = 0
+    # Single geodesic scan; reuse distances for tie detection.
+    # pyproj.Geod.inv returns (forward_azimuth, back_azimuth, distance_m).
+    distances: list[tuple[CanonicalGridCell, float]] = []
     for cell in cells:
         _, _, distance_m = geod.inv(lon, lat, float(cell.longitude), float(cell.latitude))
-        if abs(distance_m - best_distance) <= _GEODESIC_TIE_TOLERANCE_M:
-            tied_count += 1
-    if tied_count == 1:
-        tie_status = "unique"
-    else:
-        tie_status = f"tied_with_{tied_count}"
-    return best_cell, float(best_distance), tie_status, len(cells)
+        distances.append((cell, float(distance_m)))
+    best_distance = min(d for _, d in distances)
+    tied: list[tuple[CanonicalGridCell, float]] = [
+        (c, d)
+        for c, d in distances
+        if abs(d - best_distance) <= _GEODESIC_TIE_TOLERANCE_M
+    ]
+    picked_cell, picked_distance = resolve_tie_by_canonical_ordinal(tied)
+    tie_status = "unique" if len(tied) == 1 else f"tied_with_{len(tied)}"
+    return picked_cell, picked_distance, tie_status, len(cells)
 
 
 # --- public entry point (§2.1) --------------------------------------------
@@ -622,15 +781,26 @@ def nearest_cell_barycenter_geodesic_v1(
        the snapshot is unregistered, the shared-helper signature disagrees
        with the stored value, or any barycenter is outside the snapshot
        bbox. On success, returns ``(snapshot, cells)``.
-    5. For each element barycenter, iterate the loaded cells (in the caller-
-       supplied order — the snapshot's cells are already canonical-ordinal-
-       ordered per the registry contract) and pick the geodesic-nearest.
+    5. For each element barycenter, iterate the loaded cells and pick the
+       nearest by geodesic distance, delegating tie-break to
+       :func:`resolve_tie_by_canonical_ordinal` (spec §2.2 smallest-
+       canonical-ordinal).
     6. If the cells form a regular lat/lon grid, additionally compute each
        element's cell via independent lon/lat rounding and raise
        :class:`RegularGridFastPathParityError` if it disagrees with the
        geodesic pick. The reported ``geodesic_distance_m`` is always the
        geodesic value — the fast path is a defense-in-depth cross-check,
        never a silent shortcut.
+    7. Apply :func:`verify_half_cell_diagonal_sanity_bound` per element (spec
+       §2.2): raise :class:`DistanceSanityBoundExceededError` if the picked
+       geodesic distance exceeds ``local_half_cell_diagonal +
+       _HALF_CELL_DIAGONAL_TOLERANCE_M``. The bound only blocks; there is
+       no auto-correction.
+
+    The recorded ``geodesic_distance_m`` per element is the picked cell's own
+    distance; on true ties this may differ from the strict global minimum by up
+    to :data:`_GEODESIC_TIE_TOLERANCE_M`. The sanity bound (mm-scale) is
+    unaffected.
 
     Parameters
     ----------
@@ -666,6 +836,9 @@ def nearest_cell_barycenter_geodesic_v1(
         An element barycenter is outside the snapshot coverage bbox.
     RegularGridFastPathParityError
         Regular-grid fast path disagrees with the geodesic pick.
+    DistanceSanityBoundExceededError
+        A picked ownership's geodesic distance exceeds the local
+        half-cell-diagonal plus :data:`_HALF_CELL_DIAGONAL_TOLERANCE_M`.
     """
     if not isinstance(baseline_root, pathlib.Path):
         raise TypeError(
@@ -684,14 +857,16 @@ def nearest_cell_barycenter_geodesic_v1(
     barycenters_wgs84 = _transform_barycenters_to_wgs84(barycenters_pkg, transformer)
 
     # Step 4: G2 gate.
-    _snapshot, cells = verify_grid_identity_precondition(
+    snapshot, cells = verify_grid_identity_precondition(
         source_id=source_id,
         grid_id=grid_id,
         barycenters_wgs84=barycenters_wgs84,
         store=store,
     )
 
-    # Step 5-6: nearest-cell selection + optional fast-path parity check.
+    # Step 5-7: nearest-cell selection + optional fast-path parity check +
+    # §2.2 half-cell-diagonal sanity bound. Any raise here (parity or sanity)
+    # aborts before the ownership tuple leaves this function — fail-closed.
     geod = pyproj.Geod(ellps="WGS84")
     structure = _detect_regular_grid(cells)
     ownerships: list[ElementOwnership] = []
@@ -710,16 +885,132 @@ def nearest_cell_barycenter_geodesic_v1(
                     geodesic_grid_cell_id=cell.grid_cell_id,
                     fast_path_grid_cell_id=fast_pick.grid_cell_id,
                 )
-        ownerships.append(
-            ElementOwnership(
-                element_id=element_id,
-                grid_cell_id=cell.grid_cell_id,
-                canonical_ordinal=int(cell.canonical_ordinal),
-                geodesic_distance_m=distance_m,
-                tie_status=tie_status,
-                candidate_count=candidate_count,
-            )
+        ownership = ElementOwnership(
+            element_id=element_id,
+            grid_cell_id=cell.grid_cell_id,
+            canonical_ordinal=int(cell.canonical_ordinal),
+            geodesic_distance_m=distance_m,
+            tie_status=tie_status,
+            candidate_count=candidate_count,
         )
+        # §2.2 sanity bound — raises before the ownership escapes.
+        verify_half_cell_diagonal_sanity_bound(
+            ownership=ownership,
+            cell=cell,
+            snapshot=snapshot,
+            geod=geod,
+        )
+        ownerships.append(ownership)
 
     ownerships.sort(key=lambda o: o.element_id)
     return tuple(ownerships)
+
+
+# --- used-cell subset + forcing-index assignment (§2.3) -------------------
+
+
+def derive_used_cell_subset(
+    ownerships: Sequence[ElementOwnership],
+    cells: Sequence[CanonicalGridCell],
+) -> tuple[CanonicalGridCell, ...]:
+    """Return the ordered tuple of cells referenced by ≥1 ownership.
+
+    Per spec §"Only referenced cells become binding cells" (§2.3): the
+    used-cell subset contains only cells referenced by at least one
+    element (zero unused bindings) and is deduplicated by ``grid_cell_id``
+    (many elements MAY point at the same cell — one cell = one SHUD
+    station). Sort key is ``canonical_ordinal`` ascending so
+    :func:`assign_shud_forcing_index` can walk the tuple to hand out
+    1..N contiguously.
+
+    Deterministic: identical ``(ownerships, cells)`` inputs return equal
+    tuples (Python 3.7+ set/dict preserve insertion order, but the sort
+    key removes any dependence on that).
+
+    Parameters
+    ----------
+    ownerships:
+        Per-element ownership records — the source of "which cells were
+        picked". Order-independent (the function keys off
+        ``grid_cell_id``).
+    cells:
+        The loaded snapshot's cell rows (the same rows the G2 gate
+        returned). Only cells whose ``grid_cell_id`` appears in
+        ``ownerships`` are retained.
+
+    Returns
+    -------
+    tuple[CanonicalGridCell, ...]
+        Deduplicated referenced cells ordered by ``canonical_ordinal``
+        ascending. Empty when no ownership references any cell (never
+        expected in practice — the caller wouldn't have any ownership
+        records without a G2 pass).
+    """
+    referenced_ids: set[str] = {o.grid_cell_id for o in ownerships}
+    used = [c for c in cells if c.grid_cell_id in referenced_ids]
+    used.sort(key=lambda c: int(c.canonical_ordinal))
+    return tuple(used)
+
+
+def assign_shud_forcing_index(
+    used_cells: Sequence[CanonicalGridCell],
+) -> dict[str, int]:
+    """Assign contiguous ``shud_forcing_index`` values ``1..N`` to used cells.
+
+    Per spec §"shud_forcing_index is contiguous by canonical ordinal" (§2.3):
+    cells are sorted by ``canonical_ordinal`` ascending; the smallest ordinal
+    receives ``shud_forcing_index=1``, the next 2, and so on. The mapping is
+    ``{grid_cell_id: shud_forcing_index}``.
+
+    Post-conditions (fail-fast, raise :class:`MappingAlgorithmError`):
+
+    * Every input ``grid_cell_id`` is unique — a repeated id is a caller bug
+      (typically means the caller skipped :func:`derive_used_cell_subset`).
+    * Assigned values are exactly ``{1, 2, ..., N}`` where ``N ==
+      len(used_cells)`` — contiguous, unique.
+
+    Idempotent: two calls on the same input return equal dicts (Python
+    3.7+ dict preserves insertion order, but the sort key inside makes
+    the mapping order-independent of caller-supplied ordering).
+
+    Parameters
+    ----------
+    used_cells:
+        Cells returned by :func:`derive_used_cell_subset` (or an equivalent
+        unique-cell sequence). Input order is caller-owned; the function
+        sorts by ``canonical_ordinal`` internally.
+
+    Returns
+    -------
+    dict[str, int]
+        ``{grid_cell_id: shud_forcing_index}`` mapping with ``1..N``
+        contiguous values.
+
+    Raises
+    ------
+    MappingAlgorithmError
+        Input contains a duplicate ``grid_cell_id``, or the post-condition
+        contiguity check fails.
+    """
+    if not used_cells:
+        return {}
+    sorted_cells = sorted(used_cells, key=lambda c: int(c.canonical_ordinal))
+    result: dict[str, int] = {}
+    for index, cell in enumerate(sorted_cells, start=1):
+        if cell.grid_cell_id in result:
+            raise MappingAlgorithmError(
+                f"assign_shud_forcing_index received duplicate "
+                f"grid_cell_id={cell.grid_cell_id!r}; used_cells must be "
+                "unique per grid_cell_id"
+            )
+        result[cell.grid_cell_id] = index
+    n = len(sorted_cells)
+    # defense-in-depth: unreachable given the enumerate(sorted_cells, start=1)
+    # loop above (each iteration assigns a unique 1..n value), kept as a
+    # future-refactor guard against subtle changes to the loop shape.
+    if set(result.values()) != set(range(1, n + 1)):
+        raise MappingAlgorithmError(
+            f"assign_shud_forcing_index produced non-contiguous values "
+            f"{sorted(result.values())!r} for N={n}"
+        )
+    return result

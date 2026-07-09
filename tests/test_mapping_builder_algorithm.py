@@ -35,6 +35,7 @@ from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     make_snapshot,
 )
 from workers.mapping_builder import (
+    DistanceSanityBoundExceededError,
     ElementBarycenterOutOfCoverageError,
     ElementOwnership,
     GridSignatureMismatchError,
@@ -44,8 +45,12 @@ from workers.mapping_builder import (
     SupersededGridSnapshotError,
     UnregisteredGridSnapshotError,
     algorithm_id,
+    assign_shud_forcing_index,
+    derive_used_cell_subset,
     nearest_cell_barycenter_geodesic_v1,
+    resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
+    verify_half_cell_diagonal_sanity_bound,
 )
 from workers.mapping_builder import algorithm as algorithm_module
 
@@ -696,3 +701,422 @@ def test_element_ownership_frozen() -> None:
         record.element_id = 99  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         record.grid_cell_id = "x"  # type: ignore[misc]
+
+
+# --- §2.2 tie-break + sanity bound tests ----------------------------------
+
+
+def test_tie_break_selects_smallest_canonical_ordinal(tmp_path: pathlib.Path) -> None:
+    """Barycenter equidistant to two cells -> pick smallest canonical ordinal.
+
+    3x3 regular grid at (10.0°E, 20.0°N) with 0.1° step. Cell (10.0, 20.0)
+    is canonical_ordinal=5; cell (10.1, 20.0) is canonical_ordinal=6.
+    Placing the barycenter at (10.05, 20.0) puts it exactly between the two
+    same-latitude cells — by WGS84-ellipsoid symmetry the geodesic distances
+    are identical to within :data:`_GEODESIC_TIE_TOLERANCE_M`, triggering the
+    §2.2 tie-break. The rule picks the SMALLEST canonical ordinal, so ord5
+    must win.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    loader = InMemoryGridSnapshotLoader(
+        source_id="ifs",
+        grid_id="tie_grid",
+        snapshot=make_snapshot(
+            source_id="ifs",
+            grid_id="tie_grid",
+            cells=cells,
+            bbox_pad=0.5,
+        ),
+        cells=cells,
+    )
+    # Vertices arranged so the mean is exactly (10.05, 20.0). y_mean = 60.0/3
+    # is exact in IEEE-754; x_mean = 30.15/3 lands at the nearest float to
+    # 10.05 — either way, symmetry keeps the two candidate distances tied.
+    baseline = _single_element_basin(
+        tmp_path,
+        v1=(10.04, 19.99),
+        v2=(10.07, 19.99),
+        v3=(10.04, 20.02),
+    )
+    ownerships = nearest_cell_barycenter_geodesic_v1(
+        baseline_root=baseline,
+        source_id="ifs",
+        grid_id="tie_grid",
+        store=loader,
+    )
+    assert len(ownerships) == 1
+    (only,) = ownerships
+    # ord5 corresponds to grid_cell_id="4" (0-based cell index).
+    assert only.canonical_ordinal == 5, (
+        "tie-break MUST pick smallest canonical ordinal; got ord="
+        f"{only.canonical_ordinal}"
+    )
+    assert only.grid_cell_id == "4"
+    # Verify the tie was actually detected (not resolved by strict distance
+    # comparison alone).
+    assert only.tie_status.startswith("tied_with_"), (
+        "expected the two same-latitude cells to be flagged as tied, got "
+        f"tie_status={only.tie_status!r}"
+    )
+
+
+def test_tie_break_is_reproducible_across_runs(tmp_path: pathlib.Path) -> None:
+    """Two independent runs on the same input yield byte-identical ownerships.
+
+    Reproducibility is a first-class §7 determinism requirement. This test
+    builds two fresh loaders (so no cached state carries between runs) and
+    asserts the returned tuples compare equal.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+
+    def _fresh_loader() -> InMemoryGridSnapshotLoader:
+        return InMemoryGridSnapshotLoader(
+            source_id="ifs",
+            grid_id="tie_grid",
+            snapshot=make_snapshot(
+                source_id="ifs",
+                grid_id="tie_grid",
+                cells=cells,
+                bbox_pad=0.5,
+            ),
+            cells=cells,
+        )
+
+    baseline = _single_element_basin(
+        tmp_path,
+        v1=(10.04, 19.99),
+        v2=(10.07, 19.99),
+        v3=(10.04, 20.02),
+    )
+    result_1 = nearest_cell_barycenter_geodesic_v1(
+        baseline_root=baseline,
+        source_id="ifs",
+        grid_id="tie_grid",
+        store=_fresh_loader(),
+    )
+    result_2 = nearest_cell_barycenter_geodesic_v1(
+        baseline_root=baseline,
+        source_id="ifs",
+        grid_id="tie_grid",
+        store=_fresh_loader(),
+    )
+    assert result_1 == result_2, (
+        "identical input MUST yield byte-identical ownership tuples "
+        "(§7 determinism requirement)"
+    )
+
+
+def test_sanity_bound_blocks_when_distance_exceeds_half_cell_diagonal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """In-coverage barycenter far from any cell -> DistanceSanityBoundExceededError.
+
+    Constructs a 3x3 regular grid (0.1° step at 20°N, half-cell-diagonal
+    ~7.6 km) but overrides the snapshot bbox to a much wider box so the
+    barycenter still passes G2 coverage. Placing the barycenter at (10.9°E,
+    20.5°N) lands it ~99 km from the nearest cell — well beyond the local
+    half-cell-diagonal plus tolerance. Fail-closed: no ownership escapes.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    loader = InMemoryGridSnapshotLoader(
+        source_id="ifs",
+        grid_id="sparse_grid",
+        snapshot=make_snapshot(
+            source_id="ifs",
+            grid_id="sparse_grid",
+            cells=cells,
+            bbox_override=(19.0, 21.0, 9.0, 11.0),  # wide bbox
+        ),
+        cells=cells,
+    )
+    # Barycenter at (10.9, 20.5) — inside bbox but ~99 km from nearest cell.
+    baseline = _single_element_basin(
+        tmp_path,
+        v1=(10.89, 20.49),
+        v2=(10.92, 20.49),
+        v3=(10.89, 20.52),
+    )
+    with pytest.raises(DistanceSanityBoundExceededError) as exc_info:
+        nearest_cell_barycenter_geodesic_v1(
+            baseline_root=baseline,
+            source_id="ifs",
+            grid_id="sparse_grid",
+            store=loader,
+        )
+    assert exc_info.value.element_id == 1
+    assert exc_info.value.distance_m > (
+        exc_info.value.half_cell_diagonal_m + exc_info.value.tolerance_m
+    )
+    # Half-diagonal for 0.1° step at 20°N is ~7.6 km; distance is ~99 km.
+    assert 6_000.0 < exc_info.value.half_cell_diagonal_m < 10_000.0, (
+        "half-cell-diagonal not km-scale — sanity-bound math is off"
+    )
+    assert exc_info.value.distance_m > 50_000.0, (
+        "test premise: barycenter must be ~99 km from nearest cell"
+    )
+    assert isinstance(exc_info.value, MappingAlgorithmError)
+
+
+def test_sanity_bound_passes_for_normal_element(tmp_path: pathlib.Path) -> None:
+    """Well-formed grid + barycenter near a cell center -> no sanity error.
+
+    Positive-path smoke test: distance is small relative to the local
+    half-cell-diagonal, so the bound MUST NOT fire. Guards against a
+    regression that would over-trigger the blocker on legitimate inputs.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    loader = InMemoryGridSnapshotLoader(
+        source_id="ifs",
+        grid_id="normal_grid",
+        snapshot=make_snapshot(
+            source_id="ifs",
+            grid_id="normal_grid",
+            cells=cells,
+            bbox_pad=0.5,
+        ),
+        cells=cells,
+    )
+    # Barycenter at (10.02, 20.02) — ~3 km from cell (10.0, 20.0).
+    baseline = _single_element_basin(
+        tmp_path,
+        v1=(10.01, 20.01),
+        v2=(10.04, 20.01),
+        v3=(10.01, 20.04),
+    )
+    ownerships = nearest_cell_barycenter_geodesic_v1(
+        baseline_root=baseline,
+        source_id="ifs",
+        grid_id="normal_grid",
+        store=loader,
+    )
+    assert len(ownerships) == 1
+    (only,) = ownerships
+    # Distance is km-scale but well below the ~7.6 km half-cell-diagonal.
+    assert 0.0 < only.geodesic_distance_m < 5_000.0, (
+        "distance-to-cell should be well below the half-cell-diagonal for a "
+        f"well-formed input; got {only.geodesic_distance_m}m"
+    )
+    # ord5 is (10.0, 20.0) → grid_cell_id="4".
+    assert only.grid_cell_id == "4"
+
+
+# --- §2.3 used-cell subset + shud_forcing_index tests ---------------------
+
+
+def _mk_ownership(element_id: int, cell: CanonicalGridCell) -> ElementOwnership:
+    """Build an ownership record with placeholder distance/tie/count fields.
+
+    §2.3 tests exercise the subset + index derivations directly, so realistic
+    distance values don't matter — only ``grid_cell_id`` and
+    ``canonical_ordinal`` feed downstream.
+    """
+    return ElementOwnership(
+        element_id=element_id,
+        grid_cell_id=cell.grid_cell_id,
+        canonical_ordinal=int(cell.canonical_ordinal),
+        geodesic_distance_m=0.0,
+        tie_status="unique",
+        candidate_count=1,
+    )
+
+
+def test_used_cell_subset_excludes_unreferenced_cells() -> None:
+    """9-cell grid, 3 elements referencing ord=2/5/7 -> subset is exactly those.
+
+    Cells with canonical_ordinal 1/3/4/6/8/9 are NOT referenced; they MUST
+    NOT appear in the subset (zero unused bindings, spec §"Only referenced
+    cells become binding cells").
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    cell_by_ord = {c.canonical_ordinal: c for c in cells}
+    ownerships = (
+        _mk_ownership(1, cell_by_ord[2]),
+        _mk_ownership(2, cell_by_ord[5]),
+        _mk_ownership(3, cell_by_ord[7]),
+    )
+    subset = derive_used_cell_subset(ownerships, cells)
+    assert len(subset) == 3, (
+        "subset must contain exactly the referenced cells, not the full grid"
+    )
+    assert [c.canonical_ordinal for c in subset] == [2, 5, 7], (
+        "subset must be ordered by canonical_ordinal ascending"
+    )
+    assert [c.grid_cell_id for c in subset] == [
+        cell_by_ord[2].grid_cell_id,
+        cell_by_ord[5].grid_cell_id,
+        cell_by_ord[7].grid_cell_id,
+    ]
+
+
+def test_used_cell_subset_dedupes_shared_cells() -> None:
+    """Multiple elements pointing at same cell -> subset entry appears once.
+
+    Spec §"Only referenced cells become binding cells" — many-to-one is
+    the entire point of the mapping (M elements → N<=M cells); the subset
+    dedupes so that each USED cell contributes one binding entry.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=3, lat_count=3
+    )
+    target_cell = next(c for c in cells if c.canonical_ordinal == 5)
+    ownerships = tuple(_mk_ownership(i, target_cell) for i in range(1, 4))
+    subset = derive_used_cell_subset(ownerships, cells)
+    assert len(subset) == 1, "shared cell must appear exactly once in subset"
+    assert subset[0].canonical_ordinal == 5
+    assert subset[0].grid_cell_id == target_cell.grid_cell_id
+
+
+def test_shud_forcing_index_is_1_to_N_contiguous() -> None:
+    """5 used cells -> shud_forcing_index values = {1, 2, 3, 4, 5}.
+
+    Spec §"shud_forcing_index is contiguous by canonical ordinal": values
+    MUST be contiguous ``1..N`` and unique. This test checks the SET of
+    values; :func:`test_shud_forcing_index_ordered_by_canonical_ordinal`
+    checks the ordering separately.
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=5, lat_count=1
+    )
+    assert len(cells) == 5
+    result = assign_shud_forcing_index(cells)
+    assert len(result) == 5, "one entry per used cell"
+    assert set(result.values()) == {1, 2, 3, 4, 5}, (
+        "shud_forcing_index values must be contiguous 1..N"
+    )
+    # All grid_cell_ids present exactly once.
+    assert set(result.keys()) == {c.grid_cell_id for c in cells}
+
+
+def test_shud_forcing_index_ordered_by_canonical_ordinal() -> None:
+    """Cells with canonical_ordinal [7, 3, 5] -> {ord3: 1, ord5: 2, ord7: 3}.
+
+    Spec §"shud_forcing_index is contiguous by canonical ordinal": the cell
+    with the SMALLEST canonical ordinal gets ``shud_forcing_index=1``, next
+    gets 2, etc. Input order does not affect the assignment.
+    """
+    cell_a = CanonicalGridCell(
+        grid_cell_id="A", longitude=1.0, latitude=1.0, canonical_ordinal=7
+    )
+    cell_b = CanonicalGridCell(
+        grid_cell_id="B", longitude=2.0, latitude=1.0, canonical_ordinal=3
+    )
+    cell_c = CanonicalGridCell(
+        grid_cell_id="C", longitude=3.0, latitude=1.0, canonical_ordinal=5
+    )
+    # Deliberately pass cells in NON-canonical-ordinal order to prove the
+    # function sorts internally.
+    result = assign_shud_forcing_index([cell_a, cell_b, cell_c])
+    assert result == {"B": 1, "C": 2, "A": 3}, (
+        "canonical_ordinal [3, 5, 7] -> shud_forcing_index [1, 2, 3]; "
+        f"got {result!r}"
+    )
+
+
+def test_shud_forcing_index_reproducible_across_runs() -> None:
+    """Two independent runs on same input -> identical shud_forcing_index dict.
+
+    Also proves order-independence: reversing the input list must produce
+    the same mapping (Python dict equality; both key set and value pairs
+    identical).
+    """
+    cells = make_regular_grid_cells(
+        lon0=9.9, lat0=19.9, lon_step=0.1, lat_step=0.1, lon_count=5, lat_count=1
+    )
+    result_1 = assign_shud_forcing_index(cells)
+    result_2 = assign_shud_forcing_index(cells)
+    assert result_1 == result_2, (
+        "identical input MUST yield identical shud_forcing_index mapping "
+        "(§7 determinism requirement)"
+    )
+    result_reversed = assign_shud_forcing_index(list(reversed(cells)))
+    assert result_reversed == result_1, (
+        "shud_forcing_index MUST be independent of input cell order"
+    )
+
+
+# --- direct unit tests for §2.2 helpers -----------------------------------
+
+
+def test_resolve_tie_by_canonical_ordinal_empty_raises() -> None:
+    """Empty candidate sequence -> MappingAlgorithmError.
+
+    Guards the caller-owned "non-empty" contract documented on
+    :func:`workers.mapping_builder.resolve_tie_by_canonical_ordinal`. The
+    entry-point path (``nearest_cell_barycenter_geodesic_v1``) always passes at
+    least the picked cell itself, so the empty branch is unreachable in
+    production — but the helper is public API and must fail loudly rather than
+    ``min()`` on an empty sequence when a future caller mis-wires it.
+    """
+    with pytest.raises(MappingAlgorithmError) as exc_info:
+        resolve_tie_by_canonical_ordinal([])
+    assert "at least one candidate" in str(exc_info.value)
+
+
+def test_verify_half_cell_diagonal_sanity_bound_direct() -> None:
+    """Direct within-/exceeding-bound coverage bypassing the entry point.
+
+    Constructs a minimal ownership + cell + snapshot inline so the sanity-bound
+    invariant gate is exercised without the mesh / CRS / G2 stack in the way.
+    Symmetrically mirrors the direct coverage of :func:`derive_used_cell_subset`
+    and :func:`assign_shud_forcing_index`.
+    """
+    cell = CanonicalGridCell(
+        grid_cell_id="42",
+        longitude=10.0,
+        latitude=20.0,
+        canonical_ordinal=1,
+    )
+    snapshot = make_snapshot(
+        source_id="ifs",
+        grid_id="direct_bound_grid",
+        cells=[cell],
+        bbox_pad=0.5,
+        native_resolution=0.1,
+    )
+    # within-bound: mm-scale distance << km-scale half-diagonal for 0.1° step.
+    ok_ownership = ElementOwnership(
+        element_id=1,
+        grid_cell_id=cell.grid_cell_id,
+        canonical_ordinal=int(cell.canonical_ordinal),
+        geodesic_distance_m=1.0e-4,
+        tie_status="unique",
+        candidate_count=1,
+    )
+    assert (
+        verify_half_cell_diagonal_sanity_bound(
+            ownership=ok_ownership, cell=cell, snapshot=snapshot
+        )
+        is None
+    ), "within-bound distance must pass the sanity gate with no return value"
+
+    # exceeding-bound: 99 km distance vs ~7.6 km half-diagonal at 20°N / 0.1°.
+    bad_ownership = ElementOwnership(
+        element_id=7,
+        grid_cell_id=cell.grid_cell_id,
+        canonical_ordinal=int(cell.canonical_ordinal),
+        geodesic_distance_m=99_000.0,
+        tie_status="unique",
+        candidate_count=1,
+    )
+    with pytest.raises(DistanceSanityBoundExceededError) as exc_info:
+        verify_half_cell_diagonal_sanity_bound(
+            ownership=bad_ownership, cell=cell, snapshot=snapshot
+        )
+    err = exc_info.value
+    assert err.element_id == 7
+    assert err.distance_m == 99_000.0
+    # Half-diagonal at 20°N for 0.1° step is ~7.6 km.
+    assert 6_000.0 < err.half_cell_diagonal_m < 10_000.0
+    assert err.tolerance_m == 1.0e-3
+    assert err.grid_cell_id == "42"
+    assert isinstance(err, MappingAlgorithmError)
