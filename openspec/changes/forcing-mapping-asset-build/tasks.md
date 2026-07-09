@@ -53,7 +53,7 @@
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_rewrite.py -k "hydrologic_core_fingerprint"` collects the positive computation + equality gate (green build produces byte-identical fingerprints) plus the drift matrix (per-file-category, state_schema, solver_config, sp_att_non_forc) plus the FORC-only invariance, determinism, domain-separation, and multi-file-category cases — all covered surfaces of docs §Gate G10 exercised — and all cases pass with the drift cases failing closed as G4 blockers.
   - Non-goal for 3.4: no state snapshot compatibility (that is Change 5 / G10 runtime).
 - [x] 3.5 Enforce the "no legacy weather path in active package" assertion: assert the variant's active forcing tree contains no legacy CMFD weather CSV filenames (e.g. `X<lon>Y<lat>.csv` or `X<n>.csv` under active forcing per docs §8.2) and no builder-written cycle `.tsd.forc`; fail closed when any legacy weather path or forbidden file appears in the active variant tree.
-  - Required evidence: tests prove a green build emits none of these files, and a negative test that injects a legacy `X<lon>Y<lat>.csv` into the variant's active forcing directory fails closed as a G4 blocker.
+  - Required evidence: `uv run pytest -q tests/test_mapping_builder_rewrite.py -k "no_legacy_weather_path"` collects the green-build proof plus three injection blockers (X<lon>Y<lat>.csv, X<n>.csv, builder-written cycle .tsd.forc) plus the case-insensitivity matrix, recursive-scan proof, and missing-subdir refusal — all cases pass with the negative cases failing closed as G4 blockers.
   - Non-goal for 3.5: no runtime producer change (§8.1 boundary is enforced against the builder here, not against the producer).
 
 ## 4. Direct-Grid Binding Artifact

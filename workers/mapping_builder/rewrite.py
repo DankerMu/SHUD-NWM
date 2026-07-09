@@ -122,8 +122,8 @@ retired — the SUB-6/SUB-7/SUB-8/SUB-9 review loops converged on
 ``verify_*`` as the canonical gate-namespace prefix, and subsequent gates
 SHALL adopt it directly at author time.
 
-Gate orchestration (SUB-8 + SUB-9 -> SUB-13 deferral)
------------------------------------------------------
+Gate orchestration (SUB-8 + SUB-9 + SUB-10 -> SUB-13 deferral)
+--------------------------------------------------------------
 Several ``verify_*`` gates ship in this module as standalone primitives:
 :func:`verify_non_forc_columns_unchanged` (SUB-8, §3.2),
 :func:`verify_non_sp_att_checksums_equal` (SUB-9, §3.3),
@@ -692,17 +692,27 @@ HYDROLOGIC_CORE_FINGERPRINT_LABELS: tuple[str, ...] = (
 #   then ``.csv`` with no ``Y`` in between.
 # * :data:`_CYCLE_TSD_FORC_PATTERN` — docs §8.1 boundary: the runtime
 #   forcing producer owns cycle ``.tsd.forc`` (with an embedded forecast
-#   cycle startdate). The mapping builder MUST NOT write one. A run of 8+
-#   consecutive digits is the reliable date-signature marker (any
-#   ``YYYYMMDD`` or ``YYYYMMDDHH`` cycle stamp qualifies), and it never
-#   collides with baseline standard filenames like ``qhh.tsd.forc`` (no
-#   digits) or per-basin ``.tsd.forc`` with short numeric suffixes (< 8
-#   digits).
+#   cycle startdate). The mapping builder MUST NOT write one. The pattern
+#   requires an 8-digit run whose leading two digits are ``19``, ``20``,
+#   or ``21`` (a plausible cycle-year prefix) so the marker keys off a
+#   real date-shape ``YYYYMMDD`` / ``YYYYMMDDHH`` cycle stamp instead of
+#   any arbitrary 8-digit substring. A bare ``\d{8}`` marker would
+#   false-block realistic non-cycle names — e.g. ``basin12345678.tsd.forc``
+#   (embedded basin ID) — which are legal in the active tree. It still
+#   never collides with baseline standard filenames like ``qhh.tsd.forc``
+#   (no digits) or per-basin ``.tsd.forc`` with short numeric suffixes
+#   (< 8 digits), and it retains coverage for both the pure date name
+#   ``20200101.tsd.forc`` and the prefixed cycle name
+#   ``cycle_2020010100.tsd.forc``. See
+#   ``test_no_legacy_weather_path_basin_id_with_8_digits_passes`` for the
+#   collision-avoidance regression test.
 _LEGACY_LONLAT_CSV_PATTERN = re.compile(
     r"^X\d+(?:\.\d+)?Y\d+(?:\.\d+)?\.csv$", re.IGNORECASE
 )
 _LEGACY_NUMBERED_CSV_PATTERN = re.compile(r"^X\d+\.csv$", re.IGNORECASE)
-_CYCLE_TSD_FORC_PATTERN = re.compile(r"^.*\d{8}.*\.tsd\.forc$", re.IGNORECASE)
+_CYCLE_TSD_FORC_PATTERN = re.compile(
+    r"^.*(?:19|20|21)\d{6}.*\.tsd\.forc$", re.IGNORECASE
+)
 
 
 # Ordered list of (pattern_name, compiled regex). Order determines which
@@ -2132,7 +2142,8 @@ def verify_no_legacy_weather_path_in_active_tree(
         ``active_forcing_subdir`` does not resolve to an existing directory
         under ``package_root``.
     SpAttRewriteError
-        ``package_root`` is not a directory.
+        ``package_root`` is not a :class:`pathlib.Path` (type refusal at
+        the boundary), or ``package_root`` is not an existing directory.
     """
     if not isinstance(package_root, pathlib.Path):
         raise SpAttRewriteError(
@@ -2153,9 +2164,11 @@ def verify_no_legacy_weather_path_in_active_tree(
     # ``rglob("*")`` recursively enumerates every file + dir under the active
     # tree. Sort to make the first-mismatch report reproducible across runs /
     # OS iteration orders (spec §7 determinism). Only regular files are
-    # candidates — directories and symlinks-to-directories are skipped
-    # (symlinks-to-files ARE hashed by intent, so they participate here too
-    # to catch a symlink that spells the legacy name).
+    # candidates — directories and symlinks-to-directories are skipped.
+    # ``rglob("*")`` follows symlinks by default; symlinks-to-files
+    # participate in the filename scan (their basenames are matched against
+    # the legacy patterns), so a symlink named ``X100Y50.csv`` is caught
+    # just like a real file.
     for candidate in sorted(active_root.rglob("*")):
         if not candidate.is_file():
             continue
