@@ -51,11 +51,11 @@ from workers.mapping_builder import (
     algorithm_id,
     assign_shud_forcing_index,
     derive_used_cell_subset,
-    enforce_small_basin_gate,
     nearest_cell_barycenter_geodesic_v1,
     resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
     verify_half_cell_diagonal_sanity_bound,
+    verify_small_basin_gate,
 )
 from workers.mapping_builder import algorithm as algorithm_module
 
@@ -1134,7 +1134,7 @@ def _mk_cells(count: int) -> tuple[CanonicalGridCell, ...]:
     """Build ``count`` distinct :class:`CanonicalGridCell` records.
 
     Only ``grid_cell_id`` and ``canonical_ordinal`` need to be distinct for
-    :func:`enforce_small_basin_gate` — the gate looks at ``len(used_cells)``
+    :func:`verify_small_basin_gate` — the gate looks at ``len(used_cells)``
     only. Lon/lat are set to distinct values so the record is well-formed
     without pretending to be a real snapshot.
     """
@@ -1154,7 +1154,7 @@ def test_small_basin_gate_threshold_pinned() -> None:
 
     Guards against a future drift of ``SMALL_BASIN_MIN_USED_CELLS`` without a
     corresponding spec/docs update — the strict ``<`` comparison in
-    :func:`enforce_small_basin_gate` pairs with this value per docs §6.5.
+    :func:`verify_small_basin_gate` pairs with this value per docs §6.5.
     """
     from workers.mapping_builder import (
         SMALL_BASIN_MIN_USED_CELLS as reexported,
@@ -1180,7 +1180,7 @@ def test_small_basin_gate_refuses_1_cell_default() -> None:
     """
     used_cells = _mk_cells(1)
     with pytest.raises(SmallBasinBlockedError) as exc_info:
-        enforce_small_basin_gate(used_cells)
+        verify_small_basin_gate(used_cells)
     assert exc_info.value.used_cell_count == 1
     assert exc_info.value.threshold == SMALL_BASIN_MIN_USED_CELLS
     assert exc_info.value.threshold == 4
@@ -1197,9 +1197,10 @@ def test_small_basin_gate_refuses_threshold_minus_1_default() -> None:
     n = SMALL_BASIN_MIN_USED_CELLS - 1
     used_cells = _mk_cells(n)
     with pytest.raises(SmallBasinBlockedError) as exc_info:
-        enforce_small_basin_gate(used_cells)
+        verify_small_basin_gate(used_cells)
     assert exc_info.value.used_cell_count == n
     assert exc_info.value.threshold == SMALL_BASIN_MIN_USED_CELLS
+    assert isinstance(exc_info.value, MappingAlgorithmError)
 
 
 def test_small_basin_gate_passes_at_threshold_default() -> None:
@@ -1211,7 +1212,7 @@ def test_small_basin_gate_passes_at_threshold_default() -> None:
     A) — at the boundary, no approval is required.
     """
     used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS)
-    result = enforce_small_basin_gate(used_cells)
+    result = verify_small_basin_gate(used_cells)
     assert result is None, (
         f"used_cell_count == {SMALL_BASIN_MIN_USED_CELLS} is NOT below "
         "threshold under strict `<` comparison; approval MUST NOT be required"
@@ -1226,7 +1227,7 @@ def test_small_basin_gate_passes_above_threshold_default() -> None:
     raise. Guards against a regression that would over-trigger the blocker.
     """
     used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS + 5)
-    result = enforce_small_basin_gate(used_cells)
+    result = verify_small_basin_gate(used_cells)
     assert result is None
 
 
@@ -1241,7 +1242,7 @@ def test_small_basin_gate_1_cell_with_approval_proceeds() -> None:
     """
     approval = SmallBasinApproval(approver_id="ops-1", used_cell_count=1)
     used_cells = _mk_cells(1)
-    result = enforce_small_basin_gate(used_cells, approval=approval)
+    result = verify_small_basin_gate(used_cells, approval=approval)
     assert result is approval, (
         "approval MUST be returned verbatim (same object) so SUB-13 records "
         "the exact operator sign-off as supplied"
@@ -1262,7 +1263,7 @@ def test_small_basin_gate_approval_with_empty_approver_id_fails_closed() -> None
 
     # Empty string.
     with pytest.raises(SmallBasinBlockedError) as exc_info:
-        enforce_small_basin_gate(
+        verify_small_basin_gate(
             used_cells,
             approval=SmallBasinApproval(approver_id="", used_cell_count=1),
         )
@@ -1271,12 +1272,12 @@ def test_small_basin_gate_approval_with_empty_approver_id_fails_closed() -> None
 
     # Whitespace-only string (space / tab / newline mix).
     with pytest.raises(SmallBasinBlockedError):
-        enforce_small_basin_gate(
+        verify_small_basin_gate(
             used_cells,
             approval=SmallBasinApproval(approver_id="   ", used_cell_count=1),
         )
     with pytest.raises(SmallBasinBlockedError):
-        enforce_small_basin_gate(
+        verify_small_basin_gate(
             used_cells,
             approval=SmallBasinApproval(approver_id="\t\n", used_cell_count=1),
         )
@@ -1295,7 +1296,7 @@ def test_small_basin_gate_approval_ignored_when_above_threshold() -> None:
         used_cell_count=SMALL_BASIN_MIN_USED_CELLS + 1,
     )
     used_cells = _mk_cells(SMALL_BASIN_MIN_USED_CELLS + 1)
-    result = enforce_small_basin_gate(used_cells, approval=approval)
+    result = verify_small_basin_gate(used_cells, approval=approval)
     assert result is None, (
         "extra approvals for a large basin MUST be discarded (returned as "
         "None); the caller's SUB-13 code should see 'no approval needed'"
@@ -1314,7 +1315,7 @@ def test_small_basin_gate_approval_mismatch_raises() -> None:
     used_cells = _mk_cells(1)
     approval = SmallBasinApproval(approver_id="ops-1", used_cell_count=3)
     with pytest.raises(SmallBasinApprovalMismatchError) as exc_info:
-        enforce_small_basin_gate(used_cells, approval=approval)
+        verify_small_basin_gate(used_cells, approval=approval)
     assert exc_info.value.approver_id == "ops-1"
     assert exc_info.value.declared_used_cell_count == 3
     assert exc_info.value.observed_used_cell_count == 1
@@ -1343,7 +1344,7 @@ def test_small_basin_gate_default_refusal_returns_no_artifact() -> None:
     try:
         # Idiomatic caller shape: gate output feeds directly into evidence
         # bundling; on raise, nothing binds.
-        ownership_artifact = enforce_small_basin_gate(
+        ownership_artifact = verify_small_basin_gate(
             used_cells, approval=approval
         )
         forcing_index_artifact = {"1": 1}  # would only run on gate pass

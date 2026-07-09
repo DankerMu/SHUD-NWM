@@ -17,11 +17,11 @@ from workers.mapping_builder.algorithm import (
     algorithm_id,
     assign_shud_forcing_index,
     derive_used_cell_subset,
-    enforce_small_basin_gate,
     nearest_cell_barycenter_geodesic_v1,
     resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
     verify_half_cell_diagonal_sanity_bound,
+    verify_small_basin_gate,
 )
 from workers.mapping_builder.integrity import (
     G1_MIN_TRIANGLE_AREA,
@@ -110,7 +110,6 @@ __all__ = [
     "build_ancillary_inventory",
     "classify_baseline",
     "derive_used_cell_subset",
-    "enforce_small_basin_gate",
     "nearest_cell_barycenter_geodesic_v1",
     "read_sp_mesh_geometry",
     "resolve_tie_by_canonical_ordinal",
@@ -120,4 +119,5 @@ __all__ = [
     "verify_grid_identity_precondition",
     "verify_half_cell_diagonal_sanity_bound",
     "verify_package_crs",
+    "verify_small_basin_gate",
 ]

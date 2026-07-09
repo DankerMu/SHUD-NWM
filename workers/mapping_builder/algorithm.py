@@ -1055,13 +1055,13 @@ class SmallBasinApproval:
     approver_id:
         Non-empty identifier of the human/service that approved the
         small-basin proceed. An empty or whitespace-only value is treated
-        as absent by :func:`enforce_small_basin_gate` and fails closed.
+        as absent by :func:`verify_small_basin_gate` and fails closed.
     used_cell_count:
         The used-cell count the approval was granted for. Included so the
         reviewer can see the exact number the override was granted for
         (record-verbatim contract for SUB-13). Cross-checked against the
         actually-observed count at gate time — see
-        :func:`enforce_small_basin_gate` and
+        :func:`verify_small_basin_gate` and
         :class:`SmallBasinApprovalMismatchError`.
     """
 
@@ -1144,7 +1144,7 @@ class SmallBasinApprovalMismatchError(MappingAlgorithmError):
         self.observed_used_cell_count = observed_used_cell_count
 
 
-def enforce_small_basin_gate(
+def verify_small_basin_gate(
     used_cells: Sequence[CanonicalGridCell],
     *,
     approval: SmallBasinApproval | None = None,
