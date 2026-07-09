@@ -1,6 +1,8 @@
 """Mapping builder worker — offline direct-grid mapping asset producer (Change forcing-mapping-asset-build)."""
 
 from workers.mapping_builder.algorithm import (
+    _HALF_CELL_DIAGONAL_TOLERANCE_M,
+    DistanceSanityBoundExceededError,
     ElementBarycenterOutOfCoverageError,
     ElementOwnership,
     GridSignatureMismatchError,
@@ -10,7 +12,11 @@ from workers.mapping_builder.algorithm import (
     SupersededGridSnapshotError,
     UnregisteredGridSnapshotError,
     algorithm_id,
+    assign_shud_forcing_index,
+    check_half_cell_diagonal_sanity_bound,
+    derive_used_cell_subset,
     nearest_cell_barycenter_geodesic_v1,
+    resolve_tie_by_canonical_ordinal,
     verify_grid_identity_precondition,
 )
 from workers.mapping_builder.integrity import (
@@ -59,6 +65,7 @@ __all__ = [
     "BaselineClassificationReport",
     "BaselineIntegrityError",
     "BaselineIntegrityReport",
+    "DistanceSanityBoundExceededError",
     "DuplicateCoordinateCluster",
     "ElementBarycenterOutOfCoverageError",
     "ElementOwnership",
@@ -90,11 +97,16 @@ __all__ = [
     "UnparseableMeshError",
     "UnparseablePrjError",
     "UnregisteredGridSnapshotError",
+    "_HALF_CELL_DIAGONAL_TOLERANCE_M",
     "algorithm_id",
+    "assign_shud_forcing_index",
     "build_ancillary_inventory",
+    "check_half_cell_diagonal_sanity_bound",
     "classify_baseline",
+    "derive_used_cell_subset",
     "nearest_cell_barycenter_geodesic_v1",
     "read_sp_mesh_geometry",
+    "resolve_tie_by_canonical_ordinal",
     "verify_baseline_inv1_end_to_end",
     "verify_g0_baseline",
     "verify_g1_non_degenerate_triangles",
