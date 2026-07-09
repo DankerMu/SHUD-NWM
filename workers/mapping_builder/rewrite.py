@@ -28,7 +28,7 @@ Public entry points
        pre-SHA-256 (INV-1 hard block). On raise the variant file is removed.
     9. Return :class:`SpAttRewriteReport` carrying old/new SHA-256, sizes,
        semantic diff, and used-cell count.
-* :func:`prove_non_forc_columns_unchanged` — G4 standalone gate: parses
+* :func:`verify_non_forc_columns_unchanged` — G4 standalone gate: parses
   baseline + variant and asserts equal schema, row count, element-ID set,
   and byte + semantic equality of all non-``FORC`` column tokens keyed by
   element ID.
@@ -60,6 +60,30 @@ plus ownership/index consistency) than G0/G1 (baseline package integrity)
 or G2/G3 (grid registry + WGS84 coverage). Keeping the roots distinct
 lets callers differentiate the three families with dedicated ``except``
 clauses.
+
+Gate-naming convention (mapping_builder namespace)
+--------------------------------------------------
+Fail-closed invariant gates in :mod:`workers.mapping_builder` use the
+``verify_*`` prefix uniformly. The return value discriminates outcome:
+
+* ``None`` iff the gate passed with no artifact needed;
+* a dataclass / artifact iff the gate passed with a caller-visible payload;
+* ``raise`` iff the gate failed.
+
+Applies to:
+:func:`verify_non_forc_columns_unchanged` (this module),
+:func:`workers.mapping_builder.verify_grid_identity_precondition`,
+:func:`workers.mapping_builder.verify_package_crs`,
+:func:`workers.mapping_builder.verify_g0_baseline`,
+:func:`workers.mapping_builder.verify_g1_non_degenerate_triangles`,
+:func:`workers.mapping_builder.verify_baseline_inv1_end_to_end`,
+:func:`workers.mapping_builder.verify_half_cell_diagonal_sanity_bound`,
+:func:`workers.mapping_builder.verify_small_basin_gate`.
+
+Historical variants (``check_*``, ``enforce_*``, ``prove_*``) are
+retired — the SUB-6/SUB-7/SUB-8 review loops converged on ``verify_*``
+as the canonical gate-namespace prefix, and subsequent gates SHALL
+adopt it directly at author time.
 """
 
 from __future__ import annotations
@@ -105,6 +129,7 @@ class BaselineImmutabilityViolationError(SpAttRewriteError):
 
     def __init__(
         self,
+        *,
         baseline_path: pathlib.Path,
         pre_sha256: str,
         post_sha256: str,
@@ -533,6 +558,19 @@ def _parse_sp_att_file(path: pathlib.Path) -> _ParsedSpAtt:
                 f"{path.name}: data row {row_index + 1} has {len(tokens)} "
                 f"tokens, expected >= {len(schema)}"
             )
+        # Fail-closed on extra tokens per row: the schema declares exactly
+        # ``len(schema)`` columns, so any additional non-whitespace token in
+        # a data row is a schema violation that would otherwise be silently
+        # truncated by ``tokens[: len(schema)]`` below. A drifted schema is
+        # a G4 blocker — we cannot claim byte-level non-``FORC`` equality
+        # if the parser silently drops trailing columns.
+        if len(tokens) > len(schema):
+            raise SpAttRewriteError(
+                f"{path.name}: data row {row_index + 1} has {len(tokens)} "
+                f"tokens, expected exactly {len(schema)} per declared "
+                f"schema {list(schema)!r} — extra tokens rejected to "
+                "prevent silent schema drift"
+            )
         try:
             int(tokens[0])
         except ValueError as exc:
@@ -542,6 +580,21 @@ def _parse_sp_att_file(path: pathlib.Path) -> _ParsedSpAtt:
             ) from exc
         raw_data_lines.append(raw_line)
         parsed_rows.append(tuple(tokens[: len(schema)]))
+
+    # Fail-closed on extra data rows past ``n_rows``: any additional
+    # non-blank line past the declared row count is a structural
+    # inconsistency that would otherwise be stashed away in
+    # ``trailing_content`` and silently preserved in the variant. The
+    # header declares n_rows; the file MUST NOT contain undeclared data.
+    for extra_index in range(row_end, len(lines_with_terms)):
+        extra_line = lines_with_terms[extra_index]
+        if extra_line.rstrip("\r\n").strip():
+            raise SpAttRewriteError(
+                f"{path.name}: found non-blank content at line "
+                f"{extra_index + 1} past declared n_rows={n_rows} "
+                "(row_end); extra data rows rejected to prevent silent "
+                "row-count drift"
+            )
 
     trailing_content = "".join(lines_with_terms[row_end:])
 
@@ -722,13 +775,13 @@ def emit_semantic_diff(
     return SemanticDiff(entries=tuple(entries))
 
 
-def prove_non_forc_columns_unchanged(
+def verify_non_forc_columns_unchanged(
     baseline_att_path: pathlib.Path,
     variant_att_path: pathlib.Path,
 ) -> None:
-    """Prove baseline and variant ``.sp.att`` differ only in ``FORC``.
+    """Verify baseline and variant ``.sp.att`` differ only in ``FORC``.
 
-    G4 non-``FORC``-unchanged proof — callable standalone for post-hoc
+    G4 non-``FORC``-unchanged gate — callable standalone for post-hoc
     verification (e.g. by an evidence bundler). Parses both files and
     asserts:
 
@@ -905,6 +958,26 @@ def copy_and_rewrite_sp_att_forc(
             f"baseline .sp.att does not exist or is not a file: {baseline_att_path}"
         )
 
+    # Step 1b: INV-2 case-insensitive filesystem guard. ``Path.resolve()``
+    # normalizes ``..`` and symlinks but does NOT case-fold, so ``foo.att``
+    # and ``FOO.att`` compare non-equal as strings while ``os.replace``
+    # would overwrite the baseline via the same inode on macOS APFS/HFS+
+    # (default case-insensitive) or Windows NTFS. ``os.path.samefile``
+    # compares by (device, inode) and catches the alias regardless of
+    # spelling. Only meaningful when both paths already exist on disk;
+    # the resolve() string check above is the pre-write fallback.
+    if variant_att_path.exists():
+        try:
+            if os.path.samefile(baseline_att_path, variant_att_path):
+                raise SpAttRewriteError(
+                    f"variant_att_path {variant_att_path} aliases "
+                    f"baseline_att_path {baseline_att_path} on a "
+                    "case-insensitive filesystem; INV-2 requires "
+                    "distinct paths (baseline MUST NOT be overwritten)"
+                )
+        except FileNotFoundError:  # pragma: no cover - race between exists() and samefile()
+            pass
+
     # Step 2: pre-SHA-256 (INV-1 anchor).
     baseline_pre_sha = _sha256_file(baseline_att_path)
     baseline_size = baseline_att_path.stat().st_size
@@ -985,8 +1058,8 @@ def copy_and_rewrite_sp_att_forc(
             )
         )
 
-    # Step 6: prove non-FORC columns unchanged in-memory (defense in depth).
-    _prove_non_forc_columns_unchanged_in_memory(parsed, new_raw_data_lines)
+    # Step 6: verify non-FORC columns unchanged in-memory (defense in depth).
+    _verify_non_forc_columns_unchanged_in_memory(parsed, new_raw_data_lines)
 
     # Step 7: emit semantic diff.
     semantic_diff = emit_semantic_diff(baseline_forc_rows, variant_forc_rows)
@@ -1049,11 +1122,11 @@ def copy_and_rewrite_sp_att_forc(
     )
 
 
-def _prove_non_forc_columns_unchanged_in_memory(
+def _verify_non_forc_columns_unchanged_in_memory(
     baseline: _ParsedSpAtt,
     variant_raw_data_lines: Sequence[str],
 ) -> None:
-    """In-memory equivalent of :func:`prove_non_forc_columns_unchanged`.
+    """In-memory equivalent of :func:`verify_non_forc_columns_unchanged`.
 
     Runs BEFORE any variant byte hits disk (spec §"the builder fails
     closed when any non-FORC value differs"). Parses the newly-built
@@ -1069,7 +1142,19 @@ def _prove_non_forc_columns_unchanged_in_memory(
     variant_by_id: dict[int, tuple[str, ...]] = {}
     for raw_line in variant_raw_data_lines:
         content = raw_line.rstrip("\r\n")
-        tokens = tuple(content.split()[: len(baseline.schema)])
+        all_tokens = content.split()
+        # Mirror the disk parser's "extra tokens per row" rejection: if the
+        # variant row somehow carries more tokens than the baseline schema
+        # declares, silently truncating via ``[: len(schema)]`` would hide a
+        # schema drift injected between parse and write. Fail closed instead.
+        if len(all_tokens) > len(baseline.schema):
+            raise SpAttRewriteError(
+                f"variant data row {raw_line!r} has {len(all_tokens)} "
+                f"tokens, expected exactly {len(baseline.schema)} per "
+                f"baseline schema {list(baseline.schema)!r} — extra "
+                "tokens rejected to prevent silent schema drift"
+            )
+        tokens = tuple(all_tokens[: len(baseline.schema)])
         variant_by_id[int(tokens[0])] = tokens
     baseline_ids = set(baseline_by_id)
     variant_ids = set(variant_by_id)

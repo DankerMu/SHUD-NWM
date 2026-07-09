@@ -9,7 +9,7 @@ Coverage
   (out-of-range, non-integer, unmapped element, multiset mismatch); INV-2
   variant-path safety; INV-1 baseline immutability enforcement via
   monkey-patched SHA-256.
-* §3.2 :func:`prove_non_forc_columns_unchanged` — schema/row count/element
+* §3.2 :func:`verify_non_forc_columns_unchanged` — schema/row count/element
   ID/non-FORC column change blockers.
 * :func:`emit_semantic_diff` — deterministic ordering by element_id and
   FORC-only content.
@@ -48,8 +48,8 @@ from workers.mapping_builder import (
     copy_and_rewrite_sp_att_forc,
     emit_semantic_diff,
     parse_sp_att_forc_rows,
-    prove_non_forc_columns_unchanged,
     record_sp_att_checksums,
+    verify_non_forc_columns_unchanged,
 )
 from workers.mapping_builder import rewrite as rewrite_module
 
@@ -476,12 +476,12 @@ def test_forc_multiset_mismatch_blocks(tmp_path: pathlib.Path) -> None:
 
 
 def test_non_forc_column_change_blocks(tmp_path: pathlib.Path) -> None:
-    """prove_non_forc_columns_unchanged catches a SOIL column change.
+    """verify_non_forc_columns_unchanged catches a SOIL column change.
 
     Hand-crafts a variant .sp.att where element_id=1's SOIL differs from
     the baseline. Since the variant is NOT produced via
     :func:`copy_and_rewrite_sp_att_forc` (which would refuse to write on
-    the in-memory G4 proof), we exercise the standalone G4 gate directly.
+    the in-memory G4 gate), we exercise the standalone G4 gate directly.
     """
     baseline_path = _write_sp_att(
         tmp_path / "baseline.sp.att",
@@ -504,7 +504,7 @@ def test_non_forc_column_change_blocks(tmp_path: pathlib.Path) -> None:
         ],
     )
     with pytest.raises(NonForcColumnChangedError) as exc_info:
-        prove_non_forc_columns_unchanged(baseline_path, corrupt_variant)
+        verify_non_forc_columns_unchanged(baseline_path, corrupt_variant)
     assert exc_info.value.element_id == 1
     assert exc_info.value.column_name == "SOIL"
     assert exc_info.value.baseline_value == "1"
@@ -513,7 +513,7 @@ def test_non_forc_column_change_blocks(tmp_path: pathlib.Path) -> None:
 
 
 def test_row_count_change_blocks(tmp_path: pathlib.Path) -> None:
-    """Row count mismatch -> RowCountMismatchError from the G4 proof."""
+    """Row count mismatch -> RowCountMismatchError from the G4 gate."""
     baseline_path = _write_sp_att(
         tmp_path / "baseline.sp.att",
         [
@@ -533,14 +533,14 @@ def test_row_count_change_blocks(tmp_path: pathlib.Path) -> None:
         ],
     )
     with pytest.raises(RowCountMismatchError) as exc_info:
-        prove_non_forc_columns_unchanged(baseline_path, short_variant)
+        verify_non_forc_columns_unchanged(baseline_path, short_variant)
     assert exc_info.value.baseline_count == 4
     assert exc_info.value.variant_count == 3
     assert isinstance(exc_info.value, SpAttRewriteError)
 
 
 def test_element_id_set_change_blocks(tmp_path: pathlib.Path) -> None:
-    """Element-ID set mismatch -> ElementIdSetMismatchError from the G4 proof.
+    """Element-ID set mismatch -> ElementIdSetMismatchError from the G4 gate.
 
     Same row count but element_id=4 has been renumbered to 5 in the
     variant. Sets differ: baseline={1,2,3,4}, variant={1,2,3,5}.
@@ -564,18 +564,18 @@ def test_element_id_set_change_blocks(tmp_path: pathlib.Path) -> None:
         ],
     )
     with pytest.raises(ElementIdSetMismatchError) as exc_info:
-        prove_non_forc_columns_unchanged(baseline_path, renumbered_variant)
+        verify_non_forc_columns_unchanged(baseline_path, renumbered_variant)
     assert exc_info.value.baseline_only == (4,)
     assert exc_info.value.variant_only == (5,)
     assert isinstance(exc_info.value, SpAttRewriteError)
 
 
 def test_schema_change_blocks(tmp_path: pathlib.Path) -> None:
-    """Schema (column names) mismatch -> SchemaMismatchError from the G4 proof.
+    """Schema (column names) mismatch -> SchemaMismatchError from the G4 gate.
 
     Baseline uses ``LAKE``; variant uses ``iLAKE`` (a live variant per
     integrity.py module docstring). Different tokens even though the
-    semantic role is the same — G4 proof requires strict schema equality.
+    semantic role is the same — G4 gate requires strict schema equality.
     """
     baseline_schema = ("INDEX", "SOIL", "GEOL", "LC", "FORC", "MF", "BC", "SS", "LAKE")
     variant_schema = ("INDEX", "SOIL", "GEOL", "LC", "FORC", "MF", "BC", "SS", "iLAKE")
@@ -596,10 +596,76 @@ def test_schema_change_blocks(tmp_path: pathlib.Path) -> None:
         schema=variant_schema,
     )
     with pytest.raises(SchemaMismatchError) as exc_info:
-        prove_non_forc_columns_unchanged(baseline_path, variant_path)
+        verify_non_forc_columns_unchanged(baseline_path, variant_path)
     assert exc_info.value.baseline_schema == baseline_schema
     assert exc_info.value.variant_schema == variant_schema
     assert isinstance(exc_info.value, SpAttRewriteError)
+
+
+def test_extra_data_row_past_n_rows_raises(tmp_path: pathlib.Path) -> None:
+    """Extra data row past declared n_rows -> SpAttRewriteError from parser.
+
+    Regression guard: the variant declares n_rows=2 but has three data
+    rows. Without the extra-row-check the parser would silently stash the
+    third row in ``trailing_content`` and preserve it verbatim in the
+    variant, so a non-``FORC`` line could slip past the G4 gate. Standalone
+    :func:`verify_non_forc_columns_unchanged` MUST fail closed.
+    """
+    baseline_path = _write_sp_att(
+        tmp_path / "baseline.sp.att",
+        [
+            (1, 1, 1, 11, 1, 1, 0, 0, 0),
+            (2, 1, 1, 11, 2, 1, 0, 0, 0),
+        ],
+    )
+    # Hand-craft a variant with header n_rows=2 but three data rows: the
+    # helper always encodes ``len(rows)`` in the header, so we bypass it
+    # and construct the file bytes directly.
+    variant_path = tmp_path / "variant.sp.att"
+    lines = [
+        f"2\t{len(_SCHEMA)}",
+        "\t".join(_SCHEMA),
+        "\t".join(str(v) for v in (1, 1, 1, 11, 1, 1, 0, 0, 0)),
+        "\t".join(str(v) for v in (2, 1, 1, 11, 2, 1, 0, 0, 0)),
+        # Extra undeclared row — the header says n_rows=2 but this row exists.
+        "\t".join(str(v) for v in (3, 99, 99, 99, 3, 1, 0, 0, 0)),
+    ]
+    variant_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(SpAttRewriteError) as exc_info:
+        verify_non_forc_columns_unchanged(baseline_path, variant_path)
+    assert "past declared n_rows" in str(exc_info.value)
+
+
+def test_extra_token_per_row_raises(tmp_path: pathlib.Path) -> None:
+    """Extra token appended to a data row -> SpAttRewriteError from parser.
+
+    Regression guard: baseline schema has 9 columns; variant's last data
+    row has 10 tokens. Without the extra-token check the parser would
+    silently truncate via ``[: len(schema)]``, hiding a schema drift.
+    Standalone :func:`verify_non_forc_columns_unchanged` MUST fail closed.
+    """
+    baseline_path = _write_sp_att(
+        tmp_path / "baseline.sp.att",
+        [
+            (1, 1, 1, 11, 1, 1, 0, 0, 0),
+            (2, 1, 1, 11, 2, 1, 0, 0, 0),
+        ],
+    )
+    variant_path = tmp_path / "variant.sp.att"
+    # Declare n_rows=2 with correct 9-column schema, but the second data
+    # row carries 10 tokens (a rogue 999 tacked on the end).
+    lines = [
+        f"2\t{len(_SCHEMA)}",
+        "\t".join(_SCHEMA),
+        "\t".join(str(v) for v in (1, 1, 1, 11, 1, 1, 0, 0, 0)),
+        "\t".join(str(v) for v in (2, 1, 1, 11, 2, 1, 0, 0, 0, 999)),
+    ]
+    variant_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(SpAttRewriteError) as exc_info:
+        verify_non_forc_columns_unchanged(baseline_path, variant_path)
+    assert "extra tokens rejected" in str(exc_info.value)
 
 
 # --- semantic diff evidence -----------------------------------------------
@@ -822,6 +888,70 @@ def test_variant_path_equals_baseline_path_refuses(
     assert baseline_path.read_bytes() == baseline_bytes_before
 
 
+def test_variant_path_case_insensitive_alias_refuses(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case-insensitive FS: ``foo.att`` vs ``FOO.att`` aliases same inode -> INV-2 refuse.
+
+    Regression guard: ``Path.resolve()`` normalizes ``..`` and symlinks but
+    does NOT case-fold. On macOS APFS/HFS+ (default case-insensitive) or
+    Windows NTFS, ``baseline.sp.att`` and ``BASELINE.sp.att`` compare
+    unequal as strings while ``os.replace`` writes to the same inode —
+    silently corrupting the baseline. The ``os.path.samefile`` guard
+    catches the alias regardless of spelling.
+
+    Uses ``monkeypatch`` on ``os.path.samefile`` so the test is portable
+    across case-sensitive filesystems (Linux ext4/xfs, tmpfs) where a
+    literal case-varied filename would create two independent files.
+    """
+    (
+        baseline_path,
+        ownership,
+        shud_forcing_index,
+        used_cell_count,
+    ) = _make_baseline_and_mapping(tmp_path)
+    baseline_bytes_before = baseline_path.read_bytes()
+
+    # Variant path is a distinct pre-existing file so the resolve() string
+    # check does NOT catch it — only the samefile() check will.
+    variant_alias_path = tmp_path / "variant_alias.sp.att"
+    variant_alias_path.write_text("stub", encoding="utf-8")
+
+    import os as os_module
+
+    real_samefile = os_module.path.samefile
+
+    def fake_samefile(p1, p2, real=real_samefile) -> bool:
+        # Simulate a case-insensitive FS where the variant path aliases the
+        # baseline by inode. All other samefile calls (e.g. by pytest
+        # internals) delegate to the real implementation.
+        p1_str, p2_str = str(p1), str(p2)
+        alias_str = str(variant_alias_path)
+        baseline_str = str(baseline_path)
+        if (p1_str == baseline_str and p2_str == alias_str) or (
+            p1_str == alias_str and p2_str == baseline_str
+        ):
+            return True
+        return real(p1, p2)
+
+    monkeypatch.setattr(os_module.path, "samefile", fake_samefile)
+
+    with pytest.raises(SpAttRewriteError) as exc_info:
+        copy_and_rewrite_sp_att_forc(
+            baseline_att_path=baseline_path,
+            variant_att_path=variant_alias_path,
+            ownership=ownership,
+            shud_forcing_index=shud_forcing_index,
+            used_cell_count=used_cell_count,
+        )
+    # The message MUST call out the alias + INV-2 explicitly.
+    assert "aliases" in str(exc_info.value)
+    assert "INV-2" in str(exc_info.value)
+    # Baseline bytes untouched.
+    assert baseline_path.read_bytes() == baseline_bytes_before
+
+
 # --- signature pins + frozen dataclass invariants -------------------------
 
 
@@ -842,14 +972,14 @@ def test_copy_and_rewrite_sp_att_forc_signature_pinned() -> None:
     assert hints["return"] is SpAttRewriteReport
 
 
-def test_prove_non_forc_columns_unchanged_signature_pinned() -> None:
+def test_verify_non_forc_columns_unchanged_signature_pinned() -> None:
     """Signature pin for the G4 standalone gate."""
-    sig = inspect.signature(prove_non_forc_columns_unchanged)
+    sig = inspect.signature(verify_non_forc_columns_unchanged)
     assert list(sig.parameters) == [
         "baseline_att_path",
         "variant_att_path",
     ]
-    hints = typing.get_type_hints(prove_non_forc_columns_unchanged)
+    hints = typing.get_type_hints(verify_non_forc_columns_unchanged)
     assert hints["baseline_att_path"] is pathlib.Path
     assert hints["variant_att_path"] is pathlib.Path
     # Returns None (raises on violation).

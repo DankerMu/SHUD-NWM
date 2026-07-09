@@ -80,8 +80,8 @@ from workers.mapping_builder.rewrite import (
     copy_and_rewrite_sp_att_forc,
     emit_semantic_diff,
     parse_sp_att_forc_rows,
-    prove_non_forc_columns_unchanged,
     record_sp_att_checksums,
+    verify_non_forc_columns_unchanged,
 )
 
 __all__ = [
@@ -151,7 +151,6 @@ __all__ = [
     "emit_semantic_diff",
     "nearest_cell_barycenter_geodesic_v1",
     "parse_sp_att_forc_rows",
-    "prove_non_forc_columns_unchanged",
     "read_sp_mesh_geometry",
     "record_sp_att_checksums",
     "resolve_tie_by_canonical_ordinal",
@@ -160,6 +159,7 @@ __all__ = [
     "verify_g1_non_degenerate_triangles",
     "verify_grid_identity_precondition",
     "verify_half_cell_diagonal_sanity_bound",
+    "verify_non_forc_columns_unchanged",
     "verify_package_crs",
     "verify_small_basin_gate",
 ]
