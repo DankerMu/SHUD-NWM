@@ -38,11 +38,11 @@
 
 ## 3. sp.att FORC Rewrite
 
-- [ ] 3.1 Implement `workers/mapping_builder/rewrite.py`: copy the baseline `.sp.att`, update `FORC` by element ID into the variant package, and never overwrite the baseline file.
+- [x] 3.1 Implement `workers/mapping_builder/rewrite.py`: copy the baseline `.sp.att`, update `FORC` by element ID into the variant package, and never overwrite the baseline file.
   - Required evidence: `uv run pytest -q tests/test_mapping_builder_rewrite.py` proves `FORC` is updated by element ID (not row order), the new `.sp.att` is written into the variant, and the baseline file checksum is unchanged.
   - Required evidence: tests prove every rewritten `FORC` value is an integer in `1..N` (where N == used-cell count from Task 2.3), that the multiset of rewritten `FORC` values equals the ownership table's mapped `shud_forcing_index` list, and that any out-of-range or unmapped `FORC` fails closed with no variant `.sp.att` written.
   - Non-goal for 3.1: no manifest or binding emission.
-- [ ] 3.2 Implement the G4 non-`FORC`-unchanged proof, semantic diff, and checksums: prove `old_att[all columns except FORC] == new_att[...]` at parse level, emit a parse-level semantic diff artifact, and record old/new `.sp.att` SHA-256 checksums.
+- [x] 3.2 Implement the G4 non-`FORC`-unchanged proof, semantic diff, and checksums: prove `old_att[all columns except FORC] == new_att[...]` at parse level, emit a parse-level semantic diff artifact, and record old/new `.sp.att` SHA-256 checksums.
   - Required evidence: tests prove equal row count/IDs/schema, byte/semantic equality of all non-`FORC` columns, a semantic diff showing only `FORC` changes, and recorded old/new checksums.
   - Required evidence: tests prove a change to any non-`FORC` value fails the G4 proof and blocks output.
   - Non-goal for 3.2: no evidence-package assembly (that is group 5).
