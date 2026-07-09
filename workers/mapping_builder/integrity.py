@@ -1,9 +1,9 @@
 """G0 baseline integrity verification for the mapping builder.
 
 This module implements OpenSpec change ``forcing-mapping-asset-build`` §1.1 (Epic
-#909 SUB-1), §1.2 (Epic #909 SUB-2), and §1.3 (Epic #909 SUB-3). It exposes five
-pure entry points that read a baseline SHUD basin model package **read-only**
-(INV-1):
+#909 SUB-1), §1.2 (Epic #909 SUB-2), §1.3 (Epic #909 SUB-3), and §1.4 (Epic
+#909 SUB-4). It exposes six pure entry points that read a baseline SHUD basin
+model package **read-only** (INV-1):
 
 * :func:`verify_g0_baseline` — §1.1 baseline integrity gate.
 * :func:`verify_package_crs` — §1.2 CRS authority (WKT from ``gis/*.prj``).
@@ -17,16 +17,17 @@ pure entry points that read a baseline SHUD basin model package **read-only**
 * :func:`verify_baseline_inv1_end_to_end` — §1.3 end-to-end INV-1 evidence
   chain: pre-checksum all baseline files, run every §1.1/§1.2/§1.3 entry
   point, post-checksum, and prove byte-identical.
+* :func:`verify_g1_non_degenerate_triangles` — §1.4 G1 geometry gate:
+  every element has three pairwise-distinct vertex IDs, each referencing an
+  existing mesh node, and the triangle formed by their X/Y coordinates in the
+  package CRS has an unsigned planar area strictly greater than
+  :data:`G1_MIN_TRIANGLE_AREA`.
 
 Each entry point either returns an immutable report or raises a
 :class:`BaselineIntegrityError` subclass explaining the exact violation.
 
 Fail-closed guarantee: any subcheck failure raises without writing any output
 artifact. The mapping variant tree remains empty.
-
-Non-goal for §1.3 (deferred to later SUBs):
-
-* SUB-4 — G1 non-degenerate triangle geometry check.
 
 The SHUD file formats parsed here are inferred from live baseline packages
 (``SHUD/input/qhh``, ``SHUD/input/heihe``, ``SHUD/input/ccw``):
@@ -68,6 +69,18 @@ import pathlib
 from dataclasses import dataclass
 
 import pyproj
+
+#: Minimum unsigned planar triangle area (in package CRS length units squared)
+#: below which an element is treated as degenerate/collinear.
+#: Package CRS is a projected system with meters as base unit for all live
+#: SHUD basins (custom Albers x12 or Transverse Mercator x1 per §1.2 live audit),
+#: so this value is 1.0e-6 square meters (roughly the area of a 1mm-side
+#: triangle). The spec (openspec/changes/forcing-mapping-asset-build/
+#: specs/mapping-input-integrity/spec.md §"Element triangles are non-degenerate")
+#: pins the rule ("strictly greater than a declared numeric tolerance") but does
+#: not pin a numeric value, so this module owns the documented default. Any G1
+#: unsigned area at or below this tolerance rejects the element as degenerate.
+G1_MIN_TRIANGLE_AREA = 1.0e-6
 
 
 class BaselineIntegrityError(Exception):
@@ -228,6 +241,59 @@ class Inv1ViolationError(BaselineIntegrityError):
         self.drifted_paths = drifted_paths
 
 
+class G1RepeatedVertexIdError(BaselineIntegrityError):
+    """Raised when an element's three vertex IDs are not pairwise distinct.
+
+    Per spec §"Element triangles are non-degenerate (G1 geometry validity)":
+    the three vertex IDs of each element MUST be pairwise distinct. A repeated
+    vertex ID collapses the triangle to a line segment or point and is
+    always a G1 blocker.
+    """
+
+    def __init__(self, element_id: int, vertex_ids: tuple[int, int, int]) -> None:
+        super().__init__(
+            f"G1 element_id={element_id} has repeated vertex ids: {list(vertex_ids)}"
+        )
+        self.element_id = element_id
+        self.vertex_ids = vertex_ids
+
+
+class G1MissingMeshNodeError(BaselineIntegrityError):
+    """Raised when an element references a vertex ID absent from the mesh node table.
+
+    Per spec §"Element triangles are non-degenerate (G1 geometry validity)":
+    each vertex ID MUST reference an existing mesh node. A missing node makes
+    the triangle undefined and is always a G1 blocker.
+    """
+
+    def __init__(self, element_id: int, missing_vertex_id: int) -> None:
+        super().__init__(
+            f"G1 element_id={element_id} references missing mesh node "
+            f"vertex_id={missing_vertex_id}"
+        )
+        self.element_id = element_id
+        self.missing_vertex_id = missing_vertex_id
+
+
+class G1CollinearTriangleError(BaselineIntegrityError):
+    """Raised when an element's unsigned planar area is at or below the tolerance.
+
+    Per spec §"Element triangles are non-degenerate (G1 geometry validity)":
+    the unsigned planar area in the package CRS MUST be strictly greater than
+    :data:`G1_MIN_TRIANGLE_AREA`. Three collinear vertices produce a zero-area
+    triangle and are always a G1 blocker.
+    """
+
+    def __init__(self, element_id: int, area: float, tolerance: float) -> None:
+        super().__init__(
+            f"G1 element_id={element_id} triangle area {area!r} is not "
+            f"strictly greater than tolerance {tolerance!r}"
+        )
+        self.element_id = element_id
+        self.area = area
+        self.tolerance = tolerance
+
+
 @dataclass(frozen=True)
 class BaselineIntegrityReport:
     """Report produced by :func:`verify_g0_baseline` when all G0 checks pass.
@@ -293,6 +359,23 @@ class AncillaryInventoryReport:
 
     baseline_root: pathlib.Path
     entries: tuple[AncillaryEntry, ...]
+
+
+@dataclass(frozen=True)
+class G1NonDegenerateReport:
+    """Report produced by :func:`verify_g1_non_degenerate_triangles` on success.
+
+    All fields are immutable so callers cannot mutate the recorded evidence.
+    ``min_observed_area`` and ``max_observed_area`` bound the observed unsigned
+    planar area distribution across every element in the baseline mesh; both
+    are guaranteed strictly greater than ``tolerance`` when this report is
+    returned (fail-closed guarantee).
+    """
+
+    element_count: int
+    min_observed_area: float
+    max_observed_area: float
+    tolerance: float
 
 
 # --- internal helpers -----------------------------------------------------
@@ -1518,3 +1601,225 @@ def _diff_drifted_rel_paths(
     post_set = set(post)
     drifted = {rel for (rel, _sha) in pre_set ^ post_set}
     return tuple(sorted(drifted))
+
+
+def _parse_sp_mesh_g1_geometry(
+    path: pathlib.Path,
+) -> tuple[tuple[tuple[int, int, int, int], ...], dict[int, tuple[float, float]]]:
+    """Parse ``.sp.mesh`` and return ``(elements, node_xy)``.
+
+    ``elements`` is a tuple of ``(element_id, v1, v2, v3)`` in file order.
+    ``node_xy`` maps ``node_id -> (x, y)`` in the package CRS.
+
+    Reuses the header conventions verified by :func:`_parse_sp_mesh_element_ids`:
+    the element header first token MUST be ``ID`` and the next three tokens are
+    the vertex-node columns (``Node1 Node2 Node3`` in live SHUD files). The node
+    table header first token MUST be ``ID`` and the next two tokens are ``X Y``.
+    """
+    lines = _read_text_lines(path)
+    if len(lines) < 2:
+        raise UnparseableMeshError(f"{path.name}: too short to contain header + column names")
+
+    n_elements, n_element_cols = _parse_header_counts(lines[0], "mesh")
+
+    element_header_tokens = lines[1].split()
+    if len(element_header_tokens) < 4 or len(element_header_tokens) < n_element_cols:
+        raise UnparseableMeshError(
+            f"{path.name}: element header row has {len(element_header_tokens)} tokens, "
+            f"expected >= max(4, {n_element_cols})"
+        )
+    if element_header_tokens[0].upper() != "ID":
+        raise UnparseableMeshError(
+            f"{path.name}: expected element header first column 'ID', got {element_header_tokens[0]!r}"
+        )
+
+    element_row_start = 2
+    element_row_end = element_row_start + n_elements
+    if len(lines) < element_row_end:
+        raise UnparseableMeshError(
+            f"{path.name}: expected {n_elements} element rows, "
+            f"only {len(lines) - element_row_start} present"
+        )
+
+    elements: list[tuple[int, int, int, int]] = []
+    for row_index in range(element_row_start, element_row_end):
+        raw_line = lines[row_index]
+        if not raw_line.strip():
+            raise UnparseableMeshError(
+                f"{path.name}: blank element row at line {row_index + 1}"
+            )
+        tokens = raw_line.split()
+        if len(tokens) < 4:
+            raise UnparseableMeshError(
+                f"{path.name}: element row {row_index + 1} has {len(tokens)} tokens, "
+                f"expected at least 4 (ID + 3 vertex ids)"
+            )
+        try:
+            element_id = int(tokens[0])
+            v1 = int(tokens[1])
+            v2 = int(tokens[2])
+            v3 = int(tokens[3])
+        except ValueError as exc:
+            raise UnparseableMeshError(
+                f"{path.name}: element row {row_index + 1} first four tokens must be int, "
+                f"got {tokens[:4]!r}: {exc}"
+            ) from exc
+        elements.append((element_id, v1, v2, v3))
+
+    if element_row_end >= len(lines):
+        raise UnparseableMeshError(
+            f"{path.name}: expected node-table header at line {element_row_end + 1}, EOF instead"
+        )
+
+    n_nodes, n_node_cols = _parse_header_counts(lines[element_row_end], "mesh")
+
+    node_header_line_index = element_row_end + 1
+    if node_header_line_index >= len(lines):
+        raise UnparseableMeshError(
+            f"{path.name}: expected node column header at line {node_header_line_index + 1}, EOF instead"
+        )
+    node_header_tokens = lines[node_header_line_index].split()
+    if len(node_header_tokens) < 3 or len(node_header_tokens) < n_node_cols:
+        raise UnparseableMeshError(
+            f"{path.name}: node header row has {len(node_header_tokens)} tokens, "
+            f"expected >= max(3, {n_node_cols})"
+        )
+    if node_header_tokens[0].upper() != "ID":
+        raise UnparseableMeshError(
+            f"{path.name}: expected node header first column 'ID', got {node_header_tokens[0]!r}"
+        )
+    if node_header_tokens[1].upper() != "X" or node_header_tokens[2].upper() != "Y":
+        raise UnparseableMeshError(
+            f"{path.name}: expected node header columns 2/3 to be 'X'/'Y', "
+            f"got {node_header_tokens[1]!r}/{node_header_tokens[2]!r}"
+        )
+
+    node_row_start = node_header_line_index + 1
+    node_row_end = node_row_start + n_nodes
+    if len(lines) < node_row_end:
+        raise UnparseableMeshError(
+            f"{path.name}: expected {n_nodes} node rows, "
+            f"only {len(lines) - node_row_start} present"
+        )
+
+    node_xy: dict[int, tuple[float, float]] = {}
+    for row_index in range(node_row_start, node_row_end):
+        raw_line = lines[row_index]
+        if not raw_line.strip():
+            raise UnparseableMeshError(
+                f"{path.name}: blank node row at line {row_index + 1}"
+            )
+        tokens = raw_line.split()
+        if len(tokens) < 3:
+            raise UnparseableMeshError(
+                f"{path.name}: node row {row_index + 1} has {len(tokens)} tokens, "
+                f"expected at least 3 (ID + X + Y)"
+            )
+        try:
+            node_id = int(tokens[0])
+            x = float(tokens[1])
+            y = float(tokens[2])
+        except ValueError as exc:
+            raise UnparseableMeshError(
+                f"{path.name}: node row {row_index + 1} first three tokens must parse as int, float, float, "
+                f"got {tokens[:3]!r}: {exc}"
+            ) from exc
+        node_xy[node_id] = (x, y)
+
+    return tuple(elements), node_xy
+
+
+def verify_g1_non_degenerate_triangles(
+    baseline_root: pathlib.Path,
+) -> G1NonDegenerateReport:
+    """Verify the G1 non-degenerate triangle gate for the baseline mesh.
+
+    For every element in ``.sp.mesh``, this entry point enforces:
+
+    1. Three vertex IDs are pairwise distinct.
+    2. Each vertex ID references an existing mesh node.
+    3. The unsigned planar triangle area in the package CRS is strictly greater
+       than :data:`G1_MIN_TRIANGLE_AREA`.
+
+    Fail-closed. Any violation raises the corresponding
+    :class:`BaselineIntegrityError` subclass BEFORE any downstream mapping /
+    barycenter / grid-matching path can be invoked; on success returns an
+    immutable report bounding the observed area distribution.
+
+    Parameters
+    ----------
+    baseline_root:
+        Directory containing the baseline basin model package.
+
+    Returns
+    -------
+    G1NonDegenerateReport
+        Immutable evidence covering element count, observed min/max area, and
+        the tolerance used.
+
+    Raises
+    ------
+    G1RepeatedVertexIdError
+        An element's three vertex IDs are not pairwise distinct.
+    G1MissingMeshNodeError
+        An element references a vertex ID absent from the mesh node table.
+    G1CollinearTriangleError
+        An element's unsigned planar area is at or below the tolerance.
+    BaselineIntegrityError
+        ``baseline_root`` is not a directory or ``.sp.mesh`` is missing / not
+        uniquely resolvable.
+    UnparseableMeshError
+        ``.sp.mesh`` cannot be parsed at the geometry level.
+    """
+    if not isinstance(baseline_root, pathlib.Path):
+        raise TypeError(
+            f"verify_g1_non_degenerate_triangles expects pathlib.Path, got "
+            f"{type(baseline_root).__name__}"
+        )
+    if not baseline_root.exists() or not baseline_root.is_dir():
+        raise BaselineIntegrityError(
+            f"baseline_root does not exist or is not a directory: {baseline_root}"
+        )
+
+    mesh_path = _find_single_by_suffix(baseline_root, ".sp.mesh")
+    elements, node_xy = _parse_sp_mesh_g1_geometry(mesh_path)
+
+    if not elements:
+        raise BaselineIntegrityError(
+            f"{mesh_path.name}: mesh has zero elements, G1 cannot be verified"
+        )
+
+    min_area = float("inf")
+    max_area = float("-inf")
+    for element_id, v1, v2, v3 in elements:
+        # Subcheck 1: pairwise distinct vertex ids.
+        if v1 == v2 or v2 == v3 or v1 == v3:
+            raise G1RepeatedVertexIdError(
+                element_id=element_id, vertex_ids=(v1, v2, v3)
+            )
+        # Subcheck 2: each vertex references an existing mesh node.
+        for vid in (v1, v2, v3):
+            if vid not in node_xy:
+                raise G1MissingMeshNodeError(
+                    element_id=element_id, missing_vertex_id=vid
+                )
+        # Subcheck 3: unsigned planar area > tolerance.
+        x1, y1 = node_xy[v1]
+        x2, y2 = node_xy[v2]
+        x3, y3 = node_xy[v3]
+        area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        if not (area > G1_MIN_TRIANGLE_AREA):
+            raise G1CollinearTriangleError(
+                element_id=element_id, area=area, tolerance=G1_MIN_TRIANGLE_AREA
+            )
+        if area < min_area:
+            min_area = area
+        if area > max_area:
+            max_area = area
+
+    return G1NonDegenerateReport(
+        element_count=len(elements),
+        min_observed_area=min_area,
+        max_observed_area=max_area,
+        tolerance=G1_MIN_TRIANGLE_AREA,
+    )

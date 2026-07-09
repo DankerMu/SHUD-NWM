@@ -37,6 +37,7 @@ from typing import Callable
 import pytest
 
 from workers.mapping_builder import (
+    G1_MIN_TRIANGLE_AREA,
     AncillaryEntry,
     AncillaryInventoryError,
     AncillaryInventoryReport,
@@ -44,6 +45,10 @@ from workers.mapping_builder import (
     BaselineIntegrityError,
     BaselineIntegrityReport,
     DuplicateCoordinateCluster,
+    G1CollinearTriangleError,
+    G1MissingMeshNodeError,
+    G1NonDegenerateReport,
+    G1RepeatedVertexIdError,
     HarmlessDeviationRecord,
     IllegalTsdForcReferenceError,
     Inv1EndToEndEvidence,
@@ -65,6 +70,7 @@ from workers.mapping_builder import (
     classify_baseline,
     verify_baseline_inv1_end_to_end,
     verify_g0_baseline,
+    verify_g1_non_degenerate_triangles,
     verify_package_crs,
 )
 
@@ -73,6 +79,9 @@ FIXTURE_ROOT = _FIXTURES_DIR / "keliya_minimal"
 DUPLICATE_COORD_FIXTURE = _FIXTURES_DIR / "duplicate_coord_baseline"
 NON_GRID_FIXTURE = _FIXTURES_DIR / "non_grid_baseline"
 HARMLESS_DEVIATION_FIXTURE = _FIXTURES_DIR / "harmless_deviation_baseline"
+G1_REPEATED_VERTEX_FIXTURE = _FIXTURES_DIR / "g1_repeated_vertex_baseline"
+G1_MISSING_NODE_FIXTURE = _FIXTURES_DIR / "g1_missing_node_baseline"
+G1_COLLINEAR_FIXTURE = _FIXTURES_DIR / "g1_collinear_baseline"
 
 
 def _copy_fixture(target: pathlib.Path) -> pathlib.Path:
@@ -1124,3 +1133,149 @@ def test_verify_baseline_inv1_end_to_end_positive_with_historical_dir(
         "history/foo.txt should appear twice — once from baseline, once from "
         "historical_forcing_dir (post-prefix). Dedup here indicates a regression."
     )
+
+
+# --- SUB-4 §1.4 G1 non-degenerate triangle check --------------------------
+
+
+def test_g1_non_degenerate_triangles_positive() -> None:
+    """Valid keliya baseline: 4 elements, all with area = 0.5 in unit-square CRS."""
+    report = verify_g1_non_degenerate_triangles(FIXTURE_ROOT)
+    assert isinstance(report, G1NonDegenerateReport)
+    assert report.element_count == 4
+    assert report.tolerance == G1_MIN_TRIANGLE_AREA
+    assert report.min_observed_area > G1_MIN_TRIANGLE_AREA
+    assert report.max_observed_area >= report.min_observed_area
+    # keliya's 4 triangles are all right-triangles with legs 1x1 -> area 0.5.
+    assert report.min_observed_area == pytest.approx(0.5)
+    assert report.max_observed_area == pytest.approx(0.5)
+
+
+def test_g1_non_degenerate_triangles_repeated_vertex_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Element with repeated vertex id raises G1RepeatedVertexIdError, no output."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    before = {p.relative_to(scratch).as_posix() for p in scratch.rglob("*") if p.is_file()}
+
+    baseline = _copy_named_fixture(G1_REPEATED_VERTEX_FIXTURE, tmp_path)
+    with pytest.raises(G1RepeatedVertexIdError) as exc_info:
+        verify_g1_non_degenerate_triangles(baseline)
+    assert exc_info.value.element_id == 1
+    assert exc_info.value.vertex_ids == (1, 2, 2)
+    assert isinstance(exc_info.value, BaselineIntegrityError)
+    _assert_no_side_effect_output(scratch, before)
+
+
+def test_g1_non_degenerate_triangles_missing_node_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Element referencing an absent node id raises G1MissingMeshNodeError."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    before = {p.relative_to(scratch).as_posix() for p in scratch.rglob("*") if p.is_file()}
+
+    baseline = _copy_named_fixture(G1_MISSING_NODE_FIXTURE, tmp_path)
+    with pytest.raises(G1MissingMeshNodeError) as exc_info:
+        verify_g1_non_degenerate_triangles(baseline)
+    assert exc_info.value.element_id == 1
+    assert exc_info.value.missing_vertex_id == 99
+    assert isinstance(exc_info.value, BaselineIntegrityError)
+    _assert_no_side_effect_output(scratch, before)
+
+
+def test_g1_non_degenerate_triangles_collinear_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Element with 3 collinear vertex coordinates (zero area) fails closed."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    before = {p.relative_to(scratch).as_posix() for p in scratch.rglob("*") if p.is_file()}
+
+    baseline = _copy_named_fixture(G1_COLLINEAR_FIXTURE, tmp_path)
+    with pytest.raises(G1CollinearTriangleError) as exc_info:
+        verify_g1_non_degenerate_triangles(baseline)
+    assert exc_info.value.element_id == 1
+    assert exc_info.value.area == pytest.approx(0.0)
+    assert exc_info.value.tolerance == G1_MIN_TRIANGLE_AREA
+    assert isinstance(exc_info.value, BaselineIntegrityError)
+    _assert_no_side_effect_output(scratch, before)
+
+
+def test_g1_blocks_before_mapping(tmp_path: pathlib.Path) -> None:
+    """Each G1 negative fixture fails BEFORE any hypothetical mapping call.
+
+    Since SUB-6 barycenter / mapping is deferred, this test proves the integrity
+    gate short-circuits at the raise point: the fixture directory has zero
+    generated artifacts after the raise (baseline files untouched, no new
+    scratch outputs), and the raised exception is a :class:`BaselineIntegrityError`
+    subclass — the fail-closed contract downstream code must gate on.
+    """
+    for fixture_src, expected_cls in [
+        (G1_REPEATED_VERTEX_FIXTURE, G1RepeatedVertexIdError),
+        (G1_MISSING_NODE_FIXTURE, G1MissingMeshNodeError),
+        (G1_COLLINEAR_FIXTURE, G1CollinearTriangleError),
+    ]:
+        target = tmp_path / f"iter-{fixture_src.name}"
+        target.mkdir()
+        baseline = _copy_named_fixture(fixture_src, target)
+        pre_checksums = _snapshot_checksums(baseline)
+
+        with pytest.raises(expected_cls) as exc_info:
+            verify_g1_non_degenerate_triangles(baseline)
+        assert isinstance(exc_info.value, BaselineIntegrityError)
+
+        # Baseline bytes unchanged (INV-1).
+        assert _snapshot_checksums(baseline) == pre_checksums
+        # No mapping-variant artifact appeared under the target (which contains
+        # only the baseline dir); nothing new outside the copied fixture tree.
+        outside = {
+            p.relative_to(target).as_posix()
+            for p in target.rglob("*")
+            if p.is_file() and not p.is_relative_to(baseline)
+        }
+        assert outside == set(), f"unexpected mapping/output artifact created: {outside}"
+
+
+def test_verify_g1_non_degenerate_triangles_INV1_read_only(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Positive-path pre/post SHA-256 unchanged after verify_g1_non_degenerate_triangles."""
+    baseline = _copy_fixture(tmp_path)
+    pre = _snapshot_checksums(baseline)
+    report = verify_g1_non_degenerate_triangles(baseline)
+    assert isinstance(report, G1NonDegenerateReport)
+    assert _snapshot_checksums(baseline) == pre
+
+
+def test_verify_g1_non_degenerate_triangles_signature_pinned() -> None:
+    """Signature pin: parameter names + resolved type hints + return type frozen."""
+    import typing
+
+    signature = inspect.signature(verify_g1_non_degenerate_triangles)
+    assert list(signature.parameters) == ["baseline_root"]
+
+    hints = typing.get_type_hints(verify_g1_non_degenerate_triangles)
+    assert hints["baseline_root"] is pathlib.Path
+    assert hints["return"] is G1NonDegenerateReport
+
+
+def test_g1_non_degenerate_report_frozen() -> None:
+    """G1NonDegenerateReport is a frozen dataclass; field assignment must raise."""
+    report = G1NonDegenerateReport(
+        element_count=4,
+        min_observed_area=0.5,
+        max_observed_area=0.5,
+        tolerance=G1_MIN_TRIANGLE_AREA,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        report.element_count = 99  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        report.tolerance = 0.0  # type: ignore[misc]
+
+
+def test_g1_missing_baseline_root_raises() -> None:
+    """A non-existent baseline_root raises BaselineIntegrityError before any parse."""
+    with pytest.raises(BaselineIntegrityError):
+        verify_g1_non_degenerate_triangles(pathlib.Path("/nonexistent/path/baseline"))

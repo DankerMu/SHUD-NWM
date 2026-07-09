@@ -1,6 +1,7 @@
 """Mapping builder worker — offline direct-grid mapping asset producer (Change forcing-mapping-asset-build)."""
 
 from workers.mapping_builder.integrity import (
+    G1_MIN_TRIANGLE_AREA,
     AncillaryEntry,
     AncillaryInventoryError,
     AncillaryInventoryReport,
@@ -8,6 +9,10 @@ from workers.mapping_builder.integrity import (
     BaselineIntegrityError,
     BaselineIntegrityReport,
     DuplicateCoordinateCluster,
+    G1CollinearTriangleError,
+    G1MissingMeshNodeError,
+    G1NonDegenerateReport,
+    G1RepeatedVertexIdError,
     HarmlessDeviationRecord,
     IllegalTsdForcReferenceError,
     Inv1EndToEndEvidence,
@@ -29,6 +34,7 @@ from workers.mapping_builder.integrity import (
     classify_baseline,
     verify_baseline_inv1_end_to_end,
     verify_g0_baseline,
+    verify_g1_non_degenerate_triangles,
     verify_package_crs,
 )
 
@@ -40,6 +46,11 @@ __all__ = [
     "BaselineIntegrityError",
     "BaselineIntegrityReport",
     "DuplicateCoordinateCluster",
+    "G1_MIN_TRIANGLE_AREA",
+    "G1CollinearTriangleError",
+    "G1MissingMeshNodeError",
+    "G1NonDegenerateReport",
+    "G1RepeatedVertexIdError",
     "HarmlessDeviationRecord",
     "IllegalTsdForcReferenceError",
     "Inv1EndToEndEvidence",
@@ -61,5 +72,6 @@ __all__ = [
     "classify_baseline",
     "verify_baseline_inv1_end_to_end",
     "verify_g0_baseline",
+    "verify_g1_non_degenerate_triangles",
     "verify_package_crs",
 ]
