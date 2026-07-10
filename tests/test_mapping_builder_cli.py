@@ -36,9 +36,11 @@ the resolver is SUB-5's territory.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import struct
 
@@ -1815,6 +1817,318 @@ def test_zero_write_baseline_files_read_only_pre_post_checksums_unchanged(
     assert variant_root.is_dir()
     assert (variant_root / "manifest.json").is_file()
     assert (variant_root / "direct_grid_binding.json").is_file()
+
+
+# =========================================================================
+# §2.4 SUB-5 CLI DETERMINISM + KELIYA E2E VIA RESOLVER CHANNEL
+# =========================================================================
+# The three tests below cover the required
+#   pytest -k "deterministic or keliya"
+# Evidence Floor filter. Each drives ``build_direct_grid_variant`` over
+# the compact keliya fixture — the first two prove byte-level determinism
+# + wall-clock-free evidence; the third routes the build through the
+# SUB-3 §2.2 object-store input-authority resolver so the argv-authority
+# channel is exercised end-to-end (staging → resolve → build) alongside
+# the 484 elements / 32 stations / 8 used cells fixture invariants.
+
+
+def test_build_direct_grid_variant_is_deterministic_across_two_runs_raw_byte_identical(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Two runs on identical inputs produce byte-identical on-disk artifacts.
+
+    Raw byte comparison — NO field masking — of every file the CLI writes
+    under ``variant_root``: ``manifest.json``, ``direct_grid_binding.json``,
+    and the variant ``.sp.att``. Two ``build_direct_grid_variant`` invocations
+    on freshly-staged copies of the keliya fixture MUST produce identical
+    bytes for each artifact. Any smuggled wall-clock, UUID, monotonic id,
+    or environment-dependent value surfaces here as an inequality; the
+    library helper :func:`packages.common.grid_signature.canonical_json_bytes`
+    already guarantees deterministic key ordering + float formatting, so a
+    failure here always points at the caller side (this file + cli.py).
+
+    Runs the two builds under sibling tmp subdirs so each caller supplies
+    a fresh ``variant_root`` per the atomic-rename discipline.
+    """
+    run_a_root = tmp_path / "run_a"
+    run_b_root = tmp_path / "run_b"
+    run_a_root.mkdir()
+    run_b_root.mkdir()
+
+    result_a = _run_build(run_a_root)
+    result_b = _run_build(run_b_root)
+
+    # Every on-disk artifact the CLI writes: byte-for-byte equal.
+    on_disk_artifacts = ("manifest.json", "direct_grid_binding.json", "keliya.sp.att")
+    for filename in on_disk_artifacts:
+        bytes_a = (result_a.variant_root / filename).read_bytes()
+        bytes_b = (result_b.variant_root / filename).read_bytes()
+        assert bytes_a == bytes_b, (
+            f"{filename}: two runs produced diverging bytes — "
+            f"SHA-256(a)={hashlib.sha256(bytes_a).hexdigest()} vs "
+            f"SHA-256(b)={hashlib.sha256(bytes_b).hexdigest()}; "
+            "some caller-side non-determinism (wall-clock, UUID, counter, "
+            "or env-dependent value) leaked into the emitted bytes"
+        )
+
+    # Redundant lock on the derived checksums — the manifest's recorded
+    # binding_checksum and the binding artifact's own SHA-256 both hash the
+    # same emitted bytes, so a byte-identity divergence would already fire
+    # above; equality here is a belt-and-suspenders check against a future
+    # regression that recomputed a checksum from a different byte payload.
+    assert result_a.manifest.binding_checksum == result_b.manifest.binding_checksum
+    assert result_a.binding_artifact.checksum == result_b.binding_artifact.checksum
+
+    # And the evidence package's ``build_timestamp`` MUST be unset in both
+    # runs — the §2.4 no-wall-clock discipline is what makes the byte-level
+    # determinism above possible in the first place.
+    assert result_a.evidence_package.build_timestamp is None
+    assert result_b.evidence_package.build_timestamp is None
+
+    # Evidence-category byte-identity lock: the on-disk artifact loop above
+    # only compares manifest.json / direct_grid_binding.json / .sp.att, but
+    # the §2.4 "byte-identical …/evidence compared raw with no field masking"
+    # contract extends to the full in-memory ``EvidencePackage``. A
+    # non-determinism regression that leaks into a non-manifest evidence
+    # field (e.g., a wall-clock stamped into
+    # ``forbidden_output_scan.wall_clock_recorded_at``, a random UUID in
+    # ``ownership_row``, or non-deterministic ``ownership_images`` SVG
+    # bytes) would slip past the on-disk loop but MUST fail here.
+    #
+    # 1. Primary lock: the SHA-256 over all checksum-tracked fields
+    # (:data:`workers.mapping_builder.evidence.EVIDENCE_CHECKSUM_EXCLUDED_FIELDS`
+    # excludes only ``build_timestamp``, which is ``None`` on both runs).
+    assert (
+        result_a.evidence_package.evidence_checksum
+        == result_b.evidence_package.evidence_checksum
+    ), (
+        f"evidence_checksum diverged across two identical-input runs: "
+        f"a={result_a.evidence_package.evidence_checksum} vs "
+        f"b={result_b.evidence_package.evidence_checksum} — a non-manifest "
+        "evidence field carries caller-side non-determinism"
+    )
+    # 2. "No field masking" literal contract: full deep-equality of the
+    # dataclass tree. Catches any field that the checksum computation
+    # intentionally excludes by design but which SHOULD still be
+    # deterministic across identical-input builds. Safe here because the
+    # only excluded field, ``build_timestamp``, is ``None`` on both runs
+    # (asserted immediately above), so this deep-equality carries no
+    # masking-shaped false positive.
+    assert dataclasses.asdict(result_a.evidence_package) == dataclasses.asdict(
+        result_b.evidence_package
+    ), (
+        "EvidencePackage deep-equality failed across two identical-input "
+        "runs — a field outside the checksum-tracked set (or an excluded "
+        "field other than the None build_timestamp) carries non-determinism"
+    )
+
+
+def test_deterministic_cli_emits_evidence_with_build_timestamp_unset_no_wall_clock(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The emitted evidence records ``build_timestamp`` as ``None`` — no wall-clock leak.
+
+    §2.4 no-wall-clock discipline: the CLI orchestrator MUST NOT stamp any
+    ``datetime.now()`` / ``time.time()`` / date literal into the evidence
+    bundle or the on-disk manifest/binding. Assertions:
+
+    1. :attr:`EvidencePackage.build_timestamp` is ``None`` (the direct
+       oracle for the unset-timestamp contract per cli.py line ~982).
+    2. The emitted ``manifest.json`` and ``direct_grid_binding.json`` bytes
+       contain no ``build_timestamp`` key (belt-and-suspenders against a
+       future regression that serialized the field into the manifest).
+    3. Neither on-disk artifact contains any ISO-8601 datetime pattern
+       (``YYYY-MM-DDTHH:MM:SS``) — a wall-clock leak in an evidence_ref or
+       manifest field would surface as a matching substring here.
+    """
+    result = _run_build(tmp_path)
+
+    # 1. Primary oracle: the evidence dataclass field is unset.
+    assert result.evidence_package.build_timestamp is None, (
+        f"evidence_package.build_timestamp is {result.evidence_package.build_timestamp!r}; "
+        "§2.4 forbids any wall-clock stamp — cli.py must pass build_timestamp=None"
+    )
+
+    # 2. On-disk sanity: neither emitted artifact carries the field name.
+    manifest_bytes = (result.variant_root / "manifest.json").read_bytes()
+    binding_bytes = (result.variant_root / "direct_grid_binding.json").read_bytes()
+    assert b"build_timestamp" not in manifest_bytes, (
+        "manifest.json bytes contain 'build_timestamp' — evidence field "
+        "must not leak into the manifest surface"
+    )
+    assert b"build_timestamp" not in binding_bytes, (
+        "direct_grid_binding.json bytes contain 'build_timestamp' — the "
+        "evidence field must not leak into the standalone binding surface"
+    )
+
+    # 3. No ISO-8601 datetime pattern anywhere in the manifest / binding
+    # bytes. A leaked ``datetime.now().isoformat()`` (with or without the
+    # ``Z`` UTC suffix) would surface as ``YYYY-MM-DDTHH:MM:SS`` here.
+    iso_datetime_pattern = re.compile(rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+    for filename, content in (
+        ("manifest.json", manifest_bytes),
+        ("direct_grid_binding.json", binding_bytes),
+    ):
+        match = iso_datetime_pattern.search(content)
+        assert match is None, (
+            f"{filename}: emitted bytes contain an ISO-8601 datetime "
+            f"{match.group().decode()!r} — a wall-clock value leaked into "
+            "the deterministic artifact surface"
+        )
+
+
+def test_keliya_end_to_end_cli_build_via_object_store_root_resolver_channel(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Full G0→G5 build over keliya staged under a tmp ``--object-store-root``.
+
+    Exercises the SUB-3 §2.2 sanctioned tmp ``--object-store-root`` staging
+    channel end-to-end: the keliya fixture is copied to
+    ``<tmp>/object_store/models/basins_keliya_shud/rel_v1/package/`` (the
+    exact object-store release-frozen shape the resolver validates),
+    :func:`resolve_package_path` is called with the tmp root override,
+    and :func:`build_direct_grid_variant` runs the full G0..G5 chain with
+    the resolver's evidence dict threaded through. Assertions cover the
+    fixture invariants (484 elements / 32→8 stations / 8 used cells), the
+    emitted-artifact set, the G0..G5 gate results, and the G0
+    ``evidence_ref`` propagation of the input-authority record.
+    """
+    # Stage the keliya fixture at the sanctioned object-store shape.
+    staged_root = tmp_path / "object_store"
+    release_id = "rel_v1"
+    staged_package = (
+        staged_root
+        / "models"
+        / "basins_keliya_shud"
+        / release_id
+        / "package"
+    )
+    shutil.copytree(_KELIYA_FIXTURE_DIR, staged_package)
+    (staged_package / "build.py").unlink(missing_ok=True)
+    for rel_paths in _CATEGORY_FILES.values():
+        for rel_path in rel_paths:
+            target = staged_package / rel_path
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(f"stub:{rel_path}\n".encode("utf-8"))
+
+    # Resolve via the SUB-3 argv-authority channel with the tmp root
+    # override. This is the ONLY sanctioned way to land tmp fixtures under
+    # the object-store shape per §2.2 (no ad-hoc bypass).
+    resolved = resolve_package_path(
+        package_path=staged_package,
+        object_store_root=staged_root,
+    )
+    assert resolved.basin_name == "keliya"
+    assert resolved.release_id == release_id
+    assert resolved.input_authority_evidence["channel"] == "object_store"
+    assert resolved.input_authority_evidence["object_store_root_override"] is True
+    assert resolved.input_authority_evidence["object_store_root"] == str(staged_root)
+
+    # Drive the full G0..G5 build from the resolver's outputs.
+    variant_root = tmp_path / "variant"
+    domain_shp = _write_domain_shp(tmp_path)
+    _, snapshot_cells, loader, snapshot_reference = _snapshot_and_loader()
+    distance_qa, capacity_report = _canned_qa_and_capacity()
+
+    result = build_direct_grid_variant(
+        baseline_root=resolved.baseline_root,
+        variant_root=variant_root,
+        source_id=_SOURCE_ID,
+        grid_id=_GRID_ID,
+        grid_snapshot_loader=loader,
+        snapshot_cells=snapshot_cells,
+        grid_snapshot_reference=snapshot_reference,
+        mapping_asset_identity=_MAPPING_ASSET_IDENTITY,
+        model_input_package_id=_MODEL_INPUT_PACKAGE_ID,
+        binding_uri=_BINDING_URI,
+        sp_att_manifest_path=_SP_ATT_MANIFEST_PATH,
+        category_files=_CATEGORY_FILES,
+        state_schema_bytes=b"state-schema-v1",
+        solver_config_bytes=b"solver-config-v1",
+        domain_shp_path=domain_shp,
+        proj_crs_database_version=_PROJ_CRS_DB_VERSION,
+        approvals=Approvals(
+            builder_approver_id="tester@example.com",
+            reviewer_approver_id="reviewer@example.com",
+            small_basin_override_approver_id=None,
+        ),
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum="",
+            previous_mapping_asset_label="<initial>",
+        ),
+        distance_qa=distance_qa,
+        capacity_report=capacity_report,
+        input_authority_evidence=resolved.input_authority_evidence,
+    )
+
+    # BuildResult shape + variant_root population.
+    assert isinstance(result, BuildResult)
+    assert result.variant_root == variant_root
+    assert variant_root.is_dir()
+    assert (variant_root / "manifest.json").is_file()
+    assert (variant_root / "direct_grid_binding.json").is_file()
+    # The variant .sp.att sits at the same relative path as in the baseline
+    # (mirrored by ``shutil.copytree`` + overwritten in place by G4).
+    assert (variant_root / "keliya.sp.att").is_file()
+    # No leftover .building sibling.
+    assert not variant_root.with_name(variant_root.name + ".building").exists()
+
+    # Fixture-shape invariants: 484 elements / 32 raw stations / 8 used cells.
+    # ``ownership_table`` covers every element (mesh oracle = 484).
+    assert len(result.evidence_package.ownership_table) == 484
+    # 32 raw stations pre-reduction is derived from the keliya fixture's
+    # ``.tsd.forc`` header (line 1 = ``<station_count> <cycle_date>``) so a
+    # real fixture-shape change from 32 -> some other value would fire
+    # here — NOT a tautology round-tripping ``_canned_qa_and_capacity``'s
+    # 32 back through the capacity report unchanged.
+    forcing_header = (
+        (_KELIYA_FIXTURE_DIR / "keliya.tsd.forc")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    expected_pre_reduction_station_count = int(forcing_header.split()[0])
+    assert (
+        result.evidence_package.capacity_report.before_station_count
+        == expected_pre_reduction_station_count
+    ), (
+        "capacity_report.before_station_count does not match keliya "
+        f".tsd.forc header count ({expected_pre_reduction_station_count})"
+    )
+    # After ``derive_used_cell_subset``: 8 used cells → 8 station bindings
+    # (surfaced both on the manifest and on the standalone binding — those
+    # are the derived-from-algorithm invariants; the previous
+    # ``capacity_report.after_station_count == 8`` assertion round-tripped
+    # ``_canned_qa_and_capacity``'s literal 8 back through the report and
+    # was tautological, so we rely on the two length locks below).
+    assert len(result.manifest.station_bindings) == 8
+    assert len(result.binding_artifact.station_bindings) == 8
+
+    # G0..G5 all passed.
+    gate_results = result.evidence_package.gate_results
+    for gate in (
+        gate_results.g0,
+        gate_results.g1,
+        gate_results.g2,
+        gate_results.g3,
+        gate_results.g4,
+        gate_results.g5,
+    ):
+        assert gate.passed is True, f"{gate.gate_id}: expected passed=True, got {gate!r}"
+
+    # G0 evidence_ref propagates the resolver's input_authority record
+    # verbatim so downstream audits can reconstruct the argv-authority
+    # decision from the evidence bundle alone (SUB-3 wiring).
+    g0_ref = gate_results.g0.evidence_ref
+    assert g0_ref["kind"] == "baseline_integrity_report"
+    assert g0_ref["input_authority"] == dict(resolved.input_authority_evidence)
+    assert g0_ref["input_authority"]["basin_name"] == "keliya"
+    assert g0_ref["input_authority"]["release_id"] == release_id
+    assert g0_ref["input_authority"]["channel"] == "object_store"
+
+    # Deterministic evidence: build_timestamp unset per §2.4.
+    assert result.evidence_package.build_timestamp is None
 
 
 # =========================================================================
