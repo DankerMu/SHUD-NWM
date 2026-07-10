@@ -1665,8 +1665,10 @@ def test_forbidden_output_injected_tsd_forc_in_baseline_fails_closed_no_variant(
     )
 
 
+@pytest.mark.parametrize("injected_csv_name", ["X100Y37.csv", "X100Y37.CSV"])
 def test_forbidden_output_injected_station_weather_csv_fails_closed_no_variant(
     tmp_path: pathlib.Path,
+    injected_csv_name: str,
 ) -> None:
     """Injected ``X<lon>Y<lat>.csv`` at baseline root fails closed via §8.1.
 
@@ -1677,9 +1679,14 @@ def test_forbidden_output_injected_station_weather_csv_fails_closed_no_variant(
     two together exercise the two on-disk §8.1 forbidden classes
     (``cycle_dated_tsd_forc`` + ``station_weather_csv``) via the CLI's
     written-tree scan.
+
+    Parametrized over lowercase ``.csv`` and uppercase ``.CSV`` — the
+    §8.2 clause-A pattern (``binding.py:2287-2292``) is documented as
+    case-insensitive via ``re.IGNORECASE`` at ``rewrite.py:710``; the
+    uppercase case guards against silent removal of that flag.
     """
     baseline_root = _prepared_baseline(tmp_path)
-    injected_csv = baseline_root / "X100Y37.csv"
+    injected_csv = baseline_root / injected_csv_name
     injected_csv.write_bytes(b"stub legacy CMFD station weather CSV\n")
     # Sanity: the injected name actually matches the §8.2 clause-A pattern.
     assert LEGACY_STATION_LONLAT_CSV_PATTERN.fullmatch(injected_csv.name)
@@ -1726,6 +1733,14 @@ def test_forbidden_output_injected_station_weather_csv_fails_closed_no_variant(
         == ForbiddenOutputClass.STATION_WEATHER_CSV.value
     )
     assert pathlib.Path(excinfo.value.offending_evidence).name == injected_csv.name
+    # The scan_summary carries the same 4-class breakdown the pass path
+    # exposes on the evidence bundle.
+    scan_summary = excinfo.value.scan_summary
+    assert scan_summary.passed is False
+    assert len(scan_summary.offending_paths) >= 1
+    assert scan_summary.offending_paths[0][0] == (
+        ForbiddenOutputClass.STATION_WEATHER_CSV.value
+    )
 
     assert not variant_root.exists()
     assert not variant_root.with_name(variant_root.name + ".building").exists()
