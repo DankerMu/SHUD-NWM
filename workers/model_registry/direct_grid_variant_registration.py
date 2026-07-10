@@ -1,17 +1,22 @@
-"""Direct-grid variant registration surface (SUB-1 / issue #962).
+"""Direct-grid variant registration surface (SUB-1 + SUB-2).
 
-Implements the `core.model_instance` insert leg of the source-specific
-model-variant routing change (Epic #961, tasks.md §1.1). Registers a built
-direct-grid variant as a NEW `core.model_instance` row at the
-`(basin_version_id, canonical_grid_key)` grain, keyed for cross-source dedup
-and idempotency on the built mapping-asset identity
-(`model_input_package_id`, `binding_checksum`) from the §7.2 manifest.
+Implements the `core.model_instance` insert leg (SUB-1 / #962) AND the
+`met.met_station` cell-station mirror write leg (SUB-2 / #963) of the
+source-specific model-variant routing change (Epic #961, tasks.md §1.1
+and §1.2). Registers a built direct-grid variant as a NEW `core.model_instance`
+row at the `(basin_version_id, canonical_grid_key)` grain (keyed for
+cross-source dedup and idempotency on the built mapping-asset identity —
+`model_input_package_id`, `binding_checksum` from the §7.2 manifest) and
+then emits one `met.met_station` mirror row per used cell with
+``active_flag=false`` and the derived-cache identity `properties_json` that
+the runtime producer's mirror upsert (`workers/forcing_producer/store.py:
+ensure_direct_grid_met_stations`) reconciles rather than clobbers.
 
-Boundaries (§1.1 non-goals — owned by sibling sub-issues):
+Boundaries (still owned by sibling sub-issues):
 
-* `met.met_station` mirror write → SUB-2 (#963).
 * Legacy-row retention regression + no-duplicate-mirror idempotency → SUB-3 (#964).
-* Producer `active_flag` ownership → SUB-4 (#965).
+* Producer `active_flag` ownership (drops the ``active_flag=true`` insert
+  literal in the producer path) → SUB-4 (#965).
 * Lifecycle activation, scheduler manifest re-publish → §2 group.
 * Guard, dispatch enforcement → §3–§4 groups.
 
@@ -31,6 +36,14 @@ Contract:
   `lifecycle_state` is omitted from the INSERT list so the `'inactive'`
   column default applies (matches `basins_registry_import._ensure_model_instance`
   precedent).
+* Each mirror row lands `active_flag=false` (literal, NOT bound and NOT in
+  the DO UPDATE SET list — mirror activation is Change 8's cutover flip and
+  the flag stays owned by registration until then) with `station_role=
+  'direct_grid_cache'` (overriding the ``'forcing_proxy'`` column default per
+  db/migrations/000005_met.sql:53). The `grid_snapshot_id` FK column added
+  by db/migrations/000043 is populated on every mirror row and is part of
+  the conditional-upsert WHERE predicate so a stale-snapshot re-registration
+  fails closed like the runtime producer.
 """
 
 from __future__ import annotations
@@ -43,6 +56,7 @@ from typing import Any
 
 from workers.forcing_producer.direct_grid_contract import (
     DirectGridContractError,
+    DirectGridForcingContract,
     load_forcing_mapping_contract_from_manifest,
 )
 
@@ -114,12 +128,22 @@ class DirectGridVariantRegistrationInput:
 
 @dataclass(frozen=True)
 class DirectGridVariantRegistrationResult:
-    """Outcome of a single `register_direct_grid_variant` call."""
+    """Outcome of a single `register_direct_grid_variant` call.
+
+    ``mirror_stations_written`` is the number of `met.met_station` mirror
+    rows the registration emitted (equal to ``len(contract.stations)`` on the
+    inserted path). On the idempotent short-circuit (``inserted=False``) the
+    surface still emits the mirror rows so a run whose mirror leg previously
+    failed after the variant insert self-heals — the conditional upsert
+    either matches (no-op reconciliation) or fails closed on identity
+    mismatch (`DIRECT_GRID_VARIANT_MIRROR_COLLISION`).
+    """
 
     model_id: str
     inserted: bool
     canonical_grid_key: str
     grid_snapshot_id: str
+    mirror_stations_written: int = 0
 
 
 def register_direct_grid_variant(
@@ -149,7 +173,9 @@ def register_direct_grid_variant(
     """
 
     _validate_baseline(registration_input.baseline)
-    contract_payload = _validate_contract_payload(registration_input.direct_grid_forcing)
+    contract_payload, contract = _validate_contract_payload(
+        registration_input.direct_grid_forcing
+    )
 
     canonical_grid_key, grid_snapshot_id = _resolve_snapshot(cursor, registration_input)
 
@@ -161,11 +187,23 @@ def register_direct_grid_variant(
         binding_checksum=contract_payload["binding_checksum"],
     )
     if existing_model_id is not None:
+        # Emit-always idempotent path: the mirror leg re-runs so a prior partial
+        # run (variant row committed, mirror row missing) self-heals. The
+        # conditional upsert's identity WHERE either matches (no-op) or fails
+        # closed (DIRECT_GRID_VARIANT_MIRROR_COLLISION), so re-emitting is
+        # safe and mirrors the runtime producer's every-run reconciliation.
+        mirror_rows_written = _upsert_direct_grid_mirror(
+            cursor,
+            basin_version_id=registration_input.basin_version_id,
+            grid_snapshot_id=grid_snapshot_id,
+            contract=contract,
+        )
         return DirectGridVariantRegistrationResult(
             model_id=existing_model_id,
             inserted=False,
             canonical_grid_key=canonical_grid_key,
             grid_snapshot_id=grid_snapshot_id,
+            mirror_stations_written=mirror_rows_written,
         )
 
     model_id = _mint_model_id(
@@ -185,11 +223,18 @@ def register_direct_grid_variant(
         registration_input=registration_input,
         resource_profile=resource_profile,
     )
+    mirror_rows_written = _upsert_direct_grid_mirror(
+        cursor,
+        basin_version_id=registration_input.basin_version_id,
+        grid_snapshot_id=grid_snapshot_id,
+        contract=contract,
+    )
     return DirectGridVariantRegistrationResult(
         model_id=model_id,
         inserted=True,
         canonical_grid_key=canonical_grid_key,
         grid_snapshot_id=grid_snapshot_id,
+        mirror_stations_written=mirror_rows_written,
     )
 
 
@@ -222,7 +267,9 @@ def _validate_baseline(baseline: DirectGridBaselineModelInputs) -> None:
         )
 
 
-def _validate_contract_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_contract_payload(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], DirectGridForcingContract]:
     """Parse the direct-grid payload through the runtime producer's parser.
 
     The parser is the single authority for the contract shape (design.md D6).
@@ -234,12 +281,15 @@ def _validate_contract_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     Returns
     -------
-    dict[str, Any]
-        A shallow copy of the input payload with
+    tuple[dict[str, Any], DirectGridForcingContract]
+        (a) A shallow copy of the input payload with
         ``forcing_mapping_mode='direct_grid'`` set (defense-in-depth) and
         ``applicable_source_ids`` replaced by the parser's normalized tuple
         form (`gfs`/`IFS`), ready for persistence at
         ``resource_profile.direct_grid_forcing``.
+        (b) The parsed contract itself — kept out of the persisted payload
+        (which stays JSON-shaped) but reused for the mirror write so the
+        registration surface does not re-parse the payload twice.
     """
 
     if not isinstance(payload, Mapping):
@@ -273,7 +323,7 @@ def _validate_contract_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             "Direct-grid contract payload did not resolve to a direct-grid contract.",
         )
     prepared["applicable_source_ids"] = list(contract.applicable_source_ids)
-    return prepared
+    return prepared, contract
 
 
 # --- snapshot resolution ---------------------------------------------------
@@ -464,6 +514,190 @@ def _insert_variant_row(
             _json(dict(resource_profile)),
         ),
     )
+
+
+# --- met.met_station cell-station mirror write (§1.2 / SUB-2) --------------
+
+
+# The mirror INSERT statement is written per-row (not `execute_values`-batched)
+# so the per-row `cursor.rowcount` gives us a precise fail-closed collision
+# probe: any row whose ON CONFLICT DO UPDATE WHERE predicate rejects the row
+# reports `rowcount == 0` and raises DIRECT_GRID_VARIANT_MIRROR_COLLISION.
+# Docs §7.4 (fail-closed on `station_id` reuse across bound identity) and
+# design.md §D2 (registration owns `active_flag`) are the load-bearing
+# invariants — note that `active_flag` is a LITERAL `false` on INSERT and
+# is INTENTIONALLY absent from the DO UPDATE SET list so an already-flipped
+# mirror (Change 8 cutover leg) stays `true` while every other identity
+# field is refreshed.
+_MIRROR_INSERT_SQL = """
+INSERT INTO met.met_station (
+    station_id,
+    basin_version_id,
+    station_name,
+    geom,
+    elevation_m,
+    station_role,
+    active_flag,
+    properties_json,
+    grid_snapshot_id
+) VALUES (
+    %s,
+    %s,
+    %s,
+    ST_SetSRID(ST_MakePoint(%s, %s), 4490),
+    %s,
+    'direct_grid_cache',
+    false,
+    %s,
+    %s
+)
+ON CONFLICT (station_id) DO UPDATE
+    SET basin_version_id = EXCLUDED.basin_version_id,
+        station_name = EXCLUDED.station_name,
+        geom = EXCLUDED.geom,
+        elevation_m = EXCLUDED.elevation_m,
+        station_role = EXCLUDED.station_role,
+        properties_json = EXCLUDED.properties_json,
+        grid_snapshot_id = EXCLUDED.grid_snapshot_id
+    WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
+      AND met.met_station.station_role = 'direct_grid_cache'
+      AND met.met_station.properties_json @> '{"derived_cache": true}'::jsonb
+      AND met.met_station.properties_json->>'forcing_mapping_mode' = 'direct_grid'
+      AND met.met_station.properties_json->>'binding_checksum'
+          = EXCLUDED.properties_json->>'binding_checksum'
+      AND met.met_station.properties_json->>'model_input_package_id'
+          = EXCLUDED.properties_json->>'model_input_package_id'
+      AND met.met_station.properties_json->>'grid_signature'
+          = EXCLUDED.properties_json->>'grid_signature'
+      AND met.met_station.properties_json->>'contract_grid_id'
+          = EXCLUDED.properties_json->>'contract_grid_id'
+      AND met.met_station.properties_json->>'grid_id'
+          = EXCLUDED.properties_json->>'grid_id'
+      AND met.met_station.grid_snapshot_id = EXCLUDED.grid_snapshot_id
+"""
+
+
+def _upsert_direct_grid_mirror(
+    cursor: Any,
+    *,
+    basin_version_id: str,
+    grid_snapshot_id: str,
+    contract: DirectGridForcingContract,
+) -> int:
+    """Emit one `met.met_station` row per contract station binding.
+
+    The row shape (properties_json fields, station_role, geom SRID, ordering
+    by `shud_forcing_index`) matches
+    `workers/forcing_producer/store.py:ensure_direct_grid_met_stations` verbatim
+    EXCEPT for two registration-owned differences:
+
+    * `active_flag` is `false` (literal on INSERT, NOT in DO UPDATE SET) —
+      the runtime producer's `active_flag=true` on insert / `SET active_flag =
+      true` on update is Change 8's cutover flip and stays with the runtime,
+      not registration (§D2 flag ownership).
+    * `grid_snapshot_id` is populated on the mirror row and included in the
+      DO UPDATE SET + WHERE — SUB-2 discriminator FK that ties the mirror to
+      its canonical grid snapshot so a stale-snapshot re-registration fails
+      closed instead of silently rebinding.
+
+    Raises `DirectGridVariantRegistrationError` with error code
+    ``DIRECT_GRID_VARIANT_MIRROR_COLLISION`` if any row's conditional upsert
+    predicate rejects the row (docs §7.4 fail-closed collision policy).
+    """
+
+    if not contract.stations:
+        return 0
+
+    written = 0
+    stations = sorted(contract.stations, key=lambda station: station.shud_forcing_index)
+    for station in stations:
+        properties_json = _mirror_properties_json(contract=contract, station=station)
+        parameters = (
+            station.station_id,
+            basin_version_id,
+            f"Direct-grid station {station.shud_forcing_index}",
+            station.longitude,
+            station.latitude,
+            station.z,
+            _json(properties_json),
+            grid_snapshot_id,
+        )
+        cursor.execute(_MIRROR_INSERT_SQL, parameters)
+        # rowcount==1 → insert or matching-identity DO UPDATE.
+        # rowcount==0 → the WHERE predicate rejected an existing row (station_id
+        #                collision on a different bound identity) → fail closed.
+        row_count = getattr(cursor, "rowcount", None)
+        if row_count is None:
+            raise DirectGridVariantRegistrationError(
+                "DIRECT_GRID_VARIANT_MIRROR_COLLISION",
+                "Direct-grid mirror upsert did not report an affected-row count.",
+                details={"station_id": station.station_id},
+            )
+        if row_count != 1:
+            raise DirectGridVariantRegistrationError(
+                "DIRECT_GRID_VARIANT_MIRROR_COLLISION",
+                (
+                    "Direct-grid mirror row hit an existing station_id with a "
+                    "different bound identity (fail-closed collision, docs §7.4)."
+                ),
+                details={
+                    "station_id": station.station_id,
+                    "affected_row_count": row_count,
+                    "expected_row_count": 1,
+                    "basin_version_id": basin_version_id,
+                    "grid_snapshot_id": grid_snapshot_id,
+                    "binding_checksum": contract.binding_checksum,
+                    "model_input_package_id": contract.model_input_package_id,
+                },
+            )
+        written += 1
+    return written
+
+
+def _mirror_properties_json(
+    *,
+    contract: DirectGridForcingContract,
+    station: Any,
+) -> dict[str, Any]:
+    """Assemble the derived-cache identity `properties_json` for one mirror row.
+
+    Verbatim parity with
+    `workers/forcing_producer/store.py:ensure_direct_grid_met_stations`
+    (lines 347-379). Any drift here silently breaks the producer's
+    conditional upsert reconciliation — the paths carrying identity
+    (`binding_checksum`, `model_input_package_id`, `grid_signature`,
+    `contract_grid_id`, `grid_id`, `derived_cache`, `forcing_mapping_mode`)
+    are load-bearing.
+    """
+
+    return {
+        **dict(getattr(station, "properties", {}) or {}),
+        "derived_cache": True,
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid": True,
+        "manifest_authority": True,
+        "binding_checksum": contract.binding_checksum,
+        "binding_uri": contract.binding_uri,
+        "model_input_package_id": contract.model_input_package_id,
+        "sp_att_path": contract.sp_att_path,
+        "sp_att_checksum": contract.sp_att_checksum,
+        "grid_id": station.grid_id,
+        "contract_grid_id": contract.grid_id,
+        "grid_cell_id": station.grid_cell_id,
+        "grid_signature": contract.grid_signature,
+        "shud_forcing_index": station.shud_forcing_index,
+        "forcing_filename": station.forcing_filename,
+        "x": station.x,
+        "y": station.y,
+        "z": station.z,
+        "mirror_identity": {
+            "binding_checksum": contract.binding_checksum,
+            "model_input_package_id": contract.model_input_package_id,
+            "grid_signature": contract.grid_signature,
+            "contract_grid_id": contract.grid_id,
+            "grid_id": station.grid_id,
+        },
+    }
 
 
 # --- psycopg2 JSONB helper (parity with basins_registry_import._json) ------
